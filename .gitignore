@@ -15,15 +15,17 @@ CMakeFiles/
 cmake_install.cmake
 
 # Android
-Games/Chess/android/.gradle/
-Games/Chess/android/local.properties
-Games/Chess/android/*.iml
-Games/Chess/android/captures/
+Games/Chess/Android/.gradle/
+Games/Chess/Android/.kotlin/
+Games/Chess/Android/local.properties
+Games/Chess/Android/**/*.iml
+Games/Chess/Android/captures/
+Games/Chess/Android/app/release/
 .idea/
 
 # Xcode / iOS
-Games/Chess/ios/build/
-Games/Chess/ios/DerivedData/
+Games/Chess/iOS/build/
+Games/Chess/iOS/DerivedData/
 *.xcuserstate
 xcuserdata/
 
