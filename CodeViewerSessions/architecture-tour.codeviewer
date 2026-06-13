@@ -1,0 +1,200 @@
+{
+  "schema_version": 2,
+  "id": "01KV06CDB5QPVPJW3Z5J6FCD9P",
+  "title": "LurMotorn — Architecture Tour",
+  "audience": "The developer building LurMotorn (you)",
+  "summary": "A guided tour of the LurMotorn engine + Chess scaffold. It explains the two ideas the whole project is built on: (1) one shared C++ core with thin per-OS edges, so Android and iPhone run the same code and can play each other; and (2) the \"smallest possible payload\" path, where a chess move crosses the wire as a few-bit index into a deterministic legal-move list.\n\nLexicon — **BLE** (Bluetooth Low Energy): the only serverless local link that works between iOS and Android. **RFCOMM**: Bluetooth Classic's serial protocol — iOS-locked, hence unusable cross-platform. **NFC**: near-field comms; can't do iOS↔Android peer handover. **GATT**: BLE's client/server data model. **Vulkan / Metal**: the Android / iOS GPU APIs. **MoltenVK**: a layer that runs Vulkan on top of Metal, letting one Vulkan renderer serve iOS. **NDK**: Android Native Development Kit (its C++ compiler is Clang). **JNI**: Java Native Interface — the C++↔Kotlin bridge. **ITransport / IRenderer**: the C++ interface \"seams\" that hide the per-OS backends. **MSB-first**: bit packing from the most-significant bit down. **Legal-move index**: a move's position in the deterministic legal-move list — the few bits actually sent. **Fixed-point / rollback**: deterministic simulation math, banked for the reflex games' future netcode. **ProtocolVersion**: the wire-format version, bumped on any breaking change (e.g. a move-ordering change).",
+  "generated_at": "2026-06-13T09:53:04.358Z",
+  "generated_by": "claude-opus-4-7",
+  "base_dir": "..",
+  "phases": [
+    {
+      "id": "01KV0HB1H7CA7HQ029FPGH6HQ3",
+      "title": "The shape: one core, per-OS edges",
+      "summary": "Why ~80% of LurMotorn is shared C++ and only three things (radio, GPU, screen) get per-OS backends. This is what lets an Android phone and an iPhone run the same logic and play each other.",
+      "steps": [
+        {
+          "id": "01KV0HB1H7CA7HQ029FPGH6HQ4",
+          "title": "The architecture, in one table",
+          "code_path": "README.md",
+          "line_start": 11,
+          "line_end": 33,
+          "note": "The whole project in one screen. The check-marked rows are pure C++ shared across host, Android, and iOS; the gear rows get per-OS backends behind a shared interface. The rule under the tree — Games may depend on Modules, never the reverse — is the wall that keeps the engine reusable.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1H8FMXF7J2KATHC062F",
+          "title": "The shared core builds on your desktop",
+          "code_path": "CMakeLists.txt",
+          "line_start": 17,
+          "line_end": 29,
+          "note": "This top-level build compiles only the platform-agnostic pieces, so the same code that runs on the phones also builds and unit-tests on your dev machine — no device needed. The hardware backends (BLE/Vulkan/Metal) are deliberately absent here; each app's native build adds them.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1H8FMXF7J2KATHC062G",
+          "title": "Transport: the one seam for moving bytes",
+          "code_path": "Modules/Transport/Public/Lur/Transport/Transport.h",
+          "line_start": 17,
+          "line_end": 31,
+          "note": "The single interface the engine and game speak to send bytes between phones. Nothing above this knows whether the link is BLE, a future WiFi/UDP backend, or a test loopback. That ignorance is what lets chess run over BLE today and a reflex game swap in a faster transport later, untouched.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1H8FMXF7J2KATHC062H",
+          "title": "Why BLE is the only cross-platform choice",
+          "code_path": "Modules/Transport/Public/Lur/Transport/Ble.h",
+          "line_start": 6,
+          "line_end": 25,
+          "note": "The honest constraint that drove the decision: Bluetooth Classic/RFCOMM is iOS-locked and NFC peer handover isn't available to iOS apps, so BLE is the ONLY serverless link that works between an iPhone and an Android phone. The factory is declared here and defined per platform.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1H9883YBN7C2JAZE3RW",
+          "title": "One Vulkan renderer, 3D-capable",
+          "code_path": "Modules/Render/Public/Lur/Render/Renderer.h",
+          "line_start": 19,
+          "line_end": 33,
+          "note": "No native GPU API spans Android + iOS, so instead of writing Vulkan AND Metal, we write Vulkan once and run it through MoltenVK on iOS (the one sanctioned dependency). The interface is deliberately 3D-capable — meshes, depth, camera, materials — with 2D as the orthographic special case (Sprite2D.h). NativeWindow is the one opaque handle that crosses the seam.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1H9883YBN7C2JAZE3RX",
+          "title": "Determinism, banked for future rollback netcode",
+          "code_path": "Modules/Sim/Public/Lur/Sim/Fixed.h",
+          "line_start": 14,
+          "line_end": 35,
+          "note": "Chess doesn't need this yet, but the platform is built on it. Rollback netcode (for the reflex games) requires both devices to compute bit-for-bit identical results; floating-point can diverge across CPUs, so the sim core uses deterministic fixed-point. Paired with the fixed-timestep TickClock next door.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ],
+      "diagrams": [
+        {
+          "id": "01KV0JK6Y1DNC1S02EGGPKKQZJ",
+          "source": "flowchart TD\n  subgraph Shared[\"Shared pure C++  (host / Android / iOS)\"]\n    SER[Serialization: slim-bytes codec]\n    SIM[Sim: deterministic gameplay - fixed-point]\n    MATH[Math: float vec/mat/quat for render]\n    NET[Net: session + clock-sync]\n    CHESS[Chess core: rules + move codec]\n  end\n  TR[[Transport interface]]\n  R[[Renderer interface - 3D-capable]]\n  subgraph Edges[\"Per-OS backends (built by each app)\"]\n    BLE[BLE transport + pairing]\n    VULKAN[Vulkan renderer - native on Android, MoltenVK on iOS]\n  end\n  CHESS --> SER\n  CHESS --> NET\n  CHESS --> R\n  NET --> SER\n  NET --> TR\n  R --> MATH\n  BLE -. implements .-> TR\n  VULKAN -. implements .-> R",
+          "caption": "The dependency shape after collapsing to one renderer. Pure C++ (top box) is shared verbatim; the double-bordered interfaces are the only seams. There is now a single Vulkan renderer backend — native on Android, via MoltenVK on iOS — implementing the 3D-capable Renderer interface, which leans on the float Math module. Note Sim (fixed-point gameplay) and Math (float rendering) are deliberately separate."
+        }
+      ]
+    },
+    {
+      "id": "01KV0HB1H9883YBN7C2JAZE3RZ",
+      "title": "Smallest possible move: the codec",
+      "summary": "The concrete path from 'a chess move' to a few bits on the wire. A move is sent as its index in the deterministic legal-move list — 0 bits when forced, ~5 bits typically — and reconstructed on the far side.",
+      "steps": [
+        {
+          "id": "01KV0HB1HANRSGSH3CYHA999YQ",
+          "title": "BitWriter: pack bits, not bytes",
+          "code_path": "Modules/Serialization/Public/Lur/Serialization/BitWriter.h",
+          "line_start": 20,
+          "line_end": 45,
+          "note": "The foundation of the slim-bytes goal. It packs values at the bit level, MSB-first, with no per-field byte padding — so an encoder writes exactly as many bits as an event carries. BitReader is its exact inverse.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1HB8YP4CFVJ4X69C0ZT",
+          "title": "The cost model: BitsForIndex",
+          "code_path": "Modules/Serialization/Public/Lur/Serialization/Varint.h",
+          "line_start": 43,
+          "line_end": 49,
+          "note": "This function IS the compression principle in three lines: to pick one of N options you need ceil(log2(N)) bits — and crucially 0 bits when N<=1. That's why a forced move (only one legal reply) costs literally nothing on the wire.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1HCA3BHGNTV81XBRZAD",
+          "title": "The payoff: encode a move as an index",
+          "code_path": "Games/Chess/Core/Private/MoveCodec.cpp",
+          "line_start": 8,
+          "line_end": 24,
+          "note": "Here's where it all pays off. Instead of sending From/To squares (12+ bits), we send only WHICH of the legal moves it is. Both phones generate the same legal list, so the receiver maps the index straight back to a full move. Squares, flags, promotion — none of it travels.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1HDDVBJ2K07Y0NAES8J",
+          "title": "The catch: move ordering is the protocol",
+          "code_path": "Games/Chess/Core/Public/Chess/Board.h",
+          "line_start": 37,
+          "line_end": 43,
+          "note": "The codec only works if both phones produce the legal moves in the IDENTICAL order — index k must mean the same move on both. So GenerateLegalMoves' ordering is a wire-protocol contract, not an implementation detail. It's stubbed today; implementing it (task #4) is the next big step, and its determinism is why it matters.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0HB1HDDVBJ2K07Y0NAES8K",
+          "title": "Proof it round-trips",
+          "code_path": "Modules/Serialization/Tests/BitstreamTests.cpp",
+          "line_start": 73,
+          "line_end": 83,
+          "note": "A dependency-free host test (no framework — asserts + non-zero exit, run by CTest) that pins the codec's behavior, including the 0-bits-for-a-forced-move property. We couldn't run it yet (no toolchain installed on this machine), but it's ready the moment one is.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ]
+    },
+    {
+      "id": "01KV0N6FYVFGZYSNP6PCXX4H0N",
+      "title": "Working in this repo (CLAUDE.md)",
+      "summary": "The contributor contract: the constraints that must not be broken, the VS-free build, the naming convention, the gotchas, and how completed phases get documented as CodeViewer sessions. CLAUDE.md is also what Claude Code loads as standing context.",
+      "steps": [
+        {
+          "id": "01KV0N6FYWMWQ2M8VMRZENEQQJ",
+          "title": "The constraints that don't bend",
+          "code_path": "CLAUDE.md",
+          "line_start": 11,
+          "line_end": 24,
+          "note": "The four rules the whole project hangs on: no third-party libraries (one exception: MoltenVK), no servers ever, cross-platform Android<->iPhone, and slim-payload/low-latency as the actual product. Any change that brushes against these gets confirmed with you first.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N6FYWMWQ2M8VMRZENEQQK",
+          "title": "Build + test: one command, VS-free",
+          "code_path": "CLAUDE.md",
+          "line_start": 56,
+          "line_end": 67,
+          "note": "`build.ps1` configures (Ninja), builds, and runs the codec tests in one shot on a VS-free toolchain (standalone CMake + Ninja + MinGW-w64 g++ via winget). It's verified green. The host compiler is GCC; production is the NDK/Apple Clang — a different host compiler is deliberate (extra portability coverage).",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N6FYXF5F7QF7ZEFCY600K",
+          "title": "The naming convention",
+          "code_path": "CLAUDE.md",
+          "line_start": 90,
+          "line_end": 103,
+          "note": "The rule that makes 'ours vs legacy' readable at a glance: our code is PascalCase, anything snake_case/lowercase is std/C. Types get I (interface) and E (enum) prefixes; no type-encoding prefixes on variables (no Hungarian, no b-for-bool). Codified so it stays consistent as the codebase grows.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N6FYXF5F7QF7ZEFCY600M",
+          "title": "The gotchas that will bite",
+          "code_path": "CLAUDE.md",
+          "line_start": 109,
+          "line_end": 124,
+          "note": "The non-obvious traps in one place: move ordering is a wire-protocol contract, simulation state must stay deterministic (fixed-point, no floats — Math floats are render-only), the renderer targets the Vulkan portability subset for MoltenVK, BLE is the only cross-platform link, and CodeViewer anchors are regex.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N6FYXF5F7QF7ZEFCY600N",
+          "title": "How completed phases get documented",
+          "code_path": "CLAUDE.md",
+          "line_start": 126,
+          "line_end": 139,
+          "note": "The convention you asked for: each completed phase becomes its own focused CodeViewer session under CodeViewerSessions/, committed as living documentation (not one giant session) — and every session's summary must carry a Lexicon of the relevant lingo. This walkthrough lives there, with base_dir set to '..' so paths resolve to the repo root.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ]
+    }
+  ]
+}

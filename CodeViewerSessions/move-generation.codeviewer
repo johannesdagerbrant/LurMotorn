@@ -1,0 +1,145 @@
+{
+  "schema_version": 2,
+  "id": "01KV0MZYVF0TPP2A4K3H2RMFNW",
+  "title": "LurMotorn — Chess Move Generation",
+  "audience": "The developer building LurMotorn (you)",
+  "summary": "How LurMotorn generates legal chess moves with bitboards — and how perft proves it correct. It walks the attack primitives, pseudo-legal generation, the deterministic move ORDER the wire protocol relies on, copy-make legality filtering, MakeMove, FEN setup, and the perft test gate. This phase is verified: the full perft suite passes.\n\nLexicon — **Bitboard**: a 64-bit integer, one bit per square (bit S = square S). **Leaper**: a piece with fixed-jump moves (knight, king). **Slider**: bishop/rook/queen, moving along rays until blocked. **Occupancy**: a bitboard of all pieces on the board. **LSB**: least-significant bit. **Pseudo-legal**: a move that is legal except that it might leave one's own king in check. **Copy-make**: testing legality by copying the board, applying the move, and checking king safety — no separate \"unmake\". **EP (en passant)**: a pawn capturing an enemy pawn that just advanced two squares, landing on the skipped square. **Promotion**: a pawn reaching the last rank becomes Q/R/B/N. **FEN**: Forsyth–Edwards Notation, a one-line text description of a position. **Ply**: one player's single move. **Half-move clock**: plies since the last pawn move or capture (drives the 50-move rule). **Perft** (\"performance test\"): count the exact number of legal-move-sequence leaf nodes to a fixed depth; matching long-published reference counts is strong proof the generator is correct.",
+  "generated_at": "2026-06-13T14:08:24.943Z",
+  "generated_by": "claude-opus-4-7",
+  "base_dir": "..",
+  "phases": [
+    {
+      "id": "01KV0N144FK1JB3YD7ZGPPBT0W",
+      "title": "Generating moves with bitboards",
+      "summary": "From a position to an ordered list of pseudo-legal moves: leapers and sliders via bitboards, pawns with all their special cases, plus castling. Then a copy-make pass keeps only the moves that don't leave your own king in check.",
+      "steps": [
+        {
+          "id": "01KV0N144HSESTSF46KFZ7STV4",
+          "title": "Squares as bits; pop the lowest",
+          "code_path": "Games/Chess/Core/Private/Bitboard.h",
+          "line_start": 36,
+          "line_end": 40,
+          "note": "A bitboard is a uint64_t with one bit per square. Move generation iterates a target set by repeatedly popping the least-significant set bit (PopLsb) — which also fixes a deterministic ascending square order, important for the wire protocol. PopCount/LsbIndex use compiler intrinsics.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144JK3JBF32658XYAVAG",
+          "title": "Slider attacks by ray-scan",
+          "code_path": "Games/Chess/Core/Private/Bitboard.h",
+          "line_start": 101,
+          "line_end": 111,
+          "note": "Bishops/rooks/queens scan outward along each direction until they hit a blocker (which is included as a capture target). Knight/king/pawn attacks come from constexpr tables computed at compile time. No magic bitboards yet — correctness first; this is the spot to optimize later.",
+          "note_comments": [
+            {
+              "id": "01KV0NMR7SDGAQ5K7FY4TA392G",
+              "body": "we must track this future work. git issue.",
+              "created_at": "2026-06-13T14:19:46.297Z",
+              "resolved": true,
+              "author_kind": "human",
+              "author_name": "johan",
+              "resolution_note": "Logged as ISSUES.md #1 (magic bitboards optimization); will become a GitHub issue when the repo is pushed.",
+              "char_start": 199,
+              "char_end": 278,
+              "replies": [
+                {
+                  "id": "01KV0P91W7BCYMZ8N4MNQD6KH0",
+                  "body": "Tracked as ISSUES.md #1 — \"Optimize slider attacks with magic bitboards\" (area: Bitboard.h; acceptance: perft unchanged + measurably faster + no third-party libs). No GitHub remote yet, so it's logged in the repo's version-controlled ISSUES.md; it migrates to a GitHub issue the moment we push.",
+                  "created_at": "2026-06-13T14:30:51.528Z",
+                  "resolved": false,
+                  "author_kind": "agent",
+                  "replies": []
+                }
+              ]
+            }
+          ],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144K3V2QNN3FEFKFPN73",
+          "title": "Is this square attacked?",
+          "code_path": "Games/Chess/Core/Private/MoveGen.cpp",
+          "line_start": 11,
+          "line_end": 32,
+          "note": "The workhorse behind check detection, castling safety, and legality. It asks the question backwards: pretend a super-piece sits on S and see which of its attacks land on a real enemy piece of the matching type. The pawn case is the subtle one — note the Opposite() trick in the comment.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144MAD8K3W8SBVC3TKNM",
+          "title": "Generate legal moves — and the wire-defining order",
+          "code_path": "Games/Chess/Core/Private/MoveGen.cpp",
+          "line_start": 67,
+          "line_end": 151,
+          "note": "The heart of the engine. It builds pseudo-legal moves in a strict, documented order (From squares 0..63 ascending, targets ascending, promotions Q/R/B/N, castles after the king's normal moves), then filters with copy-make. That order is a wire-protocol contract — both phones must produce it identically.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144MAD8K3W8SBVC3TKNN",
+          "title": "Castling, with all its conditions",
+          "code_path": "Games/Chess/Core/Private/MoveGen.cpp",
+          "line_start": 41,
+          "line_end": 60,
+          "note": "Castling is where engines commonly get subtle bugs: it checks the right is still held, the squares between are empty, AND the king is not in check, does not pass through an attacked square, and does not land on one. Appended right after the king's normal moves to keep ordering deterministic.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ],
+      "diagrams": [
+        {
+          "id": "01KV0N144MAD8K3W8SBVC3TKNP",
+          "source": "flowchart TD\n  POS[Position: per-piece bitboards] --> GEN[Per-piece pseudo-legal generation]\n  GEN --> LEAP[Leapers: knight / king - table lookup]\n  GEN --> SLIDE[Sliders: bishop/rook/queen - ray scan vs occupancy]\n  GEN --> PAWN[Pawns: push, double, capture, EP, promotion]\n  GEN --> CASTLE[King: append castling if legal]\n  LEAP --> PSEUDO[Ordered pseudo-legal list]\n  SLIDE --> PSEUDO\n  PAWN --> PSEUDO\n  CASTLE --> PSEUDO\n  PSEUDO --> FILTER[Copy-make: drop moves leaving own king in check]\n  FILTER --> LEGAL[Legal moves - order IS the wire protocol]",
+          "caption": "The generation pipeline. Each piece type contributes pseudo-legal moves in a fixed square order; the king also appends castling. A single copy-make legality pass then filters out moves that leave the mover's king in check. The final ordering is identical on both phones, which is exactly what lets the codec ship a move as a bare index."
+        }
+      ]
+    },
+    {
+      "id": "01KV0N144MAD8K3W8SBVC3TKNQ",
+      "title": "Applying moves & proving it",
+      "summary": "Turning a chosen move into the next position (with all the bookkeeping), loading positions from FEN, and the perft test that proves the whole thing correct against published reference counts.",
+      "steps": [
+        {
+          "id": "01KV0N144N0M0CB5YFBE1K0ZGM",
+          "title": "MakeMove: apply a move to the board",
+          "code_path": "Games/Chess/Core/Private/Board.cpp",
+          "line_start": 107,
+          "line_end": 179,
+          "note": "Applies a move and updates everything that must stay consistent: captured piece (incl. the off-square en-passant pawn), promotion, the rook that moves alongside a castling king, the en-passant target, castling rights (via an elegant per-square mask), the 50-move clock, side to move, and occupancy.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144PAW8KSF09AFERH3GV",
+          "title": "Positions from FEN",
+          "code_path": "Games/Chess/Core/Private/Board.cpp",
+          "line_start": 35,
+          "line_end": 56,
+          "note": "A small Forsyth–Edwards Notation parser — how the perft tests load standard positions (and how StartPosition is defined). Hand-rolled, per the no-libraries rule. Parses placement, side to move, castling rights, en-passant square, and the two clocks.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144QRZQKXC2P8BCH86ES",
+          "title": "Perft: the correctness gate",
+          "code_path": "Games/Chess/Core/Tests/ChessRulesTests.cpp",
+          "line_start": 25,
+          "line_end": 36,
+          "note": "Perft counts the exact number of legal-move leaf nodes to a given depth. Any bug anywhere — generation, make-move, castling, EP, promotion, legality — shifts the counts. Matching long-published reference values across several tricky positions (this suite passes) is the standard proof of a correct generator.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0N144QRZQKXC2P8BCH86ET",
+          "title": "The codec on real moves",
+          "code_path": "Games/Chess/Core/Tests/ChessRulesTests.cpp",
+          "line_start": 78,
+          "line_end": 96,
+          "note": "Ties move generation back to the wire protocol: every legal move from the start position encodes to its index and decodes back identically, and the 20 opening moves cost exactly 5 bits each. This is the slim-bytes promise, now exercised with real generated moves.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+# Build output
+/build/
+**/build/
+**/.cxx/
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Android
+Games/Chess/android/.gradle/
+Games/Chess/android/local.properties
+Games/Chess/android/*.iml
+Games/Chess/android/captures/
+.idea/
+
+# Xcode / iOS
+Games/Chess/ios/build/
+Games/Chess/ios/DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# OS noise
+.DS_Store
+Thumbs.db
