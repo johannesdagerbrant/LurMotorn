@@ -174,12 +174,29 @@ Favor explaining the C++/systems reasoning rather than only handing over code.
 
 ## Current state
 
-The entire shared C++ core is implemented and **building + passing tests** on a VS-free host
-toolchain (g++ / Ninja via `build.ps1`): serialization codec, deterministic sim + math, module
-interfaces, and a **perft-verified** chess rules engine + move codec. The Android app is scaffolded
-(NativeActivity + NDK/CMake + Kotlin BLE shim + JNI), not yet built. Next: install the Android SDK
-(`scripts\setup-android.bat`) and build the app; then BLE backend (#8), Vulkan renderer (#9), iOS
-app (#7, needs a Mac), and net wiring (#10). See the task list / GitHub issues.
+The shared C++ core is implemented and **building + passing tests** on a VS-free host toolchain
+(g++ / Ninja via `build.ps1`): serialization codec, deterministic sim + math, module interfaces, a
+**perft-verified** chess rules engine + move codec, and the BLE transport contract (`BleProtocol.h`,
+`Loopback.h`, with host tests).
+
+**The cross-platform BLE link works on real hardware.** As of 2026-06-21, an iPhone and an Android
+phone discover each other, pair, and exchange datagrams both directions over BLE with no server —
+verified live (ping `0xC5` / pong `0x5C` round-trip). Specifics:
+- **Android app** (`Games/Chess/Android`): builds via Gradle/NDK and runs on a Galaxy A14 with a real
+  BLE backend (`BleShim.kt` + `AndroidBleTransport.cpp`).
+- **iOS app** (`Games/Chess/iOS`): a minimal BLE-only app (no renderer yet) that **builds on the free
+  GitHub Actions macOS runner** (CMake → Xcode, no local Mac) and was sideloaded to an iPhone via
+  Sideloadly + a free Apple ID. `IosBleTransport.mm` is the CoreBluetooth backend.
+- **BLE role handshake is IN-BAND** (iOS cannot advertise custom data): both advertise the service
+  UUID + scan + run a GATT server with a readable nonce characteristic; the central reads the peer's
+  nonce, then `DecideBleRole` settles roles. Datagrams use **write-with-response both directions**.
+- **macOS CI** (`.github/workflows/macos-ci.yml`): builds the core under Apple clang, the iOS app for
+  the simulator, and uploads an unsigned device `.ipa` artifact — all free (public repo).
+
+**Next** (transport is done; make it a playable game): wire the chess move codec over the live link
+(#5 net/session — the codec already round-trips over the `ITransport` seam via the Phase A loopback
+test, and BLE is that same seam), the Vulkan renderer to draw the board (#4), then touch input.
+Threefold-repetition (#7) and magic bitboards (#1) are independent. See GitHub issues + memory.
 
 ## Scripts
 
