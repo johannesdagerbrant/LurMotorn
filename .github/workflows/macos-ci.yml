@@ -1,15 +1,14 @@
 # macOS CI — runs on GitHub's free macOS runners (free + unlimited because this
-# repo is PUBLIC). Two jobs:
+# repo is PUBLIC).
 #
-#   core    — builds + unit-tests the shared C++ engine with APPLE's clang on
-#             every push/PR. This is the iOS production compiler family, so a
-#             green run here proves the core cross-compiles for the Apple side
-#             long before the Xcode app exists. No Mac hardware needed locally.
+# The `core` job builds + unit-tests the shared C++ engine with APPLE's clang on
+# every push/PR. That is the iOS production compiler family, so a green run here
+# proves the core cross-compiles for the Apple side long before the Xcode app
+# exists — no Mac hardware needed locally.
 #
-#   ios-app — builds the iOS app for the SIMULATOR (no code-signing, so no Apple
-#             Developer cert needed). It is SKIPPED until the Xcode project lands
-#             (issue #6); the `if:` guard auto-activates it once the .xcodeproj
-#             is committed. Until then it shows as "skipped", never red.
+# When the iOS app exists (issue #6), uncomment the `ios-app` job at the bottom:
+# it builds for the SIMULATOR (no code-signing, so no Apple Developer cert), and
+# becomes a real per-push iOS app build.
 name: macOS CI
 
 on:
@@ -37,22 +36,19 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  ios-app:
-    name: iOS app (simulator build)
-    runs-on: macos-latest
-    # Stays skipped until the Xcode project exists (issue #6); then auto-runs.
-    if: ${{ hashFiles('Games/Chess/iOS/**/project.pbxproj') != '' }}
-    steps:
-      - uses: actions/checkout@v4
-
-      # Simulator build => no signing, no Apple Developer cert required.
-      # Scheme/paths are placeholders to finalize when the Xcode project lands.
-      - name: Build for iOS Simulator
-        run: |
-          xcodebuild \
-            -project Games/Chess/iOS/OnlyChess.xcodeproj \
-            -scheme OnlyChess \
-            -sdk iphonesimulator \
-            -destination 'platform=iOS Simulator,name=iPhone 15' \
-            CODE_SIGNING_ALLOWED=NO \
-            build
+  # --- Uncomment when Games/Chess/iOS/OnlyChess.xcodeproj exists (issue #6) ---
+  # ios-app:
+  #   name: iOS app (simulator build)
+  #   runs-on: macos-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     # Simulator build => no signing, no Apple Developer cert required.
+  #     - name: Build for iOS Simulator
+  #       run: |
+  #         xcodebuild \
+  #           -project Games/Chess/iOS/OnlyChess.xcodeproj \
+  #           -scheme OnlyChess \
+  #           -sdk iphonesimulator \
+  #           -destination 'platform=iOS Simulator,name=iPhone 15' \
+  #           CODE_SIGNING_ALLOWED=NO \
+  #           build
