@@ -1,0 +1,143 @@
+{
+  "schema_version": 2,
+  "id": "01KV0QKJFH82VP089MX61D4GXY",
+  "title": "LurMotorn — Android App Skeleton",
+  "audience": "The developer building LurMotorn (you)",
+  "summary": "The Android shell for OnlyChess — deliberately thin. NativeActivity hands control to C++ (android_main in libonlychess.so); the app's CMake pulls in the shared engine + chess core; the only Kotlin is the BLE radio shim, reached from C++ over JNI. STATUS: BUILT and verified on real hardware — the debug APK installs and runs on a Samsung Galaxy A14 (arm64), and the on-device smoke test logs '20 legal moves from the start position', proving the perft-verified C++ core cross-compiles and runs under the NDK. The Vulkan renderer + BLE are still stubs (tasks #9 and #8). The final phase documents the three fixes that took the scaffold from 'never built' to 'running on a phone'.\\n\\nLexicon — **NativeActivity**: an Android activity whose lifecycle is driven by native C++ rather than Java/Kotlin. **android_native_app_glue**: NDK-provided glue (a C file) that turns NativeActivity callbacks into a simple android_main loop. **NDK**: Android Native Development Kit (compiles C/C++ with Clang for Android). **JNI**: Java Native Interface — the calling bridge between the JVM (Kotlin) and native C++. **ANativeWindow**: the native handle to the on-screen surface, handed to the renderer. **ABI**: the CPU target/binary interface (arm64-v8a for devices, x86_64 for the emulator). **AGP**: Android Gradle Plugin. **externalNativeBuild**: the Gradle hook that runs our CMake to build the native .so. **GATT**: BLE's client/server data model. **.so**: a native shared library (here libonlychess.so, loaded by NativeActivity). **logcat**: Android's runtime log stream. **minSdk**: the minimum supported Android API level (26 here, the floor for modern BLE + Vulkan). **ADB**: Android Debug Bridge — the host↔device control channel (used here over Wi-Fi 'wireless debugging' instead of USB). **APK**: the installable Android package. **Gradle wrapper**: the committed gradlew/gradlew.bat + gradle-wrapper.jar that pin the exact Gradle version so the build is reproducible without a system Gradle. **perft**: a move-generation correctness count used to verify the chess engine (20 from the start position).",
+  "generated_at": "2026-06-13T14:54:04.785Z",
+  "generated_by": "claude-opus-4-7",
+  "base_dir": "..",
+  "phases": [
+    {
+      "id": "01KV0QMWDQ1BA9P013NGKPRHV8",
+      "title": "The Android shell (skeleton)",
+      "summary": "How the thin Android app hands off to the shared C++ engine: NativeActivity loads libonlychess.so, android_main runs the loop, CMake pulls in the engine, and a tiny Kotlin BLE shim talks to C++ over JNI. Renderer + BLE are stubs (tasks #9/#8); nothing is built yet.",
+      "steps": [
+        {
+          "id": "01KV0QMWDR5H0AADBX6Z9CMDYF",
+          "title": "Manifest: NativeActivity + the native lib + BLE permissions",
+          "code_path": "Games/Chess/Android/app/src/main/AndroidManifest.xml",
+          "line_start": 6,
+          "line_end": 26,
+          "note": "Declares the Android 12+ BLE runtime permissions and the bluetooth_le + vulkan features, then the activity. The key line is the meta-data android.app.lib_name = onlychess: that tells NativeActivity which .so to load and run android_main from.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDR5H0AADBX6Z9CMDYG",
+          "title": "Gradle: hand the native build to our CMake",
+          "code_path": "Games/Chess/Android/app/build.gradle.kts",
+          "line_start": 28,
+          "line_end": 33,
+          "note": "externalNativeBuild points Gradle at our own CMakeLists. abiFilters target arm64 (devices) + x86_64 (emulator); ANDROID_STL is c++_static. ndkVersion/compileSdk are pinned and may need to match whatever SDK you install. Note: zero dependencies block.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDR5H0AADBX6Z9CMDYH",
+          "title": "CMake: pull in the shared core, build libonlychess.so",
+          "code_path": "Games/Chess/Android/app/src/main/cpp/CMakeLists.txt",
+          "line_start": 8,
+          "line_end": 40,
+          "note": "Goes up to the repo root and add_subdirectory's the whole engine (tests off), so the Android lib links the SAME chess::core and lur::* targets the desktop build tests. Adds the NDK's android_native_app_glue, builds libonlychess.so, links android/log/vulkan.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDS2E7BK8HK7FNJZ178",
+          "title": "Kotlin: a NativeActivity that just hosts the BLE shim",
+          "code_path": "Games/Chess/Android/app/src/main/kotlin/com/lurmotorn/onlychess/OnlyChessActivity.kt",
+          "line_start": 7,
+          "line_end": 18,
+          "note": "The only reason this Kotlin class exists: NativeActivity drives everything from C++, but we need a loaded Kotlin object (the BLE shim) for the native transport to call into via JNI. No game logic here.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDS2E7BK8HK7FNJZ179",
+          "title": "C++ entry: the android_main loop",
+          "code_path": "Games/Chess/Android/app/src/main/cpp/AndroidMain.cpp",
+          "line_start": 47,
+          "line_end": 69,
+          "note": "Our loop, on the thread native_app_glue gives us. It blocks when idle and spins when there's a frame to draw, processes app/input events, and shuts the renderer down on exit. The game loop + net pump land here (tasks #9/#10).",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDTJTC3PJH2F53268AK",
+          "title": "Window init + the engine smoke test",
+          "code_path": "Games/Chess/Android/app/src/main/cpp/AndroidMain.cpp",
+          "line_start": 20,
+          "line_end": 43,
+          "note": "On APP_CMD_INIT_WINDOW it creates the renderer against the ANativeWindow, then runs a smoke test of the shared core: GenerateLegalMoves from the start position should log 20. That line is the proof the perft-verified engine cross-compiles and runs under the NDK.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDVKP7Q36RD56C6TSAP",
+          "title": "The thin Kotlin BLE shim",
+          "code_path": "Games/Chess/Android/app/src/main/kotlin/com/lurmotorn/onlychess/BleShim.kt",
+          "line_start": 6,
+          "line_end": 29,
+          "note": "The radio layer's entire job: move opaque ByteArray datagrams to/from the peer and report connection state. send() is called from C++; nativeOnConnected/nativeOnReceived call back into C++. Full GATT advertise/scan/connect is task #8.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KV0QMWDWZ06XYRV35YAEK5BB",
+          "title": "JNI bridge: ITransport over the shim",
+          "code_path": "Games/Chess/Android/app/src/main/cpp/AndroidBleTransport.cpp",
+          "line_start": 15,
+          "line_end": 25,
+          "note": "The C++ side of the seam: an ITransport whose Send() will JNI-call BleShim.send, and whose Java_..._nativeOnReceived JNI entry will feed received bytes to the net layer. Stubbed now (task #8) — but this is where the platform radio meets the platform-neutral engine.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ],
+      "diagrams": [
+        {
+          "id": "01KV0QMWDWZ06XYRV35YAEK5BC",
+          "source": "flowchart TD\n  NA[NativeActivity - OnlyChessActivity.kt] -->|loads libonlychess.so| AM[android_main - C++]\n  AM --> ENG[Shared engine + perft-verified chess core]\n  AM --> R[Vulkan renderer - stub, task 9]\n  NA --> BLE[BleShim.kt - BLE radio, task 8]\n  BLE <-->|JNI| TR[AndroidBleTransport - ITransport in C++]\n  TR --> NET[net session - C++, task 10]",
+          "caption": "The Android layering. The Kotlin side is intentionally tiny: NativeActivity (which loads the native lib) and the BLE radio shim. Everything else is the shared C++ engine, reached either directly from android_main or, for the radio, across the JNI bridge. The stubbed boxes (renderer, BLE) are where tasks #8/#9 plug in."
+        }
+      ]
+    },
+    {
+      "id": "01KVMWYK34WZ3H7NY9W1DY1C4R",
+      "title": "Building & running on-device",
+      "summary": "The three concrete fixes that took the scaffold from 'never built' to 'running on a Samsung Galaxy A14'. A real CMake bug (C language never enabled), the repo's missing Gradle wrapper, and a fallback bootstrap script — then install over wireless ADB and confirm the chess core's 20-move smoke test in logcat.",
+      "steps": [
+        {
+          "id": "01KVMWYK35KBQWEY7730N142ZZ",
+          "title": "The build-blocking bug: enable C for the NDK glue",
+          "code_path": "Games/Chess/Android/app/src/main/cpp/CMakeLists.txt",
+          "line_start": 2,
+          "line_end": 3,
+          "note": "project(onlychess CXX) only enabled C++, but android_native_app_glue.c is a C file. CMake then refused it with 'can not determine linker language for target: native_app_glue', failing configure for every ABI. Declaring 'C CXX' fixes it — a genuine latent bug in the skeleton, invisible until the first real NDK build.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVMWYK35KBQWEY7730N14300",
+          "title": "Pin the Gradle wrapper (8.9)",
+          "code_path": "Games/Chess/Android/gradle/wrapper/gradle-wrapper.properties",
+          "line_start": 3,
+          "line_end": 5,
+          "note": "The repo shipped only this properties file — no gradlew/gradle-wrapper.jar — and there was no system Gradle. Generating the wrapper pins Gradle 8.9 (what AGP 8.7.3 needs) and makes the build reproducible from a clean checkout. gradlew, gradlew.bat and gradle-wrapper.jar are now committed alongside it.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVMWYK36X5XWH81VZ84WR7P1",
+          "title": "Fallback bootstrap when no Gradle exists",
+          "code_path": "scripts/gradle-bootstrap.ps1",
+          "line_start": 10,
+          "line_end": 26,
+          "note": "Idempotent recovery path: if no Gradle is on the machine, download the pinned 8.9 distribution, then use it to generate the committable wrapper before building through it. This is how a fresh machine goes from zero to a wrapper-driven build without Android Studio.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ]
+    }
+  ]
+}

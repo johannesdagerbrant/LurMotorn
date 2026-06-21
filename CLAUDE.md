@@ -138,6 +138,10 @@ it with `directory` = the repo root (so code paths validate during authoring), t
 into `CodeViewerSessions/` and patch `base_dir` from `"."` to `".."` so code paths still resolve to
 the repo root. Use `symbol`/anchor ranges; avoid parentheses in anchors (regex).
 
+**Never push to the remote until the phase's CodeViewer session has been reviewed.**
+The session is the review gate: author it, launch it, let the user review (and resolve any
+comments), and only then `git push`. Local commits are fine — *pushing* is what waits for review.
+
 ## Working style
 
 The user reviews each completed phase as a focused CodeViewer walkthrough (see Documentation above).
@@ -145,7 +149,16 @@ Favor explaining the C++/systems reasoning rather than only handing over code.
 
 ## Current state
 
-Scaffold + serialization core + move codec are implemented and **building + passing tests** on a
-VS-free host toolchain (g++ / Ninja via `build.ps1`). The renderer interface is 3D-capable with a
-`Math` module behind it. `Chess::GenerateLegalMoves` is stubbed and is the next real work. See the
-task list for the roadmap.
+The entire shared C++ core is implemented and **building + passing tests** on a VS-free host
+toolchain (g++ / Ninja via `build.ps1`): serialization codec, deterministic sim + math, module
+interfaces, and a **perft-verified** chess rules engine + move codec. The Android app is scaffolded
+(NativeActivity + NDK/CMake + Kotlin BLE shim + JNI), not yet built. Next: install the Android SDK
+(`scripts\setup-android.bat`) and build the app; then BLE backend (#8), Vulkan renderer (#9), iOS
+app (#7, needs a Mac), and net wiring (#10). See the task list / GitHub issues.
+
+## Scripts
+
+Common actions are wrapped as `.bat` entry points in `scripts/` so the workflow is consistent for
+humans and future agents — prefer them over ad-hoc commands: `build.bat` (host core build + test),
+`clean.bat`, `setup-android.bat` (one-time CLI-only SDK/NDK/JDK/Gradle install), `android-build.bat`,
+`android-install.bat`, `logcat.bat`. See `scripts/README.md`.

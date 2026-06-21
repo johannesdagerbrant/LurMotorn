@@ -32,3 +32,6 @@ xcuserdata/
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Transient build logs from scripts/
+scripts/*.log

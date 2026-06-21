@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.22)
-project(onlychess CXX)
+# C is needed for the NDK's android_native_app_glue.c; CXX for everything else.
+project(onlychess C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
