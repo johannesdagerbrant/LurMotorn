@@ -4,9 +4,14 @@
 // input, and net wiring are tasks #9/#10.
 #include <android_native_app_glue.h>
 #include <android/log.h>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 
 #include "Chess/Board.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Transport/Ble.h"
+#include "Lur/Transport/Transport.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyChess", __VA_ARGS__)
 
@@ -48,6 +53,21 @@ void android_main(android_app* App) {
     AppState State;
     App->userData = &State;
     App->onAppCmd = HandleCmd;
+
+    // Wire the BLE transport: log any datagram from the peer and bounce one reply
+    // back, so a live two-phone link shows a round-trip in logcat. The radio is
+    // driven from Kotlin (BleShim) once permissions are granted; this is the
+    // engine-side seam. Real net/game wiring lands later (#10).
+    auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
+    Transport->SetReceiver([Transport](const uint8_t* Data, std::size_t Size) {
+        char Hex[49];
+        const std::size_t Shown = Size < 16 ? Size : 16;
+        for (std::size_t i = 0; i < Shown; ++i) std::snprintf(Hex + i * 3, 4, "%02X ", Data[i]);
+        Hex[Shown ? Shown * 3 - 1 : 0] = '\0';
+        LOGI("BLE received %zu bytes: %s", Size, Hex);
+        static bool Replied = false;
+        if (!Replied) { Replied = true; const uint8_t Pong[] = {0x5C}; Transport->Send(Pong, sizeof(Pong)); }
+    });
 
     while (!App->destroyRequested) {
         int Events = 0;

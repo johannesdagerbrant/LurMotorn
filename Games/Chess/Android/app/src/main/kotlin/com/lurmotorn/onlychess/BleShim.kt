@@ -1,32 +1,372 @@
 package com.lurmotorn.onlychess
 
+import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothGattDescriptor
+import android.bluetooth.BluetoothGattServer
+import android.bluetooth.BluetoothGattServerCallback
+import android.bluetooth.BluetoothGattService
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.bluetooth.le.AdvertiseCallback
+import android.bluetooth.le.AdvertiseData
+import android.bluetooth.le.AdvertiseSettings
+import android.bluetooth.le.BluetoothLeAdvertiser
+import android.bluetooth.le.BluetoothLeScanner
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.os.Build
+import android.os.ParcelUuid
+import android.util.Log
+import java.util.UUID
+import kotlin.random.Random
 
 /**
- * Thin Bluetooth Low Energy shim — the ONLY job is to move opaque `ByteArray`
- * datagrams between this device and the peer, and report connection state. All
- * framing, encoding, and game logic live in C++ (`Lur::Transport::ITransport`
- * consumes this over JNI). Full GATT advertise / scan / connect is task #8.
+ * The real Bluetooth Low Energy radio for OnlyChess (issue #3, Android half).
+ *
+ * Its only job is to move opaque `ByteArray` datagrams between this phone and the
+ * peer; all framing/encoding/game logic stays in C++ (the Lur::Transport backend
+ * consumes this over JNI).
+ *
+ * The GATT role is decided IN-BAND (it must be, to interoperate with iOS, which
+ * cannot advertise custom data). Both phones run a GATT server, advertise only the
+ * service UUID, and scan. On discovering a peer, a phone connects as central and
+ * reads the peer's nonce characteristic; C++ `DecideBleRole` (the shared single
+ * source of truth) then uses the two nonces to settle who keeps the link: the
+ * larger nonce stays central, the smaller drops that connection and serves as
+ * peripheral, letting its peer connect to it. Both keep advertising/scanning until
+ * the canonical link is up, so it self-corrects. See BleProtocol.h.
  */
 class BleShim(private val context: Context) {
 
-    // --- Called FROM C++ (the Lur::Transport BLE backend) ---
-
-    /** Send one datagram to the peer. The bytes are already minimal — send as-is. */
-    @Suppress("unused")
-    fun send(bytes: ByteArray) {
-        // TODO(#8): write to the connected GATT characteristic (notify/write).
-    }
-
-    // --- Called INTO C++ when the radio reports events ---
-
-    private external fun nativeOnConnected()
-    private external fun nativeOnReceived(bytes: ByteArray)
-
     companion object {
+        private const val TAG = "OnlyChess"
+
+        // MUST match Lur::Transport::BleProtocol (Modules/.../BleProtocol.h).
+        private val SERVICE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E00-5472616E7370")
+        private val DATAGRAM_UUID = UUID.fromString("4C55524D-4F54-4F52-4E01-446174616772")
+        private val NONCE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E02-4E6F6E636500")
+        // Standard Client Characteristic Configuration Descriptor (enables notify).
+        private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+
+        private const val ROLE_PERIPHERAL = 0
+        private const val ROLE_CENTRAL = 1
+
         init {
             // Same .so NativeActivity loads (android.app.lib_name = "onlychess").
             System.loadLibrary("onlychess")
         }
+    }
+
+    // --- JNI: into C++ (defined in AndroidBleTransport.cpp) ---
+    private external fun nativeSetShim()
+    private external fun nativeOnConnected(asPeripheral: Boolean)
+    private external fun nativeOnDisconnected()
+    private external fun nativeOnReceived(bytes: ByteArray)
+    private external fun nativeDecideRole(localNonce: ByteArray, peerNonce: ByteArray): Int
+
+    private val adapter: BluetoothAdapter? =
+        (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+
+    private val nonce = ByteArray(4).also { Random.nextBytes(it) }
+
+    private var advertiser: BluetoothLeAdvertiser? = null
+    private var scanner: BluetoothLeScanner? = null
+    private var gattServer: BluetoothGattServer? = null
+    private var serverDatagram: BluetoothGattCharacteristic? = null
+    private var connectedCentral: BluetoothDevice? = null   // the peripheral's live link
+    private var gattClient: BluetoothGatt? = null
+    private var clientDatagram: BluetoothGattCharacteristic? = null
+
+    @Volatile private var started = false
+    @Volatile private var linked = false
+    @Volatile private var connecting = false   // an outgoing central attempt is mid-flight
+    @Volatile private var decidedPeripheral = false  // we settled as peripheral; stop connecting out
+
+    init {
+        nativeSetShim()
+    }
+
+    /** Permissions this device needs to advertise/scan/connect over BLE. */
+    fun requiredPermissions(): Array<String> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S)
+            arrayOf(
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_CONNECT,
+            )
+        else
+            arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
+
+    // --- Called FROM C++ (the Lur::Transport BLE backend) ---
+
+    /** Send one datagram to the peer. Bytes are already minimal — send as-is. */
+    @Suppress("unused")
+    fun send(bytes: ByteArray) {
+        try {
+            val client = gattClient
+            val clientCh = clientDatagram
+            val central = connectedCentral
+            val serverCh = serverDatagram
+            if (client != null && clientCh != null) {           // we are central -> write
+                clientCh.value = bytes
+                clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                client.writeCharacteristic(clientCh)
+            } else if (central != null && serverCh != null) {   // we are peripheral -> notify
+                serverCh.value = bytes
+                gattServer?.notifyCharacteristicChanged(central, serverCh, false)
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "send: missing BLE permission", e)
+        }
+    }
+
+    // --- Called from OnlyChessActivity once permissions are granted ---
+
+    fun onPermissionsReady() {
+        if (started) return
+        val a = adapter
+        if (a == null || !a.isEnabled) {
+            Log.e(TAG, "BLE unavailable (no adapter or Bluetooth off)")
+            return
+        }
+        started = true
+        startGattServer()
+        startAdvertising()
+        startScanning()
+    }
+
+    private fun startAdvertising() {
+        val adv = adapter?.bluetoothLeAdvertiser ?: run { Log.e(TAG, "no BLE advertiser"); return }
+        advertiser = adv
+        val settings = AdvertiseSettings.Builder()
+            .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+            .setConnectable(true)
+            .setTimeout(0)
+            .build()
+        // Service UUID only — iOS can advertise no more than this, so neither do we.
+        val data = AdvertiseData.Builder()
+            .setIncludeDeviceName(false)
+            .addServiceUuid(ParcelUuid(SERVICE_UUID))
+            .build()
+        try {
+            adv.startAdvertising(settings, data, advertiseCallback)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "startAdvertising: missing BLE permission", e)
+        }
+    }
+
+    private fun startScanning() {
+        val sc = adapter?.bluetoothLeScanner ?: run { Log.e(TAG, "no BLE scanner"); return }
+        scanner = sc
+        val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+        try {
+            sc.startScan(listOf(filter), settings, scanCallback)
+            Log.i(TAG, "BLE up: serving + advertising + scanning for LurMotorn peers")
+        } catch (e: SecurityException) {
+            Log.e(TAG, "startScan: missing BLE permission", e)
+        }
+    }
+
+    private fun stopAdvertising() {
+        try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
+    }
+
+    private fun stopScanning() {
+        try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
+    }
+
+    /** The canonical link is up — stop discovery so the radio settles. */
+    private fun onLinked(asPeripheral: Boolean) {
+        if (linked) return
+        linked = true
+        stopScanning()
+        stopAdvertising()
+        nativeOnConnected(asPeripheral)
+    }
+
+    private val advertiseCallback = object : AdvertiseCallback() {
+        override fun onStartFailure(errorCode: Int) { Log.e(TAG, "advertise failed: $errorCode") }
+    }
+
+    private val scanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            if (linked || connecting || decidedPeripheral) return
+            connecting = true
+            connectAsCentral(result.device)
+        }
+
+        override fun onScanFailed(errorCode: Int) { Log.e(TAG, "scan failed: $errorCode") }
+    }
+
+    // --- GATT server (every device runs one; the peripheral's is the live link) ---
+
+    private fun startGattServer() {
+        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        try {
+            val server = mgr.openGattServer(context, gattServerCallback)
+            gattServer = server
+            val service = BluetoothGattService(SERVICE_UUID, BluetoothGattService.SERVICE_TYPE_PRIMARY)
+
+            val datagram = BluetoothGattCharacteristic(
+                DATAGRAM_UUID,
+                BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                BluetoothGattCharacteristic.PERMISSION_WRITE,
+            )
+            datagram.addDescriptor(
+                BluetoothGattDescriptor(
+                    CCCD_UUID,
+                    BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
+                )
+            )
+            val nonceCh = BluetoothGattCharacteristic(
+                NONCE_UUID,
+                BluetoothGattCharacteristic.PROPERTY_READ,
+                BluetoothGattCharacteristic.PERMISSION_READ,
+            )
+            service.addCharacteristic(datagram)
+            service.addCharacteristic(nonceCh)
+            server.addService(service)
+            serverDatagram = datagram
+        } catch (e: SecurityException) {
+            Log.e(TAG, "openGattServer: missing BLE permission", e)
+        }
+    }
+
+    private val gattServerCallback = object : BluetoothGattServerCallback() {
+        override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            if (newState == BluetoothProfile.STATE_DISCONNECTED && device == connectedCentral) {
+                connectedCentral = null
+                linked = false
+                nativeOnDisconnected()
+            }
+        }
+
+        override fun onCharacteristicReadRequest(
+            device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
+        ) {
+            // Hand the connecting central our nonce so it can run the role tie-break.
+            val value = if (characteristic.uuid == NONCE_UUID) nonce else ByteArray(0)
+            try {
+                gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
+            } catch (_: SecurityException) {}
+        }
+
+        override fun onCharacteristicWriteRequest(
+            device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic,
+            preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
+        ) {
+            if (characteristic.uuid == DATAGRAM_UUID) nativeOnReceived(value)
+            if (responseNeeded) {
+                try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) }
+                catch (_: SecurityException) {}
+            }
+        }
+
+        override fun onDescriptorWriteRequest(
+            device: BluetoothDevice, requestId: Int, descriptor: BluetoothGattDescriptor,
+            preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
+        ) {
+            // The canonical central enabling notifications IS the "link is live" signal.
+            if (descriptor.uuid == CCCD_UUID) {
+                connectedCentral = device
+                onLinked(asPeripheral = true)
+                Log.i(TAG, "peripheral: central linked")
+            }
+            if (responseNeeded) {
+                try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) }
+                catch (_: SecurityException) {}
+            }
+        }
+    }
+
+    // --- GATT client (central) ---
+
+    private fun connectAsCentral(device: BluetoothDevice) {
+        try {
+            gattClient = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: SecurityException) {
+            Log.e(TAG, "connectGatt: missing BLE permission", e)
+            connecting = false
+        }
+    }
+
+    private fun dropClient(gatt: BluetoothGatt) {
+        try { gatt.disconnect(); gatt.close() } catch (_: SecurityException) {}
+        if (gattClient == gatt) { gattClient = null; clientDatagram = null }
+        connecting = false
+    }
+
+    private val gattClientCallback = object : BluetoothGattCallback() {
+        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+            try {
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    gatt.requestMtu(247)
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    connecting = false
+                    if (linked && gatt == gattClient) { linked = false; nativeOnDisconnected() }
+                }
+            } catch (_: SecurityException) {}
+        }
+
+        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            try { gatt.discoverServices() } catch (_: SecurityException) {}
+        }
+
+        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+            val service = gatt.getService(SERVICE_UUID) ?: run { dropClient(gatt); return }
+            clientDatagram = service.getCharacteristic(DATAGRAM_UUID)
+            val nonceCh = service.getCharacteristic(NONCE_UUID) ?: run { dropClient(gatt); return }
+            try { gatt.readCharacteristic(nonceCh) } catch (_: SecurityException) { dropClient(gatt) }
+        }
+
+        override fun onCharacteristicRead(
+            gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
+        ) {
+            if (characteristic.uuid != NONCE_UUID) return
+            val peerNonce = characteristic.value ?: ByteArray(0)
+            val role = nativeDecideRole(nonce, peerNonce)
+            if (role == ROLE_CENTRAL) {
+                enableNotifications(gatt)   // we keep this connection as the live link
+            } else {
+                // We should be the peripheral: drop this connection and let the peer
+                // (the canonical central) connect to our server instead.
+                decidedPeripheral = true
+                stopScanning()
+                dropClient(gatt)
+                Log.i(TAG, "central attempt -> we are peripheral; deferring to peer")
+            }
+        }
+
+        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
+            if (descriptor.uuid == CCCD_UUID) {
+                onLinked(asPeripheral = false)
+                Log.i(TAG, "central: linked + notifications on")
+            }
+        }
+
+        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
+            if (characteristic.uuid == DATAGRAM_UUID) nativeOnReceived(characteristic.value)
+        }
+    }
+
+    private fun enableNotifications(gatt: BluetoothGatt) {
+        val ch = clientDatagram ?: return
+        try {
+            gatt.setCharacteristicNotification(ch, true)
+            val cccd = ch.getDescriptor(CCCD_UUID)
+            cccd?.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            gatt.writeDescriptor(cccd)
+        } catch (_: SecurityException) {}
     }
 }
