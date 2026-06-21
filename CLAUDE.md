@@ -51,6 +51,30 @@ The renderer is **3D-capable by design** (meshes + depth + camera + materials); 
 is the orthographic special case via `Render/Sprite2D.h`. 3D model loading, when a game needs it,
 is ours to write (no importers) — likely a glTF 2.0 / `.glb` loader.
 
+### Authority is distributed, never hosted
+
+LurMotorn is **symmetric peer-to-peer**: there is no host, and no peer owns the global source of
+truth. Authority over a piece of state is assigned **per-entity (and per-aspect) to the peer whose
+player interacts with it most tightly**, so that interaction is *locally authoritative* — instant,
+never round-tripped to another peer for approval. Chess: each phone owns its own pieces. A shooter:
+each phone owns *spawning* its own units (snappy spawn) but hands *movement* authority of a unit to
+whoever is shooting at it, so aim is accurate ("you hit what you see"). Authority follows the
+interaction whose *feel* must be protected (spawn-feel → owner; aim-feel → shooter).
+
+This is a `Modules/Net` concern (ownership + replication) and **never** the transport. The BLE
+**peripheral/central** split is a *radio mechanic only* — it confers no authority; once the link is
+up it is a symmetric two-way datagram pipe. Do **not** introduce a "host" peer or a single global
+authority: when a new game needs shared state, decide *per entity* which peer owns it. This
+distributed-authority model is the foundation the reflex games' rollback netcode builds on.
+
+Because play is **co-located and between two trusted people** (cheating here is like cheating at a
+board game — trivial, but pointless and socially awkward in the same room), **anti-cheat is an
+explicit non-goal**: each peer is trusted to report its own state, which is exactly what makes
+owner-authority viable without a referee. What still matters is **consistency, not fairness** — a
+dropped packet or a tie between two peers must resolve to the *same outcome on both screens*, so
+contested state needs a simple **deterministic tie-break** (not cryptographic verification). And
+since the players share a room, genuine disputes can be settled out-of-band, socially.
+
 ## Build and test
 
 ### Shared C++ core (do this for any core change)

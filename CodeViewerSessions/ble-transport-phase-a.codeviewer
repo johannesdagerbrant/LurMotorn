@@ -3,10 +3,24 @@
   "id": "01KVN657YD2TDH2XBYH1HQ08ZE",
   "title": "LurMotorn — BLE Phase A: the cross-platform transport contract",
   "audience": "The developer building LurMotorn (you)",
-  "summary": "Phase A of the BLE link (issue #3) — the pure-C++, hardware-free half: the contract both phones must agree on, proven on the host with zero radio. No Bluetooth, JNI, Kotlin, or Mac here; that is Phase B (Android) and Phase D (iOS). The point of doing this first is that both platform backends implement against these exact constants and rules, so getting them right in one shared place stops Android and iOS from silently diverging into a wire incompatibility. Everything here builds and unit-tests via build.ps1 and on the new macOS CI under Apple's clang.\n\nLexicon\n\n**BLE** — Bluetooth Low Energy; the only serverless link that works between an iPhone and an Android phone, so it is LurMotorn's transport.\n\n**GATT** — Generic Attribute Profile; BLE's data model of services and characteristics that a peripheral exposes and a central reads/writes.\n\n**peripheral** — the device that hosts the GATT server (advertises the service, owns the characteristic). One of the two phones.\n\n**central** — the device that scans for and connects to the peripheral. The other phone.\n\n**characteristic** — a single GATT data endpoint; here one writable + notifiable characteristic is the bidirectional datagram channel.\n\n**advertise / scan** — the peripheral broadcasts its presence; the central listens for it. Discovery is symmetric here: both phones do both.\n\n**UUID** — a 128-bit identifier; our service and characteristic UUIDs are the wire identity both platforms must match exactly.\n\n**ITransport** — the engine's platform-neutral 'move bytes to the peer' interface; BLE and the loopback both implement it.\n\n**datagram** — one self-contained message (already minimal); the transport ships it as-is without re-framing.\n\n**loopback** — an in-process ITransport pair used for host tests: one endpoint's Send is delivered straight to the other's Receiver, no radio.\n\n**role tie-break** — the deterministic rule that hands two symmetric peers opposite GATT roles (one peripheral, one central) without any negotiation.\n\n**legal-move index** — the codec sends only a move's position in the deterministic legal-move list, not its squares; both phones regenerate the same list and map the index back.\n\n**CTest** — CMake's test runner; each test is a plain executable that exits non-zero on failure.",
+  "summary": "Phase A of the BLE link (issue #3) — the pure-C++, hardware-free half: the contract both phones must agree on, proven on the host with zero radio. No Bluetooth, JNI, Kotlin, or Mac here; that is Phase B (Android) and Phase D (iOS).\n\nArchitecture note: LurMotorn is symmetric peer-to-peer — there is NO host and no peer that owns the global source of truth. Authority over state is distributed per-entity to the peer whose player interacts with it most tightly (in chess, each phone owns its own pieces; in a shooter, each phone owns spawning its own units but hands movement-authority of a unit to whoever is shooting at it). Ownership + replication live in Modules/Net, never the transport. The BLE peripheral/central split below is a radio mechanic only and confers no authority; once the link is up it is a symmetric two-way datagram pipe.\n\nWhat Phase A pins down is the shared wire contract both backends compile against, so Android and iOS cannot silently diverge into a wire incompatibility. Everything here builds and unit-tests via build.ps1 and on the macOS CI under Apple's clang.\n\nLexicon\n\n**BLE** — Bluetooth Low Energy; the only serverless link that works between an iPhone and an Android phone, so it is LurMotorn's transport.\n\n**GATT** — Generic Attribute Profile; BLE's data model of services and characteristics that a peripheral exposes and a central reads/writes.\n\n**peripheral** — the device that hosts the GATT server on the radio (advertises the service, owns the characteristic). A transport-layer role ONLY — not a game-state authority.\n\n**central** — the device that scans for and connects to the peripheral on the radio. A transport-layer role ONLY — not a game-state authority.\n\n**characteristic** — a single GATT data endpoint; here one writable + notifiable characteristic is the bidirectional datagram channel.\n\n**advertise / scan** — the peripheral broadcasts its presence; the central listens for it. Discovery is symmetric here: both phones do both.\n\n**UUID** — a 128-bit identifier; our service and characteristic UUIDs are the wire identity both platforms must match exactly.\n\n**ITransport** — the engine's platform-neutral 'move bytes to the peer' interface; BLE and the loopback both implement it.\n\n**datagram** — one self-contained message (already minimal); the transport ships it as-is without re-framing.\n\n**loopback** — an in-process ITransport pair used for host tests: one endpoint's Send is delivered straight to the other's Receiver, no radio.\n\n**role tie-break** — the deterministic rule that hands two symmetric peers opposite GATT *radio* roles (one peripheral, one central) without any negotiation. Radio only — not authority.\n\n**interaction-local authority** — LurMotorn's ownership model: each peer is authoritative for the state its player interacts with most tightly, so that interaction is instant and never round-tripped to a host. Distributed per-entity, lives in Net — not the transport.\n\n**legal-move index** — the codec sends only a move's position in the deterministic legal-move list, not its squares; both phones regenerate the same list and map the index back.\n\n**CTest** — CMake's test runner; each test is a plain executable that exits non-zero on failure.",
   "generated_at": "2026-06-21T13:33:12.526Z",
   "generated_by": "claude-opus-4-8",
   "base_dir": "..",
+  "comments": [
+    {
+      "id": "01KVN7K3QC5M16RPDQYF0Z1HSS",
+      "body": "architecturally, I dont want LurMotorn to default into thinking of one of the peer to peer agents to be a host that holds the source of truth. I would rather think of each agent to own the truth of the items most interesting and relevant for them to interact with. for instance in chess it might make sense for each agent to \"host\" the pieces of their own team, since those are the pieces the player will interact with - so interaction is snappy and tight. in a multiplayer game about shooting down the other players units it might make sense for each agent to own/host the spawning of its own units but the movement of the oponents units after they are spawned - so that it feels responsive to spawn and accurate to aim and shoot at the oponents miving units.",
+      "created_at": "2026-06-21T13:58:15.532Z",
+      "resolved": false,
+      "author_kind": "human",
+      "author_name": "johan",
+      "char_start": 957,
+      "char_end": 979,
+      "target": "summary",
+      "replies": []
+    }
+  ],
   "phases": [
     {
       "id": "01KVN657YF4R3RGWPW124TVKA8",
@@ -15,11 +29,11 @@
       "steps": [
         {
           "id": "01KVN657YH6SHWHP1E51GCEYZN",
-          "title": "One source of truth for the UUIDs",
+          "title": "The wire constants, defined once",
           "code_path": "Modules/Transport/Public/Lur/Transport/BleProtocol.h",
           "line_start": 21,
           "line_end": 32,
-          "note": "The service + datagram-characteristic UUIDs and advertised name live here ONCE. If they were copied into Kotlin and Swift they could drift and two phones would silently never discover each other, so both backends include this header. Changing a UUID is a breaking wire change (bump ProtocolVersion).",
+          "note": "The service + datagram-characteristic UUIDs and advertised name are defined in ONE header so they can't drift between the Kotlin and Swift backends — pure constant-deduplication, NOT a claim that either peer owns game state. Changing a UUID is a breaking wire change (bump ProtocolVersion).",
           "note_comments": [],
           "code_comments": []
         },
@@ -29,7 +43,7 @@
           "code_path": "Modules/Transport/Public/Lur/Transport/BleProtocol.h",
           "line_start": 42,
           "line_end": 44,
-          "note": "Both phones advertise AND scan, so both reach this pure function with the two ids swapped. A total order on the ids hands them opposite answers for free — the smaller id hosts the peripheral — so they never both try to be the GATT server.",
+          "note": "Both phones advertise AND scan, so both reach this pure function with the two ids swapped. A total order on the ids hands them opposite answers for free — the smaller id hosts the peripheral — so they never both try to be the GATT server. This is a RADIO role only: it decides who advertises vs who connects, nothing about game-state authority. Once connected the channel is a symmetric two-way datagram pipe; authority over state is distributed in the Net layer (interaction-local ownership), never here.",
           "note_comments": [],
           "code_comments": []
         },
