@@ -35,3 +35,6 @@ Thumbs.db
 
 # Transient build logs from scripts/
 scripts/*.log
+
+# Downloaded build artifacts (e.g. the sideloadable .ipa)
+/dist/
