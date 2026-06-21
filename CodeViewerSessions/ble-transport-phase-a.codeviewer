@@ -1,0 +1,76 @@
+{
+  "schema_version": 2,
+  "id": "01KVN657YD2TDH2XBYH1HQ08ZE",
+  "title": "LurMotorn — BLE Phase A: the cross-platform transport contract",
+  "audience": "The developer building LurMotorn (you)",
+  "summary": "Phase A of the BLE link (issue #3) — the pure-C++, hardware-free half: the contract both phones must agree on, proven on the host with zero radio. No Bluetooth, JNI, Kotlin, or Mac here; that is Phase B (Android) and Phase D (iOS). The point of doing this first is that both platform backends implement against these exact constants and rules, so getting them right in one shared place stops Android and iOS from silently diverging into a wire incompatibility. Everything here builds and unit-tests via build.ps1 and on the new macOS CI under Apple's clang.\n\nLexicon\n\n**BLE** — Bluetooth Low Energy; the only serverless link that works between an iPhone and an Android phone, so it is LurMotorn's transport.\n\n**GATT** — Generic Attribute Profile; BLE's data model of services and characteristics that a peripheral exposes and a central reads/writes.\n\n**peripheral** — the device that hosts the GATT server (advertises the service, owns the characteristic). One of the two phones.\n\n**central** — the device that scans for and connects to the peripheral. The other phone.\n\n**characteristic** — a single GATT data endpoint; here one writable + notifiable characteristic is the bidirectional datagram channel.\n\n**advertise / scan** — the peripheral broadcasts its presence; the central listens for it. Discovery is symmetric here: both phones do both.\n\n**UUID** — a 128-bit identifier; our service and characteristic UUIDs are the wire identity both platforms must match exactly.\n\n**ITransport** — the engine's platform-neutral 'move bytes to the peer' interface; BLE and the loopback both implement it.\n\n**datagram** — one self-contained message (already minimal); the transport ships it as-is without re-framing.\n\n**loopback** — an in-process ITransport pair used for host tests: one endpoint's Send is delivered straight to the other's Receiver, no radio.\n\n**role tie-break** — the deterministic rule that hands two symmetric peers opposite GATT roles (one peripheral, one central) without any negotiation.\n\n**legal-move index** — the codec sends only a move's position in the deterministic legal-move list, not its squares; both phones regenerate the same list and map the index back.\n\n**CTest** — CMake's test runner; each test is a plain executable that exits non-zero on failure.",
+  "generated_at": "2026-06-21T13:33:12.526Z",
+  "generated_by": "claude-opus-4-8",
+  "base_dir": "..",
+  "phases": [
+    {
+      "id": "01KVN657YF4R3RGWPW124TVKA8",
+      "title": "The shared contract + host proof",
+      "summary": "One header pins the cross-platform wire identity (UUIDs) and the role tie-break; a loopback ITransport lets the host exercise a real datagram round-trip; and the tests prove a chess move survives the trip through the transport seam — issue #3's 'done when', in software.",
+      "steps": [
+        {
+          "id": "01KVN657YH6SHWHP1E51GCEYZN",
+          "title": "One source of truth for the UUIDs",
+          "code_path": "Modules/Transport/Public/Lur/Transport/BleProtocol.h",
+          "line_start": 21,
+          "line_end": 32,
+          "note": "The service + datagram-characteristic UUIDs and advertised name live here ONCE. If they were copied into Kotlin and Swift they could drift and two phones would silently never discover each other, so both backends include this header. Changing a UUID is a breaking wire change (bump ProtocolVersion).",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVN657YKDA11XHGG007M9F93",
+          "title": "Opposite roles with no negotiation",
+          "code_path": "Modules/Transport/Public/Lur/Transport/BleProtocol.h",
+          "line_start": 42,
+          "line_end": 44,
+          "note": "Both phones advertise AND scan, so both reach this pure function with the two ids swapped. A total order on the ids hands them opposite answers for free — the smaller id hosts the peripheral — so they never both try to be the GATT server.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVN657YM8D9AYJZZ2C6FCS0M",
+          "title": "Loopback: an ITransport with no radio",
+          "code_path": "Modules/Transport/Public/Lur/Transport/Loopback.h",
+          "line_start": 17,
+          "line_end": 39,
+          "note": "Two linked endpoints: whatever one Sends is delivered synchronously to the other's Receiver. Because it satisfies the same ITransport contract the BLE backend will, code tested against this runs unchanged over the real link.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVN657YNTMYRKY5JERHEZRWZ",
+          "title": "Test: the tie-break is opposite",
+          "code_path": "Modules/Transport/Tests/TransportTests.cpp",
+          "line_start": 35,
+          "line_end": 45,
+          "note": "Two devices reaching the tie-break with swapped ids must pick OPPOSITE roles — exactly one peripheral. This is the cross-platform invariant that keeps the GATT server unambiguous.",
+          "note_comments": [],
+          "code_comments": []
+        },
+        {
+          "id": "01KVN657YPNM5C3BYBECMJ7KQ7",
+          "title": "Test: a real move round-trips over the seam",
+          "code_path": "Modules/Transport/Tests/TransportTests.cpp",
+          "line_start": 81,
+          "line_end": 125,
+          "note": "The payoff: encode e2e4 to its legal-move index, ship the byte through the LoopbackTransport, and the receiver decodes it back to the identical move using its OWN regenerated legal list. Squares never travel — only the index does. This is issue #3's 'move codec round-trips over the live link', proven with no hardware.",
+          "note_comments": [],
+          "code_comments": []
+        }
+      ],
+      "diagrams": [
+        {
+          "id": "01KVN657YQJZ5CRXNZAGNFCE2R",
+          "source": "sequenceDiagram\n  participant S as Sender (Chess)\n  participant TA as Loopback A\n  participant TB as Loopback B\n  participant R as Receiver (Chess)\n  S->>S: GenerateLegalMoves + EncodeMove(e2e4)\n  Note over S: 20 legal -> 5 bits -> 1 byte\n  S->>TA: Send(bytes)\n  TA->>TB: deliver to peer\n  TB->>R: Receiver(bytes)\n  R->>R: GenerateLegalMoves (same position)\n  R->>R: DecodeMove -> e2e4",
+          "caption": "The move round-trip the test verifies. Only the move's INDEX in the legal list crosses the transport (one byte); each side reconstructs the full move from its own regenerated legal-move list. Swap the LoopbackTransport for the BLE backend and nothing above the ITransport seam changes."
+        }
+      ]
+    }
+  ]
+}
