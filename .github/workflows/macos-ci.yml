@@ -59,3 +59,43 @@ jobs:
           xcodebuild -project Games/Chess/iOS/build/OnlyChess.xcodeproj \
             -scheme OnlyChess -configuration Debug \
             -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
+
+  ios-ipa:
+    name: iOS unsigned .ipa (for sideloading)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # A DEVICE build (arm64, iphoneos) with signing disabled. The simulator app
+      # can't use real Bluetooth, so the cross-platform test needs the app on a
+      # physical iPhone — which means a device build. It's unsigned; Sideloadly (on
+      # the dev PC) signs it with a free Apple ID at install time.
+      - name: Configure (device, unsigned)
+        run: |
+          cmake -S Games/Chess/iOS -B Games/Chess/iOS/build-device -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+
+      - name: Build (device, unsigned)
+        run: |
+          xcodebuild -project Games/Chess/iOS/build-device/OnlyChess.xcodeproj \
+            -scheme OnlyChess -configuration Debug \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      # Wrap OnlyChess.app in the standard Payload/ layout and zip it to a .ipa.
+      - name: Package unsigned .ipa
+        run: |
+          APP=$(find Games/Chess/iOS/build-device -name 'OnlyChess.app' -type d | head -1)
+          echo "App bundle: $APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry OnlyChess-unsigned.ipa Payload
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnlyChess-unsigned-ipa
+          path: OnlyChess-unsigned.ipa
+          if-no-files-found: error
