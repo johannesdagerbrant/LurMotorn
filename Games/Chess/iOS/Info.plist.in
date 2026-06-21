@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Configured by CMake (configure_file). @VAR@ tokens are filled at configure time.
+     The Bluetooth usage strings are MANDATORY: iOS kills any app that touches
+     CoreBluetooth without them. Both keys are present because this device acts as
+     BOTH central (scans/connects) and peripheral (advertises), chosen at runtime
+     by DecideBleRole — see BleProtocol.h. -->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.lurmotorn.onlychess</string>
+    <key>CFBundleName</key>
+    <string>OnlyChess</string>
+    <key>CFBundleDisplayName</key>
+    <string>OnlyChess</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+
+    <!-- BLE usage strings (CLAUDE.md: BLE is the cross-platform transport). -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>OnlyChess uses Bluetooth to connect to a nearby phone for local two-player chess. No internet, no servers.</string>
+    <!-- Legacy key for iOS 12 and earlier; harmless on newer iOS. -->
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>OnlyChess uses Bluetooth to host a local game so a nearby phone can join. No internet, no servers.</string>
+</dict>
+</plist>

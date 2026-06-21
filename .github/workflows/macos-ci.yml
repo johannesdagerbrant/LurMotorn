@@ -6,9 +6,9 @@
 # proves the core cross-compiles for the Apple side long before the Xcode app
 # exists — no Mac hardware needed locally.
 #
-# When the iOS app exists (issue #6), uncomment the `ios-app` job at the bottom:
-# it builds for the SIMULATOR (no code-signing, so no Apple Developer cert), and
-# becomes a real per-push iOS app build.
+# The `ios-app` job builds the iOS app for the SIMULATOR (no code-signing, so no
+# Apple Developer cert): CMake generates the Xcode project on the runner, then
+# xcodebuild compiles it. This is how the iPhone half is verified with no local Mac.
 name: macOS CI
 
 on:
@@ -36,19 +36,26 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
-  # --- Uncomment when Games/Chess/iOS/OnlyChess.xcodeproj exists (issue #6) ---
-  # ios-app:
-  #   name: iOS app (simulator build)
-  #   runs-on: macos-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     # Simulator build => no signing, no Apple Developer cert required.
-  #     - name: Build for iOS Simulator
-  #       run: |
-  #         xcodebuild \
-  #           -project Games/Chess/iOS/OnlyChess.xcodeproj \
-  #           -scheme OnlyChess \
-  #           -sdk iphonesimulator \
-  #           -destination 'platform=iOS Simulator,name=iPhone 15' \
-  #           CODE_SIGNING_ALLOWED=NO \
-  #           build
+  ios-app:
+    name: iOS app (simulator build)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The iOS app is its own CMake project (like Android's), pulling in the shared
+      # C++ core via add_subdirectory. CMake generates the .xcodeproj on the runner,
+      # so nobody opens Xcode locally.
+      - name: Configure (CMake -> Xcode project)
+        run: |
+          cmake -S Games/Chess/iOS -B Games/Chess/iOS/build -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphonesimulator \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+
+      # Simulator build => no signing, no Apple Developer cert required.
+      - name: Build for iOS Simulator
+        run: |
+          xcodebuild -project Games/Chess/iOS/build/OnlyChess.xcodeproj \
+            -scheme OnlyChess -configuration Debug \
+            -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
