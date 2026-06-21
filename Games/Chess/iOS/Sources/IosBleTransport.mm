@@ -118,9 +118,12 @@ static std::string MakeSessionNonce() {
 - (void)transmit:(const std::vector<uint8_t>&)Bytes {
     NSData* Payload = [NSData dataWithBytes:Bytes.data() length:Bytes.size()];
     if (_RemoteDatagram && _PeerDevice) {            // we are central -> write
+        // WithResponse: the peer's datagram characteristic only declares
+        // write-with-response (PROPERTY_WRITE on Android), and chess payloads are
+        // tiny so latency is irrelevant. Both platforms write-with-response.
         [_PeerDevice writeValue:Payload
               forCharacteristic:_RemoteDatagram
-                           type:CBCharacteristicWriteWithoutResponse];
+                           type:CBCharacteristicWriteWithResponse];
     } else if (_LocalDatagram && _Subscriber) {      // we are peripheral -> notify
         [_Peripheral updateValue:Payload
                forCharacteristic:_LocalDatagram
@@ -144,6 +147,27 @@ static std::string MakeSessionNonce() {
         std::vector<uint8_t> Ping{0xC5};
         [self transmit:Ping];
     }
+}
+
+- (void)advertiseService {
+    if (_Peripheral.state != CBManagerStatePoweredOn || _Peripheral.isAdvertising) return;
+    NSString* Name = [NSString stringWithUTF8String:std::string(BleAdvertisedName).c_str()];
+    [_Peripheral startAdvertising:@{
+        CBAdvertisementDataServiceUUIDsKey: @[_ServiceUuid],
+        CBAdvertisementDataLocalNameKey: Name,
+    }];
+}
+
+// The live link dropped — reset role state and resume discovery so it re-forms.
+- (void)onLinkLost {
+    if (!_Linked) return;
+    _Linked = _Connected = _Connecting = _DecidedPeripheral = false;
+    _Subscriber = nil;
+    _RemoteDatagram = nil;
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    if (_Central.state == CBManagerStatePoweredOn)
+        [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
+    [self advertiseService];
 }
 
 // ===========================================================================
@@ -181,8 +205,8 @@ didFailToConnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
 
 - (void)centralManager:(CBCentralManager*)central
 didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
-    if (_Linked && peripheral == _PeerDevice) { _Linked = _Connected = false; }
-    [self resetClientAndRescan];
+    if (_Linked && peripheral == _PeerDevice) { [self onLinkLost]; }
+    else { [self resetClientAndRescan]; }
 }
 
 - (void)resetClientAndRescan {
@@ -275,11 +299,7 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
     if (error) { NSLog(@"OnlyChess BLE: addService error: %@", error); return; }
     // Advertise the service UUID + a human name ONLY (iOS allows no more, and the
     // nonce now travels in-band via the nonce characteristic).
-    NSString* Name = [NSString stringWithUTF8String:std::string(BleAdvertisedName).c_str()];
-    [peripheral startAdvertising:@{
-        CBAdvertisementDataServiceUUIDsKey: @[_ServiceUuid],
-        CBAdvertisementDataLocalNameKey: Name,
-    }];
+    [self advertiseService];
 }
 
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
@@ -295,9 +315,8 @@ didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
                   central:(CBCentral*)central
 didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
-    if ([characteristic.UUID isEqual:_DatagramUuid]) {
-        _Subscriber = nil;
-        _Connected = false;
+    if ([characteristic.UUID isEqual:_DatagramUuid] && _Linked) {
+        [self onLinkLost];
     }
 }
 

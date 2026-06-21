@@ -195,6 +195,22 @@ class BleShim(private val context: Context) {
         nativeOnConnected(asPeripheral)
     }
 
+    /** The live link dropped — reset role state and resume discovery so it re-forms. */
+    @Synchronized
+    private fun onLinkLost() {
+        if (!linked) return
+        linked = false
+        decidedPeripheral = false
+        connecting = false
+        connectedCentral = null
+        clientDatagram = null
+        try { gattClient?.close() } catch (_: SecurityException) {}
+        gattClient = null
+        nativeOnDisconnected()
+        startAdvertising()
+        startScanning()
+    }
+
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartFailure(errorCode: Int) { Log.e(TAG, "advertise failed: $errorCode") }
     }
@@ -246,9 +262,7 @@ class BleShim(private val context: Context) {
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             if (newState == BluetoothProfile.STATE_DISCONNECTED && device == connectedCentral) {
-                connectedCentral = null
-                linked = false
-                nativeOnDisconnected()
+                onLinkLost()
             }
         }
 
@@ -314,7 +328,7 @@ class BleShim(private val context: Context) {
                     gatt.requestMtu(247)
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
                     connecting = false
-                    if (linked && gatt == gattClient) { linked = false; nativeOnDisconnected() }
+                    if (gatt == gattClient && linked) onLinkLost()
                 }
             } catch (_: SecurityException) {}
         }
