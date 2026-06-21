@@ -162,9 +162,10 @@ it with `directory` = the repo root (so code paths validate during authoring), t
 into `CodeViewerSessions/` and patch `base_dir` from `"."` to `".."` so code paths still resolve to
 the repo root. Use `symbol`/anchor ranges; avoid parentheses in anchors (regex).
 
-**Never push to the remote until the phase's CodeViewer session has been reviewed.**
-The session is the review gate: author it, launch it, let the user review (and resolve any
-comments), and only then `git push`. Local commits are fine — *pushing* is what waits for review.
+**CodeViewer sessions are created on request, not as a mandatory pre-push gate.** The user asks for
+a walkthrough when they want one; do not block pushing on authoring/reviewing a session, and do not
+proactively create one unless asked. (Earlier the session was a hard pre-push gate; the user dropped
+that — they'll request CodeViewer sessions when they want them.)
 
 ## Working style
 
