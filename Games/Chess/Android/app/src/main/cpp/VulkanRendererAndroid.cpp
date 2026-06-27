@@ -61,8 +61,15 @@ struct Mesh {
     uint32_t       IndexCount = 0;
 };
 
+struct Texture {
+    VkImage        Image = VK_NULL_HANDLE;
+    VkDeviceMemory Memory = VK_NULL_HANDLE;
+    VkImageView    View = VK_NULL_HANDLE;
+};
+
 struct Material {
-    Color Tint;
+    Color           Tint;
+    VkDescriptorSet DescriptorSet = VK_NULL_HANDLE;  // binds the base-colour texture
 };
 
 class VulkanRendererAndroid : public IRenderer {
@@ -79,8 +86,14 @@ public:
         if (!CreateDevice())           return false;
         if (!CreateCommandResources()) return false;
         if (!CreateSyncObjects())      return false;
-        if (!CreateSwapchain())        return false;
-        if (!CreatePipeline())         return false;
+        if (!CreateSwapchain())          return false;
+        if (!CreateDescriptorResources())return false;
+        if (!CreatePipeline())           return false;
+        // 1x1 opaque white: materials with no base-colour texture (board squares)
+        // bind this, so they fall out of the same sample-x-tint path as flat tint.
+        const uint8_t White[4] = {255, 255, 255, 255};
+        DefaultTexture = LoadTexture(White, 1, 1);
+        if (DefaultTexture == 0)         return false;
         LOGI("Vulkan renderer up: %ux%u, %u swapchain images",
              Extent.width, Extent.height, static_cast<uint32_t>(SwapImages.size()));
         Ready = true;
@@ -97,10 +110,15 @@ public:
         if (Device != VK_NULL_HANDLE) vkDeviceWaitIdle(Device);
         for (Mesh& M : Meshes) DestroyMesh(M);
         Meshes.clear();
-        Materials.clear();
+        for (Texture& T : Textures) DestroyTexture(T);
+        Textures.clear();
+        Materials.clear();  // sets are freed with the pool below
         if (Device != VK_NULL_HANDLE) {
             if (Pipeline != VK_NULL_HANDLE)       vkDestroyPipeline(Device, Pipeline, nullptr);
             if (PipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(Device, PipelineLayout, nullptr);
+            if (DescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(Device, DescriptorPool, nullptr);
+            if (DescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(Device, DescriptorSetLayout, nullptr);
+            if (Sampler != VK_NULL_HANDLE)        vkDestroySampler(Device, Sampler, nullptr);
         }
         DestroySwapchain();
         if (Device != VK_NULL_HANDLE) {
@@ -130,10 +148,77 @@ public:
         return static_cast<MeshHandle>(Meshes.size());  // handle = index + 1
     }
 
-    TextureHandle LoadTexture(const uint8_t*, int, int) override { return 0; }  // 1c
+    TextureHandle LoadTexture(const uint8_t* Rgba, int Width, int Height) override {
+        const VkDeviceSize Size = static_cast<VkDeviceSize>(Width) * Height * 4;
+
+        // Staging buffer (host-visible) -> device-local image.
+        VkBuffer Staging = VK_NULL_HANDLE;
+        VkDeviceMemory StagingMem = VK_NULL_HANDLE;
+        if (!CreateBuffer(Size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Rgba, Staging, StagingMem))
+            return 0;
+
+        Texture Tex;
+        VkImageCreateInfo ImgInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ImgInfo.imageType = VK_IMAGE_TYPE_2D;
+        ImgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ImgInfo.extent = {static_cast<uint32_t>(Width), static_cast<uint32_t>(Height), 1};
+        ImgInfo.mipLevels = 1;
+        ImgInfo.arrayLayers = 1;
+        ImgInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        ImgInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ImgInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ImgInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ImgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(Device, &ImgInfo, nullptr, &Tex.Image) != VK_SUCCESS) {
+            LOGE("vkCreateImage failed (%dx%d)", Width, Height);
+            vkDestroyBuffer(Device, Staging, nullptr); vkFreeMemory(Device, StagingMem, nullptr);
+            return 0;
+        }
+
+        VkMemoryRequirements Req{};
+        vkGetImageMemoryRequirements(Device, Tex.Image, &Req);
+        VkMemoryAllocateInfo Alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        Alloc.allocationSize = Req.size;
+        Alloc.memoryTypeIndex = FindMemoryType(Req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        vkAllocateMemory(Device, &Alloc, nullptr, &Tex.Memory);
+        vkBindImageMemory(Device, Tex.Image, Tex.Memory, 0);
+
+        // Upload: UNDEFINED -> TRANSFER_DST, copy, TRANSFER_DST -> SHADER_READ_ONLY.
+        VkCommandBuffer Cmd = BeginOneTimeCommands();
+        TransitionLayout(Cmd, Tex.Image, VK_IMAGE_LAYOUT_UNDEFINED,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy Copy{};
+        Copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        Copy.imageSubresource.layerCount = 1;
+        Copy.imageExtent = {static_cast<uint32_t>(Width), static_cast<uint32_t>(Height), 1};
+        vkCmdCopyBufferToImage(Cmd, Staging, Tex.Image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &Copy);
+        TransitionLayout(Cmd, Tex.Image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        EndOneTimeCommands(Cmd);
+
+        vkDestroyBuffer(Device, Staging, nullptr);
+        vkFreeMemory(Device, StagingMem, nullptr);
+
+        VkImageViewCreateInfo ViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        ViewInfo.image = Tex.Image;
+        ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ViewInfo.subresourceRange.levelCount = 1;
+        ViewInfo.subresourceRange.layerCount = 1;
+        vkCreateImageView(Device, &ViewInfo, nullptr, &Tex.View);
+
+        Textures.push_back(Tex);
+        return static_cast<TextureHandle>(Textures.size());  // handle = index + 1
+    }
 
     MaterialHandle CreateMaterial(const MaterialDesc& Desc) override {
-        Materials.push_back(Material{Desc.Tint});
+        Material M;
+        M.Tint = Desc.Tint;
+        const TextureHandle Tex = (Desc.BaseColor != 0) ? Desc.BaseColor : DefaultTexture;
+        M.DescriptorSet = AllocateDescriptorSet(Textures[Tex - 1].View);
+        Materials.push_back(M);
         return static_cast<MaterialHandle>(Materials.size());  // handle = index + 1
     }
 
@@ -189,17 +274,21 @@ public:
                   const Math::Mat4& Model) override {
         if (!Recording) return;
         if (MeshId == 0 || MeshId > Meshes.size()) return;
+        if (MaterialId == 0 || MaterialId > Materials.size()) return;
         const Mesh& M = Meshes[MeshId - 1];
+        const Material& Mat = Materials[MaterialId - 1];
 
         PushConstants Pc;
         const Math::Mat4 Mvp = CurrentCamera.Projection * CurrentCamera.View * Model;
         std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
-        const Color T = (MaterialId != 0 && MaterialId <= Materials.size())
-                            ? Materials[MaterialId - 1].Tint : Color{};
-        Pc.Tint[0] = T.R; Pc.Tint[1] = T.G; Pc.Tint[2] = T.B; Pc.Tint[3] = T.A;
+        Pc.Tint[0] = Mat.Tint.R; Pc.Tint[1] = Mat.Tint.G;
+        Pc.Tint[2] = Mat.Tint.B; Pc.Tint[3] = Mat.Tint.A;
         vkCmdPushConstants(CommandBuffer, PipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(Pc), &Pc);
+
+        vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                PipelineLayout, 0, 1, &Mat.DescriptorSet, 0, nullptr);
 
         VkDeviceSize Offset = 0;
         vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &M.VertexBuffer, &Offset);
@@ -356,6 +445,8 @@ private:
         Push.size = sizeof(PushConstants);
 
         VkPipelineLayoutCreateInfo LayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        LayoutInfo.setLayoutCount = 1;
+        LayoutInfo.pSetLayouts = &DescriptorSetLayout;  // set 0: base-colour sampler
         LayoutInfo.pushConstantRangeCount = 1;
         LayoutInfo.pPushConstantRanges = &Push;
         VkResult LR = vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &PipelineLayout);
@@ -503,6 +594,125 @@ private:
         if (M.IndexBuffer)  vkDestroyBuffer(Device, M.IndexBuffer, nullptr);
         if (M.IndexMemory)  vkFreeMemory(Device, M.IndexMemory, nullptr);
         M = Mesh{};
+    }
+
+    // ---- Textures / descriptors ----
+
+    // Sampler (shared), descriptor set layout (set 0 = one combined image sampler
+    // in the fragment stage), and a pool to allocate per-material sets from.
+    bool CreateDescriptorResources() {
+        VkSamplerCreateInfo SamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+        SamplerInfo.magFilter = VK_FILTER_LINEAR;   // smooth the mask edges when scaled
+        SamplerInfo.minFilter = VK_FILTER_LINEAR;
+        SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        SamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        VK_CHECK(vkCreateSampler(Device, &SamplerInfo, nullptr, &Sampler));
+
+        VkDescriptorSetLayoutBinding Binding{};
+        Binding.binding = 0;
+        Binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        Binding.descriptorCount = 1;
+        Binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+        VkDescriptorSetLayoutCreateInfo LayoutInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        LayoutInfo.bindingCount = 1;
+        LayoutInfo.pBindings = &Binding;
+        VK_CHECK(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &DescriptorSetLayout));
+
+        // One set per material; MaxMaterials is a generous static cap (board uses 2,
+        // pieces 12, plus headroom).
+        VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MaxMaterials};
+        VkDescriptorPoolCreateInfo PoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        PoolInfo.maxSets = MaxMaterials;
+        PoolInfo.poolSizeCount = 1;
+        PoolInfo.pPoolSizes = &PoolSize;
+        VK_CHECK(vkCreateDescriptorPool(Device, &PoolInfo, nullptr, &DescriptorPool));
+        return Sampler != VK_NULL_HANDLE && DescriptorSetLayout != VK_NULL_HANDLE &&
+               DescriptorPool != VK_NULL_HANDLE;
+    }
+
+    VkDescriptorSet AllocateDescriptorSet(VkImageView View) {
+        VkDescriptorSetAllocateInfo Alloc{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        Alloc.descriptorPool = DescriptorPool;
+        Alloc.descriptorSetCount = 1;
+        Alloc.pSetLayouts = &DescriptorSetLayout;
+        VkDescriptorSet Set = VK_NULL_HANDLE;
+        VK_CHECK(vkAllocateDescriptorSets(Device, &Alloc, &Set));
+
+        VkDescriptorImageInfo ImageInfo{};
+        ImageInfo.sampler = Sampler;
+        ImageInfo.imageView = View;
+        ImageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet Write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        Write.dstSet = Set;
+        Write.dstBinding = 0;
+        Write.descriptorCount = 1;
+        Write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        Write.pImageInfo = &ImageInfo;
+        vkUpdateDescriptorSets(Device, 1, &Write, 0, nullptr);
+        return Set;
+    }
+
+    // Transient command buffer for one-off GPU work (texture uploads), submitted
+    // and waited on inline — fine since textures load once at startup.
+    VkCommandBuffer BeginOneTimeCommands() {
+        VkCommandBufferAllocateInfo Alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        Alloc.commandPool = CommandPool;
+        Alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        Alloc.commandBufferCount = 1;
+        VkCommandBuffer Cmd = VK_NULL_HANDLE;
+        vkAllocateCommandBuffers(Device, &Alloc, &Cmd);
+        VkCommandBufferBeginInfo Begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        Begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(Cmd, &Begin);
+        return Cmd;
+    }
+
+    void EndOneTimeCommands(VkCommandBuffer Cmd) {
+        vkEndCommandBuffer(Cmd);
+        VkSubmitInfo Submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        Submit.commandBufferCount = 1;
+        Submit.pCommandBuffers = &Cmd;
+        vkQueueSubmit(GraphicsQueue, 1, &Submit, VK_NULL_HANDLE);
+        vkQueueWaitIdle(GraphicsQueue);
+        vkFreeCommandBuffers(Device, CommandPool, 1, &Cmd);
+    }
+
+    // Pipeline barrier covering the two transitions a texture upload needs.
+    void TransitionLayout(VkCommandBuffer Cmd, VkImage Image,
+                          VkImageLayout Old, VkImageLayout New) {
+        VkImageMemoryBarrier Barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        Barrier.oldLayout = Old;
+        Barrier.newLayout = New;
+        Barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        Barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        Barrier.image = Image;
+        Barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        Barrier.subresourceRange.levelCount = 1;
+        Barrier.subresourceRange.layerCount = 1;
+
+        VkPipelineStageFlags SrcStage, DstStage;
+        if (Old == VK_IMAGE_LAYOUT_UNDEFINED &&
+            New == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            Barrier.srcAccessMask = 0;
+            Barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            SrcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+            DstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        } else {  // TRANSFER_DST -> SHADER_READ_ONLY
+            Barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            Barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            SrcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+            DstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        vkCmdPipelineBarrier(Cmd, SrcStage, DstStage, 0, 0, nullptr, 0, nullptr, 1, &Barrier);
+    }
+
+    void DestroyTexture(Texture& T) {
+        if (Device == VK_NULL_HANDLE) return;
+        if (T.View)   vkDestroyImageView(Device, T.View, nullptr);
+        if (T.Image)  vkDestroyImage(Device, T.Image, nullptr);
+        if (T.Memory) vkFreeMemory(Device, T.Memory, nullptr);
+        T = Texture{};
     }
 
     // ---- Swapchain (recreated on resize / out-of-date) ----
@@ -667,6 +877,13 @@ private:
 
     VkPipelineLayout PipelineLayout = VK_NULL_HANDLE;
     VkPipeline       Pipeline = VK_NULL_HANDLE;
+
+    static constexpr uint32_t MaxMaterials = 32;
+    VkSampler             Sampler = VK_NULL_HANDLE;
+    VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
+    VkDescriptorPool      DescriptorPool = VK_NULL_HANDLE;
+    std::vector<Texture>  Textures;
+    TextureHandle         DefaultTexture = 0;
 
     VkCommandPool   CommandPool = VK_NULL_HANDLE;
     VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;
