@@ -9,6 +9,7 @@
 #include <cstdio>
 
 #include "Chess/Board.h"
+#include "Lur/Render/Sprite2D.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
@@ -20,7 +21,46 @@ namespace {
 struct AppState {
     Lur::Render::IRenderer* Renderer = nullptr;
     bool Ready = false;
+
+    // Board render resources (built once the renderer is up). One shared unit
+    // quad drawn 64 times with a per-square model matrix + light/dark material.
+    Lur::Render::MeshHandle     Quad = 0;
+    Lur::Render::MaterialHandle LightSquare = 0;
+    Lur::Render::MaterialHandle DarkSquare = 0;
 };
+
+// Build the board's GPU resources: one unit quad + two materials. Cheap, done
+// once after the renderer initialises.
+void CreateBoardResources(AppState* State) {
+    using namespace Lur::Render;
+    const Quad Q = MakeQuad();  // unit (0,0)-(1,1), white vertices
+    State->Quad = State->Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
+    State->LightSquare = State->Renderer->CreateMaterial(MaterialDesc{0, Color{0.93f, 0.85f, 0.70f, 1.0f}, false});
+    State->DarkSquare  = State->Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
+}
+
+// Draw the 8x8 board centred in the window, each square a tinted quad.
+void DrawBoard(AppState* State, float Width, float Height) {
+    using namespace Lur::Render;
+    using Lur::Math::Mat4;
+    using Lur::Math::Vec3;
+
+    const float BoardSize = (Width < Height ? Width : Height) * 0.95f;
+    const float Square = BoardSize / 8.0f;
+    const float OriginX = (Width - BoardSize) * 0.5f;
+    const float OriginY = (Height - BoardSize) * 0.5f;
+
+    for (int Rank = 0; Rank < 8; ++Rank) {
+        for (int File = 0; File < 8; ++File) {
+            const Mat4 Model =
+                Mat4::Translation({OriginX + File * Square, OriginY + Rank * Square, 0.0f}) *
+                Mat4::Scale({Square, Square, 1.0f});
+            const MaterialHandle Mat = ((Rank + File) % 2 == 0) ? State->LightSquare
+                                                                : State->DarkSquare;
+            State->Renderer->DrawMesh(State->Quad, Mat, Model);
+        }
+    }
+}
 
 void HandleCmd(android_app* App, int32_t Cmd) {
     auto* State = static_cast<AppState*>(App->userData);
@@ -30,6 +70,7 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                 State->Renderer = Lur::Render::VulkanRenderer::Create();
                 State->Ready = State->Renderer && State->Renderer->Init(App->window);
                 LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
+                if (State->Ready) CreateBoardResources(State);
 
                 // Smoke test: the shared, perft-verified C++ core runs here.
                 Chess::Board Board = Chess::Board::StartPosition();
@@ -72,16 +113,25 @@ void android_main(android_app* App) {
     while (!App->destroyRequested) {
         int Events = 0;
         android_poll_source* Source = nullptr;
-        // Block when idle (-1); spin when there's a frame to draw (0).
-        const int Timeout = State.Ready ? 0 : -1;
-        while (ALooper_pollOnce(Timeout, nullptr, &Events, reinterpret_cast<void**>(&Source)) >= 0) {
+        // Block when idle (-1); spin when there's a frame to draw (0). The timeout
+        // MUST be re-evaluated on every poll, not captured once: INIT_WINDOW flips
+        // State.Ready to true *inside* this inner loop, and a stale -1 would then
+        // block forever on the next poll and we'd never reach the render block.
+        while (ALooper_pollOnce(State.Ready ? 0 : -1, nullptr, &Events,
+                                reinterpret_cast<void**>(&Source)) >= 0) {
             if (Source != nullptr) Source->process(App, Source);
             if (App->destroyRequested) break;
         }
 
         if (State.Ready) {
-            // TODO(#9/#10): renderer BeginFrame -> draw board -> EndFrame; pump
-            // touch input and the net session here.
+            // Pixel-space ortho camera matching the window; draw the board quads.
+            // Touch input and the net session pump in here later.
+            const auto Width  = static_cast<float>(ANativeWindow_getWidth(App->window));
+            const auto Height = static_cast<float>(ANativeWindow_getHeight(App->window));
+            const Lur::Render::Camera Cam = Lur::Render::MakeOrthoCamera(Width, Height);
+            State.Renderer->BeginFrame(Cam);
+            DrawBoard(&State, Width, Height);
+            State.Renderer->EndFrame();
         }
     }
 

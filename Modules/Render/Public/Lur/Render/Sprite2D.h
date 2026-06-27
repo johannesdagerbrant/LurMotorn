@@ -8,10 +8,16 @@ namespace Lur::Render {
 // — chess uses these, while 3D games use Camera/meshes directly.
 
 // Pixel-space orthographic camera: (0,0) top-left, (Width,Height) bottom-right.
+//
+// Vulkan clip space is Y-down (NDC y=-1 is the TOP of the framebuffer), so a
+// top-left pixel origin maps Bottom=0 -> Top=Height: world y=0 lands at NDC y=-1
+// (top) and y=Height at NDC y=+1 (bottom). This keeps the Y flip in the
+// projection, valid on the Vulkan 1.0 baseline — no negative-height viewport
+// (which would need KHR_maintenance1). Verified against the Android backend.
 inline Camera MakeOrthoCamera(float Width, float Height) {
     Camera C;
     C.View = Math::Mat4::Identity();
-    C.Projection = Math::Mat4::Ortho(0.0f, Width, Height, 0.0f, -1.0f, 1.0f);
+    C.Projection = Math::Mat4::Ortho(0.0f, Width, 0.0f, Height, -1.0f, 1.0f);
     return C;
 }
 
