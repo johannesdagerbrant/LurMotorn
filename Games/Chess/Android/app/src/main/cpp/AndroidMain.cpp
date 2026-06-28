@@ -41,7 +41,35 @@ struct AppState {
     // material over that type's single silhouette texture (the "tint trick").
     Lur::Render::MaterialHandle PieceLight[6] = {};
     Lur::Render::MaterialHandle PieceDark[6] = {};
+    Lur::Render::MaterialHandle Highlight = 0;  // translucent select/target overlay
+
+    Chess::Square Selected = Chess::NoSquare;    // currently picked-up square, if any
 };
+
+// Board placement in the window: a centred square, 0.95 of the shorter side.
+struct BoardLayout { float OriginX, OriginY, Square; };
+
+BoardLayout ComputeLayout(float Width, float Height) {
+    const float BoardSize = (Width < Height ? Width : Height) * 0.95f;
+    const float Square = BoardSize / 8.0f;
+    return {(Width - BoardSize) * 0.5f, (Height - BoardSize) * 0.5f, Square};
+}
+
+// Screen-space top-left of a chess square's cell (White at the bottom).
+void CellTopLeft(const BoardLayout& L, Chess::Square S, float& X, float& Y) {
+    X = L.OriginX + (S % 8) * L.Square;
+    Y = L.OriginY + (7 - S / 8) * L.Square;  // rank 0 (White) at the bottom row
+}
+
+// Map a screen point to a chess square, or NoSquare if outside the board.
+Chess::Square SquareAt(const BoardLayout& L, float X, float Y) {
+    const float Fx = (X - L.OriginX) / L.Square;
+    const float Fy = (Y - L.OriginY) / L.Square;
+    if (Fx < 0.0f || Fx >= 8.0f || Fy < 0.0f || Fy >= 8.0f) return Chess::NoSquare;
+    const int File = static_cast<int>(Fx);
+    const int Rank = 7 - static_cast<int>(Fy);
+    return static_cast<Chess::Square>(Rank * 8 + File);
+}
 
 void CreateSceneResources(AppState* State) {
     using namespace Lur::Render;
@@ -49,6 +77,8 @@ void CreateSceneResources(AppState* State) {
     State->Quad = State->Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
     State->LightSquare = State->Renderer->CreateMaterial(MaterialDesc{0, Color{0.93f, 0.85f, 0.70f, 1.0f}, false});
     State->DarkSquare  = State->Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
+    // Translucent green for the selected square and legal-move dots (alpha blended).
+    State->Highlight   = State->Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
 
     // Expand each single-channel coverage mask to RGBA (white, mask as alpha) and
     // upload once; the material tint supplies the piece colour at draw time.
@@ -93,25 +123,34 @@ void DrawScene(AppState* State, float Width, float Height) {
     using namespace Lur::Render;
     using Lur::Math::Mat4;
 
-    const float BoardSize = (Width < Height ? Width : Height) * 0.95f;
-    const float Square = BoardSize / 8.0f;
-    const float OriginX = (Width - BoardSize) * 0.5f;
-    const float OriginY = (Height - BoardSize) * 0.5f;
+    const BoardLayout L = ComputeLayout(Width, Height);
+    const float Square = L.Square;
+    auto CellModel = [](float X, float Y, float Size) {
+        return Mat4::Translation({X, Y, 0.0f}) * Mat4::Scale({Size, Size, 1.0f});
+    };
 
+    // Squares.
     for (int Row = 0; Row < 8; ++Row) {
         for (int File = 0; File < 8; ++File) {
-            const Mat4 Model =
-                Mat4::Translation({OriginX + File * Square, OriginY + Row * Square, 0.0f}) *
-                Mat4::Scale({Square, Square, 1.0f});
             const MaterialHandle Mat = ((Row + File) % 2 == 0) ? State->LightSquare
                                                                : State->DarkSquare;
-            State->Renderer->DrawMesh(State->Quad, Mat, Model);
+            State->Renderer->DrawMesh(State->Quad, Mat,
+                CellModel(L.OriginX + File * Square, L.OriginY + Row * Square, Square));
         }
     }
 
+    // Selected-square highlight (under the pieces). Generate the legal moves once,
+    // here, to both highlight the selection and dot its targets below.
+    Chess::MoveList Legal;
+    Legal.Count = 0;
+    if (State->Selected != Chess::NoSquare) {
+        float X, Y; CellTopLeft(L, State->Selected, X, Y);
+        State->Renderer->DrawMesh(State->Quad, State->Highlight, CellModel(X, Y, Square));
+        Chess::GenerateLegalMoves(State->Board, Legal);
+    }
+
+    // Pieces.
     for (Chess::Square S = 0; S < 64; ++S) {
-        const int File = S % 8;
-        const int Rank = S / 8;  // 0 = rank 1 (White's back rank)
         Chess::EPieceType Type = Chess::PieceTypeAt(State->Board, Chess::EColor::White, S);
         bool White = true;
         if (Type == Chess::EPieceType::None) {
@@ -119,11 +158,67 @@ void DrawScene(AppState* State, float Width, float Height) {
             White = false;
         }
         if (Type == Chess::EPieceType::None) continue;
-
-        const int Row = 7 - Rank;  // White (rank 0) at the bottom of the screen
-        DrawPiece(State, OriginX + File * Square, OriginY + Row * Square, Square,
-                  static_cast<int>(Type), White);
+        float X, Y; CellTopLeft(L, S, X, Y);
+        DrawPiece(State, X, Y, Square, static_cast<int>(Type), White);
     }
+
+    // Legal-target dots (over the pieces, so captures show too).
+    const float Dot = Square * 0.30f;
+    const float DotOff = (Square - Dot) * 0.5f;
+    for (int i = 0; i < Legal.Count; ++i) {
+        const Chess::Move& Mv = Legal.Moves[i];
+        if (Mv.From != State->Selected) continue;
+        float X, Y; CellTopLeft(L, Mv.To, X, Y);
+        State->Renderer->DrawMesh(State->Quad, State->Highlight,
+            CellModel(X + DotOff, Y + DotOff, Dot));
+    }
+}
+
+// Apply a tap at screen (X,Y): select one's own piece, or move the selected piece
+// to a legal target. Local hot-seat play -- side to move comes from the board.
+void HandleTap(AppState* State, float X, float Y, float Width, float Height) {
+    const BoardLayout L = ComputeLayout(Width, Height);
+    const Chess::Square Sq = SquareAt(L, X, Y);
+    if (Sq == Chess::NoSquare) { State->Selected = Chess::NoSquare; return; }
+
+    const Chess::EColor Side = State->Board.SideToMove;
+    const Chess::EPieceType Mine = Chess::PieceTypeAt(State->Board, Side, Sq);
+
+    if (State->Selected != Chess::NoSquare) {
+        // Try to move Selected -> Sq. Promotions appear as 4 entries (Q/R/B/N) for
+        // the same From/To; default to the queen for now (a picker comes later).
+        Chess::MoveList Legal; Chess::GenerateLegalMoves(State->Board, Legal);
+        const Chess::Move* Chosen = nullptr;
+        for (int i = 0; i < Legal.Count; ++i) {
+            const Chess::Move& M = Legal.Moves[i];
+            if (M.From != State->Selected || M.To != Sq) continue;
+            if (M.Flags & Chess::MoveFlagPromotion) {
+                if (M.Promo == Chess::EPieceType::Queen) Chosen = &M;
+            } else {
+                Chosen = &M;
+            }
+        }
+        if (Chosen != nullptr) {
+            State->Board.MakeMove(*Chosen);
+            State->Selected = Chess::NoSquare;
+            return;
+        }
+    }
+
+    // Not a move: select one's own piece, otherwise clear.
+    State->Selected = (Mine != Chess::EPieceType::None) ? Sq : Chess::NoSquare;
+}
+
+int32_t HandleInput(android_app* App, AInputEvent* Event) {
+    auto* State = static_cast<AppState*>(App->userData);
+    if (State == nullptr || !State->Ready || App->window == nullptr) return 0;
+    if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
+    if ((AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK) != AMOTION_EVENT_ACTION_UP)
+        return 0;
+    HandleTap(State, AMotionEvent_getX(Event, 0), AMotionEvent_getY(Event, 0),
+              static_cast<float>(ANativeWindow_getWidth(App->window)),
+              static_cast<float>(ANativeWindow_getHeight(App->window)));
+    return 1;
 }
 
 void HandleCmd(android_app* App, int32_t Cmd) {
@@ -158,6 +253,7 @@ void android_main(android_app* App) {
     AppState State;
     App->userData = &State;
     App->onAppCmd = HandleCmd;
+    App->onInputEvent = HandleInput;  // tap to select / move pieces
 
     // Wire the BLE transport: log any datagram from the peer and bounce one reply
     // back, so a live two-phone link shows a round-trip in logcat. The radio is
