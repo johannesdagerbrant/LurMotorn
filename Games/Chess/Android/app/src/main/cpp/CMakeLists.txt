@@ -19,40 +19,14 @@ add_library(native_app_glue STATIC
 target_include_directories(native_app_glue PUBLIC
     ${ANDROID_NDK}/sources/android/native_app_glue)
 
-# --- Shaders: GLSL -> SPIR-V -> includable uint32 array. ---
-# glslc ships with the NDK (first-party). -mfmt=num emits a comma-separated
-# init list we #include straight into a uint32_t[] in the renderer — no runtime
-# asset loading, no committed binaries. The same SPIR-V will feed MoltenVK on iOS.
-if(NOT ANDROID_HOST_TAG)
-    file(GLOB _host_tags RELATIVE "${ANDROID_NDK}/shader-tools" "${ANDROID_NDK}/shader-tools/*")
-    list(GET _host_tags 0 ANDROID_HOST_TAG)
-endif()
-set(GLSLC "${ANDROID_NDK}/shader-tools/${ANDROID_HOST_TAG}/glslc")
-set(SHADER_GEN_DIR "${CMAKE_BINARY_DIR}/generated/shaders")
-file(MAKE_DIRECTORY ${SHADER_GEN_DIR})
-
-set(SHADER_INCS "")
-foreach(stage IN ITEMS Sprite.vert Sprite.frag)
-    set(inc "${SHADER_GEN_DIR}/${stage}.inc")
-    add_custom_command(
-        OUTPUT ${inc}
-        COMMAND ${GLSLC} -mfmt=num "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/${stage}" -o ${inc}
-        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/Shaders/${stage}"
-        COMMENT "Compiling shader ${stage} -> SPIR-V"
-        VERBATIM)
-    list(APPEND SHADER_INCS ${inc})
-endforeach()
-add_custom_target(onlychess_shaders DEPENDS ${SHADER_INCS})
-
 # The app's native library. NativeActivity loads this (android.app.lib_name=onlychess).
+# The shared Vulkan backend lives in lur::render; this app provides only the thin
+# Android surface seam (AndroidVulkanSurface.cpp). Shaders are cooked to SPIR-V
+# offline (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
 add_library(onlychess SHARED
     AndroidMain.cpp
-    VulkanRendererAndroid.cpp
+    AndroidVulkanSurface.cpp
     AndroidBleTransport.cpp)
-
-# Generate the shader includes before compiling the renderer; expose their dir.
-add_dependencies(onlychess onlychess_shaders)
-target_include_directories(onlychess PRIVATE ${SHADER_GEN_DIR})
 
 target_link_libraries(onlychess
     native_app_glue

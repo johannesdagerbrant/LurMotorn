@@ -1,41 +1,54 @@
-// Android Vulkan backend.
-//   1a: swapchain bring-up + per-frame clear (render pass loadOp).
-//   1b: one unlit textured-quad pipeline + vertex/index buffers + DrawMesh, so
-//       the board draws as tinted quads. Tint + MVP travel as push constants —
-//       no descriptor sets yet; textures (descriptor sets/samplers) are 1c.
+// Shared Vulkan backend — compiles identically for Android (native Vulkan) and
+// iOS (Vulkan via MoltenVK). The ONLY platform-specific pieces are behind the
+// Lur::Render::Vk seam (PlatformSurface.h): surface creation, the surface
+// instance extensions, drawable size, and logging. Everything here — swapchain,
+// the 2D textured-quad pipeline, buffers, textures, descriptors, per-frame draw —
+// is shared.
 //
 // Targets the Vulkan portability subset (triangle-list, standard formats, no
-// geometry/tessellation, dynamic viewport) so the same code runs through
-// MoltenVK on iOS later.
-#include <android/log.h>
-#include <android/native_window.h>
-
-// Must precede <vulkan/vulkan.h> to expose VkAndroidSurfaceCreateInfoKHR and
-// vkCreateAndroidSurfaceKHR (the platform-specific surface entry points).
-#define VK_USE_PLATFORM_ANDROID_KHR
+// geometry/tessellation, dynamic viewport) so it runs unchanged through MoltenVK.
 #include <vulkan/vulkan.h>
 
+#include <cstdarg>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Render/Vulkan/PlatformSurface.h"
 
-// SPIR-V compiled from Shaders/*.glsl at build time (glslc -mfmt=num), emitted
-// as a uint32 init list we include directly — no runtime asset loading.
+// Older SDK headers may predate VK_KHR_portability_enumeration; define the flag
+// so the source compiles everywhere (only ever set when the extension is present).
+#ifndef VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+#define VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR 0x00000001
+#endif
+
+// SPIR-V cooked from Shaders/*.glsl (scripts/gen-shaders.ps1), committed as uint32
+// arrays so no shader compiler is needed in either platform's build.
 static const uint32_t SpriteVertSpv[] = {
-#include "Sprite.vert.inc"
+#include "Shaders/Sprite.vert.inc"
 };
 static const uint32_t SpriteFragSpv[] = {
-#include "Sprite.frag.inc"
+#include "Shaders/Sprite.frag.inc"
 };
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyChess", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "OnlyChess", __VA_ARGS__)
+namespace Lur::Render {
+namespace {
 
-// Log + carry on. The slow build->install->look loop makes a loud failure marker
-// in logcat more useful than aborting; a half-initialised renderer just clears
-// to the background colour, itself a visible signal that something failed.
+void LogF(bool Error, const char* Fmt, ...) {
+    char Buf[256];
+    va_list Args;
+    va_start(Args, Fmt);
+    std::vsnprintf(Buf, sizeof(Buf), Fmt, Args);
+    va_end(Args);
+    Vk::PlatformLog(Error, Buf);
+}
+#define LOGI(...) LogF(false, __VA_ARGS__)
+#define LOGE(...) LogF(true, __VA_ARGS__)
+
+// Log + carry on. A half-initialised renderer just clears to the background,
+// itself a visible signal — more useful than aborting on these dev devices.
 #define VK_CHECK(Expr)                                                              \
     do {                                                                            \
         VkResult Result_ = (Expr);                                                  \
@@ -43,11 +56,7 @@ static const uint32_t SpriteFragSpv[] = {
             LOGE("Vulkan call failed (%d) at %s:%d", Result_, __FILE__, __LINE__);  \
     } while (0)
 
-namespace Lur::Render {
-namespace {
-
-// Pushed per draw. mat4 (64) + vec4 (16) = 80 bytes, well under the 128-byte
-// guaranteed push-constant range.
+// Pushed per draw. mat4 (64) + vec4 (16) = 80 bytes, under the 128-byte minimum.
 struct PushConstants {
     float Mvp[16];
     float Tint[4];
@@ -72,10 +81,10 @@ struct Material {
     VkDescriptorSet DescriptorSet = VK_NULL_HANDLE;  // binds the base-colour texture
 };
 
-class VulkanRendererAndroid : public IRenderer {
+class VulkanRendererImpl : public IRenderer {
 public:
     bool Init(void* NativeWindow) override {
-        Window = static_cast<ANativeWindow*>(NativeWindow);
+        Window = NativeWindow;
         if (Window == nullptr) {
             LOGE("Renderer Init: null native window");
             return false;
@@ -86,25 +95,19 @@ public:
         if (!CreateDevice())           return false;
         if (!CreateCommandResources()) return false;
         if (!CreateSyncObjects())      return false;
-        if (!CreateSwapchain())          return false;
-        if (!CreateDescriptorResources())return false;
-        if (!CreatePipeline())           return false;
-        // 1x1 opaque white: materials with no base-colour texture (board squares)
-        // bind this, so they fall out of the same sample-x-tint path as flat tint.
+        if (!CreateSwapchain())        return false;
+        if (!CreateDescriptorResources()) return false;
+        if (!CreatePipeline())         return false;
         const uint8_t White[4] = {255, 255, 255, 255};
         DefaultTexture = LoadTexture(White, 1, 1);
-        if (DefaultTexture == 0)         return false;
+        if (DefaultTexture == 0)       return false;
         LOGI("Vulkan renderer up: %ux%u, %u swapchain images",
              Extent.width, Extent.height, static_cast<uint32_t>(SwapImages.size()));
         Ready = true;
         return true;
     }
 
-    void Resize(int /*WidthPx*/, int /*HeightPx*/) override {
-        // The swapchain owns the real extent (from surface caps); a resize just
-        // means the current one is stale. Recreate lazily on the next frame.
-        NeedsRecreate = true;
-    }
+    void Resize(int /*WidthPx*/, int /*HeightPx*/) override { NeedsRecreate = true; }
 
     void Shutdown() override {
         if (Device != VK_NULL_HANDLE) vkDeviceWaitIdle(Device);
@@ -112,7 +115,7 @@ public:
         Meshes.clear();
         for (Texture& T : Textures) DestroyTexture(T);
         Textures.clear();
-        Materials.clear();  // sets are freed with the pool below
+        Materials.clear();  // sets freed with the pool below
         if (Device != VK_NULL_HANDLE) {
             if (Pipeline != VK_NULL_HANDLE)       vkDestroyPipeline(Device, Pipeline, nullptr);
             if (PipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(Device, PipelineLayout, nullptr);
@@ -131,7 +134,7 @@ public:
         if (Surface != VK_NULL_HANDLE && Instance != VK_NULL_HANDLE)
             vkDestroySurfaceKHR(Instance, Surface, nullptr);
         if (Instance != VK_NULL_HANDLE) vkDestroyInstance(Instance, nullptr);
-        *this = VulkanRendererAndroid{};  // reset all handles to null
+        *this = VulkanRendererImpl{};
     }
 
     MeshHandle CreateMesh(const Vertex* Vertices, uint32_t VertexCount,
@@ -145,13 +148,12 @@ public:
                           VK_BUFFER_USAGE_INDEX_BUFFER_BIT, Indices,
                           M.IndexBuffer, M.IndexMemory)) return 0;
         Meshes.push_back(M);
-        return static_cast<MeshHandle>(Meshes.size());  // handle = index + 1
+        return static_cast<MeshHandle>(Meshes.size());
     }
 
     TextureHandle LoadTexture(const uint8_t* Rgba, int Width, int Height) override {
         const VkDeviceSize Size = static_cast<VkDeviceSize>(Width) * Height * 4;
 
-        // Staging buffer (host-visible) -> device-local image.
         VkBuffer Staging = VK_NULL_HANDLE;
         VkDeviceMemory StagingMem = VK_NULL_HANDLE;
         if (!CreateBuffer(Size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Rgba, Staging, StagingMem))
@@ -183,7 +185,6 @@ public:
         vkAllocateMemory(Device, &Alloc, nullptr, &Tex.Memory);
         vkBindImageMemory(Device, Tex.Image, Tex.Memory, 0);
 
-        // Upload: UNDEFINED -> TRANSFER_DST, copy, TRANSFER_DST -> SHADER_READ_ONLY.
         VkCommandBuffer Cmd = BeginOneTimeCommands();
         TransitionLayout(Cmd, Tex.Image, VK_IMAGE_LAYOUT_UNDEFINED,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
@@ -210,7 +211,7 @@ public:
         vkCreateImageView(Device, &ViewInfo, nullptr, &Tex.View);
 
         Textures.push_back(Tex);
-        return static_cast<TextureHandle>(Textures.size());  // handle = index + 1
+        return static_cast<TextureHandle>(Textures.size());
     }
 
     MaterialHandle CreateMaterial(const MaterialDesc& Desc) override {
@@ -219,7 +220,7 @@ public:
         const TextureHandle Tex = (Desc.BaseColor != 0) ? Desc.BaseColor : DefaultTexture;
         M.DescriptorSet = AllocateDescriptorSet(Textures[Tex - 1].View);
         Materials.push_back(M);
-        return static_cast<MaterialHandle>(Materials.size());  // handle = index + 1
+        return static_cast<MaterialHandle>(Materials.size());
     }
 
     void BeginFrame(const Camera& Cam) override {
@@ -228,7 +229,7 @@ public:
         if (!Ready) return;
 
         if (NeedsRecreate) { RecreateSwapchain(); NeedsRecreate = false; }
-        if (Swapchain == VK_NULL_HANDLE) return;  // window not presentable (e.g. minimised)
+        if (Swapchain == VK_NULL_HANDLE) return;
 
         vkWaitForFences(Device, 1, &InFlight, VK_TRUE, UINT64_MAX);
 
@@ -247,7 +248,6 @@ public:
         BeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         VK_CHECK(vkBeginCommandBuffer(CommandBuffer, &BeginInfo));
 
-        // A muted slate blue-grey behind the board.
         VkClearValue Clear{};
         Clear.color = {{0.16f, 0.20f, 0.26f, 1.0f}};
 
@@ -259,8 +259,6 @@ public:
         Pass.pClearValues = &Clear;
         vkCmdBeginRenderPass(CommandBuffer, &Pass, VK_SUBPASS_CONTENTS_INLINE);
 
-        // Pipeline + viewport/scissor are dynamic, so a swapchain resize never
-        // rebuilds the pipeline — we just set the new extent each frame here.
         vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipeline);
         VkViewport Vp{0.0f, 0.0f, static_cast<float>(Extent.width),
                       static_cast<float>(Extent.height), 0.0f, 1.0f};
@@ -331,26 +329,31 @@ private:
     bool CreateInstance() {
         VkApplicationInfo App{VK_STRUCTURE_TYPE_APPLICATION_INFO};
         App.pApplicationName = "OnlyChess";
-        App.apiVersion = VK_API_VERSION_1_0;  // minSdk 26 guarantees Vulkan 1.0
+        App.apiVersion = VK_API_VERSION_1_0;
 
-        const char* Extensions[] = {
-            VK_KHR_SURFACE_EXTENSION_NAME,
-            VK_KHR_ANDROID_SURFACE_EXTENSION_NAME,
-        };
+        uint32_t PlatCount = 0;
+        const char* const* PlatExts = Vk::PlatformSurfaceExtensions(&PlatCount);
+        std::vector<const char*> Exts;
+        Exts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
+        bool Portability = false;
+        for (uint32_t i = 0; i < PlatCount; ++i) {
+            Exts.push_back(PlatExts[i]);
+            if (std::strcmp(PlatExts[i], "VK_KHR_portability_enumeration") == 0) Portability = true;
+        }
+
         VkInstanceCreateInfo Info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
         Info.pApplicationInfo = &App;
-        Info.enabledExtensionCount = 2;
-        Info.ppEnabledExtensionNames = Extensions;
+        Info.enabledExtensionCount = static_cast<uint32_t>(Exts.size());
+        Info.ppEnabledExtensionNames = Exts.data();
+        if (Portability) Info.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
         VkResult R = vkCreateInstance(&Info, nullptr, &Instance);
         if (R != VK_SUCCESS) { LOGE("vkCreateInstance failed (%d)", R); return false; }
         return true;
     }
 
     bool CreateSurface() {
-        VkAndroidSurfaceCreateInfoKHR Info{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
-        Info.window = Window;
-        VkResult R = vkCreateAndroidSurfaceKHR(Instance, &Info, nullptr, &Surface);
-        if (R != VK_SUCCESS) { LOGE("vkCreateAndroidSurfaceKHR failed (%d)", R); return false; }
+        VkResult R = Vk::CreatePlatformSurface(Instance, Window, &Surface);
+        if (R != VK_SUCCESS) { LOGE("CreatePlatformSurface failed (%d)", R); return false; }
         return true;
     }
 
@@ -361,8 +364,6 @@ private:
         std::vector<VkPhysicalDevice> Devices(Count);
         vkEnumeratePhysicalDevices(Instance, &Count, Devices.data());
 
-        // Phones have a single GPU; take the first that has a queue family which
-        // both renders and presents to our surface (universal on mobile).
         for (VkPhysicalDevice Dev : Devices) {
             uint32_t Families = 0;
             vkGetPhysicalDeviceQueueFamilyProperties(Dev, &Families, nullptr);
@@ -390,12 +391,23 @@ private:
         QueueInfo.queueCount = 1;
         QueueInfo.pQueuePriorities = &Priority;
 
-        const char* DeviceExt[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+        // Always swapchain; add portability_subset when present (required to enable
+        // it if the device exposes it — i.e. on MoltenVK).
+        uint32_t ExtCount = 0;
+        vkEnumerateDeviceExtensionProperties(Physical, nullptr, &ExtCount, nullptr);
+        std::vector<VkExtensionProperties> Avail(ExtCount);
+        vkEnumerateDeviceExtensionProperties(Physical, nullptr, &ExtCount, Avail.data());
+        std::vector<const char*> DevExts;
+        DevExts.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+        for (const VkExtensionProperties& E : Avail)
+            if (std::strcmp(E.extensionName, "VK_KHR_portability_subset") == 0)
+                DevExts.push_back("VK_KHR_portability_subset");
+
         VkDeviceCreateInfo Info{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
         Info.queueCreateInfoCount = 1;
         Info.pQueueCreateInfos = &QueueInfo;
-        Info.enabledExtensionCount = 1;
-        Info.ppEnabledExtensionNames = DeviceExt;
+        Info.enabledExtensionCount = static_cast<uint32_t>(DevExts.size());
+        Info.ppEnabledExtensionNames = DevExts.data();
         VkResult R = vkCreateDevice(Physical, &Info, nullptr, &Device);
         if (R != VK_SUCCESS) { LOGE("vkCreateDevice failed (%d)", R); return false; }
         vkGetDeviceQueue(Device, QueueFamily, 0, &GraphicsQueue);
@@ -420,14 +432,14 @@ private:
     bool CreateSyncObjects() {
         VkSemaphoreCreateInfo SemInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VkFenceCreateInfo FenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;  // first BeginFrame won't block
+        FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
         VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable));
         VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &RenderFinished));
         VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight));
         return true;
     }
 
-    // ---- Pipeline (built once; viewport/scissor are dynamic) ----
+    // ---- Pipeline ----
 
     VkShaderModule CreateShaderModule(const uint32_t* Code, size_t SizeBytes) {
         VkShaderModuleCreateInfo Info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -446,7 +458,7 @@ private:
 
         VkPipelineLayoutCreateInfo LayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         LayoutInfo.setLayoutCount = 1;
-        LayoutInfo.pSetLayouts = &DescriptorSetLayout;  // set 0: base-colour sampler
+        LayoutInfo.pSetLayouts = &DescriptorSetLayout;
         LayoutInfo.pushConstantRangeCount = 1;
         LayoutInfo.pPushConstantRanges = &Push;
         VkResult LR = vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &PipelineLayout);
@@ -465,7 +477,6 @@ private:
         Stages[1].module = Frag;
         Stages[1].pName = "main";
 
-        // Vertex layout mirrors Lur::Render::Vertex (48 bytes, all floats).
         VkVertexInputBindingDescription Binding{};
         Binding.binding = 0;
         Binding.stride = sizeof(Vertex);
@@ -488,19 +499,17 @@ private:
 
         VkPipelineViewportStateCreateInfo Viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
         Viewport.viewportCount = 1;
-        Viewport.scissorCount = 1;  // both dynamic (set each frame)
+        Viewport.scissorCount = 1;
 
         VkPipelineRasterizationStateCreateInfo Raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
         Raster.polygonMode = VK_POLYGON_MODE_FILL;
-        Raster.cullMode = VK_CULL_MODE_NONE;  // 2D quads: winding-agnostic
+        Raster.cullMode = VK_CULL_MODE_NONE;
         Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
         Raster.lineWidth = 1.0f;
 
         VkPipelineMultisampleStateCreateInfo Multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
         Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
-        // Straight alpha blending, so the textured pieces (1c) composite over the
-        // board. Opaque board quads (alpha 1) are unaffected.
         VkPipelineColorBlendAttachmentState Blend{};
         Blend.blendEnable = VK_TRUE;
         Blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
@@ -536,7 +545,6 @@ private:
         Info.subpass = 0;
         VkResult R = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr, &Pipeline);
 
-        // Modules can be destroyed once the pipeline is built.
         vkDestroyShaderModule(Device, Vert, nullptr);
         vkDestroyShaderModule(Device, Frag, nullptr);
         if (R != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines failed (%d)", R); return false; }
@@ -555,8 +563,6 @@ private:
         return 0;
     }
 
-    // Host-visible coherent buffer, uploaded by map+memcpy. Fine for the small,
-    // static board geometry; device-local + staging is a later optimisation.
     bool CreateBuffer(VkDeviceSize Size, VkBufferUsageFlags Usage, const void* Data,
                       VkBuffer& OutBuffer, VkDeviceMemory& OutMemory) {
         VkBufferCreateInfo BufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -598,11 +604,9 @@ private:
 
     // ---- Textures / descriptors ----
 
-    // Sampler (shared), descriptor set layout (set 0 = one combined image sampler
-    // in the fragment stage), and a pool to allocate per-material sets from.
     bool CreateDescriptorResources() {
         VkSamplerCreateInfo SamplerInfo{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
-        SamplerInfo.magFilter = VK_FILTER_LINEAR;   // smooth the mask edges when scaled
+        SamplerInfo.magFilter = VK_FILTER_LINEAR;
         SamplerInfo.minFilter = VK_FILTER_LINEAR;
         SamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
         SamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
@@ -619,8 +623,6 @@ private:
         LayoutInfo.pBindings = &Binding;
         VK_CHECK(vkCreateDescriptorSetLayout(Device, &LayoutInfo, nullptr, &DescriptorSetLayout));
 
-        // One set per material; MaxMaterials is a generous static cap (board uses 2,
-        // pieces 12, plus headroom).
         VkDescriptorPoolSize PoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, MaxMaterials};
         VkDescriptorPoolCreateInfo PoolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         PoolInfo.maxSets = MaxMaterials;
@@ -653,8 +655,6 @@ private:
         return Set;
     }
 
-    // Transient command buffer for one-off GPU work (texture uploads), submitted
-    // and waited on inline — fine since textures load once at startup.
     VkCommandBuffer BeginOneTimeCommands() {
         VkCommandBufferAllocateInfo Alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         Alloc.commandPool = CommandPool;
@@ -678,7 +678,6 @@ private:
         vkFreeCommandBuffers(Device, CommandPool, 1, &Cmd);
     }
 
-    // Pipeline barrier covering the two transitions a texture upload needs.
     void TransitionLayout(VkCommandBuffer Cmd, VkImage Image,
                           VkImageLayout Old, VkImageLayout New) {
         VkImageMemoryBarrier Barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
@@ -698,7 +697,7 @@ private:
             Barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             SrcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
             DstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-        } else {  // TRANSFER_DST -> SHADER_READ_ONLY
+        } else {
             Barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             Barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             SrcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
@@ -715,18 +714,17 @@ private:
         T = Texture{};
     }
 
-    // ---- Swapchain (recreated on resize / out-of-date) ----
+    // ---- Swapchain ----
 
     bool CreateSwapchain() {
         VkSurfaceCapabilitiesKHR Caps{};
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(Physical, Surface, &Caps);
 
         Extent = Caps.currentExtent;
-        if (Extent.width == 0xFFFFFFFFu) {  // surface lets us choose; use the window size
-            Extent.width  = static_cast<uint32_t>(ANativeWindow_getWidth(Window));
-            Extent.height = static_cast<uint32_t>(ANativeWindow_getHeight(Window));
+        if (Extent.width == 0xFFFFFFFFu) {  // surface lets us choose: ask the platform
+            Vk::PlatformDrawableSize(Window, &Extent.width, &Extent.height);
         }
-        if (Extent.width == 0 || Extent.height == 0) return false;  // minimised
+        if (Extent.width == 0 || Extent.height == 0) return false;
 
         uint32_t ImageCount = Caps.minImageCount + 1;
         if (Caps.maxImageCount > 0 && ImageCount > Caps.maxImageCount)
@@ -742,10 +740,10 @@ private:
         Info.imageExtent = Extent;
         Info.imageArrayLayers = 1;
         Info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-        Info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;  // one queue family
+        Info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         Info.preTransform = Caps.currentTransform;
         Info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        Info.presentMode = VK_PRESENT_MODE_FIFO_KHR;  // always available; vsync'd
+        Info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         Info.clipped = VK_TRUE;
         VkResult R = vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain);
         if (R != VK_SUCCESS) { LOGE("vkCreateSwapchainKHR failed (%d)", R); return false; }
@@ -789,15 +787,15 @@ private:
     }
 
     bool CreateRenderPass() {
-        VkAttachmentDescription Color{};
-        Color.format = SurfaceFormat.format;
-        Color.samples = VK_SAMPLE_COUNT_1_BIT;
-        Color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;   // this is what clears the screen
-        Color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        Color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        Color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        Color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        Color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        VkAttachmentDescription ColorAtt{};
+        ColorAtt.format = SurfaceFormat.format;
+        ColorAtt.samples = VK_SAMPLE_COUNT_1_BIT;
+        ColorAtt.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        ColorAtt.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        ColorAtt.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        ColorAtt.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        ColorAtt.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        ColorAtt.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
         VkAttachmentReference ColorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         VkSubpassDescription Subpass{};
@@ -805,7 +803,6 @@ private:
         Subpass.colorAttachmentCount = 1;
         Subpass.pColorAttachments = &ColorRef;
 
-        // Wait for the acquired image before writing it.
         VkSubpassDependency Dep{};
         Dep.srcSubpass = VK_SUBPASS_EXTERNAL;
         Dep.dstSubpass = 0;
@@ -815,7 +812,7 @@ private:
 
         VkRenderPassCreateInfo Info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
         Info.attachmentCount = 1;
-        Info.pAttachments = &Color;
+        Info.pAttachments = &ColorAtt;
         Info.subpassCount = 1;
         Info.pSubpasses = &Subpass;
         Info.dependencyCount = 1;
@@ -854,11 +851,11 @@ private:
     void RecreateSwapchain() {
         vkDeviceWaitIdle(Device);
         DestroySwapchain();
-        CreateSwapchain();  // render pass is identical, so the pipeline still matches
+        CreateSwapchain();
     }
 
     // ---- State ----
-    ANativeWindow*   Window = nullptr;
+    void*            Window = nullptr;  // ANativeWindow* (Android) / CAMetalLayer* (iOS)
     VkInstance       Instance = VK_NULL_HANDLE;
     VkSurfaceKHR     Surface = VK_NULL_HANDLE;
     VkPhysicalDevice Physical = VK_NULL_HANDLE;
@@ -903,6 +900,6 @@ private:
 
 } // namespace
 
-IRenderer* VulkanRenderer::Create() { return new VulkanRendererAndroid(); }
+IRenderer* VulkanRenderer::Create() { return new VulkanRendererImpl(); }
 
 } // namespace Lur::Render
