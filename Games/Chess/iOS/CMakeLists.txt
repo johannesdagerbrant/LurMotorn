@@ -31,34 +31,64 @@ get_filename_component(LUR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 set(LUR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 add_subdirectory(${LUR_ROOT} ${CMAKE_BINARY_DIR}/lurmotorn)
 
+# --- MoltenVK: Vulkan-on-Metal, the ONE sanctioned third-party dependency. ---
+# MOLTENVK_DIR is the extracted package root (contains include/ and static/),
+# provided by CI (see .github/workflows/macos-ci.yml). Pick the static
+# xcframework slice that matches the SDK (device vs simulator).
+if(NOT DEFINED MOLTENVK_DIR)
+    message(FATAL_ERROR "MOLTENVK_DIR is not set — point it at the extracted MoltenVK package.")
+endif()
+if(CMAKE_OSX_SYSROOT MATCHES "simulator")
+    set(MVK_SLICE "ios-arm64_x86_64-simulator")
+else()
+    set(MVK_SLICE "ios-arm64")
+endif()
+set(MVK_INCLUDE "${MOLTENVK_DIR}/include")
+set(MVK_LIB "${MOLTENVK_DIR}/static/MoltenVK.xcframework/${MVK_SLICE}/libMoltenVK.a")
+
+# The shared Vulkan backend (lur_render) is compiled for iOS here; give it the
+# MoltenVK Vulkan headers (iOS has no system Vulkan).
+target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
+
 # The app bundle. Sources:
-#   AppMain.mm        — Obj-C++ UIKit entry point + the chess-core smoke test.
-#   IosBleTransport.mm — the CoreBluetooth backend of Lur::Transport::ITransport.
+#   AppMain.mm          — UIKit shim: Metal-backed view drives the shared BoardView.
+#   IosVulkanSurface.mm — iOS implementation of the Vulkan platform seam (MoltenVK).
+#   IosBleTransport.mm  — the CoreBluetooth backend of Lur::Transport::ITransport.
 add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
+    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm)
 
+target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
+
 target_link_libraries(OnlyChess PRIVATE
+    chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
     chess::core
+    lur::render
     lur::transport
     lur::net
     lur::sim
     lur::math)
 
-# The .mm sources are Objective-C++ and use ARC (CoreBluetooth objects are
-# ARC-managed). CMake's Xcode generator does NOT enable ARC by default, so turn it
-# on explicitly for this target.
+# The .mm sources are Objective-C++ and use ARC. CMake's Xcode generator does NOT
+# enable ARC by default, so turn it on explicitly for this target.
 set_source_files_properties(
     Sources/AppMain.mm
+    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
-# Apple frameworks (first-party SDK — the only dependencies allowed here).
-# NO Vulkan / MoltenVK yet: this is a BLE-and-core-only skeleton.
+# MoltenVK + Apple frameworks. MoltenVK is linked as the matching static slice;
+# Metal/QuartzCore/IOSurface/CoreGraphics are its runtime deps.
 target_link_libraries(OnlyChess PRIVATE
+    ${MVK_LIB}
     "-framework Foundation"
     "-framework UIKit"
-    "-framework CoreBluetooth")
+    "-framework CoreBluetooth"
+    "-framework Metal"
+    "-framework QuartzCore"
+    "-framework IOSurface"
+    "-framework CoreGraphics")
 
 # iOS app bundle metadata. The Info.plist (with the Bluetooth usage strings) is
 # generated from Info.plist.in by configure_file below and fed to the bundle.

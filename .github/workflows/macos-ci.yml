@@ -42,6 +42,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # MoltenVK (Vulkan-on-Metal) — the one sanctioned third-party dep. Fetch the
+      # prebuilt static xcframework + Vulkan headers; cache by version so the 165 MB
+      # download happens once and is shared across jobs/runs.
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
       # The iOS app is its own CMake project (like Android's), pulling in the shared
       # C++ core via add_subdirectory. CMake generates the .xcodeproj on the runner,
       # so nobody opens Xcode locally.
@@ -51,6 +71,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphonesimulator \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
 
       # Simulator build => no signing, no Apple Developer cert required.
@@ -66,6 +87,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
       # A DEVICE build (arm64, iphoneos) with signing disabled. The simulator app
       # can't use real Bluetooth, so the cross-platform test needs the app on a
       # physical iPhone — which means a device build. It's unsigned; Sideloadly (on
@@ -76,6 +114,7 @@ jobs:
             -DCMAKE_SYSTEM_NAME=iOS \
             -DCMAKE_OSX_SYSROOT=iphoneos \
             -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
             -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
 
       - name: Build (device, unsigned)

@@ -1,76 +1,113 @@
-// iOS entry point. The iOS counterpart of Games/Chess/Android/.../AndroidMain.cpp.
+// iOS entry point — the counterpart of Games/Chess/Android/.../AndroidMain.cpp.
 //
-// Deliberately the thinnest possible UIKit host: a single window with one label.
-// Its only jobs in this skeleton are to (1) prove the shared, perft-verified C++
-// chess core compiles and runs on iOS, and (2) bring up the CoreBluetooth BLE
-// backend so a later cross-platform BLE test against the Android app can run.
-//
-// NO renderer / Vulkan / MoltenVK yet — graphics are deferred (issue #9). All real
-// logic stays in C++; this Obj-C++ shim only owns the UIKit lifecycle.
+// A thin UIKit shim: a Metal-backed view (CAMetalLayer) hosts the shared Vulkan
+// renderer (via MoltenVK) and drives the shared Chess::BoardView for both drawing
+// and touch. All game/render logic lives in the engine + chess::view — identical
+// to Android. BLE is brought up too (engine seam), unchanged from the skeleton.
 #import <UIKit/UIKit.h>
+#import <QuartzCore/CAMetalLayer.h>
+#import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
 
 #include "Chess/Board.h"
+#include "Chess/View/BoardView.h"
+#include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Transport/Ble.h"
-#include "Lur/Transport/BleProtocol.h"
+#include "Lur/Transport/Transport.h"
 
-// Run the shared chess core and return the legal-move count from the start
-// position (must be 20 — the same smoke test the Android app logs). Defined as a
-// free function so the logic reads identically to AndroidMain.cpp.
-static int ChessCoreSmokeTest() {
-    Chess::Board Board = Chess::Board::StartPosition();
-    Chess::MoveList Moves;
-    Chess::GenerateLegalMoves(Board, Moves);
-    return Moves.Count;
-}
+// A Metal-backed view: its backing layer is a CAMetalLayer, which MoltenVK turns
+// into a Vulkan surface.
+@interface OnlyChessView : UIView
+@end
+@implementation OnlyChessView
++ (Class)layerClass { return [CAMetalLayer class]; }
+@end
 
 @interface OnlyChessViewController : UIViewController
 @end
 
 @implementation OnlyChessViewController {
-    Lur::Transport::ITransport* _Transport;  // owned by its translation unit (1:1 link)
+    Lur::Render::IRenderer* _Renderer;
+    Chess::BoardView _View;
+    Lur::Transport::ITransport* _Transport;  // owned by its translation unit
+    CADisplayLink* _DisplayLink;
+    bool _Ready;
+}
+
+- (void)loadView {
+    self.view = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+}
+
+- (CAMetalLayer*)metalLayer {
+    return (CAMetalLayer*)self.view.layer;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor blackColor];
 
-    // (1) Chess-core smoke test — proves the shared C++ core runs on iOS.
-    const int MoveCount = ChessCoreSmokeTest();
-    NSLog(@"OnlyChess: Chess core alive: %d legal moves from the start position", MoveCount);
+    CAMetalLayer* Layer = [self metalLayer];
+    Layer.device = MTLCreateSystemDefaultDevice();
+    Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;  // matches the swapchain format
+    Layer.contentsScale = UIScreen.mainScreen.scale;
 
-    UILabel* Label = [[UILabel alloc] initWithFrame:self.view.bounds];
-    Label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    Label.textAlignment = NSTextAlignmentCenter;
-    Label.numberOfLines = 0;
-    Label.textColor = [UIColor whiteColor];
-    Label.text = [NSString stringWithFormat:
-        @"OnlyChess\n%d legal moves\n\nLooking for a peer over BLE…", MoveCount];
-    [self.view addSubview:Label];
+    // Smoke test: the shared, perft-verified C++ core runs on iOS.
+    Chess::Board Board = Chess::Board::StartPosition();
+    Chess::MoveList Moves;
+    Chess::GenerateLegalMoves(Board, Moves);
+    NSLog(@"OnlyChess: Chess core alive: %d legal moves from the start position", Moves.Count);
 
-    // (2) Bring up the BLE transport. Discovery starts immediately: the device
-    // both advertises and scans, then DecideBleRole tie-breaks who hosts the GATT
-    // peripheral once a LurMotorn peer is seen (see IosBleTransport.mm). We pass
-    // Peripheral as an initial hint; the backend re-decides per peer.
+    // Bring up BLE (engine seam). Real net/session wiring is #5; for now just
+    // bounce one reply so a live two-phone link is observable.
     _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
-
-    // Show any datagram from the peer ON SCREEN (iOS logs are hard to read from
-    // Windows) and bounce one reply back, so a live Android<->iPhone link is
-    // visible on the phone. Mirrors AndroidMain's logcat round-trip.
     auto* T = _Transport;
-    _Transport->SetReceiver([T, Label](const uint8_t* Data, std::size_t Size) {
-        const unsigned long N = (unsigned long)Size;
-        const uint8_t First = Size > 0 ? Data[0] : 0;
-        dispatch_async(dispatch_get_main_queue(), ^{
-            Label.textColor = [UIColor greenColor];
-            Label.text = [NSString stringWithFormat:
-                @"OnlyChess\n\n✓ BLE LINKED\nreceived %lu byte(s) from peer\nfirst = 0x%02X",
-                N, First];
-        });
+    _Transport->SetReceiver([T](const uint8_t* /*Data*/, std::size_t /*Size*/) {
         static bool Replied = false;
         if (!Replied) { Replied = true; const uint8_t Pong = 0x5C; T->Send(&Pong, 1); }
     });
-    NSLog(@"OnlyChess: BLE transport up (advertising + scanning)");
+}
+
+// The renderer needs the layer's drawable size, which is only known after layout.
+// Initialise lazily here on first valid layout; recreate the swapchain on resize.
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    CAMetalLayer* Layer = [self metalLayer];
+    const CGFloat Scale = Layer.contentsScale;
+    Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Scale,
+                                    self.view.bounds.size.height * Scale);
+    if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
+
+    if (!_Ready) {
+        _Renderer = Lur::Render::VulkanRenderer::Create();
+        _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
+        NSLog(@"OnlyChess: Renderer init: %s", _Ready ? "ok" : "failed");
+        if (_Ready) {
+            _View.CreateResources(_Renderer);
+            _DisplayLink = [CADisplayLink displayLinkWithTarget:self
+                                                       selector:@selector(renderFrame)];
+            [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
+        }
+    } else {
+        _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
+                          static_cast<int>(Layer.drawableSize.height));
+    }
+}
+
+- (void)renderFrame {
+    if (!_Ready) return;
+    CAMetalLayer* Layer = [self metalLayer];
+    _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
+                 static_cast<float>(Layer.drawableSize.height));
+}
+
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    if (!_Ready) return;
+    UITouch* Touch = touches.anyObject;
+    const CGPoint P = [Touch locationInView:self.view];
+    CAMetalLayer* Layer = [self metalLayer];
+    const CGFloat Scale = Layer.contentsScale;  // points -> pixels (drawable space)
+    _View.OnTap(static_cast<float>(P.x * Scale), static_cast<float>(P.y * Scale),
+                static_cast<float>(Layer.drawableSize.width),
+                static_cast<float>(Layer.drawableSize.height));
 }
 
 @end
