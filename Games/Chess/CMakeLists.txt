@@ -9,3 +9,13 @@ target_include_directories(chess_core PUBLIC Core/Public PRIVATE Core/Private)
 target_link_libraries(chess_core PUBLIC lur::serialization)
 target_compile_features(chess_core PUBLIC cxx_std_20)
 add_library(chess::core ALIAS chess_core)
+
+# View — the board's presentation + interaction, shared by the Android and iOS
+# apps. Talks only to the IRenderer interface (no Vulkan), so it builds on the
+# host too. PieceMasks.h (cooked piece silhouettes) lives in Private.
+add_library(chess_view
+    View/Private/BoardView.cpp)
+target_include_directories(chess_view PUBLIC View/Public PRIVATE View/Private)
+target_link_libraries(chess_view PUBLIC chess::core lur::render)
+target_compile_features(chess_view PUBLIC cxx_std_20)
+add_library(chess::view ALIAS chess_view)

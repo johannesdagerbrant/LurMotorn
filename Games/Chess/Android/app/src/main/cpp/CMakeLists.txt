@@ -30,6 +30,7 @@ add_library(onlychess SHARED
 
 target_link_libraries(onlychess
     native_app_glue
+    chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
     chess::core
     lur::render
     lur::transport

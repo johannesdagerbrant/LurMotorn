@@ -21,7 +21,7 @@ Add-Type -AssemblyName System.Drawing
 
 $Root      = Split-Path -Parent $PSScriptRoot
 $AssetsDir = Join-Path $Root 'Games\Chess\Content\Pieces'
-$OutHeader = Join-Path $Root 'Games\Chess\Android\app\src\main\cpp\PieceMasks.h'
+$OutHeader = Join-Path $Root 'Games\Chess\View\Private\PieceMasks.h'
 $Tmp       = Join-Path $env:TEMP 'lur_piece_raster'
 New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
 $ua = "LurMotorn/0.1 (johannesdagerbrant@gmail.com)"
