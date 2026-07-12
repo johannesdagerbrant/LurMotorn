@@ -23,6 +23,38 @@ EColor ChessMatchState::MyColor() const {
 void ChessMatchState::ApplyMove(const Move& M) {
     Position.MakeMove(M);
     Rec.Moves.push_back(M);
+    const EGameResult R = DetectResult();
+    if (R != EGameResult::Ongoing) ConcludeMatch(R);
+}
+
+EGameResult ChessMatchState::DetectResult() const {
+    // 75-move auto-draw (FIDE 9.6.2): 75 moves by each side = 150 plies with no
+    // capture or pawn move. Automatic (no claim), so both peers agree, and it bounds
+    // the game + the stored move history.
+    if (Position.HalfmoveClock >= 150) return EGameResult::DrawFiftyMove;
+    MoveList Legal;
+    GenerateLegalMoves(Position, Legal);
+    if (Legal.Count == 0)
+        return IsInCheck(Position, Position.SideToMove) ? EGameResult::Checkmate
+                                                        : EGameResult::Stalemate;
+    return EGameResult::Ongoing;
+}
+
+void ChessMatchState::ConcludeMatch(EGameResult R) {
+    if (R == EGameResult::Checkmate) {
+        // The side to move is checkmated; the side that just moved won. Tally against
+        // the lower-GUID device's colour THIS match (before the parity flips below).
+        const EColor Winner      = Opposite(Position.SideToMove);
+        const bool   LowerIsWhite = (Rec.TotalMatches() % 2u) == 0u;
+        const EColor LowerColour  = LowerIsWhite ? EColor::White : EColor::Black;
+        if (Winner == LowerColour) { if (Rec.WinsLower  < 255) ++Rec.WinsLower; }
+        else                       { if (Rec.WinsHigher < 255) ++Rec.WinsHigher; }
+    } else {
+        if (Rec.Draws < 255) ++Rec.Draws;  // stalemate / 75-move
+    }
+    Last = R;
+    Rec.Moves.clear();                    // next match starts fresh
+    Position = Board::StartPosition();     // colour recomputes from the new parity
 }
 
 void ChessMatchState::RebuildBoard() {

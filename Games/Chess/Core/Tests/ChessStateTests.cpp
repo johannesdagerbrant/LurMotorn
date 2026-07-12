@@ -134,12 +134,58 @@ static void TestMergeMatchesDominate() {
     CHECK(Mine.Record().Moves.empty());
 }
 
+// A terminal move auto-concludes the match: winner tallied (agnostic, anchored to
+// the lower-GUID device), board reset, colour flips with the new match parity.
+static void TestCheckmateConcludesMatch() {
+    ChessMatchState S;
+    S.SetIdentity("1111", "9999");     // S is the lower GUID -> White in match 0
+    CHECK(S.MyColor() == EColor::White);
+
+    // Fool's mate: 1.f3 e5 2.g4 Qh4#
+    const Square F2 = 13, F3s = 21, G2 = 14, G4 = 30, E7s = 52, E5s = 36, D8 = 59, H4 = 31;
+    Play(S, F2, F3s);
+    Play(S, E7s, E5s);
+    Play(S, G2, G4);
+    Play(S, D8, H4);                   // checkmate -> auto-conclude
+
+    CHECK(S.LastResult() == EGameResult::Checkmate);
+    CHECK(S.Record().WinsHigher == 1); // Black (the higher-GUID device) delivered mate
+    CHECK(S.Record().WinsLower == 0);
+    CHECK(S.Record().Draws == 0);
+    CHECK(S.Record().TotalMatches() == 1);
+    CHECK(S.Record().Moves.empty());                        // next match started
+    CHECK(S.CurrentBoard().SideToMove == EColor::White);    // fresh board
+    CHECK(S.MyColor() == EColor::Black);                    // parity flipped: lower now Black
+}
+
+// 150 quiet plies (knight shuffle) trigger the 75-move auto-draw.
+static void TestSeventyFiveMoveDraw() {
+    ChessMatchState S;
+    S.SetIdentity("1111", "9999");
+    const Square G1s = 6, F3s = 21, G8 = 62, F6 = 45;
+    const Square From[4] = {G1s, G8, F3s, F6};   // Ng1f3, Ng8f6, Nf3g1, Nf6g8, repeat
+    const Square To[4]   = {F3s, F6, G1s, G8};
+
+    int Plies = 0;
+    for (int i = 0; i < 200 && S.Record().TotalMatches() == 0; ++i) {
+        Play(S, From[i % 4], To[i % 4]);
+        ++Plies;
+    }
+    CHECK(S.LastResult() == EGameResult::DrawFiftyMove);
+    CHECK(S.Record().Draws == 1);
+    CHECK(S.Record().TotalMatches() == 1);
+    CHECK(Plies == 150);               // 75 moves by each side
+    CHECK(S.Record().Moves.empty());   // next match started
+}
+
 int main() {
     TestRecordRoundTrip();
     TestReadAbsentIsFresh();
     TestIdentityColour();
     TestMergeByMoveCount();
     TestMergeMatchesDominate();
+    TestCheckmateConcludesMatch();
+    TestSeventyFiveMoveDraw();
 
     if (GFailures == 0) {
         std::printf("All chess state tests passed.\n");

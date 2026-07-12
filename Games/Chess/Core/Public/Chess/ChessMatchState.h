@@ -40,7 +40,15 @@ public:
     const Board&       CurrentBoard() const { return Position; }
     const ChessRecord& Record() const { return Rec; }
 
-    // Apply a legal move: advance the board AND append it to the record.
+    // The result of the most recently concluded match (Ongoing until the first ends).
+    // Set when a terminal move auto-concludes a match; useful for a UI "you won" note.
+    EGameResult LastResult() const { return Last; }
+
+    // Apply a legal move: advance the board and append it to the record. If the move
+    // ends the game (checkmate / stalemate / 75-move auto-draw), auto-conclude the
+    // match: bump the agnostic W/L/D tally and start the next match (board reset,
+    // colour recomputed from the new match-count parity). This is DETERMINISTIC from
+    // the shared move sequence, so both peers conclude identically and stay in sync.
     void ApplyMove(const Move& M);
 
     // Replay the record's move list from the start position into the board. Call
@@ -57,8 +65,14 @@ private:
     // resets moves to 0), so they compare first.
     static bool StrictlyNewer(const ChessRecord& A, const ChessRecord& B);  // A newer than B?
 
+    // Terminal state of the current position, or Ongoing.
+    EGameResult DetectResult() const;
+    // Bump the agnostic tally for a terminal result and start the next match.
+    void ConcludeMatch(EGameResult R);
+
     ChessRecord Rec;
     Board       Position = Board::StartPosition();
+    EGameResult Last = EGameResult::Ongoing;
     std::string LocalGuid;
     std::string PeerGuid;
     bool        Identified = false;
