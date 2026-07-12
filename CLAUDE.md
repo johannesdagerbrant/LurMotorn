@@ -99,7 +99,50 @@ Studio + NDK. `minSdk` targets BLE + Vulkan support.
 
 Built from `Games/Chess/iOS` with Xcode, linking **MoltenVK** for the Vulkan-on-Metal layer.
 **Requires a Mac** — iOS cannot be built on Windows. The current dev machine is Windows 11, so the
-iOS half is Mac-only (local Mac or a cloud Mac).
+iOS half is Mac-only (local Mac or a cloud Mac). In practice the iPhone build comes from the free
+macOS CI, not a local Mac: the `ios-ipa` job produces an unsigned device `.ipa` artifact.
+
+**Getting the `.ipa` onto the iPhone:** always download the CI artifact to
+**`dist/OnlyChess-unsigned.ipa`** (overwrite it in place — `dist/` is gitignored), so the Sideloadly
+flow always points at the same file:
+
+```
+gh run download <run-id> -n OnlyChess-unsigned-ipa -D dist
+```
+
+Then sideload with Sideloadly + a free Apple ID (see the `device-testing-ops` memory).
+
+### Reading device logs (WITHOUT burning tokens on noise)
+
+Device logs are firehoses — a raw dump is ~95% render/system spam (`BLASTBufferQueue`,
+`BufferQueueProducer`, `EPDG`, per-frame `NearbyMediums`) that costs thousands of tokens and says
+nothing. **Never** run an unfiltered `adb logcat -d -t N`. Always filter to our tag/prefix at the
+source, and pipe through `grep` (or `Select-String`) so only relevant lines reach the model.
+
+**Android** — everything we emit uses the log tag `OnlyChess` (native `__android_log_print` and
+Kotlin `Log.i(TAG=…)` alike), so the tag filter alone kills the noise:
+
+```
+adb -s <serial> logcat -d -s OnlyChess:*
+```
+
+Two wireless transports (`<ip>:<port>` and `adb-<serial>._adb-tls-connect._tcp`) can point at the
+*same* phone — confirm with `getprop ro.serialno`, then pin one via `ANDROID_SERIAL` for install so
+Gradle's `installDebug` isn't ambiguous. When hunting the BLE handshake specifically, also drop the
+per-frame chatter: `... -s OnlyChess:* | grep -vE 'hello: link not up|Chess core alive|Renderer'`.
+
+**iOS** — no logcat; use `pymobiledevice3` with a process/message match, and **bound the capture with
+`timeout`** (the stream never ends on its own):
+
+```
+timeout 15 python -m pymobiledevice3 syslog live -m "OnlyChess" | grep -i onlychess
+```
+
+**BLE log vocabulary to grep for** (both platforms): `BLE up` / `powered on` (radio started),
+`role decided` (tie-break ran), `central: linked` / `peripheral: central linked` (handshake done),
+`central attempt -> we are peripheral` (self-correction), `disconnected` / `link lost`. iOS BLE
+lines carry the prefix `OnlyChess BLE:` (note the space — NOT `OnlyChess:`). Absence of `role
+decided`/`linked` after `BLE up` on both phones = discovery/handshake is failing, not a crash.
 
 ## Folder layout & file naming (Unreal-style)
 

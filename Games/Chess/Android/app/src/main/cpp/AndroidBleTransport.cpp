@@ -119,6 +119,39 @@ Java_com_lurmotorn_onlychess_BleShim_nativeLoadOrCreateDeviceId(JNIEnv* Env, job
     return Arr;
 }
 
+// --- JNI: the last-linked peer's device id (issue #17 Step 3). Enables the cached-
+// role reconnect shortcut. Empty array if none stored yet. ---
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_com_lurmotorn_onlychess_BleShim_nativeLoadPeerId(JNIEnv* Env, jobject /*Self*/, jstring Dir) {
+    const char* DirChars = Env->GetStringUTFChars(Dir, nullptr);
+    const std::string DirPath = DirChars ? DirChars : ".";
+    if (DirChars) Env->ReleaseStringUTFChars(Dir, DirChars);
+
+    Lur::Save::Store DeviceStore(DirPath);
+    const std::vector<uint8_t> Id = DeviceStore.Load(Lur::Save::PeerIdKey);
+
+    jbyteArray Arr = Env->NewByteArray(static_cast<jsize>(Id.size()));
+    if (!Id.empty())
+        Env->SetByteArrayRegion(Arr, 0, static_cast<jsize>(Id.size()),
+                                reinterpret_cast<const jbyte*>(Id.data()));
+    return Arr;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_lurmotorn_onlychess_BleShim_nativeSavePeerId(JNIEnv* Env, jobject /*Self*/,
+                                                      jstring Dir, jbyteArray Data) {
+    const char* DirChars = Env->GetStringUTFChars(Dir, nullptr);
+    const std::string DirPath = DirChars ? DirChars : ".";
+    if (DirChars) Env->ReleaseStringUTFChars(Dir, DirChars);
+
+    const jsize Len = Env->GetArrayLength(Data);
+    std::vector<uint8_t> Bytes(static_cast<std::size_t>(Len));
+    if (Len > 0) Env->GetByteArrayRegion(Data, 0, Len, reinterpret_cast<jbyte*>(Bytes.data()));
+
+    Lur::Save::Store DeviceStore(DirPath);
+    DeviceStore.Save(Lur::Save::PeerIdKey, Bytes.data(), Bytes.size());
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
                                                        jboolean AsPeripheral) {

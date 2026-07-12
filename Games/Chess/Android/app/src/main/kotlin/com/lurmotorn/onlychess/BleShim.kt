@@ -76,6 +76,8 @@ class BleShim(private val context: Context) {
     private external fun nativeOnReceived(bytes: ByteArray)
     private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray): Int
     private external fun nativeLoadOrCreateDeviceId(dir: String): ByteArray
+    private external fun nativeLoadPeerId(dir: String): ByteArray
+    private external fun nativeSavePeerId(dir: String, bytes: ByteArray)
 
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
@@ -85,6 +87,16 @@ class BleShim(private val context: Context) {
     // the BLE role it drives never flips on relaunch (issue #17).
     private val deviceId: ByteArray = nativeLoadOrCreateDeviceId(context.filesDir.absolutePath)
 
+    // The LAST linked peer's id (empty until the first pairing). When present we know
+    // our role up front and skip the discovery collision on reconnect (issue #17 Step 3).
+    private var peerId: ByteArray = nativeLoadPeerId(context.filesDir.absolutePath)
+
+    private fun rememberPeer(id: ByteArray) {
+        if (id.isEmpty() || id.contentEquals(peerId)) return
+        peerId = id
+        try { nativeSavePeerId(context.filesDir.absolutePath, id) } catch (_: Exception) {}
+    }
+
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
     private var gattServer: BluetoothGattServer? = null
@@ -92,6 +104,9 @@ class BleShim(private val context: Context) {
     private var connectedCentral: BluetoothDevice? = null   // the peripheral's live link
     private var gattClient: BluetoothGatt? = null
     private var clientDatagram: BluetoothGattCharacteristic? = null
+
+    // Post delayed retries/watchdogs on the main thread.
+    private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
     @Volatile private var started = false
     @Volatile private var linked = false
@@ -146,9 +161,32 @@ class BleShim(private val context: Context) {
             return
         }
         started = true
+        Log.i(TAG, "device id: ${deviceId.size}B, cached peer: ${peerId.size}B")
         startGattServer()
-        startAdvertising()
-        startScanning()
+        startDiscovery()
+    }
+
+    /** Begin discovery. If we already know the peer (a prior link), we know our role
+     *  and act one-sided — the peripheral only advertises, the central only scans —
+     *  so the two phones never both connect out at once (the reconnect collision,
+     *  issue #17 Step 3). With no cached peer (first pairing) we do the full symmetric
+     *  dance (advertise + scan + connect + in-band tie-break). */
+    private fun startDiscovery() {
+        if (peerId.isNotEmpty()) {
+            if (nativeDecideRole(deviceId, peerId) == ROLE_PERIPHERAL) {
+                decidedPeripheral = true          // known peripheral: never connect out
+                Log.i(TAG, "cached role: PERIPHERAL — advertise + serve, no scan")
+                startAdvertising()
+            } else {
+                decidedPeripheral = false
+                Log.i(TAG, "cached role: CENTRAL — scan + connect, no advertise")
+                startScanning()
+            }
+        } else {
+            Log.i(TAG, "no cached peer — full discovery (advertise + scan)")
+            startAdvertising()
+            startScanning()
+        }
     }
 
     private fun startAdvertising() {
@@ -215,8 +253,7 @@ class BleShim(private val context: Context) {
         try { gattClient?.close() } catch (_: SecurityException) {}
         gattClient = null
         nativeOnDisconnected()
-        startAdvertising()
-        startScanning()
+        startDiscovery()   // role-aware: cached peer -> one-sided, no reconnect collision
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
@@ -227,6 +264,7 @@ class BleShim(private val context: Context) {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             if (linked || connecting || decidedPeripheral) return
             connecting = true
+            Log.i(TAG, "scan: found a LurMotorn peer, connecting as central")
             connectAsCentral(result.device)
         }
 
@@ -278,7 +316,14 @@ class BleShim(private val context: Context) {
             device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
         ) {
             // Hand the connecting central our device id so it can run the role tie-break.
-            val value = if (characteristic.uuid == DEVICE_ID_UUID) deviceId else ByteArray(0)
+            val full = if (characteristic.uuid == DEVICE_ID_UUID) deviceId else ByteArray(0)
+            // Honor the read offset: the id (32 bytes) exceeds a default-MTU ATT read
+            // (~22 bytes), so a central that hasn't negotiated a larger MTU issues a
+            // LONG read — a second request at offset>0. We must return only the bytes
+            // from that offset on; returning the full array corrupts the central's
+            // reassembly (this stranded the iOS<->Android role tie-break, issue #17).
+            val value = if (offset in 0..full.size) full.copyOfRange(offset, full.size) else ByteArray(0)
+            Log.i(TAG, "serve device id: uuid=${characteristic.uuid} offset=$offset -> ${value.size}B")
             try {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             } catch (_: SecurityException) {}
@@ -315,49 +360,100 @@ class BleShim(private val context: Context) {
     // --- GATT client (central) ---
 
     private fun connectAsCentral(device: BluetoothDevice) {
+        // Stop scanning before connecting: on many Android BLE stacks a scan running
+        // concurrently with connectGatt causes the connect to fail (GATT status 133)
+        // or hang with no callback — the reconnect stall we hit (issue #17). We resume
+        // scanning if the connect fails (see onConnectionStateChange).
+        stopScanning()
         try {
-            gattClient = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+            Log.i(TAG, "central: connectGatt -> ${device.address}")
+            val g = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
+            gattClient = g
+            // Watchdog: Android can silently never call back (a hung connect). If this
+            // attempt hasn't linked or been resolved within a few seconds, tear it down
+            // and retry cleanly.
+            handler.postDelayed({
+                if (!linked && !decidedPeripheral && gattClient === g) {
+                    Log.i(TAG, "central: connect watchdog -> tearing down and retrying")
+                    dropClient(g, rescan = false)
+                    scheduleRescan()
+                }
+            }, 6000L)
         } catch (e: SecurityException) {
             Log.e(TAG, "connectGatt: missing BLE permission", e)
             connecting = false
+            scheduleRescan()
         }
     }
 
-    private fun dropClient(gatt: BluetoothGatt) {
+    /** Resume scanning after a short delay. A collided/failed connect must NOT be
+     *  retried immediately: the peer (doing its own exploratory connect) needs a
+     *  moment to settle into peripheral-only, and the shared LE link needs to finish
+     *  tearing down, or the retry collides again / hangs (issue #17 reconnect). */
+    private fun scheduleRescan() {
+        handler.postDelayed({
+            if (started && !linked && !decidedPeripheral && !connecting) startScanning()
+        }, 1500L)
+    }
+
+    /** Tear down a client connection. Always closes (a leaked gatt makes the NEXT
+     *  connectGatt fail with 133). Resumes discovery unless we're deliberately idle. */
+    private fun dropClient(gatt: BluetoothGatt, rescan: Boolean) {
         try { gatt.disconnect(); gatt.close() } catch (_: SecurityException) {}
         if (gattClient == gatt) { gattClient = null; clientDatagram = null }
         connecting = false
+        if (rescan) scheduleRescan()
     }
 
     private val gattClientCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             try {
-                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
+                    Log.i(TAG, "central: connected, requesting MTU")
                     gatt.requestMtu(247)
-                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
-                    connecting = false
-                    if (gatt == gattClient && linked) onLinkLost()
+                    return
                 }
+                // A failed connect (status != SUCCESS) OR a disconnect. MUST close the
+                // gatt here — otherwise the client interface leaks and every later
+                // connectGatt fails with 133, which is exactly what stalled reconnect.
+                Log.i(TAG, "central: down status=$status newState=$newState -> close")
+                val wasLiveLink = linked && gatt == gattClient
+                try { gatt.close() } catch (_: SecurityException) {}
+                if (gatt == gattClient) { gattClient = null; clientDatagram = null }
+                connecting = false
+                if (wasLiveLink) onLinkLost()   // restarts discovery itself
+                else scheduleRescan()           // delayed retry so the collision settles
             } catch (_: SecurityException) {}
         }
 
         override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
+            Log.i(TAG, "central: mtu=$mtu status=$status, discovering services")
             try { gatt.discoverServices() } catch (_: SecurityException) {}
         }
 
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            val service = gatt.getService(SERVICE_UUID) ?: run { dropClient(gatt); return }
+            val service = gatt.getService(SERVICE_UUID) ?: run {
+                Log.i(TAG, "central: peer has no LurMotorn service (status=$status), dropping")
+                dropClient(gatt, rescan = true); return
+            }
             clientDatagram = service.getCharacteristic(DATAGRAM_UUID)
-            val deviceIdCh = service.getCharacteristic(DEVICE_ID_UUID) ?: run { dropClient(gatt); return }
-            try { gatt.readCharacteristic(deviceIdCh) } catch (_: SecurityException) { dropClient(gatt) }
+            val deviceIdCh = service.getCharacteristic(DEVICE_ID_UUID) ?: run {
+                Log.i(TAG, "central: peer has no device-id characteristic, dropping")
+                dropClient(gatt, rescan = true); return
+            }
+            Log.i(TAG, "central: services discovered, reading peer device id")
+            try { gatt.readCharacteristic(deviceIdCh) } catch (_: SecurityException) { dropClient(gatt, rescan = true) }
         }
 
         override fun onCharacteristicRead(
             gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
         ) {
             if (characteristic.uuid != DEVICE_ID_UUID) return
-            val peerId = characteristic.value ?: ByteArray(0)
-            val role = nativeDecideRole(deviceId, peerId)
+            val readPeerId = characteristic.value ?: ByteArray(0)
+            rememberPeer(readPeerId)   // cache for the fast cached-role reconnect next time
+            val role = nativeDecideRole(deviceId, readPeerId)
+            Log.i(TAG, "read peer id: mine=${deviceId.size}B peer=${readPeerId.size}B -> " +
+                if (role == ROLE_CENTRAL) "CENTRAL (keep link)" else "PERIPHERAL (defer)")
             if (role == ROLE_CENTRAL) {
                 enableNotifications(gatt)   // we keep this connection as the live link
             } else {
@@ -365,7 +461,7 @@ class BleShim(private val context: Context) {
                 // (the canonical central) connect to our server instead.
                 decidedPeripheral = true
                 stopScanning()
-                dropClient(gatt)
+                dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer
                 Log.i(TAG, "central attempt -> we are peripheral; deferring to peer")
             }
         }

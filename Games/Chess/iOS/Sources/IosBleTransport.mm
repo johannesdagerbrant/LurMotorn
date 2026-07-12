@@ -53,12 +53,30 @@ static CBUUID* MakeUuid(std::string_view Uuid) {
 // the same value and the role it drives is stable across restarts. Exchanged
 // in-band over the device-id characteristic (never advertised). Android mints its
 // id from the very same Modules/Save code, so the two are directly comparable.
-static std::string LoadOrCreateIosDeviceId() {
+static std::string IosSaveDir() {
     NSArray<NSString*>* Dirs =
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
-    Lur::Save::Store DeviceStore(std::string(Dir.UTF8String));  // Save() creates the dir if absent
+    return std::string(Dir.UTF8String);  // Store's Save() creates the dir if absent
+}
+
+static std::string LoadOrCreateIosDeviceId() {
+    Lur::Save::Store DeviceStore(IosSaveDir());
     return Lur::Save::LoadOrCreateDeviceId(DeviceStore);
+}
+
+// The last-linked peer's id (issue #17 Step 3), for the cached-role reconnect
+// shortcut: knowing the peer up front lets the peripheral-elected side just advertise
+// and never connect out, so the two devices never both connect at once on reconnect.
+static std::string LoadIosPeerId() {
+    Lur::Save::Store S(IosSaveDir());
+    const std::vector<uint8_t> V = S.Load(Lur::Save::PeerIdKey);
+    return std::string(V.begin(), V.end());
+}
+
+static void SaveIosPeerId(const std::string& Id) {
+    Lur::Save::Store S(IosSaveDir());
+    S.Save(Lur::Save::PeerIdKey, reinterpret_cast<const uint8_t*>(Id.data()), Id.size());
 }
 
 // ---------------------------------------------------------------------------
@@ -79,6 +97,13 @@ static std::string LoadOrCreateIosDeviceId() {
     CBUUID* _DeviceIdUuid;
 
     std::string _LocalId;
+
+    // Cached-role reconnect (issue #17 Step 3). Once we know the peer's id we know our
+    // role up front: a known peripheral only advertises (never connects out), a known
+    // central only scans — so reconnect can't hit the mutual-connect collision.
+    std::string _PeerId;
+    bool _HaveCachedRole;   // _PeerId known from a prior link
+    bool _CachedPeripheral; // ...and our stable role for it is peripheral
 
     // Central-side state (we connected OUT to a peer's GATT server).
     CBPeripheral*     _PeerDevice;
@@ -105,15 +130,27 @@ static std::string LoadOrCreateIosDeviceId() {
         _DeviceIdUuid = MakeUuid(BleDeviceIdCharacteristicUuid);
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
+
+        _PeerId = LoadIosPeerId();
+        _HaveCachedRole = !_PeerId.empty();
+        _CachedPeripheral = _HaveCachedRole && (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
+        if (_HaveCachedRole && _CachedPeripheral) _DecidedPeripheral = true;  // never connect out
+
         _Central    = [[CBCentralManager alloc] initWithDelegate:self queue:nil];
         _Peripheral = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
-        NSLog(@"OnlyChess BLE: driver up, local device id=%s", _LocalId.c_str());
+        NSLog(@"OnlyChess BLE: driver up, local id=%s, cached role=%s", _LocalId.c_str(),
+              _HaveCachedRole ? (_CachedPeripheral ? "PERIPHERAL" : "CENTRAL") : "none");
     }
     return self;
 }
 
 - (void)setReceiver:(ITransport::Receiver)Receiver { _Receiver = std::move(Receiver); }
 - (bool)isConnected { return _Connected; }
+
+// Cached-role gates (issue #17 Step 3): a device that already knows the peer acts
+// one-sided, so reconnect never has both sides connecting at once.
+- (BOOL)shouldScan { return !(_HaveCachedRole && _CachedPeripheral); }        // scan unless known peripheral
+- (BOOL)shouldAdvertise { return !(_HaveCachedRole && !_CachedPeripheral); }  // advertise unless known central
 
 // ---- Outbound ----
 - (void)sendData:(const uint8_t*)Data size:(std::size_t)Size {
@@ -157,6 +194,7 @@ static std::string LoadOrCreateIosDeviceId() {
 }
 
 - (void)advertiseService {
+    if (![self shouldAdvertise]) return;  // cached CENTRAL role: find the peer by scanning, don't advertise
     if (_Peripheral.state != CBManagerStatePoweredOn || _Peripheral.isAdvertising) return;
     NSString* Name = [NSString stringWithUTF8String:std::string(BleAdvertisedName).c_str()];
     [_Peripheral startAdvertising:@{
@@ -168,22 +206,28 @@ static std::string LoadOrCreateIosDeviceId() {
 // The live link dropped — reset role state and resume discovery so it re-forms.
 - (void)onLinkLost {
     if (!_Linked) return;
-    _Linked = _Connected = _Connecting = _DecidedPeripheral = false;
+    _Linked = _Connected = _Connecting = false;
+    _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
     _Subscriber = nil;
     _RemoteDatagram = nil;
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
-    if (_Central.state == CBManagerStatePoweredOn)
+    // Role-aware rediscovery: known central only scans, known peripheral only advertises,
+    // so the two devices never both connect out (the reconnect collision, issue #17).
+    if (_Central.state == CBManagerStatePoweredOn && [self shouldScan])
         [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
-    [self advertiseService];
+    [self advertiseService];  // gated internally by shouldAdvertise
 }
 
 // ===========================================================================
 // CBCentralManagerDelegate — scan, connect out, read the peer's device id.
 // ===========================================================================
 - (void)centralManagerDidUpdateState:(CBCentralManager*)central {
-    if (central.state == CBManagerStatePoweredOn) {
+    if (central.state != CBManagerStatePoweredOn) return;
+    if ([self shouldScan]) {
         NSLog(@"OnlyChess BLE: central powered on, scanning");
         [central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
+    } else {
+        NSLog(@"OnlyChess BLE: central powered on, cached PERIPHERAL role -> not scanning");
     }
 }
 
@@ -251,6 +295,12 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
         // Got the peer's device id -> run the shared tie-break.
         NSData* V = characteristic.value;
         std::string PeerId(V ? static_cast<const char*>(V.bytes) : "", V ? V.length : 0);
+        if (!PeerId.empty() && PeerId != _PeerId) {   // cache for the fast cached-role reconnect
+            _PeerId = PeerId;
+            _HaveCachedRole = true;
+            _CachedPeripheral = (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
+            SaveIosPeerId(_PeerId);
+        }
         const EBleRole Role = DecideBleRole(_LocalId, PeerId);
         NSLog(@"OnlyChess BLE: role decided = %s",
               Role == EBleRole::Peripheral ? "Peripheral" : "Central");
