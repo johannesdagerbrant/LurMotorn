@@ -24,12 +24,15 @@ class SyncManager {
 public:
     SyncManager(Store& StoreRef, ISaveState& StateRef) : Disk(StoreRef), State(StateRef) {}
 
-    // A peer link is up: remember its id and load our stored record for it (absent
-    // -> the ISaveState restores fresh defaults).
+    // A peer link is up: remember its id and fold our stored record into the current
+    // state. Uses MergeIfNewer (NOT a hard Read) so this can't downgrade state that a
+    // peer's Sync already delivered — link-time reconciliation is order-independent
+    // and monotonic across {current state, disk, peer}, so nothing ever resets to an
+    // older record regardless of whether the disk load or the Sync arrives first.
     void OnLink(std::string_view PeerId) {
         Peer = std::string(PeerId);
         const std::vector<uint8_t> Blob = Disk.Load(Peer);
-        State.Read(Blob.data(), Blob.size());
+        if (!Blob.empty()) State.MergeIfNewer(Blob.data(), Blob.size());
     }
 
     // Serialise the current state — the payload for a link-time Sync message.

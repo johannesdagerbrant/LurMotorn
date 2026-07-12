@@ -10,10 +10,13 @@
 #include <vector>
 
 #include "Lur/Save/DeviceId.h"
+#include "Lur/Save/SaveState.h"
 #include "Lur/Save/Store.h"
+#include "Lur/Save/SyncManager.h"
 
 using Lur::Save::LoadOrCreateDeviceId;
 using Lur::Save::Store;
+using Lur::Save::SyncManager;
 namespace fs = std::filesystem;
 
 static int GFailures = 0;
@@ -115,6 +118,61 @@ static void TestDeviceIdsAreDistinctAndHex() {
     }
 }
 
+// A minimal ISaveState for SyncManager tests: the "record" is opaque bytes and
+// "newer" means simply longer (enough to exercise the merge/adopt logic).
+struct FakeState : Lur::Save::ISaveState {
+    std::vector<uint8_t> Data;
+    void Write(std::vector<uint8_t>& Out) const override { Out.insert(Out.end(), Data.begin(), Data.end()); }
+    void Read(const uint8_t* D, std::size_t N) override { Data.assign(D, D + N); }
+    bool MergeIfNewer(const uint8_t* D, std::size_t N) override {
+        if (N > Data.size()) { Data.assign(D, D + N); return true; }
+        return false;
+    }
+};
+
+// On a fresh start, OnLink adopts the saved record from disk (resume a game).
+static void TestSyncOnLinkLoadsDisk() {
+    const std::string Dir = ScratchDir();
+    { Store S(Dir); FakeState St; SyncManager Sync(S, St);
+      Sync.OnLink("peerX");
+      St.Data = Bytes({9, 9, 9, 9});
+      Sync.Persist(); }
+    { Store S(Dir); FakeState St; SyncManager Sync(S, St);
+      Sync.OnLink("peerX");
+      CHECK(St.Data.size() == 4); }  // restored from disk
+}
+
+// The reconnect reset bug (issue #18): a stale/empty disk must NOT downgrade state a
+// peer's Sync already delivered — OnLink folds disk in via MergeIfNewer, never resets.
+static void TestSyncOnLinkDoesNotDowngrade() {
+    Store S(ScratchDir());
+    FakeState St;
+    SyncManager Sync(S, St);
+    const std::vector<uint8_t> PeerRecord = Bytes({1, 2, 3, 4, 5});
+    CHECK(Sync.OnSync(PeerRecord.data(), PeerRecord.size()));  // peer's Sync arrives first, adopted
+    CHECK(St.Data.size() == 5);
+    Sync.OnLink("peerX");                                      // disk is empty here
+    CHECK(St.Data.size() == 5);                               // NOT reset to empty
+}
+
+// OnSync adopts a strictly-newer peer record and persists it; rejects an older one.
+static void TestSyncOnSyncAdoptsNewer() {
+    const std::string Dir = ScratchDir();
+    Store S(Dir);
+    FakeState St;
+    SyncManager Sync(S, St);
+    Sync.OnLink("peerX");
+    const std::vector<uint8_t> Longer = Bytes({1, 2, 3});
+    CHECK(Sync.OnSync(Longer.data(), Longer.size()));          // adopted + persisted
+    const std::vector<uint8_t> Shorter = Bytes({7});
+    CHECK(!Sync.OnSync(Shorter.data(), Shorter.size()));       // older -> rejected
+    CHECK(St.Data.size() == 3);
+    // The adopt persisted, so a fresh manager reloads it.
+    Store S2(Dir); FakeState St2; SyncManager Sync2(S2, St2);
+    Sync2.OnLink("peerX");
+    CHECK(St2.Data.size() == 3);
+}
+
 int main() {
     TestRoundTripAndAbsent();
     TestOverwrite();
@@ -123,6 +181,9 @@ int main() {
     TestDeviceIdStableWithinInstance();
     TestDeviceIdStableAcrossRestart();
     TestDeviceIdsAreDistinctAndHex();
+    TestSyncOnLinkLoadsDisk();
+    TestSyncOnLinkDoesNotDowngrade();
+    TestSyncOnSyncAdoptsNewer();
 
     if (GFailures == 0) {
         std::printf("All save tests passed.\n");
