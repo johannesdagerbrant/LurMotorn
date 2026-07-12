@@ -171,12 +171,8 @@ Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject 
                                                        jboolean AsPeripheral) {
     g_Transport.Connected = true;
     LOGI("BLE connected as %s", AsPeripheral ? "peripheral" : "central");
-    // The central writes first (the peripheral can't notify until the central has
-    // enabled notifications); the peer replies from its receiver. See AndroidMain.
-    if (AsPeripheral == JNI_FALSE) {
-        const uint8_t Ping[] = {0xC5};
-        g_Transport.Send(Ping, sizeof(Ping));
-    }
+    // The net Session sends the first Hello (central writes first) once it sees the
+    // link up — no demo ping needed, and a bare 1-byte ping would now look like a move.
 }
 
 extern "C" JNIEXPORT void JNICALL

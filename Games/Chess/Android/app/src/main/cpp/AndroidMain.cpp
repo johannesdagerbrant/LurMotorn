@@ -86,6 +86,7 @@ void android_main(android_app* App) {
     Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
     const std::string DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
     Lur::Save::SyncManager Sync(Store, State.Match);
+    State.Match.SetOnMatchEnd([&Sync] { Sync.Persist(); });  // durable all-time stats on game end
 
     // Wire the BLE transport into the net session. The session Hello exchanges the
     // device GUIDs; the shared BoardView renders + mutates State.Match and ships the

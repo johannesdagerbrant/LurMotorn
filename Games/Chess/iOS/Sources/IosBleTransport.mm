@@ -119,7 +119,6 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _DecidedPeripheral; // we settled as peripheral; stop connecting out
 
     ITransport::Receiver _Receiver;
-    std::vector<std::vector<uint8_t>> _Outbox;
 }
 
 - (instancetype)init {
@@ -154,8 +153,11 @@ static void SaveIosPeerId(const std::string& Id) {
 
 // ---- Outbound ----
 - (void)sendData:(const uint8_t*)Data size:(std::size_t)Size {
+    // Live-only: drop if not linked. An offline move is healed by the next
+    // link-establishment record sync, so we must NOT buffer + replay a stale move
+    // (which would decode against a since-advanced position and desync).
+    if (!_Connected) return;
     std::vector<uint8_t> Bytes(Data, Data + Size);
-    if (!_Connected) { _Outbox.push_back(std::move(Bytes)); return; }
     [self transmit:Bytes];
 }
 
@@ -175,8 +177,6 @@ static void SaveIosPeerId(const std::string& Id) {
     }
 }
 
-- (void)flushOutbox { for (auto& B : _Outbox) [self transmit:B]; _Outbox.clear(); }
-
 - (void)deliverInbound:(NSData*)Data {
     if (_Receiver && Data.length > 0) {
         _Receiver(static_cast<const uint8_t*>(Data.bytes), (std::size_t)Data.length);
@@ -186,11 +186,8 @@ static void SaveIosPeerId(const std::string& Id) {
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
-    [self flushOutbox];
-    if (_RemoteDatagram && _PeerDevice) {   // central initiates the demo round-trip (ping)
-        std::vector<uint8_t> Ping{0xC5};
-        [self transmit:Ping];
-    }
+    // The net Session sends the first Hello once it sees the link up — no demo ping
+    // (a bare 1-byte ping would now look like a move).
 }
 
 - (void)advertiseService {

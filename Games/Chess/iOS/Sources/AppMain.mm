@@ -79,6 +79,7 @@
     _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
     _Sync = new Lur::Save::SyncManager(*_Store, _Match);
+    _Match.SetOnMatchEnd([SyncPtr = _Sync] { SyncPtr->Persist(); });  // durable stats on game end
 
     // Wire the BLE transport into the net session. Hello exchanges the device GUIDs;
     // the shared BoardView renders + mutates _Match and ships moves via MoveCodec.

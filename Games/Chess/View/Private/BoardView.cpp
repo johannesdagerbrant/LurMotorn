@@ -88,9 +88,10 @@ bool BoardView::FlipBoard() const {
 bool BoardView::CanMoveNow() const {
     if (State == nullptr) return false;
     if (!State->HasIdentity()) return true;   // local hot-seat: either side may tap
-    return Net != nullptr &&
-           Net->GetLinkState() == Lur::Net::ELinkState::Linked &&
-           State->IsMyTurn();
+    // Offline move (issue #19): a player may move on their turn even while the link
+    // is down — you can only ever be one move ahead (then it's the opponent's turn),
+    // and the next link-establishment record sync heals it.
+    return State->IsMyTurn();
 }
 
 void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx) {
@@ -178,8 +179,8 @@ void BoardView::AttachSession(Lur::Net::Session* Session) {
     Net = Session;
     // The view only needs peer moves + the link state. Identity/colour and the
     // link-time record sync are wired by the app (ChessMatchState + SyncManager).
-    Net->SetHandler(Lur::Net::EMsgType::Move,
-                    [this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
+    // A live move is a bare 1-byte datagram (issue #19), so it uses the move hook.
+    Net->SetMoveHandler([this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
 }
 
 void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
@@ -221,13 +222,14 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
             }
         }
         if (Chosen != nullptr) {
-            // Ship only the move's index (see MoveCodec) before applying locally, so
-            // both boards advance in lockstep off the same pre-move legal list.
+            // Ship only the move's index as a bare 1-byte datagram (see MoveCodec)
+            // before applying locally, so both boards advance in lockstep off the same
+            // pre-move legal list.
             if (Net != nullptr) {
                 Lur::Serialization::BitWriter W;
                 EncodeMove(*Chosen, Legal, W);
                 const std::vector<uint8_t>& Bytes = W.Finish();
-                Net->Send(Lur::Net::EMsgType::Move, Bytes.data(), Bytes.size());
+                Net->SendMove(Bytes.data(), Bytes.size());
             }
             State->ApplyMove(*Chosen);
             Selected = NoSquare;
