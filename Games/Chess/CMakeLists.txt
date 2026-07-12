@@ -16,6 +16,6 @@ add_library(chess::core ALIAS chess_core)
 add_library(chess_view
     View/Private/BoardView.cpp)
 target_include_directories(chess_view PUBLIC View/Public PRIVATE View/Private)
-target_link_libraries(chess_view PUBLIC chess::core lur::render)
+target_link_libraries(chess_view PUBLIC chess::core lur::render lur::net)
 target_compile_features(chess_view PUBLIC cxx_std_20)
 add_library(chess::view ALIAS chess_view)

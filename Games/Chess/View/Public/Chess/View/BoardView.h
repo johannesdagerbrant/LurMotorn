@@ -1,6 +1,10 @@
 #pragma once
+#include <cstddef>
+#include <cstdint>
 #include "Lur/Render/Renderer.h"
 #include "Chess/Board.h"
+
+namespace Lur::Net { class Session; }
 
 namespace Chess {
 
@@ -18,9 +22,21 @@ public:
     void Render(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx);
     void OnTap(float XPx, float YPx, float WidthPx, float HeightPx);
 
+    // Attach a networked session: our colour is derived from the session's seat
+    // when the handshake completes (seat 0 -> White), the peer's moves are applied
+    // as they arrive, and OnTap only acts on our own turn. Without a session the
+    // view stays a local hot-seat (both sides tapped on one device), unchanged.
+    void AttachSession(Lur::Net::Session* Session);
+
 private:
+    // Decode a peer move (its index in our regenerated legal list) and apply it.
+    void ApplyRemoteMove(const uint8_t* Data, std::size_t Size);
+
     Board  Position = Board::StartPosition();
     Square Selected = NoSquare;
+
+    Lur::Net::Session* Net = nullptr;          // null => local hot-seat
+    EColor MyColor = EColor::White;            // meaningful once Net && Net->IsReady()
 
     Lur::Render::MeshHandle     QuadMesh = 0;
     Lur::Render::MaterialHandle LightSquare = 0;

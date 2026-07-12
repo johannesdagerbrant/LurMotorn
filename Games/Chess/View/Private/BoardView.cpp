@@ -1,9 +1,14 @@
 #include "Chess/View/BoardView.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
+#include "Chess/MoveCodec.h"
+#include "Lur/Net/Session.h"
 #include "Lur/Render/Sprite2D.h"
+#include "Lur/Serialization/BitReader.h"
+#include "Lur/Serialization/BitWriter.h"
 #include "PieceMasks.h"  // cooked rhosgfx (CC0) silhouette masks, one per piece type
 
 namespace Chess {
@@ -133,15 +138,41 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     Renderer->EndFrame();
 }
 
+void BoardView::AttachSession(Lur::Net::Session* Session) {
+    Net = Session;
+    Net->SetReadyHandler([this] {
+        MyColor = (Net->GetSeat() == 0) ? EColor::White : EColor::Black;
+    });
+    Net->SetHandler(Lur::Net::EMsgType::Move,
+                    [this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
+}
+
+void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
+    // Regenerate the identical legal list from our in-sync position; move ORDER is
+    // the wire protocol, so the peer's index maps back to the exact same move.
+    MoveList Legal; GenerateLegalMoves(Position, Legal);
+    Lur::Serialization::BitReader R(Data, Size);
+    const Move Mv = DecodeMove(R, Legal);
+    if (!R.IsOk() || Mv == Move{}) return;                 // corrupt/out-of-range: desync guard
+    if (Position.SideToMove == MyColor) return;            // not the peer's turn: ignore
+    Position.MakeMove(Mv);
+    Selected = NoSquare;
+}
+
 void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     const BoardLayout L = ComputeLayout(WidthPx, HeightPx);
     const Square Sq = SquareAt(L, XPx, YPx);
     if (Sq == NoSquare) { Selected = NoSquare; return; }
 
+    // In a networked game you may act only on your own turn, and only once the
+    // handshake has assigned colours. Local hot-seat (no session) is always "my turn".
+    const bool MyTurn = (Net == nullptr) ||
+                        (Net->IsReady() && Position.SideToMove == MyColor);
+
     const EColor Side = Position.SideToMove;
     const EPieceType Mine = PieceTypeAt(Position, Side, Sq);
 
-    if (Selected != NoSquare) {
+    if (Selected != NoSquare && MyTurn) {
         // Try to move Selected -> Sq. Promotions appear as 4 entries (Q/R/B/N) for
         // the same From/To; default to the queen for now (a picker comes later).
         MoveList Legal; GenerateLegalMoves(Position, Legal);
@@ -156,14 +187,22 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
             }
         }
         if (Chosen != nullptr) {
+            // Ship only the move's index (see MoveCodec) before applying locally, so
+            // both boards advance in lockstep off the same pre-move legal list.
+            if (Net != nullptr) {
+                Lur::Serialization::BitWriter W;
+                EncodeMove(*Chosen, Legal, W);
+                const std::vector<uint8_t>& Bytes = W.Finish();
+                Net->Send(Lur::Net::EMsgType::Move, Bytes.data(), Bytes.size());
+            }
             Position.MakeMove(*Chosen);
             Selected = NoSquare;
             return;
         }
     }
 
-    // Not a move: select one's own piece, otherwise clear.
-    Selected = (Mine != EPieceType::None) ? Sq : NoSquare;
+    // Not a move: select one's own piece (only on your turn), otherwise clear.
+    Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
 }
 
 } // namespace Chess

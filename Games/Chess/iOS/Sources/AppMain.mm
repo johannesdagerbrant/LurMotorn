@@ -10,8 +10,11 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 
+#include <random>
+
 #include "Chess/Board.h"
 #include "Chess/View/BoardView.h"
+#include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
@@ -31,6 +34,7 @@
     Lur::Render::IRenderer* _Renderer;
     Chess::BoardView _View;
     Lur::Transport::ITransport* _Transport;  // owned by its translation unit
+    Lur::Net::Session _Session;
     CADisplayLink* _DisplayLink;
     bool _Ready;
 }
@@ -58,14 +62,18 @@
     os_log(OS_LOG_DEFAULT,
            "OnlyChess: Chess core alive: %d legal moves from the start position", Moves.Count);
 
-    // Bring up BLE (engine seam). Real net/session wiring is #5; for now just
-    // bounce one reply so a live two-phone link is observable.
+    // Wire the BLE transport into the net session: it runs the Hello handshake
+    // (deterministic seat -> colour, independent of the BLE radio role) and delivers
+    // the peer's moves to the shared BoardView (encoded/decoded via Chess::MoveCodec).
+    // A random nonce seeds the seat tie-break.
     _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
-    auto* T = _Transport;
-    _Transport->SetReceiver([T](const uint8_t* /*Data*/, std::size_t /*Size*/) {
-        static bool Replied = false;
-        if (!Replied) { Replied = true; const uint8_t Pong = 0x5C; T->Send(&Pong, 1); }
+    std::random_device Rd;
+    const uint64_t Nonce = (static_cast<uint64_t>(Rd()) << 32) ^ Rd();
+    _Session.SetLogger([](const char* M) {
+        os_log(OS_LOG_DEFAULT, "OnlyChess: Net: %{public}s", M);
     });
+    _View.AttachSession(&_Session);
+    _Session.Start(_Transport, Nonce);
 }
 
 // The renderer needs the layer's drawable size, which is only known after layout.
@@ -96,6 +104,7 @@
 
 - (void)renderFrame {
     if (!_Ready) return;
+    _Session.Tick();  // drive the Hello handshake until it completes
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));

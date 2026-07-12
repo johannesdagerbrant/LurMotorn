@@ -1,5 +1,8 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <functional>
+#include "Lur/Transport/Transport.h"
 
 namespace Lur::Net {
 
@@ -7,7 +10,7 @@ namespace Lur::Net {
 // single byte (often foldable into spare bits later) preserves the slim-payload
 // goal while letting one transport channel carry handshake, moves, and keepalive.
 enum class EMsgType : uint8_t {
-    Hello       = 0,  // version + role + nonce, exchanged on connect
+    Hello       = 0,  // version + nonce, exchanged on connect (see Session::Start)
     ClockPing   = 1,  // clock-sync probe (see ClockSync.h)
     ClockPong   = 2,  // clock-sync reply
     Move        = 3,  // a game move (chess: a legal-move index, ~4-6 bits payload)
@@ -18,14 +21,80 @@ enum class EMsgType : uint8_t {
 
 // Protocol version negotiated in Hello. Bump on any wire-format change so two
 // app versions refuse to mis-decode each other rather than corrupt a game.
-inline constexpr uint8_t ProtocolVersion = 1;
+// v2: Hello gained a trailing "ready" byte for a loss-tolerant handshake.
+inline constexpr uint8_t ProtocolVersion = 2;
 
-// The Session owns the handshake and the rules for which side moves first; it
-// sits between ITransport (raw datagrams) and the game (typed events). Fleshed
-// out alongside the end-to-end wiring task.
+// The symmetric peer-to-peer session that sits between ITransport (raw datagrams)
+// and the game (typed messages). It owns two things:
+//
+//   1. The Hello HANDSHAKE. On connect each peer sends its ProtocolVersion + a
+//      random 64-bit nonce. Comparing the two nonces yields a "seat" (0 or 1) that
+//      the two peers agree on but resolve to OPPOSITE values — a deterministic
+//      tie-break, so authority is NOT taken from the BLE peripheral/central role
+//      (which is a radio mechanic only) and there is no "host". The chess layer
+//      maps seat 0 -> White, seat 1 -> Black.
+//
+//   2. MESSAGE FRAMING. Send() prepends the EMsgType byte; inbound datagrams are
+//      dispatched to a per-type handler. The session is game-agnostic — it moves
+//      opaque payload bytes and never names a chess type; the chess layer encodes
+//      a move into those bytes with Chess::MoveCodec.
+//
+// Not thread-safe: drive it from one thread. Per the ITransport contract the
+// receiver fires on the engine thread, which is also where Tick()/Send() are called.
 class Session {
-    // TODO(net): Hello handshake, role/color assignment, framing of EMsgType +
-    // payload, keepalive timer, and dispatch to clock-sync / game handlers.
+public:
+    using Handler = std::function<void(const uint8_t* Payload, std::size_t Size)>;
+
+    // Begin the session over Transport (which must outlive the session). LocalNonce
+    // seeds the seat tie-break; the caller supplies platform randomness and it must
+    // differ from the peer's (a 64-bit random value collides with negligible
+    // probability). Installs the transport receiver and sends the first Hello.
+    void Start(Lur::Transport::ITransport* NewTransport, uint64_t Nonce);
+
+    // Drive Hello retransmission. Call periodically (e.g. once per rendered frame):
+    // the first Hello can be dropped when it is sent before the BLE link is up, so
+    // we resend until the handshake completes. A no-op once ready.
+    void Tick();
+
+    bool IsReady() const { return Ready; }
+
+    // The local seat once ready (0 or 1, agreed opposite on the two peers), else -1.
+    int GetSeat() const { return Ready ? Seat : -1; }
+
+    // Register the handler for one application message type (e.g. EMsgType::Move).
+    void SetHandler(EMsgType Type, Handler H);
+
+    // Fired once, when the handshake completes and the seat is known.
+    void SetReadyHandler(std::function<void()> H) { ReadyHandler = std::move(H); }
+
+    // Optional debug sink for handshake tracing. The app supplies a platform logger
+    // (logcat / os_log); the session stays platform-free. No-op if unset.
+    using LogFn = std::function<void(const char* Line)>;
+    void SetLogger(LogFn L) { Log = std::move(L); }
+
+    // Frame [Type][Payload] and send it to the peer. Payloads are tiny (a move is
+    // ~1 byte); oversized payloads are dropped rather than truncated.
+    void Send(EMsgType Type, const uint8_t* Payload, std::size_t Size);
+
+private:
+    void SendHello();
+    void OnDatagram(const uint8_t* Data, std::size_t Size);
+    void OnHello(const uint8_t* Payload, std::size_t Size);
+    void Logf(const char* Fmt, ...);
+
+    static constexpr int      MaxMsgTypes     = 8;   // covers EMsgType 0..6
+    static constexpr unsigned HelloResendTicks = 30; // ~0.5s at 60 fps
+
+    Lur::Transport::ITransport* Transport = nullptr;
+    uint64_t LocalNonce   = 0;
+    uint64_t PeerNonce    = 0;
+    bool     Ready        = false;
+    int      Seat         = -1;
+    unsigned TickCounter  = 0;
+
+    Handler               Handlers[MaxMsgTypes];
+    std::function<void()> ReadyHandler;
+    LogFn                 Log;
 };
 
 } // namespace Lur::Net

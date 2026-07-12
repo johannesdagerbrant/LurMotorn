@@ -7,9 +7,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <random>
 
 #include "Chess/Board.h"
 #include "Chess/View/BoardView.h"
+#include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
@@ -22,6 +24,7 @@ struct AppState {
     Lur::Render::IRenderer* Renderer = nullptr;
     bool Ready = false;
     Chess::BoardView View;
+    Lur::Net::Session Session;
 };
 
 void HandleCmd(android_app* App, int32_t Cmd) {
@@ -70,21 +73,20 @@ void android_main(android_app* App) {
     App->onAppCmd = HandleCmd;
     App->onInputEvent = HandleInput;  // tap to select / move pieces
 
-    // Wire the BLE transport (engine seam): log any datagram from the peer and
-    // bounce one reply, so a live two-phone link shows a round-trip in logcat.
-    // Real net/session wiring lands later (#5).
+    // Wire the BLE transport into the net session: the session runs the Hello
+    // handshake (deterministic seat -> colour, independent of the BLE radio role)
+    // and delivers the peer's moves to the shared BoardView, which encodes/decodes
+    // via Chess::MoveCodec. A random nonce seeds the seat tie-break.
     auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
-    Transport->SetReceiver([Transport](const uint8_t* Data, std::size_t Size) {
-        char Hex[49];
-        const std::size_t Shown = Size < 16 ? Size : 16;
-        for (std::size_t i = 0; i < Shown; ++i) std::snprintf(Hex + i * 3, 4, "%02X ", Data[i]);
-        Hex[Shown ? Shown * 3 - 1 : 0] = '\0';
-        LOGI("BLE received %zu bytes: %s", Size, Hex);
-        static bool Replied = false;
-        if (!Replied) { Replied = true; const uint8_t Pong[] = {0x5C}; Transport->Send(Pong, sizeof(Pong)); }
-    });
+    std::random_device Rd;
+    const uint64_t Nonce = (static_cast<uint64_t>(Rd()) << 32) ^ Rd();
+    State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
+    State.View.AttachSession(&State.Session);
+    State.Session.Start(Transport, Nonce);
+    LOGI("Net session started (nonce hi=%08X)", static_cast<uint32_t>(Nonce >> 32));
 
     while (!App->destroyRequested) {
+        State.Session.Tick();  // drive the Hello handshake until it completes
         int Events = 0;
         android_poll_source* Source = nullptr;
         // Re-evaluate the timeout on every poll: INIT_WINDOW flips State.Ready
