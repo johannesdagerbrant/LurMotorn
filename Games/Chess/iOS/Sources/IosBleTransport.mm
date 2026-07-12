@@ -203,6 +203,15 @@ static void SaveIosPeerId(const std::string& Id) {
     }];
 }
 
+// The net layer's keepalive timed out: the peer is silent but CoreBluetooth never
+// told us (an abruptly-killed central gives a CBPeripheralManager no callback). Treat
+// it as a link loss so we resume discovery and the UI goes to Disconnected.
+- (void)resetLink {
+    if (!_Linked) return;
+    NSLog(@"OnlyChess BLE: net keepalive timeout -> forcing link reset");
+    [self onLinkLost];
+}
+
 // The live link dropped — reset role state and resume discovery so it re-forms.
 - (void)onLinkLost {
     if (!_Linked) return;
@@ -310,6 +319,7 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
             // We should be the peripheral: drop this connection, let the peer connect to us.
             _DecidedPeripheral = true;
             [_Central stopScan];
+            [self advertiseService];  // ensure findable even if we began in cached-central mode
             [_Central cancelPeripheralConnection:peripheral];
         }
     } else if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.value) {
@@ -402,6 +412,7 @@ public:
     void Send(const uint8_t* Data, std::size_t Size) override { [Driver sendData:Data size:Size]; }
     void SetReceiver(Receiver NewReceiver) override { [Driver setReceiver:std::move(NewReceiver)]; }
     bool IsConnected() const override { return Driver && [Driver isConnected]; }
+    void ResetLink() override { if (Driver) [Driver resetLink]; }
 
 private:
     IosBleDriver* Driver = nil;  // ARC-retained

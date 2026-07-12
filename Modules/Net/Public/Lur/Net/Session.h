@@ -102,6 +102,7 @@ public:
 
 private:
     void SendHello();
+    void SendKeepalive();
     void OnDatagram(const uint8_t* Data, std::size_t Size);
     void OnHello(const uint8_t* Payload, std::size_t Size);
     void Logf(const char* Fmt, ...);
@@ -109,12 +110,23 @@ private:
     static constexpr int      MaxMsgTypes     = 8;   // covers EMsgType 0..6
     static constexpr unsigned HelloResendTicks = 30; // ~0.5s at 60 fps
 
+    // Link liveness (assuming ~60 fps ticks). Once ready we send a Keepalive every
+    // second; if NO datagram arrives for LinkTimeoutTicks we declare the link dead
+    // and ask the transport to reset. This is what lets an iOS peripheral notice an
+    // abruptly-killed central (its CBPeripheralManager gets no disconnect callback);
+    // every other role also detects a real drop via the backend, so this is a
+    // belt-and-suspenders safety net there.
+    static constexpr unsigned KeepaliveTicks  = 60;  // ~1s between keepalives
+    static constexpr unsigned LinkTimeoutTicks = 300; // ~5s of silence -> dead
+
     Lur::Transport::ITransport* Transport = nullptr;
     uint64_t LocalNonce   = 0;
     uint64_t PeerNonce    = 0;
     bool     Ready        = false;
     int      Seat         = -1;
     unsigned TickCounter  = 0;
+    unsigned KeepaliveCounter = 0;   // ticks since our last keepalive send
+    unsigned SinceRecvTicks   = 0;   // ticks since ANY datagram arrived (liveness)
     bool     EverConnected      = false;  // for Disconnected vs never-connected
     bool     VersionMismatchSeen = false;
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook

@@ -101,6 +101,64 @@ static void TestVersionMismatchRefused() {
     CHECK(!S.IsReady());
 }
 
+// A transport that reports "connected" but delivers nothing on its own, so tests can
+// drive Session liveness by hand: Deliver() feeds inbound datagrams, and ResetLink()
+// (what a real backend does on the net keepalive timeout) is observable.
+struct SilentTransport : Lur::Transport::ITransport {
+    bool     Connected  = true;
+    int      ResetCount = 0;
+    Receiver Rx;
+    void Send(const uint8_t*, std::size_t) override {}
+    void SetReceiver(Receiver R) override { Rx = std::move(R); }
+    bool IsConnected() const override { return Connected; }
+    void ResetLink() override { ++ResetCount; Connected = false; }  // mimic backend teardown
+    void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
+};
+
+// Build a valid peer Hello datagram (type + version + nonce + ready), used to push a
+// Session to Ready without a live peer.
+static void MakeHello(uint8_t (&H)[11], uint8_t NonceLow, bool Ready) {
+    for (auto& B : H) B = 0;
+    H[0]  = static_cast<uint8_t>(EMsgType::Hello);
+    H[1]  = ProtocolVersion;
+    H[2]  = NonceLow;             // low byte of the peer nonce
+    H[10] = Ready ? 1 : 0;
+}
+
+// After going Ready, a Session whose peer falls silent must time out and ask the
+// transport to reset the link (the iOS-peripheral silent-drop case).
+static void TestKeepaliveTimeoutResetsLink() {
+    SilentTransport T;
+    Session S;
+    S.Start(&T, /*nonce*/ 42);
+    uint8_t H[11];
+    MakeHello(H, /*peer nonce*/ 7, /*ready*/ true);  // 42 > 7 -> we take seat 0, become ready
+    T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+
+    // No inbound traffic: well past LinkTimeoutTicks (~300) the link is declared dead.
+    for (int i = 0; i < 400; ++i) S.Tick();
+    CHECK(T.ResetCount == 1);  // fired once (ResetLink drops Connected, so it can't re-fire)
+}
+
+// Steady peer traffic (keepalives) keeps the link alive — no false timeout.
+static void TestKeepaliveKeepsLinkAlive() {
+    SilentTransport T;
+    Session S;
+    S.Start(&T, 42);
+    uint8_t H[11];
+    MakeHello(H, 7, true);
+    T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+
+    const uint8_t KA[1] = { static_cast<uint8_t>(EMsgType::Keepalive) };
+    for (int i = 0; i < 400; ++i) {
+        S.Tick();
+        if (i % 50 == 0) T.Deliver(KA, sizeof(KA));  // peer alive, well within the timeout
+    }
+    CHECK(T.ResetCount == 0);
+}
+
 static bool SamePosition(const Chess::Board& A, const Chess::Board& B) {
     if (A.SideToMove != B.SideToMove) return false;
     if (A.Castling != B.Castling || A.EnPassant != B.EnPassant) return false;
@@ -207,6 +265,8 @@ int main() {
     TestVersionMismatchRefused();
     TestChessMoveAcrossSessions();
     TestGameHistoryResync();
+    TestKeepaliveTimeoutResetsLink();
+    TestKeepaliveKeepsLinkAlive();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");

@@ -461,6 +461,7 @@ class BleShim(private val context: Context) {
                 // (the canonical central) connect to our server instead.
                 decidedPeripheral = true
                 stopScanning()
+                startAdvertising()  // ensure findable even if we began in cached-central mode
                 dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer
                 Log.i(TAG, "central attempt -> we are peripheral; deferring to peer")
             }
