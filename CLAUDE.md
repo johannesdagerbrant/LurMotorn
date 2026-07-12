@@ -202,8 +202,10 @@ the repo root. Use `symbol`/anchor ranges; avoid parentheses in anchors (regex).
 **Never branch — commit straight to `master`.** This repo is a solo, trunk-based workflow: no
 feature branches, no PRs. (This overrides the usual "branch first on the default branch" default.)
 **Push only when the user asks** — commit freely as coherent, green changes land, but leave pushing
-`master` to an explicit request. Keep `master` green: build + test (`build.ps1`, and the
-Android/iOS builds when they're touched) before committing.
+`master` to an explicit request. **Exception (pre-authorised):** you MAY push without asking when a
+change legitimately needs verifying on the iPhone — the iOS `.ipa` is built by CI only on push, so a
+push to get a fresh `.ipa` for a real device test is fine. Keep `master` green: build + test
+(`build.ps1`, and the Android/iOS builds when they're touched) before committing.
 
 ## Working style
 
