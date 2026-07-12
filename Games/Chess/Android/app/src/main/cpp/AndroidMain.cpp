@@ -100,14 +100,26 @@ void android_main(android_app* App) {
         const std::vector<uint8_t> Snap = Sync.Snapshot();
         State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
-    State.Session.SetReadyHandler([&State, &Sync, &SendRecord, &DeviceId] {
+    auto LogState = [&State](const char* Tag) {
+        LOGI("Net: %s colour=%s toMove=%s moves=%zu myTurn=%d peer=%.6s", Tag,
+             State.Match.MyColor() == Chess::EColor::White ? "White" : "Black",
+             State.Match.SideToMove() == Chess::EColor::White ? "White" : "Black",
+             State.Match.Record().Moves.size(), State.Match.IsMyTurn() ? 1 : 0,
+             State.Session.GetPeerGuid().c_str());
+    };
+    State.Session.SetReadyHandler([&State, &Sync, &SendRecord, &DeviceId, &LogState] {
         State.Match.SetIdentity(DeviceId, State.Session.GetPeerGuid());  // colour + anchor
         Sync.OnLink(State.Session.GetPeerGuid());                        // load our stored record
+        LogState("READY");
         SendRecord();                                                    // let the peer reconcile
     });
-    State.Session.SetResyncHandler(SendRecord);                          // reconnect: re-sync records
+    State.Session.SetResyncHandler([&SendRecord, &LogState] { LogState("RESYNC"); SendRecord(); });
     State.Session.SetHandler(Lur::Net::EMsgType::Sync,
-                             [&Sync](const uint8_t* D, std::size_t N) { Sync.OnSync(D, N); });
+                             [&Sync, &LogState](const uint8_t* D, std::size_t N) {
+                                 const bool Adopted = Sync.OnSync(D, N);
+                                 LOGI("Net: SYNC recv %zuB adopted=%d", N, Adopted ? 1 : 0);
+                                 LogState("post-SYNC");
+                             });
     State.Session.Start(Transport, DeviceId);
     LOGI("Net session started (device id %zuB)", DeviceId.size());
 

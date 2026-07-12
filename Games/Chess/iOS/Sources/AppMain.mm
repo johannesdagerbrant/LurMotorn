@@ -96,14 +96,30 @@
         const std::vector<uint8_t> Snap = Sync->Snapshot();
         Session->Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
-    Session->SetReadyHandler([Match, Sync, Session, DeviceId, SendRecord] {
+    auto LogState = [Match, Session](const char* Tag) {
+        const std::string Peer6 = Session->GetPeerGuid().substr(0, 6);
+        os_log(OS_LOG_DEFAULT,
+               "OnlyChess: Net: %{public}s colour=%{public}s toMove=%{public}s moves=%d myTurn=%d peer=%{public}s",
+               Tag,
+               Match->MyColor() == Chess::EColor::White ? "White" : "Black",
+               Match->SideToMove() == Chess::EColor::White ? "White" : "Black",
+               static_cast<int>(Match->Record().Moves.size()), Match->IsMyTurn() ? 1 : 0,
+               Peer6.c_str());
+    };
+    Session->SetReadyHandler([Match, Sync, Session, DeviceId, SendRecord, LogState] {
         Match->SetIdentity(DeviceId, Session->GetPeerGuid());  // colour + anchor
         Sync->OnLink(Session->GetPeerGuid());                  // load our stored record
+        LogState("READY");
         SendRecord();                                          // let the peer reconcile
     });
-    Session->SetResyncHandler(SendRecord);                     // reconnect: re-sync records
+    Session->SetResyncHandler([SendRecord, LogState] { LogState("RESYNC"); SendRecord(); });
     Session->SetHandler(Lur::Net::EMsgType::Sync,
-                        [Sync](const uint8_t* D, std::size_t N) { Sync->OnSync(D, N); });
+                        [Sync, LogState](const uint8_t* D, std::size_t N) {
+                            const bool Adopted = Sync->OnSync(D, N);
+                            os_log(OS_LOG_DEFAULT, "OnlyChess: Net: SYNC recv %dB adopted=%d",
+                                   static_cast<int>(N), Adopted ? 1 : 0);
+                            LogState("post-SYNC");
+                        });
 
     _View.SetState(&_Match);
     _View.AttachSession(&_Session);
