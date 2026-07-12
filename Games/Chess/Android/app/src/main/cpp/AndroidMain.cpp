@@ -31,6 +31,7 @@ struct AppState {
     Chess::BoardView View;
     Lur::Net::Session Session;
     Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
+    Lur::Save::SyncManager* Sync = nullptr;  // for persist-on-background (set in android_main)
 };
 
 void HandleCmd(android_app* App, int32_t Cmd) {
@@ -53,6 +54,10 @@ void HandleCmd(android_app* App, int32_t Cmd) {
         case APP_CMD_TERM_WINDOW:
             if (State->Renderer != nullptr) State->Renderer->Shutdown();
             State->Ready = false;
+            break;
+        case APP_CMD_PAUSE:
+            // Backgrounded: persist the in-progress match so it survives a close.
+            if (State->Sync != nullptr) State->Sync->Persist();
             break;
         default:
             break;
@@ -86,7 +91,14 @@ void android_main(android_app* App) {
     Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
     const std::string DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
     Lur::Save::SyncManager Sync(Store, State.Match);
-    State.Match.SetOnMatchEnd([&Sync] { Sync.Persist(); });  // durable all-time stats on game end
+    State.Sync = &Sync;                                       // for persist-on-background
+    State.Match.SetOnMatchEnd([&Sync, &State] {
+        Sync.Persist();                                      // durable all-time stats on game end
+        LOGI("Net: MATCH END result=%d WLD(lo/hi/dr)=%u/%u/%u total=%u",
+             static_cast<int>(State.Match.LastResult()), State.Match.Record().WinsLower,
+             State.Match.Record().WinsHigher, State.Match.Record().Draws,
+             State.Match.Record().TotalMatches());
+    });
 
     // Wire the BLE transport into the net session. The session Hello exchanges the
     // device GUIDs; the shared BoardView renders + mutates State.Match and ships the
@@ -102,11 +114,12 @@ void android_main(android_app* App) {
         State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
     auto LogState = [&State](const char* Tag) {
-        LOGI("Net: %s colour=%s toMove=%s moves=%zu myTurn=%d peer=%.6s", Tag,
+        LOGI("Net: %s colour=%s toMove=%s moves=%zu myTurn=%d WLD=%u/%u/%u peer=%.6s", Tag,
              State.Match.MyColor() == Chess::EColor::White ? "White" : "Black",
              State.Match.SideToMove() == Chess::EColor::White ? "White" : "Black",
              State.Match.Record().Moves.size(), State.Match.IsMyTurn() ? 1 : 0,
-             State.Session.GetPeerGuid().c_str());
+             State.Match.Record().WinsLower, State.Match.Record().WinsHigher,
+             State.Match.Record().Draws, State.Session.GetPeerGuid().c_str());
     };
     State.Session.SetReadyHandler([&State, &Sync, &SendRecord, &DeviceId, &LogState] {
         State.Match.SetIdentity(DeviceId, State.Session.GetPeerGuid());  // colour + anchor

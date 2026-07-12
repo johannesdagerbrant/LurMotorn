@@ -79,7 +79,18 @@
     _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
     _Sync = new Lur::Save::SyncManager(*_Store, _Match);
-    _Match.SetOnMatchEnd([SyncPtr = _Sync] { SyncPtr->Persist(); });  // durable stats on game end
+    _Match.SetOnMatchEnd([SyncPtr = _Sync, M = &_Match] {
+        SyncPtr->Persist();                                          // durable stats on game end
+        os_log(OS_LOG_DEFAULT, "OnlyChess: Net: MATCH END result=%d WLD=%d/%d/%d total=%d",
+               static_cast<int>(M->LastResult()), static_cast<int>(M->Record().WinsLower),
+               static_cast<int>(M->Record().WinsHigher), static_cast<int>(M->Record().Draws),
+               static_cast<int>(M->Record().TotalMatches()));
+    });
+    // Persist the in-progress match when backgrounded, so it survives a close.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(persistState)
+                                                 name:UIApplicationDidEnterBackgroundNotification
+                                               object:nil];
 
     // Wire the BLE transport into the net session. Hello exchanges the device GUIDs;
     // the shared BoardView renders + mutates _Match and ships moves via MoveCodec.
@@ -100,12 +111,13 @@
     auto LogState = [Match, Session](const char* Tag) {
         const std::string Peer6 = Session->GetPeerGuid().substr(0, 6);
         os_log(OS_LOG_DEFAULT,
-               "OnlyChess: Net: %{public}s colour=%{public}s toMove=%{public}s moves=%d myTurn=%d peer=%{public}s",
+               "OnlyChess: Net: %{public}s colour=%{public}s toMove=%{public}s moves=%d myTurn=%d WLD=%d/%d/%d peer=%{public}s",
                Tag,
                Match->MyColor() == Chess::EColor::White ? "White" : "Black",
                Match->SideToMove() == Chess::EColor::White ? "White" : "Black",
                static_cast<int>(Match->Record().Moves.size()), Match->IsMyTurn() ? 1 : 0,
-               Peer6.c_str());
+               static_cast<int>(Match->Record().WinsLower), static_cast<int>(Match->Record().WinsHigher),
+               static_cast<int>(Match->Record().Draws), Peer6.c_str());
     };
     Session->SetReadyHandler([Match, Sync, Session, DeviceId, SendRecord, LogState] {
         Match->SetIdentity(DeviceId, Session->GetPeerGuid());  // colour + anchor
@@ -159,6 +171,11 @@
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));
+}
+
+// Backgrounded: persist the in-progress match so it survives a close.
+- (void)persistState {
+    if (_Sync != nullptr) _Sync->Persist();
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
