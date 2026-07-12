@@ -1,0 +1,68 @@
+#pragma once
+#include <cstddef>
+#include <cstdint>
+#include <string>
+#include <string_view>
+
+#include "Chess/Board.h"
+#include "Chess/ChessRecord.h"
+#include "Chess/Types.h"
+#include "Lur/Save/SaveState.h"
+
+namespace Chess {
+
+// The authoritative game state for a networked chess match (issue #18): the
+// player-agnostic record + the board derived from it + this device's colour. It is
+// an ISaveState, so the engine persists and link-syncs it without knowing chess.
+//
+// Colour is DETERMINISTIC and identical on both phones, independent of the BLE
+// radio role: it comes from the two device GUIDs' order plus the match-count parity
+// (even total => the lower-GUID device is White; odd => Black). Because both phones
+// share the same synced record, both compute the same, opposite colours — and it is
+// stable across restarts (the flip that broke reconnect in Phase A is gone).
+//
+// Pure logic, no rendering or transport: BoardView renders it, SyncManager persists
+// and syncs it. Host-testable.
+class ChessMatchState : public Lur::Save::ISaveState {
+public:
+    // Establish identity once the peer's GUID is known (link established). Both are
+    // the hex device ids from Lur::Save. Colour + the lower/higher anchor derive
+    // from their lexicographic order.
+    void SetIdentity(std::string_view LocalGuid, std::string_view PeerGuid);
+    bool HasIdentity() const { return Identified; }
+    bool IsLocalLower() const { return LocalLower; }
+
+    // This device's colour for the current match (valid once identity is set).
+    EColor MyColor() const;
+    EColor SideToMove() const { return Position.SideToMove; }
+    bool   IsMyTurn() const { return Identified && Position.SideToMove == MyColor(); }
+
+    const Board&       CurrentBoard() const { return Position; }
+    const ChessRecord& Record() const { return Rec; }
+
+    // Apply a legal move: advance the board AND append it to the record.
+    void ApplyMove(const Move& M);
+
+    // Replay the record's move list from the start position into the board. Call
+    // after Read / a merge that replaced the record.
+    void RebuildBoard();
+
+    // --- Lur::Save::ISaveState ---
+    void Write(std::vector<uint8_t>& Out) const override { Rec.Write(Out); }
+    void Read(const uint8_t* Data, std::size_t Size) override;
+    bool MergeIfNewer(const uint8_t* Data, std::size_t Size) override;
+
+private:
+    // Newness key: (totalMatches, moveCount). Matches dominate (a finished match
+    // resets moves to 0), so they compare first.
+    static bool StrictlyNewer(const ChessRecord& A, const ChessRecord& B);  // A newer than B?
+
+    ChessRecord Rec;
+    Board       Position = Board::StartPosition();
+    std::string LocalGuid;
+    std::string PeerGuid;
+    bool        Identified = false;
+    bool        LocalLower = false;  // our GUID sorts before the peer's
+};
+
+} // namespace Chess

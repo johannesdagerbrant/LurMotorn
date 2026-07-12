@@ -3,10 +3,13 @@
 add_library(chess_core
     Core/Private/Board.cpp
     Core/Private/MoveGen.cpp
-    Core/Private/MoveCodec.cpp)
+    Core/Private/MoveCodec.cpp
+    Core/Private/ChessRecord.cpp
+    Core/Private/ChessMatchState.cpp)
 
 target_include_directories(chess_core PUBLIC Core/Public PRIVATE Core/Private)
-target_link_libraries(chess_core PUBLIC lur::serialization)
+# lur::save for the ISaveState contract ChessMatchState implements (issue #18).
+target_link_libraries(chess_core PUBLIC lur::serialization lur::save)
 target_compile_features(chess_core PUBLIC cxx_std_20)
 add_library(chess::core ALIAS chess_core)
 
