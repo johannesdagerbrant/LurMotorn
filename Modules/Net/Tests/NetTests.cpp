@@ -186,7 +186,7 @@ static void TestChessMoveAcrossSessions() {
     Chess::Board BoardWhite = Chess::Board::StartPosition();
     Chess::Board BoardBlack = Chess::Board::StartPosition();
 
-    SBlack.SetHandler(EMsgType::Move, [&](const uint8_t* D, std::size_t N) {
+    SBlack.SetMoveHandler([&](const uint8_t* D, std::size_t N) {
         Chess::MoveList Legal;
         Chess::GenerateLegalMoves(BoardBlack, Legal);
         Lur::Serialization::BitReader R(D, N);
@@ -207,11 +207,36 @@ static void TestChessMoveAcrossSessions() {
     Lur::Serialization::BitWriter W;
     Chess::EncodeMove(*Chosen, Legal, W);
     const std::vector<uint8_t>& Bytes = W.Finish();
-    SWhite.Send(EMsgType::Move, Bytes.data(), Bytes.size());
+    SWhite.SendMove(Bytes.data(), Bytes.size());  // bare 1-byte index (issue #19)
     BoardWhite.MakeMove(*Chosen);
 
     CHECK(BoardBlack.SideToMove == Chess::EColor::Black);
     CHECK(SamePosition(BoardWhite, BoardBlack));  // both boards advanced identically
+}
+
+// A bare 1-byte datagram routes to the move handler; a framed (>=2 byte) message
+// routes to its typed handler and NEVER the move handler (the #19 length rule).
+static void TestMoveFramingDisambiguation() {
+    LoopbackTransport TA, TB;
+    LoopbackTransport::Link(TA, TB);
+    Session SA, SB;
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
+
+    int MoveCalls = 0, SyncCalls = 0;
+    std::size_t LastMoveSize = 99;
+    SB.SetMoveHandler([&](const uint8_t*, std::size_t N) { ++MoveCalls; LastMoveSize = N; });
+    SB.SetHandler(EMsgType::Sync, [&](const uint8_t*, std::size_t) { ++SyncCalls; });
+
+    const uint8_t Index[1] = {0x05};
+    SA.SendMove(Index, 1);
+    CHECK(MoveCalls == 1 && LastMoveSize == 1);
+    CHECK(SyncCalls == 0);
+
+    const uint8_t Payload[2] = {0xAA, 0xBB};       // framed Sync (>= 2 bytes on the wire)
+    SA.Send(EMsgType::Sync, Payload, sizeof(Payload));
+    CHECK(SyncCalls == 1);
+    CHECK(MoveCalls == 1);                          // framed message did NOT hit the move handler
 }
 
 static const Chess::Move* Find(const Chess::MoveList& L, Chess::Square From, Chess::Square To) {
@@ -267,6 +292,7 @@ int main() {
     TestMessageFramingStripsType();
     TestVersionMismatchRefused();
     TestChessMoveAcrossSessions();
+    TestMoveFramingDisambiguation();
     TestGameHistoryResync();
     TestKeepaliveTimeoutResetsLink();
     TestKeepaliveKeepsLinkAlive();

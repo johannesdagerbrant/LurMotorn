@@ -28,7 +28,9 @@ enum class EMsgType : uint8_t {
 // v3: Hello carries the persistent device GUID (was a random session nonce), so
 //     each peer learns the other's stable identity for colour + the per-opponent
 //     stats key (issue #18), independent of the BLE radio role.
-inline constexpr uint8_t ProtocolVersion = 3;
+// v4: live moves are a BARE 1-byte index (no type tag); every framed message is
+//     padded to >=2 bytes, so datagram length disambiguates (issue #19/#15).
+inline constexpr uint8_t ProtocolVersion = 4;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {
@@ -85,8 +87,17 @@ public:
         return EverConnected ? ELinkState::Disconnected : ELinkState::Searching;
     }
 
-    // Register the handler for one application message type (e.g. EMsgType::Move).
+    // Register the handler for one application message type (framed, >=2 bytes).
     void SetHandler(EMsgType Type, Handler H);
+
+    // Register the handler for a live move — a bare 1-byte index datagram (no type
+    // tag). Since every framed message is >=2 bytes, a 1-byte datagram is always a
+    // move, so it needs no type (issue #19). The payload is the move's index bits.
+    void SetMoveHandler(Handler H) { MoveHandler = std::move(H); }
+
+    // Send a live move: the raw index byte with NO type prefix, so it arrives as a
+    // 1-byte datagram. A forced move (0-bit index) still sends a single 0 byte.
+    void SendMove(const uint8_t* Data, std::size_t Size);
 
     // Fired once, when the handshake completes and the seat is known.
     void SetReadyHandler(std::function<void()> H) { ReadyHandler = std::move(H); }
@@ -138,6 +149,7 @@ private:
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook
 
     Handler               Handlers[MaxMsgTypes];
+    Handler               MoveHandler;          // bare 1-byte live move (issue #19)
     std::function<void()> ReadyHandler;
     std::function<void()> ResyncHandler;
     LogFn                 Log;

@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
 
@@ -44,6 +45,12 @@ public:
     // Set when a terminal move auto-concludes a match; useful for a UI "you won" note.
     EGameResult LastResult() const { return Last; }
 
+    // Called once whenever a move concludes a match (the tally is already bumped and
+    // the board reset). The app wires this to persist the updated all-time stats to
+    // disk. LOCAL only — no network sync, since the terminal move already concluded
+    // the match deterministically on both peers.
+    void SetOnMatchEnd(std::function<void()> H) { OnMatchEnd = std::move(H); }
+
     // Apply a legal move: advance the board and append it to the record. If the move
     // ends the game (checkmate / stalemate / 75-move auto-draw), auto-conclude the
     // match: bump the agnostic W/L/D tally and start the next match (board reset,
@@ -70,13 +77,14 @@ private:
     // Bump the agnostic tally for a terminal result and start the next match.
     void ConcludeMatch(EGameResult R);
 
-    ChessRecord Rec;
-    Board       Position = Board::StartPosition();
-    EGameResult Last = EGameResult::Ongoing;
-    std::string LocalGuid;
-    std::string PeerGuid;
-    bool        Identified = false;
-    bool        LocalLower = false;  // our GUID sorts before the peer's
+    ChessRecord           Rec;
+    Board                 Position = Board::StartPosition();
+    EGameResult           Last = EGameResult::Ongoing;
+    std::function<void()> OnMatchEnd;
+    std::string           LocalGuid;
+    std::string           PeerGuid;
+    bool                  Identified = false;
+    bool                  LocalLower = false;  // our GUID sorts before the peer's
 };
 
 } // namespace Chess

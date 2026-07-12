@@ -55,6 +55,7 @@ void ChessMatchState::ConcludeMatch(EGameResult R) {
     Last = R;
     Rec.Moves.clear();                    // next match starts fresh
     Position = Board::StartPosition();     // colour recomputes from the new parity
+    if (OnMatchEnd) OnMatchEnd();          // app persists the updated all-time stats (local)
 }
 
 void ChessMatchState::RebuildBoard() {

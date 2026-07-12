@@ -84,14 +84,27 @@ void Session::SendHello() {
     Logf("hello SENT (ready=%d)", Ready ? 1 : 0);
 }
 
+void Session::SendMove(const uint8_t* Data, std::size_t Size) {
+    if (Transport == nullptr) return;
+    const uint8_t Byte = Size >= 1 ? Data[0] : 0;  // the index byte (0 for a forced move)
+    Transport->Send(&Byte, 1);                      // bare, no type -> a 1-byte datagram
+}
+
 void Session::SendKeepalive() {
     if (Transport == nullptr || !Transport->IsConnected()) return;
-    Send(EMsgType::Keepalive, nullptr, 0);  // a bare [type] byte; the peer resets its timer
+    const uint8_t Pad = 0;
+    Send(EMsgType::Keepalive, &Pad, 1);  // [type][pad] = 2 bytes, never a 1-byte move
 }
 
 void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (Size == 0) return;
     SinceRecvTicks = 0;  // any traffic from the peer proves the link is alive
+
+    // A bare 1-byte datagram is a live move (framed messages are always >=2 bytes).
+    if (Size == 1) {
+        if (MoveHandler) MoveHandler(Data, Size);
+        return;
+    }
 
     const EMsgType Type = static_cast<EMsgType>(Data[0]);
     const uint8_t* Payload = Data + 1;
