@@ -210,6 +210,14 @@ a walkthrough when they want one; do not block pushing on authoring/reviewing a 
 proactively create one unless asked. (Earlier the session was a hard pre-push gate; the user dropped
 that — they'll request CodeViewer sessions when they want them.)
 
+## Version control
+
+**Never branch. Always commit and _push directly to `master`_.** This repo is a solo,
+trunk-based workflow: no feature branches, no PRs. Commit each coherent, green change straight to
+`master` and push it. (This overrides the usual "branch first on the default branch" default —
+the user has explicitly chosen trunk-based here.) Keep `master` green: build + test (`build.ps1`,
+and the Android/iOS builds when they're touched) before pushing.
+
 ## Working style
 
 The user reviews each completed phase as a focused CodeViewer walkthrough (see Documentation above).
