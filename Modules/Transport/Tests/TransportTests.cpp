@@ -128,11 +128,11 @@ static void TestMoveRoundtripsOverTransport() {
 static void TestProtocolConstants() {
     CHECK(BleServiceUuid.size() == 36);                 // 8-4-4-4-12 + 4 hyphens
     CHECK(BleDatagramCharacteristicUuid.size() == 36);
-    CHECK(BleNonceCharacteristicUuid.size() == 36);
+    CHECK(BleDeviceIdCharacteristicUuid.size() == 36);
     // Service + both characteristics are three distinct UUIDs.
     CHECK(BleServiceUuid != BleDatagramCharacteristicUuid);
-    CHECK(BleServiceUuid != BleNonceCharacteristicUuid);
-    CHECK(BleDatagramCharacteristicUuid != BleNonceCharacteristicUuid);
+    CHECK(BleServiceUuid != BleDeviceIdCharacteristicUuid);
+    CHECK(BleDatagramCharacteristicUuid != BleDeviceIdCharacteristicUuid);
     CHECK(!BleAdvertisedName.empty());
 }
 

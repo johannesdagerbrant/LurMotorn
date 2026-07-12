@@ -26,7 +26,6 @@ import android.os.Build
 import android.os.ParcelUuid
 import android.util.Log
 import java.util.UUID
-import kotlin.random.Random
 
 /**
  * The real Bluetooth Low Energy radio for OnlyChess (issue #3, Android half).
@@ -38,11 +37,16 @@ import kotlin.random.Random
  * The GATT role is decided IN-BAND (it must be, to interoperate with iOS, which
  * cannot advertise custom data). Both phones run a GATT server, advertise only the
  * service UUID, and scan. On discovering a peer, a phone connects as central and
- * reads the peer's nonce characteristic; C++ `DecideBleRole` (the shared single
- * source of truth) then uses the two nonces to settle who keeps the link: the
- * larger nonce stays central, the smaller drops that connection and serves as
- * peripheral, letting its peer connect to it. Both keep advertising/scanning until
- * the canonical link is up, so it self-corrects. See BleProtocol.h.
+ * reads the peer's device-id characteristic; C++ `DecideBleRole` (the shared single
+ * source of truth) then uses the two ids to settle who keeps the link: the larger
+ * id stays central, the smaller drops that connection and serves as peripheral,
+ * letting its peer connect to it. Both keep advertising/scanning until the
+ * canonical link is up, so it self-corrects. See BleProtocol.h.
+ *
+ * The device id is PERSISTENT (a GUID minted once by the engine's Modules/Save and
+ * kept in Context.filesDir), so the role settled above is STABLE across app
+ * restarts — a restarted phone rejoins its peer instead of flipping roles and
+ * stranding it (the reconnect-on-restart fix, issue #17).
  */
 class BleShim(private val context: Context) {
 
@@ -52,7 +56,7 @@ class BleShim(private val context: Context) {
         // MUST match Lur::Transport::BleProtocol (Modules/.../BleProtocol.h).
         private val SERVICE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E00-5472616E7370")
         private val DATAGRAM_UUID = UUID.fromString("4C55524D-4F54-4F52-4E01-446174616772")
-        private val NONCE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E02-4E6F6E636500")
+        private val DEVICE_ID_UUID = UUID.fromString("4C55524D-4F54-4F52-4E02-4E6F6E636500")
         // Standard Client Characteristic Configuration Descriptor (enables notify).
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
 
@@ -70,12 +74,16 @@ class BleShim(private val context: Context) {
     private external fun nativeOnConnected(asPeripheral: Boolean)
     private external fun nativeOnDisconnected()
     private external fun nativeOnReceived(bytes: ByteArray)
-    private external fun nativeDecideRole(localNonce: ByteArray, peerNonce: ByteArray): Int
+    private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray): Int
+    private external fun nativeLoadOrCreateDeviceId(dir: String): ByteArray
 
     private val adapter: BluetoothAdapter? =
         (context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
 
-    private val nonce = ByteArray(4).also { Random.nextBytes(it) }
+    // The persistent device id (a GUID minted once by Modules/Save, kept in
+    // filesDir) — stable across restarts, unlike the old random session nonce, so
+    // the BLE role it drives never flips on relaunch (issue #17).
+    private val deviceId: ByteArray = nativeLoadOrCreateDeviceId(context.filesDir.absolutePath)
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
@@ -245,13 +253,13 @@ class BleShim(private val context: Context) {
                     BluetoothGattDescriptor.PERMISSION_READ or BluetoothGattDescriptor.PERMISSION_WRITE,
                 )
             )
-            val nonceCh = BluetoothGattCharacteristic(
-                NONCE_UUID,
+            val deviceIdCh = BluetoothGattCharacteristic(
+                DEVICE_ID_UUID,
                 BluetoothGattCharacteristic.PROPERTY_READ,
                 BluetoothGattCharacteristic.PERMISSION_READ,
             )
             service.addCharacteristic(datagram)
-            service.addCharacteristic(nonceCh)
+            service.addCharacteristic(deviceIdCh)
             server.addService(service)
             serverDatagram = datagram
         } catch (e: SecurityException) {
@@ -269,8 +277,8 @@ class BleShim(private val context: Context) {
         override fun onCharacteristicReadRequest(
             device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
         ) {
-            // Hand the connecting central our nonce so it can run the role tie-break.
-            val value = if (characteristic.uuid == NONCE_UUID) nonce else ByteArray(0)
+            // Hand the connecting central our device id so it can run the role tie-break.
+            val value = if (characteristic.uuid == DEVICE_ID_UUID) deviceId else ByteArray(0)
             try {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             } catch (_: SecurityException) {}
@@ -340,16 +348,16 @@ class BleShim(private val context: Context) {
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
             val service = gatt.getService(SERVICE_UUID) ?: run { dropClient(gatt); return }
             clientDatagram = service.getCharacteristic(DATAGRAM_UUID)
-            val nonceCh = service.getCharacteristic(NONCE_UUID) ?: run { dropClient(gatt); return }
-            try { gatt.readCharacteristic(nonceCh) } catch (_: SecurityException) { dropClient(gatt) }
+            val deviceIdCh = service.getCharacteristic(DEVICE_ID_UUID) ?: run { dropClient(gatt); return }
+            try { gatt.readCharacteristic(deviceIdCh) } catch (_: SecurityException) { dropClient(gatt) }
         }
 
         override fun onCharacteristicRead(
             gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
         ) {
-            if (characteristic.uuid != NONCE_UUID) return
-            val peerNonce = characteristic.value ?: ByteArray(0)
-            val role = nativeDecideRole(nonce, peerNonce)
+            if (characteristic.uuid != DEVICE_ID_UUID) return
+            val peerId = characteristic.value ?: ByteArray(0)
+            val role = nativeDecideRole(deviceId, peerId)
             if (role == ROLE_CENTRAL) {
                 enableNotifications(gatt)   // we keep this connection as the live link
             } else {

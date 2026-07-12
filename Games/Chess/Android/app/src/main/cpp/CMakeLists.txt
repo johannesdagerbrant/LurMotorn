@@ -35,6 +35,7 @@ target_link_libraries(onlychess
     lur::render
     lur::transport
     lur::net
+    lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math
     android   # NativeActivity / ANativeWindow
