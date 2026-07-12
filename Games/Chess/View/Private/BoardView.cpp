@@ -29,19 +29,26 @@ BoardLayout ComputeLayout(float Width, float Height) {
     return {(Width - BoardSize) * 0.5f, (Height - BoardSize) * 0.5f, Square};
 }
 
-// Screen-space top-left of a chess square's cell (White at the bottom).
-void CellTopLeft(const BoardLayout& L, Square S, float& X, float& Y) {
-    X = L.OriginX + (S % 8) * L.Square;
-    Y = L.OriginY + (7 - S / 8) * L.Square;  // rank 0 (White) at the bottom row
+// Screen-space top-left of a chess square's cell. Flip == false puts White at the
+// bottom; Flip == true rotates the board 180° so the Black player sees their own
+// pieces at the near edge.
+void CellTopLeft(const BoardLayout& L, Square S, bool Flip, float& X, float& Y) {
+    int File = S % 8;
+    int Rank = S / 8;
+    if (Flip) { File = 7 - File; Rank = 7 - Rank; }
+    X = L.OriginX + File * L.Square;
+    Y = L.OriginY + (7 - Rank) * L.Square;  // rank 0 at the bottom row (of this view)
 }
 
-// Map a screen point to a chess square, or NoSquare if outside the board.
-Square SquareAt(const BoardLayout& L, float X, float Y) {
+// Map a screen point to a chess square, or NoSquare if outside the board. Flip is
+// the same board orientation used by CellTopLeft, so touch matches what is drawn.
+Square SquareAt(const BoardLayout& L, float X, float Y, bool Flip) {
     const float Fx = (X - L.OriginX) / L.Square;
     const float Fy = (Y - L.OriginY) / L.Square;
     if (Fx < 0.0f || Fx >= 8.0f || Fy < 0.0f || Fy >= 8.0f) return NoSquare;
-    const int File = static_cast<int>(Fx);
-    const int Rank = 7 - static_cast<int>(Fy);
+    int File = static_cast<int>(Fx);
+    int Rank = 7 - static_cast<int>(Fy);
+    if (Flip) { File = 7 - File; Rank = 7 - Rank; }
     return static_cast<Square>(Rank * 8 + File);
 }
 
@@ -55,6 +62,8 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     LightSquare = Renderer->CreateMaterial(MaterialDesc{0, Color{0.93f, 0.85f, 0.70f, 1.0f}, false});
     DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
     Highlight   = Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
+
+    StatusBar.CreateResources(Renderer);  // engine link-state widget owns its palette
 
     // Expand each single-channel coverage mask to RGBA (white, mask as alpha) and
     // upload once; the material tint supplies the piece colour at draw time.
@@ -98,7 +107,7 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     MoveList Legal;
     Legal.Count = 0;
     if (Selected != NoSquare) {
-        float X, Y; CellTopLeft(L, Selected, X, Y);
+        float X, Y; CellTopLeft(L, Selected, ShouldFlipBoard, X, Y);
         Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X, Y, Sq));
         GenerateLegalMoves(Position, Legal);
     }
@@ -113,7 +122,7 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         }
         if (Type == EPieceType::None) continue;
 
-        float X, Y; CellTopLeft(L, S, X, Y);
+        float X, Y; CellTopLeft(L, S, ShouldFlipBoard, X, Y);
         const int Idx = static_cast<int>(Type);
         const float FillSize = Sq * 0.90f;
         const float FillOff  = (Sq - FillSize) * 0.5f;
@@ -131,8 +140,18 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     for (int i = 0; i < Legal.Count; ++i) {
         const Move& Mv = Legal.Moves[i];
         if (Mv.From != Selected) continue;
-        float X, Y; CellTopLeft(L, Mv.To, X, Y);
+        float X, Y; CellTopLeft(L, Mv.To, ShouldFlipBoard, X, Y);
         Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X + DotOff, Y + DotOff, Dot));
+    }
+
+    // Link-state indicator: hand the engine widget a slim rect in the top margin;
+    // it owns the colour per state. Absent in a local hot-seat (no session).
+    if (Net != nullptr) {
+        const float Inset = Sq * 0.12f;
+        const float MaxH  = L.OriginY - 2.0f * Inset;   // available top-margin height
+        float BarH = Sq * 0.5f;
+        if (BarH > MaxH) BarH = MaxH;
+        StatusBar.Draw(Renderer, Net->GetLinkState(), L.OriginX, Inset, Sq * 8.0f, BarH);
     }
 
     Renderer->EndFrame();
@@ -142,9 +161,20 @@ void BoardView::AttachSession(Lur::Net::Session* Session) {
     Net = Session;
     Net->SetReadyHandler([this] {
         MyColor = (Net->GetSeat() == 0) ? EColor::White : EColor::Black;
+        ShouldFlipBoard = (MyColor == EColor::Black);   // Black views from its own side
     });
     Net->SetHandler(Lur::Net::EMsgType::Move,
                     [this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
+    // Reconnect resync (the engine's Session fires these; chess supplies the payload).
+    Net->SetHandler(Lur::Net::EMsgType::Sync,
+                    [this](const uint8_t* D, std::size_t N) { OnResync(D, N); });
+    Net->SetResyncHandler([this] { SendResync(); });
+}
+
+void BoardView::Apply(const Move& M) {
+    Position.MakeMove(M);
+    History.push_back(M);
+    Selected = NoSquare;
 }
 
 void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
@@ -155,19 +185,43 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     const Move Mv = DecodeMove(R, Legal);
     if (!R.IsOk() || Mv == Move{}) return;                 // corrupt/out-of-range: desync guard
     if (Position.SideToMove == MyColor) return;            // not the peer's turn: ignore
-    Position.MakeMove(Mv);
-    Selected = NoSquare;
+    Apply(Mv);
+}
+
+// Reconnect resync — the game-specific half of the engine's connection-flow shell.
+// On reconnect both peers send their full move history; because chess is turn-based
+// the boards can only differ by one side being ahead, so the shorter side adopts
+// the longer game and catches up. No ambiguous merge.
+void BoardView::SendResync() {
+    Lur::Serialization::BitWriter W;
+    EncodeGame(History, W);
+    const std::vector<uint8_t>& Bytes = W.Finish();
+    Net->Send(Lur::Net::EMsgType::Sync, Bytes.data(), Bytes.size());
+}
+
+void BoardView::OnResync(const uint8_t* Data, std::size_t Size) {
+    Board B;
+    std::vector<Move> H;
+    Lur::Serialization::BitReader R(Data, Size);
+    if (!DecodeGame(R, B, H)) return;               // corrupt: ignore
+    if (H.size() > History.size()) {                // peer is ahead — adopt its game
+        Position = B;
+        History = std::move(H);
+        Selected = NoSquare;
+    }
 }
 
 void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     const BoardLayout L = ComputeLayout(WidthPx, HeightPx);
-    const Square Sq = SquareAt(L, XPx, YPx);
+    const Square Sq = SquareAt(L, XPx, YPx, ShouldFlipBoard);
     if (Sq == NoSquare) { Selected = NoSquare; return; }
 
-    // In a networked game you may act only on your own turn, and only once the
-    // handshake has assigned colours. Local hot-seat (no session) is always "my turn".
+    // In a networked game you may act only on your own turn, and only while the link
+    // is live (Linked) — moving during a drop would desync the boards. Local hot-seat
+    // (no session) is always "my turn".
     const bool MyTurn = (Net == nullptr) ||
-                        (Net->IsReady() && Position.SideToMove == MyColor);
+                        (Net->GetLinkState() == Lur::Net::ELinkState::Linked &&
+                         Position.SideToMove == MyColor);
 
     const EColor Side = Position.SideToMove;
     const EPieceType Mine = PieceTypeAt(Position, Side, Sq);
@@ -195,8 +249,7 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
                 const std::vector<uint8_t>& Bytes = W.Finish();
                 Net->Send(Lur::Net::EMsgType::Move, Bytes.data(), Bytes.size());
             }
-            Position.MakeMove(*Chosen);
-            Selected = NoSquare;
+            Apply(*Chosen);
             return;
         }
     }

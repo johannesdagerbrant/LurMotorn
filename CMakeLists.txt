@@ -25,6 +25,7 @@ add_subdirectory(Modules/Pairing)
 add_subdirectory(Modules/Net)
 add_subdirectory(Modules/Render)
 add_subdirectory(Modules/Input)
+add_subdirectory(Modules/Hud)
 
 # --- Games ---
 add_subdirectory(Games/Chess)

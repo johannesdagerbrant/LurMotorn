@@ -1,7 +1,9 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 #include "Lur/Render/Renderer.h"
+#include "Lur/Hud/LinkStatusBar.h"
 #include "Chess/Board.h"
 
 namespace Lur::Net { class Session; }
@@ -31,17 +33,25 @@ public:
 private:
     // Decode a peer move (its index in our regenerated legal list) and apply it.
     void ApplyRemoteMove(const uint8_t* Data, std::size_t Size);
+    // Apply a move to the board AND record it in History (the resync source).
+    void Apply(const Move& M);
+    // Reconnect resync: send our full history / adopt the peer's if it is longer.
+    void SendResync();
+    void OnResync(const uint8_t* Data, std::size_t Size);
 
     Board  Position = Board::StartPosition();
     Square Selected = NoSquare;
+    std::vector<Move> History;                 // moves applied, in order (for resync)
 
     Lur::Net::Session* Net = nullptr;          // null => local hot-seat
     EColor MyColor = EColor::White;            // meaningful once Net && Net->IsReady()
+    bool   ShouldFlipBoard = false;                  // true when local player is Black
 
     Lur::Render::MeshHandle     QuadMesh = 0;
     Lur::Render::MaterialHandle LightSquare = 0;
     Lur::Render::MaterialHandle DarkSquare = 0;
     Lur::Render::MaterialHandle Highlight = 0;
+    Lur::Hud::LinkStatusBar     StatusBar;  // engine widget: draws the link-state bar
     // Per piece TYPE (Chess::EPieceType order), light- and dark-tinted materials
     // over that type's single silhouette texture (the "tint trick").
     Lur::Render::MaterialHandle PieceLight[6] = {};

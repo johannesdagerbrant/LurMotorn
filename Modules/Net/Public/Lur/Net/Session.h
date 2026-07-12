@@ -17,12 +17,22 @@ enum class EMsgType : uint8_t {
     Resign      = 4,
     DrawOffer   = 5,
     Keepalive   = 6,  // detect a silently dropped BLE link
+    Sync        = 7,  // full game-state resync after a reconnect (game-defined payload)
 };
 
 // Protocol version negotiated in Hello. Bump on any wire-format change so two
 // app versions refuse to mis-decode each other rather than corrupt a game.
 // v2: Hello gained a trailing "ready" byte for a loss-tolerant handshake.
 inline constexpr uint8_t ProtocolVersion = 2;
+
+// Coarse link state for UI feedback (is a game live? did the link fail?).
+enum class ELinkState : uint8_t {
+    Searching,        // no peer connected yet (advertising + scanning)
+    Handshaking,      // link up, exchanging Hello
+    Linked,           // handshake done — the game is live
+    Disconnected,     // the link came up once and then dropped
+    VersionMismatch,  // peer speaks a different ProtocolVersion
+};
 
 // The symmetric peer-to-peer session that sits between ITransport (raw datagrams)
 // and the game (typed messages). It owns two things:
@@ -61,11 +71,25 @@ public:
     // The local seat once ready (0 or 1, agreed opposite on the two peers), else -1.
     int GetSeat() const { return Ready ? Seat : -1; }
 
+    // Coarse link state for a UI indicator. Cheap; call each frame.
+    ELinkState GetLinkState() const {
+        if (VersionMismatchSeen) return ELinkState::VersionMismatch;
+        if (Transport != nullptr && Transport->IsConnected())
+            return Ready ? ELinkState::Linked : ELinkState::Handshaking;
+        return EverConnected ? ELinkState::Disconnected : ELinkState::Searching;
+    }
+
     // Register the handler for one application message type (e.g. EMsgType::Move).
     void SetHandler(EMsgType Type, Handler H);
 
     // Fired once, when the handshake completes and the seat is known.
     void SetReadyHandler(std::function<void()> H) { ReadyHandler = std::move(H); }
+
+    // Fired when the link is re-established after a drop (post-handshake). This is
+    // the generic reconnect-flow shell: the engine detects the reconnect and pokes
+    // the game, which resynchronises its own state (e.g. exchange move history via
+    // an EMsgType::Sync message) so both peers converge again.
+    void SetResyncHandler(std::function<void()> H) { ResyncHandler = std::move(H); }
 
     // Optional debug sink for handshake tracing. The app supplies a platform logger
     // (logcat / os_log); the session stays platform-free. No-op if unset.
@@ -91,9 +115,13 @@ private:
     bool     Ready        = false;
     int      Seat         = -1;
     unsigned TickCounter  = 0;
+    bool     EverConnected      = false;  // for Disconnected vs never-connected
+    bool     VersionMismatchSeen = false;
+    bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook
 
     Handler               Handlers[MaxMsgTypes];
     std::function<void()> ReadyHandler;
+    std::function<void()> ResyncHandler;
     LogFn                 Log;
 };
 

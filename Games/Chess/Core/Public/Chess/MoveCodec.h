@@ -1,4 +1,5 @@
 #pragma once
+#include <vector>
 #include "Chess/Board.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
@@ -23,5 +24,18 @@ void EncodeMove(const Move& MoveToSend, const MoveList& Legal,
 // (invalid) Move if the index is out of range — which the session must treat as a
 // protocol error rather than apply.
 Move DecodeMove(Lur::Serialization::BitReader& R, const MoveList& Legal);
+
+// Encode a whole game as its move sequence from the start position: a 16-bit ply
+// count, then each move as its index (EncodeMove) replayed from the start. This is
+// the reconnect-resync payload — because chess is turn-based, two boards can only
+// diverge by one side being ahead, so exchanging full histories lets the shorter
+// side replay the longer and catch up. Slim: ~1 byte per move.
+void EncodeGame(const std::vector<Move>& History, Lur::Serialization::BitWriter& W);
+
+// Inverse of EncodeGame: replay Count moves from the start position. Fills OutBoard
+// and OutHistory and returns true; returns false (leaving outputs unspecified) on a
+// corrupt/illegal stream, which the caller must treat as a failed resync.
+bool DecodeGame(Lur::Serialization::BitReader& R, Board& OutBoard,
+                std::vector<Move>& OutHistory);
 
 } // namespace Chess

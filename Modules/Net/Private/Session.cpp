@@ -27,6 +27,17 @@ void Session::Start(Lur::Transport::ITransport* NewTransport, uint64_t Nonce) {
 }
 
 void Session::Tick() {
+    const bool Connected = Transport != nullptr && Transport->IsConnected();
+
+    // Reconnect edge (post-handshake): the link came back after a drop. Poke the
+    // game to resynchronise its state. Generic flow — the payload is game-defined.
+    if (Ready && Connected && !PrevConnected) {
+        Logf("reconnected — requesting resync");
+        if (ResyncHandler) ResyncHandler();
+    }
+    PrevConnected = Connected;
+
+    if (Connected) EverConnected = true;  // latch, so a later drop reads as Disconnected
     if (Ready) return;
     // Resend on tick 0 (snappy once connected) and every HelloResendTicks after,
     // until the handshake completes.
@@ -77,6 +88,7 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
     if (Size < 1 + 8 + 1) { Logf("hello RECV malformed (size=%zu)", Size); return; }
     const uint8_t PeerVersion = Payload[0];
     if (PeerVersion != ProtocolVersion) {         // refuse to play across wire versions
+        VersionMismatchSeen = true;
         Logf("hello RECV version mismatch (peer=%u ours=%u)", PeerVersion, ProtocolVersion);
         return;
     }

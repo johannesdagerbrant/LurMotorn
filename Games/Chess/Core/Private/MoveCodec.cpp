@@ -32,4 +32,33 @@ Move DecodeMove(Lur::Serialization::BitReader& R, const MoveList& Legal) {
     return Move{};  // out-of-range: invalid move, session treats as protocol error
 }
 
+void EncodeGame(const std::vector<Move>& History, Lur::Serialization::BitWriter& W) {
+    W.WriteBits(static_cast<uint32_t>(History.size()), 16);  // ply count
+    Board B = Board::StartPosition();
+    for (const Move& M : History) {
+        MoveList Legal;
+        GenerateLegalMoves(B, Legal);
+        EncodeMove(M, Legal, W);   // index into the legal list at this ply
+        B.MakeMove(M);
+    }
+}
+
+bool DecodeGame(Lur::Serialization::BitReader& R, Board& OutBoard,
+                std::vector<Move>& OutHistory) {
+    const uint32_t Count = R.ReadBits(16);
+    if (!R.IsOk()) return false;
+    Board B = Board::StartPosition();
+    OutHistory.clear();
+    for (uint32_t i = 0; i < Count; ++i) {
+        MoveList Legal;
+        GenerateLegalMoves(B, Legal);
+        const Move M = DecodeMove(R, Legal);
+        if (!R.IsOk() || M == Move{}) return false;  // corrupt / illegal index
+        B.MakeMove(M);
+        OutHistory.push_back(M);
+    }
+    OutBoard = B;
+    return true;
+}
+
 } // namespace Chess

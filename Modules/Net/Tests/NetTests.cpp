@@ -153,12 +153,60 @@ static void TestChessMoveAcrossSessions() {
     CHECK(SamePosition(BoardWhite, BoardBlack));  // both boards advanced identically
 }
 
+static const Chess::Move* Find(const Chess::MoveList& L, Chess::Square From, Chess::Square To) {
+    for (int i = 0; i < L.Count; ++i)
+        if (L.Moves[i].From == From && L.Moves[i].To == To) return &L.Moves[i];
+    return nullptr;
+}
+
+// The reconnect-resync payload: a game's full move history round-trips through
+// EncodeGame/DecodeGame back to the identical position, and a shorter history is
+// a prefix of a longer one (so the "adopt the longer game" reconcile is sound).
+static void TestGameHistoryResync() {
+    // Play 1.e4 e5 2.Nf3 by From/To (rank-major squares).
+    const Chess::Square E2 = 12, E4 = 28, E7 = 52, E5 = 36, G1 = 6, F3 = 21;
+    Chess::Board B = Chess::Board::StartPosition();
+    std::vector<Chess::Move> History;
+    auto Play = [&](Chess::Square From, Chess::Square To) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(B, L);
+        const Chess::Move* M = Find(L, From, To);
+        CHECK(M != nullptr);
+        if (M) { B.MakeMove(*M); History.push_back(*M); }
+    };
+    Play(E2, E4); Play(E7, E5); Play(G1, F3);
+
+    Lur::Serialization::BitWriter W;
+    Chess::EncodeGame(History, W);
+    const std::vector<uint8_t>& Bytes = W.Finish();
+
+    Chess::Board Decoded;
+    std::vector<Chess::Move> DecodedHistory;
+    Lur::Serialization::BitReader R(Bytes.data(), Bytes.size());
+    CHECK(Chess::DecodeGame(R, Decoded, DecodedHistory));
+    CHECK(DecodedHistory.size() == History.size());
+    CHECK(SamePosition(Decoded, B));  // replayed to the identical position
+
+    // A 2-move prefix decodes to the position after 1.e4 e5 (reconcile soundness:
+    // the shorter game is a prefix of the longer, so replaying the longer is safe).
+    std::vector<Chess::Move> Prefix(History.begin(), History.begin() + 2);
+    Lur::Serialization::BitWriter PW;
+    Chess::EncodeGame(Prefix, PW);
+    const std::vector<uint8_t>& PBytes = PW.Finish();
+    Chess::Board PDecoded;
+    std::vector<Chess::Move> PHist;
+    Lur::Serialization::BitReader PR(PBytes.data(), PBytes.size());
+    CHECK(Chess::DecodeGame(PR, PDecoded, PHist));
+    CHECK(PHist.size() == 2);
+    CHECK(PDecoded.SideToMove == Chess::EColor::White);  // after two plies, White to move
+}
+
 int main() {
     TestHandshakeSeatsAreOpposite();
     TestHandshakeResendsUntilConnected();
     TestMessageFramingStripsType();
     TestVersionMismatchRefused();
     TestChessMoveAcrossSessions();
+    TestGameHistoryResync();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");
