@@ -192,23 +192,10 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
 
 ## Documentation (CodeViewer sessions)
 
-Completed phases are documented as **focused** CodeViewer walkthroughs kept in
-`CodeViewerSessions/`, committed as living documentation. **One session per phase** — do not grow a
-single giant session.
-
-**Every session's `summary` (its overview / intro) must include a Lexicon** — a short glossary of
-the relevant lingo and abbreviations used in that session (e.g. perft, bitboard, EP, FEN, LSB,
-MoltenVK, RFCOMM), so a reader can follow the walkthrough without external lookups.
-
 Recipe: the create tool writes `<slug>.codeviewer` into its `directory` with `base_dir: "."`. Author
 it with `directory` = the repo root (so code paths validate during authoring), then move the file
 into `CodeViewerSessions/` and patch `base_dir` from `"."` to `".."` so code paths still resolve to
 the repo root. Use `symbol`/anchor ranges; avoid parentheses in anchors (regex).
-
-**CodeViewer sessions are created on request, not as a mandatory pre-push gate.** The user asks for
-a walkthrough when they want one; do not block pushing on authoring/reviewing a session, and do not
-proactively create one unless asked. (Earlier the session was a hard pre-push gate; the user dropped
-that — they'll request CodeViewer sessions when they want them.)
 
 ## Version control
 
