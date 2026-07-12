@@ -81,12 +81,25 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     }
 }
 
+bool BoardView::FlipBoard() const {
+    return State != nullptr && State->HasIdentity() && State->MyColor() == EColor::Black;
+}
+
+bool BoardView::CanMoveNow() const {
+    if (State == nullptr) return false;
+    if (!State->HasIdentity()) return true;   // local hot-seat: either side may tap
+    return Net != nullptr &&
+           Net->GetLinkState() == Lur::Net::ELinkState::Linked &&
+           State->IsMyTurn();
+}
+
 void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx) {
     using namespace Lur::Render;
     using Lur::Math::Mat4;
 
     const BoardLayout L = ComputeLayout(WidthPx, HeightPx);
     const float Sq = L.Square;
+    const bool  Flip = FlipBoard();
     auto CellModel = [](float X, float Y, float Size) {
         return Mat4::Translation({X, Y, 0.0f}) * Mat4::Scale({Size, Size, 1.0f});
     };
@@ -102,46 +115,50 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         }
     }
 
-    // Selected-square highlight (under the pieces); generate the legal moves once
-    // to both highlight the selection and dot its targets below.
-    MoveList Legal;
-    Legal.Count = 0;
-    if (Selected != NoSquare) {
-        float X, Y; CellTopLeft(L, Selected, ShouldFlipBoard, X, Y);
-        Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X, Y, Sq));
-        GenerateLegalMoves(Position, Legal);
-    }
+    if (State != nullptr) {
+        const Board& B = State->CurrentBoard();
 
-    // Pieces.
-    for (Square S = 0; S < 64; ++S) {
-        EPieceType Type = PieceTypeAt(Position, EColor::White, S);
-        bool White = true;
-        if (Type == EPieceType::None) {
-            Type = PieceTypeAt(Position, EColor::Black, S);
-            White = false;
+        // Selected-square highlight (under the pieces); generate the legal moves once
+        // to both highlight the selection and dot its targets below.
+        MoveList Legal;
+        Legal.Count = 0;
+        if (Selected != NoSquare) {
+            float X, Y; CellTopLeft(L, Selected, Flip, X, Y);
+            Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X, Y, Sq));
+            GenerateLegalMoves(B, Legal);
         }
-        if (Type == EPieceType::None) continue;
 
-        float X, Y; CellTopLeft(L, S, ShouldFlipBoard, X, Y);
-        const int Idx = static_cast<int>(Type);
-        const float FillSize = Sq * 0.90f;
-        const float FillOff  = (Sq - FillSize) * 0.5f;
-        const float OutSize  = FillSize * 1.08f;
-        const float OutOff   = (Sq - OutSize) * 0.5f;
-        const MaterialHandle Fill    = White ? PieceLight[Idx] : PieceDark[Idx];
-        const MaterialHandle Outline = White ? PieceDark[Idx]  : PieceLight[Idx];
-        Renderer->DrawMesh(QuadMesh, Outline, CellModel(X + OutOff, Y + OutOff, OutSize));
-        Renderer->DrawMesh(QuadMesh, Fill, CellModel(X + FillOff, Y + FillOff, FillSize));
-    }
+        // Pieces.
+        for (Square S = 0; S < 64; ++S) {
+            EPieceType Type = PieceTypeAt(B, EColor::White, S);
+            bool White = true;
+            if (Type == EPieceType::None) {
+                Type = PieceTypeAt(B, EColor::Black, S);
+                White = false;
+            }
+            if (Type == EPieceType::None) continue;
 
-    // Legal-target dots (over the pieces, so captures show too).
-    const float Dot = Sq * 0.30f;
-    const float DotOff = (Sq - Dot) * 0.5f;
-    for (int i = 0; i < Legal.Count; ++i) {
-        const Move& Mv = Legal.Moves[i];
-        if (Mv.From != Selected) continue;
-        float X, Y; CellTopLeft(L, Mv.To, ShouldFlipBoard, X, Y);
-        Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X + DotOff, Y + DotOff, Dot));
+            float X, Y; CellTopLeft(L, S, Flip, X, Y);
+            const int Idx = static_cast<int>(Type);
+            const float FillSize = Sq * 0.90f;
+            const float FillOff  = (Sq - FillSize) * 0.5f;
+            const float OutSize  = FillSize * 1.08f;
+            const float OutOff   = (Sq - OutSize) * 0.5f;
+            const MaterialHandle Fill    = White ? PieceLight[Idx] : PieceDark[Idx];
+            const MaterialHandle Outline = White ? PieceDark[Idx]  : PieceLight[Idx];
+            Renderer->DrawMesh(QuadMesh, Outline, CellModel(X + OutOff, Y + OutOff, OutSize));
+            Renderer->DrawMesh(QuadMesh, Fill, CellModel(X + FillOff, Y + FillOff, FillSize));
+        }
+
+        // Legal-target dots (over the pieces, so captures show too).
+        const float Dot = Sq * 0.30f;
+        const float DotOff = (Sq - Dot) * 0.5f;
+        for (int i = 0; i < Legal.Count; ++i) {
+            const Move& Mv = Legal.Moves[i];
+            if (Mv.From != Selected) continue;
+            float X, Y; CellTopLeft(L, Mv.To, Flip, X, Y);
+            Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X + DotOff, Y + DotOff, Dot));
+        }
     }
 
     // Link-state indicator: hand the engine widget a slim rect in the top margin;
@@ -159,77 +176,40 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
 
 void BoardView::AttachSession(Lur::Net::Session* Session) {
     Net = Session;
-    Net->SetReadyHandler([this] {
-        MyColor = (Net->GetSeat() == 0) ? EColor::White : EColor::Black;
-        ShouldFlipBoard = (MyColor == EColor::Black);   // Black views from its own side
-    });
+    // The view only needs peer moves + the link state. Identity/colour and the
+    // link-time record sync are wired by the app (ChessMatchState + SyncManager).
     Net->SetHandler(Lur::Net::EMsgType::Move,
                     [this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
-    // Reconnect resync (the engine's Session fires these; chess supplies the payload).
-    Net->SetHandler(Lur::Net::EMsgType::Sync,
-                    [this](const uint8_t* D, std::size_t N) { OnResync(D, N); });
-    Net->SetResyncHandler([this] { SendResync(); });
-}
-
-void BoardView::Apply(const Move& M) {
-    Position.MakeMove(M);
-    History.push_back(M);
-    Selected = NoSquare;
 }
 
 void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
+    if (State == nullptr) return;
     // Regenerate the identical legal list from our in-sync position; move ORDER is
     // the wire protocol, so the peer's index maps back to the exact same move.
-    MoveList Legal; GenerateLegalMoves(Position, Legal);
+    MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);
     Lur::Serialization::BitReader R(Data, Size);
     const Move Mv = DecodeMove(R, Legal);
-    if (!R.IsOk() || Mv == Move{}) return;                 // corrupt/out-of-range: desync guard
-    if (Position.SideToMove == MyColor) return;            // not the peer's turn: ignore
-    Apply(Mv);
-}
-
-// Reconnect resync — the game-specific half of the engine's connection-flow shell.
-// On reconnect both peers send their full move history; because chess is turn-based
-// the boards can only differ by one side being ahead, so the shorter side adopts
-// the longer game and catches up. No ambiguous merge.
-void BoardView::SendResync() {
-    Lur::Serialization::BitWriter W;
-    EncodeGame(History, W);
-    const std::vector<uint8_t>& Bytes = W.Finish();
-    Net->Send(Lur::Net::EMsgType::Sync, Bytes.data(), Bytes.size());
-}
-
-void BoardView::OnResync(const uint8_t* Data, std::size_t Size) {
-    Board B;
-    std::vector<Move> H;
-    Lur::Serialization::BitReader R(Data, Size);
-    if (!DecodeGame(R, B, H)) return;               // corrupt: ignore
-    if (H.size() > History.size()) {                // peer is ahead — adopt its game
-        Position = B;
-        History = std::move(H);
-        Selected = NoSquare;
-    }
+    if (!R.IsOk() || Mv == Move{}) return;                         // corrupt/out-of-range guard
+    if (State->HasIdentity() && State->SideToMove() == State->MyColor()) return;  // not the peer's turn
+    State->ApplyMove(Mv);
+    Selected = NoSquare;
 }
 
 void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
+    if (State == nullptr) return;
     const BoardLayout L = ComputeLayout(WidthPx, HeightPx);
-    const Square Sq = SquareAt(L, XPx, YPx, ShouldFlipBoard);
+    const Square Sq = SquareAt(L, XPx, YPx, FlipBoard());
     if (Sq == NoSquare) { Selected = NoSquare; return; }
 
-    // In a networked game you may act only on your own turn, and only while the link
-    // is live (Linked) — moving during a drop would desync the boards. Local hot-seat
-    // (no session) is always "my turn".
-    const bool MyTurn = (Net == nullptr) ||
-                        (Net->GetLinkState() == Lur::Net::ELinkState::Linked &&
-                         Position.SideToMove == MyColor);
-
-    const EColor Side = Position.SideToMove;
-    const EPieceType Mine = PieceTypeAt(Position, Side, Sq);
+    const bool MyTurn = CanMoveNow();
+    const Board& B = State->CurrentBoard();
+    const EColor Side = B.SideToMove;
+    const EPieceType Mine = PieceTypeAt(B, Side, Sq);
 
     if (Selected != NoSquare && MyTurn) {
         // Try to move Selected -> Sq. Promotions appear as 4 entries (Q/R/B/N) for
         // the same From/To; default to the queen for now (a picker comes later).
-        MoveList Legal; GenerateLegalMoves(Position, Legal);
+        MoveList Legal; GenerateLegalMoves(B, Legal);
         const Move* Chosen = nullptr;
         for (int i = 0; i < Legal.Count; ++i) {
             const Move& M = Legal.Moves[i];
@@ -249,7 +229,8 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
                 const std::vector<uint8_t>& Bytes = W.Finish();
                 Net->Send(Lur::Net::EMsgType::Move, Bytes.data(), Bytes.size());
             }
-            Apply(*Chosen);
+            State->ApplyMove(*Chosen);
+            Selected = NoSquare;
             return;
         }
     }

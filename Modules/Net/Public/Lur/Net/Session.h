@@ -2,6 +2,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <string>
+#include <string_view>
 #include "Lur/Transport/Transport.h"
 
 namespace Lur::Net {
@@ -23,7 +25,10 @@ enum class EMsgType : uint8_t {
 // Protocol version negotiated in Hello. Bump on any wire-format change so two
 // app versions refuse to mis-decode each other rather than corrupt a game.
 // v2: Hello gained a trailing "ready" byte for a loss-tolerant handshake.
-inline constexpr uint8_t ProtocolVersion = 2;
+// v3: Hello carries the persistent device GUID (was a random session nonce), so
+//     each peer learns the other's stable identity for colour + the per-opponent
+//     stats key (issue #18), independent of the BLE radio role.
+inline constexpr uint8_t ProtocolVersion = 3;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {
@@ -37,12 +42,11 @@ enum class ELinkState : uint8_t {
 // The symmetric peer-to-peer session that sits between ITransport (raw datagrams)
 // and the game (typed messages). It owns two things:
 //
-//   1. The Hello HANDSHAKE. On connect each peer sends its ProtocolVersion + a
-//      random 64-bit nonce. Comparing the two nonces yields a "seat" (0 or 1) that
-//      the two peers agree on but resolve to OPPOSITE values — a deterministic
-//      tie-break, so authority is NOT taken from the BLE peripheral/central role
-//      (which is a radio mechanic only) and there is no "host". The chess layer
-//      maps seat 0 -> White, seat 1 -> Black.
+//   1. The Hello HANDSHAKE. On connect each peer sends its ProtocolVersion + its
+//      persistent device GUID, so each learns the other's stable identity. The game
+//      derives colour + the per-opponent stats key from the two GUIDs (GUID order +
+//      match parity) — independent of the BLE peripheral/central role (a radio
+//      mechanic only), so there is no "host".
 //
 //   2. MESSAGE FRAMING. Send() prepends the EMsgType byte; inbound datagrams are
 //      dispatched to a per-type handler. The session is game-agnostic — it moves
@@ -55,11 +59,11 @@ class Session {
 public:
     using Handler = std::function<void(const uint8_t* Payload, std::size_t Size)>;
 
-    // Begin the session over Transport (which must outlive the session). LocalNonce
-    // seeds the seat tie-break; the caller supplies platform randomness and it must
-    // differ from the peer's (a 64-bit random value collides with negligible
-    // probability). Installs the transport receiver and sends the first Hello.
-    void Start(Lur::Transport::ITransport* NewTransport, uint64_t Nonce);
+    // Begin the session over Transport (which must outlive the session). LocalGuid is
+    // this device's persistent id (Lur::Save::LoadOrCreateDeviceId); it is exchanged
+    // in the Hello so each peer learns the other's stable identity. Installs the
+    // transport receiver and sends the first Hello.
+    void Start(Lur::Transport::ITransport* NewTransport, std::string_view LocalGuid);
 
     // Drive Hello retransmission. Call periodically (e.g. once per rendered frame):
     // the first Hello can be dropped when it is sent before the BLE link is up, so
@@ -68,8 +72,10 @@ public:
 
     bool IsReady() const { return Ready; }
 
-    // The local seat once ready (0 or 1, agreed opposite on the two peers), else -1.
-    int GetSeat() const { return Ready ? Seat : -1; }
+    // The peer's persistent device id once ready, else empty. The game pairs it with
+    // our own id to derive colour + the per-opponent stats key (independent of the
+    // BLE radio role).
+    const std::string& GetPeerGuid() const { return PeerGuid; }
 
     // Coarse link state for a UI indicator. Cheap; call each frame.
     ELinkState GetLinkState() const {
@@ -107,8 +113,9 @@ private:
     void OnHello(const uint8_t* Payload, std::size_t Size);
     void Logf(const char* Fmt, ...);
 
-    static constexpr int      MaxMsgTypes     = 8;   // covers EMsgType 0..6
-    static constexpr unsigned HelloResendTicks = 30; // ~0.5s at 60 fps
+    static constexpr int         MaxMsgTypes     = 8;   // covers EMsgType 0..6
+    static constexpr unsigned    HelloResendTicks = 30; // ~0.5s at 60 fps
+    static constexpr std::size_t GuidLen          = 32;  // 128-bit id as hex (Lur::Save::DeviceIdHexLen)
 
     // Link liveness (assuming ~60 fps ticks). Once ready we send a Keepalive every
     // second; if NO datagram arrives for LinkTimeoutTicks we declare the link dead
@@ -120,10 +127,9 @@ private:
     static constexpr unsigned LinkTimeoutTicks = 300; // ~5s of silence -> dead
 
     Lur::Transport::ITransport* Transport = nullptr;
-    uint64_t LocalNonce   = 0;
-    uint64_t PeerNonce    = 0;
+    std::string LocalGuid;
+    std::string PeerGuid;
     bool     Ready        = false;
-    int      Seat         = -1;
     unsigned TickCounter  = 0;
     unsigned KeepaliveCounter = 0;   // ticks since our last keepalive send
     unsigned SinceRecvTicks   = 0;   // ticks since ANY datagram arrived (liveness)

@@ -15,14 +15,14 @@ void Session::Logf(const char* Fmt, ...) {
     Log(Buf);
 }
 
-void Session::Start(Lur::Transport::ITransport* NewTransport, uint64_t Nonce) {
+void Session::Start(Lur::Transport::ITransport* NewTransport, std::string_view Guid) {
     Transport = NewTransport;
-    LocalNonce = Nonce;
+    LocalGuid = std::string(Guid);
     if (Transport == nullptr) return;
     Transport->SetReceiver([this](const uint8_t* Data, std::size_t Size) {
         OnDatagram(Data, Size);
     });
-    Logf("start: localNonce lo=%08X", static_cast<uint32_t>(LocalNonce));
+    Logf("start: local id set (%zu bytes)", LocalGuid.size());
     SendHello();  // best-effort; if the link isn't up yet, Tick() resends
 }
 
@@ -75,13 +75,13 @@ void Session::SendHello() {
     // Sending before the link is up would just be dropped; skip and let Tick retry.
     if (Transport == nullptr) return;
     if (!Transport->IsConnected()) { Logf("hello: link not up yet"); return; }
-    uint8_t Payload[1 + 8 + 1];
+    uint8_t Payload[1 + GuidLen + 1];
     Payload[0] = ProtocolVersion;
-    for (int i = 0; i < 8; ++i)                   // little-endian nonce
-        Payload[1 + i] = static_cast<uint8_t>((LocalNonce >> (8 * i)) & 0xFF);
-    Payload[9] = Ready ? 1 : 0;                   // let the peer know if we're done
+    for (std::size_t i = 0; i < GuidLen; ++i)     // our device id (zero-padded if short)
+        Payload[1 + i] = i < LocalGuid.size() ? static_cast<uint8_t>(LocalGuid[i]) : 0;
+    Payload[1 + GuidLen] = Ready ? 1 : 0;         // let the peer know if we're done
     Send(EMsgType::Hello, Payload, sizeof(Payload));
-    Logf("hello SENT (nonce lo=%08X ready=%d)", static_cast<uint32_t>(LocalNonce), Ready ? 1 : 0);
+    Logf("hello SENT (ready=%d)", Ready ? 1 : 0);
 }
 
 void Session::SendKeepalive() {
@@ -106,7 +106,7 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
 }
 
 void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
-    if (Size < 1 + 8 + 1) { Logf("hello RECV malformed (size=%zu)", Size); return; }
+    if (Size < 1 + GuidLen + 1) { Logf("hello RECV malformed (size=%zu)", Size); return; }
     const uint8_t PeerVersion = Payload[0];
     if (PeerVersion != ProtocolVersion) {         // refuse to play across wire versions
         VersionMismatchSeen = true;
@@ -114,27 +114,22 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
         return;
     }
 
-    uint64_t Nonce = 0;
-    for (int i = 0; i < 8; ++i) Nonce |= static_cast<uint64_t>(Payload[1 + i]) << (8 * i);
-    const bool PeerReady = Payload[9] != 0;
-    PeerNonce = Nonce;
-    Logf("hello RECV (peerNonce lo=%08X peerReady=%d oursReady=%d)",
-         static_cast<uint32_t>(PeerNonce), PeerReady ? 1 : 0, Ready ? 1 : 0);
+    PeerGuid.assign(reinterpret_cast<const char*>(Payload + 1), GuidLen);
+    const bool PeerReady = Payload[1 + GuidLen] != 0;
+    Logf("hello RECV (peerReady=%d oursReady=%d)", PeerReady ? 1 : 0, Ready ? 1 : 0);
 
     if (Ready) {
-        // We're done. If the peer isn't yet, re-send our Hello so it receives our
-        // nonce even if our earlier reply was dropped (e.g. sent before its link was
-        // up). Once the peer is also ready it stops asking, so this can't storm.
+        // We're done. If the peer isn't yet, re-send our Hello so it receives our id
+        // even if our earlier reply was dropped (e.g. sent before its link was up).
+        // Once the peer is also ready it stops asking, so this can't storm.
         if (!PeerReady) SendHello();
         return;
     }
-    if (LocalNonce == PeerNonce) return;          // (astronomically unlikely) tie: wait
+    if (LocalGuid == PeerGuid) return;            // identical id (shouldn't happen): wait
 
-    // A total order on distinct nonces hands the two peers opposite seats for free.
-    Seat = (LocalNonce > PeerNonce) ? 0 : 1;
     Ready = true;
-    Logf("READY: seat=%d (%s)", Seat, Seat == 0 ? "White" : "Black");
-    SendHello();  // ready-flagged reply, so the peer learns our nonce + that we're set
+    Logf("READY (peer id known)");
+    SendHello();  // ready-flagged reply, so the peer learns our id + that we're set
     if (ReadyHandler) ReadyHandler();
 }
 

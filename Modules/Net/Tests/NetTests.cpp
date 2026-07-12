@@ -31,21 +31,23 @@ static int GFailures = 0;
         }                                                                 \
     } while (0)
 
+// A 32-char device id filled with one character (matches Lur::Save::DeviceIdHexLen).
+static std::string Guid(char C) { return std::string(32, C); }
+
 // Two sessions over a linked loopback pair, already connected before Start, must
-// both become ready with OPPOSITE seats — and the larger nonce takes seat 0.
-static void TestHandshakeSeatsAreOpposite() {
+// both become ready and each learns the OTHER's device id from the Hello.
+static void TestHandshakeExchangesGuids() {
     LoopbackTransport TA, TB;
     LoopbackTransport::Link(TA, TB);
 
     Session SA, SB;
-    SA.Start(&TA, /*nonce*/ 100);
-    SB.Start(&TB, /*nonce*/ 200);
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
 
     CHECK(SA.IsReady());
     CHECK(SB.IsReady());
-    CHECK(SA.GetSeat() != SB.GetSeat());
-    CHECK(SB.GetSeat() == 0);  // larger nonce (200) -> seat 0
-    CHECK(SA.GetSeat() == 1);
+    CHECK(SA.GetPeerGuid() == Guid('b'));
+    CHECK(SB.GetPeerGuid() == Guid('a'));
 }
 
 // The first Hello is dropped when it is sent before the link is up (IsConnected
@@ -54,8 +56,8 @@ static void TestHandshakeResendsUntilConnected() {
     Session SA, SB;
     LoopbackTransport TA, TB;
 
-    SA.Start(&TA, 7);  // not linked yet -> Hello skipped (not connected)
-    SB.Start(&TB, 9);
+    SA.Start(&TA, Guid('a'));  // not linked yet -> Hello skipped (not connected)
+    SB.Start(&TB, Guid('b'));
     CHECK(!SA.IsReady());
     CHECK(!SB.IsReady());
 
@@ -63,7 +65,7 @@ static void TestHandshakeResendsUntilConnected() {
     for (int i = 0; i < 4 && !(SA.IsReady() && SB.IsReady()); ++i) { SA.Tick(); SB.Tick(); }
 
     CHECK(SA.IsReady() && SB.IsReady());
-    CHECK(SB.GetSeat() == 0 && SA.GetSeat() == 1);  // 9 > 7 -> SB seat 0
+    CHECK(SA.GetPeerGuid() == Guid('b') && SB.GetPeerGuid() == Guid('a'));
 }
 
 // Send() prepends the type byte; the far side's per-type handler receives the
@@ -72,8 +74,8 @@ static void TestMessageFramingStripsType() {
     LoopbackTransport TA, TB;
     LoopbackTransport::Link(TA, TB);
     Session SA, SB;
-    SA.Start(&TA, 1);
-    SB.Start(&TB, 2);
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
 
     std::vector<uint8_t> Got;
     SB.SetHandler(EMsgType::Move, [&](const uint8_t* D, std::size_t N) { Got.assign(D, D + N); });
@@ -90,13 +92,13 @@ static void TestVersionMismatchRefused() {
     LoopbackTransport T, Peer;
     LoopbackTransport::Link(T, Peer);
     Session S;
-    S.Start(&T, 500);
+    S.Start(&T, Guid('a'));
 
-    uint8_t Hello[1 + 8 + 1 + 1] = {};                     // type + version + nonce + ready
+    uint8_t Hello[1 + 1 + 32 + 1] = {};                    // type + version + guid + ready
     Hello[0] = static_cast<uint8_t>(EMsgType::Hello);
     Hello[1] = static_cast<uint8_t>(ProtocolVersion + 1);  // wrong version
-    Hello[2] = 0x2C;                                        // some nonce (600)
-    Hello[10] = 1;                                          // ready flag
+    for (int i = 0; i < 32; ++i) Hello[2 + i] = 'c';       // some guid
+    Hello[34] = 1;                                          // ready flag
     Peer.Send(Hello, sizeof(Hello));
     CHECK(!S.IsReady());
 }
@@ -115,14 +117,14 @@ struct SilentTransport : Lur::Transport::ITransport {
     void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
 };
 
-// Build a valid peer Hello datagram (type + version + nonce + ready), used to push a
+// Build a valid peer Hello datagram (type + version + guid + ready), used to push a
 // Session to Ready without a live peer.
-static void MakeHello(uint8_t (&H)[11], uint8_t NonceLow, bool Ready) {
+static void MakeHello(uint8_t (&H)[35], char GuidChar, bool Ready) {
     for (auto& B : H) B = 0;
     H[0]  = static_cast<uint8_t>(EMsgType::Hello);
     H[1]  = ProtocolVersion;
-    H[2]  = NonceLow;             // low byte of the peer nonce
-    H[10] = Ready ? 1 : 0;
+    for (int i = 0; i < 32; ++i) H[2 + i] = static_cast<uint8_t>(GuidChar);
+    H[34] = Ready ? 1 : 0;
 }
 
 // After going Ready, a Session whose peer falls silent must time out and ask the
@@ -130,9 +132,9 @@ static void MakeHello(uint8_t (&H)[11], uint8_t NonceLow, bool Ready) {
 static void TestKeepaliveTimeoutResetsLink() {
     SilentTransport T;
     Session S;
-    S.Start(&T, /*nonce*/ 42);
-    uint8_t H[11];
-    MakeHello(H, /*peer nonce*/ 7, /*ready*/ true);  // 42 > 7 -> we take seat 0, become ready
+    S.Start(&T, Guid('a'));
+    uint8_t H[35];
+    MakeHello(H, 'b', /*ready*/ true);  // a valid peer Hello -> we become ready
     T.Deliver(H, sizeof(H));
     CHECK(S.IsReady());
 
@@ -145,9 +147,9 @@ static void TestKeepaliveTimeoutResetsLink() {
 static void TestKeepaliveKeepsLinkAlive() {
     SilentTransport T;
     Session S;
-    S.Start(&T, 42);
-    uint8_t H[11];
-    MakeHello(H, 7, true);
+    S.Start(&T, Guid('a'));
+    uint8_t H[35];
+    MakeHello(H, 'b', true);
     T.Deliver(H, sizeof(H));
     CHECK(S.IsReady());
 
@@ -168,17 +170,18 @@ static bool SamePosition(const Chess::Board& A, const Chess::Board& B) {
     return true;
 }
 
-// THE integration test: seat 0 (White) plays e2e4; the move's INDEX crosses the
-// session as a framed Move message; seat 1 decodes it against its own regenerated
-// legal list and applies it — landing on the identical position. Squares never
-// travel, only the index.
+// THE integration test: White plays e2e4; the move's INDEX crosses the session as a
+// framed Move message; Black decodes it against its own regenerated legal list and
+// applies it — landing on the identical position. Squares never travel, only the
+// index. (Colour is a game-layer concern now; here White is just the side that moves
+// first.)
 static void TestChessMoveAcrossSessions() {
     LoopbackTransport TWhite, TBlack;
     LoopbackTransport::Link(TWhite, TBlack);
     Session SWhite, SBlack;
-    SWhite.Start(&TWhite, 900);  // larger nonce -> seat 0 -> White
-    SBlack.Start(&TBlack, 100);
-    CHECK(SWhite.GetSeat() == 0 && SBlack.GetSeat() == 1);
+    SWhite.Start(&TWhite, Guid('w'));
+    SBlack.Start(&TBlack, Guid('b'));
+    CHECK(SWhite.IsReady() && SBlack.IsReady());
 
     Chess::Board BoardWhite = Chess::Board::StartPosition();
     Chess::Board BoardBlack = Chess::Board::StartPosition();
@@ -259,7 +262,7 @@ static void TestGameHistoryResync() {
 }
 
 int main() {
-    TestHandshakeSeatsAreOpposite();
+    TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
     TestMessageFramingStripsType();
     TestVersionMismatchRefused();

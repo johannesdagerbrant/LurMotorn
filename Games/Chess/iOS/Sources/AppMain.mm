@@ -10,12 +10,17 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 
-#include <random>
+#include <string>
+#include <vector>
 
 #include "Chess/Board.h"
+#include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Save/DeviceId.h"
+#include "Lur/Save/Store.h"
+#include "Lur/Save/SyncManager.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
 
@@ -35,6 +40,10 @@
     Chess::BoardView _View;
     Lur::Transport::ITransport* _Transport;  // owned by its translation unit
     Lur::Net::Session _Session;
+    Chess::ChessMatchState _Match;           // authoritative game state
+    Lur::Save::Store* _Store;                // heap: lives for the app
+    Lur::Save::SyncManager* _Sync;
+    std::string _DeviceId;
     CADisplayLink* _DisplayLink;
     bool _Ready;
 }
@@ -62,18 +71,43 @@
     os_log(OS_LOG_DEFAULT,
            "OnlyChess: Chess core alive: %d legal moves from the start position", Moves.Count);
 
-    // Wire the BLE transport into the net session: it runs the Hello handshake
-    // (deterministic seat -> colour, independent of the BLE radio role) and delivers
-    // the peer's moves to the shared BoardView (encoded/decoded via Chess::MoveCodec).
-    // A random nonce seeds the seat tie-break.
+    // Persistent device identity (issue #17/#18): the same GUID the BLE role uses,
+    // from Application Support. Drives colour + the per-opponent stats key.
+    NSArray<NSString*>* Dirs =
+        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
+    _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
+    _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
+    _Sync = new Lur::Save::SyncManager(*_Store, _Match);
+
+    // Wire the BLE transport into the net session. Hello exchanges the device GUIDs;
+    // the shared BoardView renders + mutates _Match and ships moves via MoveCodec.
+    // Colour comes from the two GUIDs, and the per-opponent record syncs once per link.
     _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
-    std::random_device Rd;
-    const uint64_t Nonce = (static_cast<uint64_t>(Rd()) << 32) ^ Rd();
     _Session.SetLogger([](const char* M) {
         os_log(OS_LOG_DEFAULT, "OnlyChess: Net: %{public}s", M);
     });
+
+    auto* Match = &_Match;
+    auto* Sync = _Sync;
+    auto* Session = &_Session;
+    std::string DeviceId = _DeviceId;
+    auto SendRecord = [Sync, Session] {
+        const std::vector<uint8_t> Snap = Sync->Snapshot();
+        Session->Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
+    };
+    Session->SetReadyHandler([Match, Sync, Session, DeviceId, SendRecord] {
+        Match->SetIdentity(DeviceId, Session->GetPeerGuid());  // colour + anchor
+        Sync->OnLink(Session->GetPeerGuid());                  // load our stored record
+        SendRecord();                                          // let the peer reconcile
+    });
+    Session->SetResyncHandler(SendRecord);                     // reconnect: re-sync records
+    Session->SetHandler(Lur::Net::EMsgType::Sync,
+                        [Sync](const uint8_t* D, std::size_t N) { Sync->OnSync(D, N); });
+
+    _View.SetState(&_Match);
     _View.AttachSession(&_Session);
-    _Session.Start(_Transport, Nonce);
+    _Session.Start(_Transport, _DeviceId);
 }
 
 // The renderer needs the layer's drawable size, which is only known after layout.

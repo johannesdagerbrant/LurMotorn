@@ -7,12 +7,17 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <random>
+#include <string>
+#include <vector>
 
 #include "Chess/Board.h"
+#include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Save/DeviceId.h"
+#include "Lur/Save/Store.h"
+#include "Lur/Save/SyncManager.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
 
@@ -25,6 +30,7 @@ struct AppState {
     bool Ready = false;
     Chess::BoardView View;
     Lur::Net::Session Session;
+    Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
 };
 
 void HandleCmd(android_app* App, int32_t Cmd) {
@@ -73,17 +79,37 @@ void android_main(android_app* App) {
     App->onAppCmd = HandleCmd;
     App->onInputEvent = HandleInput;  // tap to select / move pieces
 
-    // Wire the BLE transport into the net session: the session runs the Hello
-    // handshake (deterministic seat -> colour, independent of the BLE radio role)
-    // and delivers the peer's moves to the shared BoardView, which encodes/decodes
-    // via Chess::MoveCodec. A random nonce seeds the seat tie-break.
+    // Persistent device identity (issue #17/#18): the same GUID the BLE role uses,
+    // read from the app's internal data dir (== Context.filesDir, where the Kotlin
+    // radio reads it too, so both agree). Drives colour + the per-opponent stats key.
+    const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
+    Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
+    const std::string DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
+    Lur::Save::SyncManager Sync(Store, State.Match);
+
+    // Wire the BLE transport into the net session. The session Hello exchanges the
+    // device GUIDs; the shared BoardView renders + mutates State.Match and ships the
+    // peer's moves via Chess::MoveCodec. Colour comes from the two GUIDs (not the
+    // radio role). The per-opponent record syncs once per link establishment.
     auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
-    std::random_device Rd;
-    const uint64_t Nonce = (static_cast<uint64_t>(Rd()) << 32) ^ Rd();
     State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
+    State.View.SetState(&State.Match);
     State.View.AttachSession(&State.Session);
-    State.Session.Start(Transport, Nonce);
-    LOGI("Net session started (nonce hi=%08X)", static_cast<uint32_t>(Nonce >> 32));
+
+    auto SendRecord = [&State, &Sync] {
+        const std::vector<uint8_t> Snap = Sync.Snapshot();
+        State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
+    };
+    State.Session.SetReadyHandler([&State, &Sync, &SendRecord, &DeviceId] {
+        State.Match.SetIdentity(DeviceId, State.Session.GetPeerGuid());  // colour + anchor
+        Sync.OnLink(State.Session.GetPeerGuid());                        // load our stored record
+        SendRecord();                                                    // let the peer reconcile
+    });
+    State.Session.SetResyncHandler(SendRecord);                          // reconnect: re-sync records
+    State.Session.SetHandler(Lur::Net::EMsgType::Sync,
+                             [&Sync](const uint8_t* D, std::size_t N) { Sync.OnSync(D, N); });
+    State.Session.Start(Transport, DeviceId);
+    LOGI("Net session started (device id %zuB)", DeviceId.size());
 
     while (!App->destroyRequested) {
         State.Session.Tick();  // drive the Hello handshake until it completes
