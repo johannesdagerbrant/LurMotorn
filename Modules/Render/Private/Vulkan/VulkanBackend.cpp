@@ -331,14 +331,33 @@ private:
         App.pApplicationName = "OnlyChess";
         App.apiVersion = VK_API_VERSION_1_0;
 
+        // Which instance extensions does this Vulkan implementation actually expose?
+        // VK_KHR_portability_enumeration is a LOADER extension: it lets the loader
+        // enumerate portability drivers. On iOS we link MoltenVK statically and call
+        // it directly (no loader), so MoltenVK doesn't advertise it — requesting it
+        // unconditionally made vkCreateInstance fail with VK_ERROR_EXTENSION_NOT_
+        // PRESENT (-7). Add each requested extension only if it's present.
+        uint32_t AvailCount = 0;
+        vkEnumerateInstanceExtensionProperties(nullptr, &AvailCount, nullptr);
+        std::vector<VkExtensionProperties> Available(AvailCount);
+        vkEnumerateInstanceExtensionProperties(nullptr, &AvailCount, Available.data());
+        auto Has = [&](const char* Name) {
+            for (const VkExtensionProperties& E : Available)
+                if (std::strcmp(E.extensionName, Name) == 0) return true;
+            return false;
+        };
+
         uint32_t PlatCount = 0;
         const char* const* PlatExts = Vk::PlatformSurfaceExtensions(&PlatCount);
         std::vector<const char*> Exts;
         Exts.push_back(VK_KHR_SURFACE_EXTENSION_NAME);
         bool Portability = false;
         for (uint32_t i = 0; i < PlatCount; ++i) {
+            const bool IsPortabilityEnum =
+                std::strcmp(PlatExts[i], "VK_KHR_portability_enumeration") == 0;
+            if (IsPortabilityEnum && !Has(PlatExts[i])) continue;  // loader-only; skip
             Exts.push_back(PlatExts[i]);
-            if (std::strcmp(PlatExts[i], "VK_KHR_portability_enumeration") == 0) Portability = true;
+            if (IsPortabilityEnum) Portability = true;
         }
 
         VkInstanceCreateInfo Info{VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
