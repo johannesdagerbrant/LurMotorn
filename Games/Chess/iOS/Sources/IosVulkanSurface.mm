@@ -3,6 +3,7 @@
 // Vulkan code. (The Android counterpart is AndroidVulkanSurface.cpp.)
 #import <Foundation/Foundation.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <os/log.h>
 
 // Define before the FIRST include of vulkan.h so the Metal surface symbols are
 // exposed (PlatformSurface.h re-includes vulkan.h, guarded — so the define must
@@ -39,8 +40,14 @@ void PlatformDrawableSize(void* NativeHandle, uint32_t* Width, uint32_t* Height)
     *Height = static_cast<uint32_t>(Size.height);
 }
 
-void PlatformLog(bool /*Error*/, const char* Message) {
-    NSLog(@"OnlyChess: %s", Message);
+// Every backend log line streams to the dev host over syslog
+// (scripts/ios-syslog.bat) — the logcat analog. The "OnlyChess:" tag is the
+// filter; %{public}s is load-bearing: without it iOS redacts the dynamic string
+// to "<private>" when the device isn't attached to Xcode (i.e. exactly our case).
+void PlatformLog(bool Error, const char* Message) {
+    os_log_with_type(OS_LOG_DEFAULT,
+                     Error ? OS_LOG_TYPE_ERROR : OS_LOG_TYPE_DEFAULT,
+                     "OnlyChess: %{public}s", Message);
 }
 
 } // namespace Lur::Render::Vk

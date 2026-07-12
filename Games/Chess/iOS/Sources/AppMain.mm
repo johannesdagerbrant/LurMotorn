@@ -8,6 +8,7 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
+#import <os/log.h>
 
 #include "Chess/Board.h"
 #include "Chess/View/BoardView.h"
@@ -54,7 +55,8 @@
     Chess::Board Board = Chess::Board::StartPosition();
     Chess::MoveList Moves;
     Chess::GenerateLegalMoves(Board, Moves);
-    NSLog(@"OnlyChess: Chess core alive: %d legal moves from the start position", Moves.Count);
+    os_log(OS_LOG_DEFAULT,
+           "OnlyChess: Chess core alive: %d legal moves from the start position", Moves.Count);
 
     // Bring up BLE (engine seam). Real net/session wiring is #5; for now just
     // bounce one reply so a live two-phone link is observable.
@@ -79,7 +81,7 @@
     if (!_Ready) {
         _Renderer = Lur::Render::VulkanRenderer::Create();
         _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
-        NSLog(@"OnlyChess: Renderer init: %s", _Ready ? "ok" : "failed");
+        os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s", _Ready ? "ok" : "failed");
         if (_Ready) {
             _View.CreateResources(_Renderer);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
