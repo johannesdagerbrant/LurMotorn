@@ -220,34 +220,29 @@ and the Android/iOS builds when they're touched) before pushing.
 
 ## Working style
 
-The user reviews each completed phase as a focused CodeViewer walkthrough (see Documentation above).
-Favor explaining the C++/systems reasoning rather than only handing over code.
+Favor explaining the C++/systems reasoning rather than only handing over code. When the user wants a
+completed phase reviewed, they ask for a focused CodeViewer walkthrough (see Documentation).
 
 ## Current state
 
-The shared C++ core is implemented and **building + passing tests** on a VS-free host toolchain
-(g++ / Ninja via `build.ps1`): serialization codec, deterministic sim + math, module interfaces, a
-**perft-verified** chess rules engine + move codec, and the BLE transport contract (`BleProtocol.h`,
-`Loopback.h`, with host tests).
+The shared C++ core is host-green via `build.ps1`: serialization codec, deterministic sim + math,
+module interfaces, a **perft-verified** chess engine + move codec, the BLE transport contract, and
+per-opponent save records (`Modules/Save`).
 
-**The cross-platform BLE link works on real hardware.** As of 2026-06-21, an iPhone and an Android
-phone discover each other, pair, and exchange datagrams both directions over BLE with no server —
-verified live (ping `0xC5` / pong `0x5C` round-trip). Specifics:
-- **Android app** (`Games/Chess/Android`): builds via Gradle/NDK and runs on a Galaxy A14 with a real
-  BLE backend (`BleShim.kt` + `AndroidBleTransport.cpp`).
-- **iOS app** (`Games/Chess/iOS`): a minimal BLE-only app (no renderer yet) that **builds on the free
-  GitHub Actions macOS runner** (CMake → Xcode, no local Mac) and was sideloaded to an iPhone via
-  Sideloadly + a free Apple ID. `IosBleTransport.mm` is the CoreBluetooth backend.
-- **BLE role handshake is IN-BAND** (iOS cannot advertise custom data): both advertise the service
-  UUID + scan + run a GATT server with a readable nonce characteristic; the central reads the peer's
-  nonce, then `DecideBleRole` settles roles. Datagrams use **write-with-response both directions**.
-- **macOS CI** (`.github/workflows/macos-ci.yml`): builds the core under Apple clang, the iOS app for
-  the simulator, and uploads an unsigned device `.ipa` artifact — all free (public repo).
+**Two phones play real chess over BLE, on hardware** — an iPhone and an Android phone discover,
+pair, and play with no server: the move codec runs over the live link, the shared Vulkan renderer
+draws the board on both (MoltenVK on iOS), and touch moves pieces. The BLE role handshake is
+**in-band** (iOS can't advertise custom data): both advertise the service UUID, scan, and serve a
+readable **device-id** characteristic; the central reads the peer's id and `DecideBleRole` settles
+roles. A **persistent per-install device GUID** (`Modules/Save`) makes that role stable across
+restarts, with deterministic fast reconnect + a net keepalive liveness timeout (#17, done).
 
-**Next** (transport is done; make it a playable game): wire the chess move codec over the live link
-(#5 net/session — the codec already round-trips over the `ITransport` seam via the Phase A loopback
-test, and BLE is that same seam), the Vulkan renderer to draw the board (#4), then touch input.
-Threefold-repetition (#7) and magic bitboards (#1) are independent. See GitHub issues + memory.
+Both apps build with no local Mac: Android via Gradle/NDK (Galaxy A14); iOS via the free macOS CI
+(`.github/workflows/macos-ci.yml`), which uploads an unsigned device `.ipa` for sideloading.
+
+**In progress:** identity-based colour + link-time record sync so a reconnected game resumes the
+position and colours (#18 core landed; its net/view wiring + #19 next). Threefold-repetition (#7)
+and magic bitboards (#1) are independent. See GitHub issues + memory for live status.
 
 ## Scripts
 
