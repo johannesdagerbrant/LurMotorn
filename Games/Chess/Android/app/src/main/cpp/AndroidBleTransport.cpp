@@ -25,6 +25,7 @@ public:
     void Send(const uint8_t* Data, std::size_t Size) override;
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
+    void ResetLink() override;
 
     Receiver ReceiverFn;
     bool     Connected = false;
@@ -34,9 +35,10 @@ public:
 AndroidBleTransport g_Transport;
 
 // JNI plumbing cached at load / shim-registration time.
-JavaVM*   g_Vm        = nullptr;
-jobject   g_Shim      = nullptr;  // global ref to the Kotlin BleShim
-jmethodID g_SendMethod = nullptr; // BleShim.send([B)V
+JavaVM*   g_Vm         = nullptr;
+jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
+jmethodID g_SendMethod  = nullptr; // BleShim.send([B)V
+jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
 
 // Get a JNIEnv for the calling thread, attaching it if necessary. android_main
 // runs on a native thread the JVM doesn't know about, so Send() may need attach.
@@ -62,6 +64,17 @@ void AndroidBleTransport::Send(const uint8_t* Data, std::size_t Size) {
     Env->DeleteLocalRef(Arr);
 }
 
+// The net keepalive timed out — the peer is silently gone. Force the Kotlin radio to
+// drop the (dead) link and resume discovery, rather than waiting out the BLE
+// supervision timeout (10-20s) for a disconnect callback. This makes a killed-peer
+// drop detected in ~5s on Android too, matching iOS.
+void AndroidBleTransport::ResetLink() {
+    if (g_Shim == nullptr || g_ResetMethod == nullptr) return;
+    JNIEnv* Env = EnvForThisThread();
+    if (Env == nullptr) return;
+    Env->CallVoidMethod(g_Shim, g_ResetMethod);
+}
+
 } // namespace
 
 ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
@@ -81,7 +94,8 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
-    g_SendMethod = Env->GetMethodID(Cls, "send", "([B)V");
+    g_SendMethod  = Env->GetMethodID(Cls, "send", "([B)V");
+    g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
 }
 
 // --- JNI: the shared, cross-platform role tie-break (single source of truth). ---

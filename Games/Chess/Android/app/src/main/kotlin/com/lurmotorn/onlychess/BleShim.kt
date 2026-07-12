@@ -151,6 +151,15 @@ class BleShim(private val context: Context) {
         }
     }
 
+    /** Called FROM C++ when the net keepalive times out: treat the silently-gone peer
+     *  as a link loss now, instead of waiting out the BLE supervision timeout. */
+    @Suppress("unused")
+    fun resetLink() {
+        handler.post {
+            if (linked) { Log.i(TAG, "net keepalive timeout -> forcing link reset"); onLinkLost() }
+        }
+    }
+
     // --- Called from OnlyChessActivity once permissions are granted ---
 
     fun onPermissionsReady() {
