@@ -212,37 +212,16 @@ that — they'll request CodeViewer sessions when they want them.)
 
 ## Version control
 
-**Never branch. Always commit and _push directly to `master`_.** This repo is a solo,
-trunk-based workflow: no feature branches, no PRs. Commit each coherent, green change straight to
-`master` and push it. (This overrides the usual "branch first on the default branch" default —
-the user has explicitly chosen trunk-based here.) Keep `master` green: build + test (`build.ps1`,
-and the Android/iOS builds when they're touched) before pushing.
+**Never branch — commit straight to `master`.** This repo is a solo, trunk-based workflow: no
+feature branches, no PRs. (This overrides the usual "branch first on the default branch" default.)
+**Push only when the user asks** — commit freely as coherent, green changes land, but leave pushing
+`master` to an explicit request. Keep `master` green: build + test (`build.ps1`, and the
+Android/iOS builds when they're touched) before committing.
 
 ## Working style
 
 Favor explaining the C++/systems reasoning rather than only handing over code. When the user wants a
 completed phase reviewed, they ask for a focused CodeViewer walkthrough (see Documentation).
-
-## Current state
-
-The shared C++ core is host-green via `build.ps1`: serialization codec, deterministic sim + math,
-module interfaces, a **perft-verified** chess engine + move codec, the BLE transport contract, and
-per-opponent save records (`Modules/Save`).
-
-**Two phones play real chess over BLE, on hardware** — an iPhone and an Android phone discover,
-pair, and play with no server: the move codec runs over the live link, the shared Vulkan renderer
-draws the board on both (MoltenVK on iOS), and touch moves pieces. The BLE role handshake is
-**in-band** (iOS can't advertise custom data): both advertise the service UUID, scan, and serve a
-readable **device-id** characteristic; the central reads the peer's id and `DecideBleRole` settles
-roles. A **persistent per-install device GUID** (`Modules/Save`) makes that role stable across
-restarts, with deterministic fast reconnect + a net keepalive liveness timeout (#17, done).
-
-Both apps build with no local Mac: Android via Gradle/NDK (Galaxy A14); iOS via the free macOS CI
-(`.github/workflows/macos-ci.yml`), which uploads an unsigned device `.ipa` for sideloading.
-
-**In progress:** identity-based colour + link-time record sync so a reconnected game resumes the
-position and colours (#18 core landed; its net/view wiring + #19 next). Threefold-repetition (#7)
-and magic bitboards (#1) are independent. See GitHub issues + memory for live status.
 
 ## Scripts
 
