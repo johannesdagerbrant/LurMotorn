@@ -15,9 +15,12 @@ namespace Lur::Transport {
 // character, which is perfectly legal (a UUID is just a 128-bit number):
 //   Service        4C55524D-4F54-4F52-4E00-5472616E7370 = "LURM" "OT" "OR" "N\0" "Transp"
 //   Datagram char  4C55524D-4F54-4F52-4E01-446174616772 = "LURM" "OT" "OR" "N\1" "Datagr"
-//   Nonce char     4C55524D-4F54-4F52-4E02-4E6F6E636500 = "LURM" "OT" "OR" "N\2" "Nonce\0"
+//   Device-id char 4C55524D-4F54-4F52-4E02-4E6F6E636500 = "LURM" "OT" "OR" "N\2" "Nonce\0"
 // They share a prefix (same product family) and differ only in the 4th group, so
-// the characteristics are visibly children of the LurMotorn service.
+// the characteristics are visibly children of the LurMotorn service. (The device-id
+// characteristic's UUID bytes still spell "Nonce" — its endpoint is unchanged; only
+// what it carries changed from a random session nonce to the persistent device id,
+// see below — so the UUID is kept to avoid churning the wire identity.)
 
 // GATT service the peripheral exposes and the central scans for.
 inline constexpr std::string_view BleServiceUuid =
@@ -28,37 +31,45 @@ inline constexpr std::string_view BleServiceUuid =
 inline constexpr std::string_view BleDatagramCharacteristicUuid =
     "4C55524D-4F54-4F52-4E01-446174616772";
 
-// Readable characteristic exposing this device's random session nonce, read by
-// the central right after connecting to drive the role handshake below.
-inline constexpr std::string_view BleNonceCharacteristicUuid =
+// Readable characteristic exposing this device's PERSISTENT device id (a 128-bit
+// GUID, hex-encoded; see Lur::Save::LoadOrCreateDeviceId), read by the central
+// right after connecting to drive the role handshake below. It is persistent, not
+// a fresh per-session value, so the role it settles is STABLE across app restarts
+// — which is what lets a restarted app rejoin an existing peer instead of flipping
+// roles and stranding it (issue #17).
+inline constexpr std::string_view BleDeviceIdCharacteristicUuid =
     "4C55524D-4F54-4F52-4E02-4E6F6E636500";
 
 // Short name the peripheral puts in its advertisement, so a human scanning sees
 // something recognizable. Kept tiny — BLE advertisement payloads are ~31 bytes.
 inline constexpr std::string_view BleAdvertisedName = "LurMotorn";
 
-// Pick GATT roles from two session nonces.
+// Pick GATT roles from the two devices' persistent device ids.
 //
 // The role is decided IN-BAND, after connecting — NOT from the advertisement.
-// iOS apps cannot put custom data (a nonce) in a BLE advertisement (CoreBluetooth
+// iOS apps cannot put custom data (an id) in a BLE advertisement (CoreBluetooth
 // only advertises the local name + service UUIDs), so a pre-connection tie-break
 // is impossible cross-platform. Instead:
 //
 //   1. Both phones advertise only the service UUID, both scan, and both run a GATT
-//      server exposing the nonce characteristic (their own random session nonce).
+//      server exposing the device-id characteristic (their own persistent GUID).
 //   2. On discovering a peer, a phone connects as central and READS the peer's
-//      nonce characteristic.
-//   3. DecideBleRole(MyNonce, PeerNonce) picks the canonical role: the smaller
-//      nonce is the peripheral, the larger the central. The phone that finds it
-//      should be Central keeps the connection (the live link); the phone that
-//      finds it should be Peripheral drops that connection and keeps serving,
-//      letting its peer connect to it as central. Both keep advertising + scanning
-//      until the canonical link is established, so it self-corrects.
+//      device-id characteristic.
+//   3. DecideBleRole(MyId, PeerId) picks the canonical role: the smaller id is the
+//      peripheral, the larger the central. The phone that finds it should be
+//      Central keeps the connection (the live link); the phone that finds it
+//      should be Peripheral drops that connection and keeps serving, letting its
+//      peer connect to it as central. Both keep advertising + scanning until the
+//      canonical link is established, so it self-corrects.
 //
-// A total order on the nonces hands the two phones OPPOSITE answers for free.
-// Nonces are distinct for two devices (a collision is re-rolled by the backend).
-inline EBleRole DecideBleRole(std::string_view LocalNonce, std::string_view PeerNonce) {
-    return LocalNonce < PeerNonce ? EBleRole::Peripheral : EBleRole::Central;
+// A total order on the ids hands the two phones OPPOSITE answers for free. Because
+// the ids are PERSISTENT (not per-session), the same two phones settle the SAME
+// roles on every reconnect — no role flip on restart (issue #17). Ids are distinct
+// for two devices (a 128-bit-space collision is negligible). Comparison is a plain
+// lexicographic compare of the hex, which for fixed-width hex equals a numeric
+// compare of the underlying 128-bit value.
+inline EBleRole DecideBleRole(std::string_view LocalId, std::string_view PeerId) {
+    return LocalId < PeerId ? EBleRole::Peripheral : EBleRole::Central;
 }
 
 } // namespace Lur::Transport

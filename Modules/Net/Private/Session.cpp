@@ -38,6 +38,19 @@ void Session::Tick() {
     PrevConnected = Connected;
 
     if (Connected) EverConnected = true;  // latch, so a later drop reads as Disconnected
+
+    if (Ready && Connected) {
+        // Liveness: keep the link warm and notice if the peer went silent. Any inbound
+        // datagram resets SinceRecvTicks (see OnDatagram); if it runs out, the link is
+        // dead even though the backend never told us (the iOS-peripheral case).
+        if (++KeepaliveCounter >= KeepaliveTicks) { KeepaliveCounter = 0; SendKeepalive(); }
+        if (++SinceRecvTicks >= LinkTimeoutTicks) {
+            Logf("link timeout — peer silent, resetting transport");
+            SinceRecvTicks = 0;
+            if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
+        }
+        return;
+    }
     if (Ready) return;
     // Resend on tick 0 (snappy once connected) and every HelloResendTicks after,
     // until the handshake completes.
@@ -71,13 +84,21 @@ void Session::SendHello() {
     Logf("hello SENT (nonce lo=%08X ready=%d)", static_cast<uint32_t>(LocalNonce), Ready ? 1 : 0);
 }
 
+void Session::SendKeepalive() {
+    if (Transport == nullptr || !Transport->IsConnected()) return;
+    Send(EMsgType::Keepalive, nullptr, 0);  // a bare [type] byte; the peer resets its timer
+}
+
 void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (Size == 0) return;
+    SinceRecvTicks = 0;  // any traffic from the peer proves the link is alive
+
     const EMsgType Type = static_cast<EMsgType>(Data[0]);
     const uint8_t* Payload = Data + 1;
     const std::size_t PayloadSize = Size - 1;
 
     if (Type == EMsgType::Hello) { OnHello(Payload, PayloadSize); return; }
+    if (Type == EMsgType::Keepalive) return;  // liveness only; already counted above
 
     Logf("recv msg type=%u size=%zu", static_cast<unsigned>(Data[0]), PayloadSize);
     const int Idx = static_cast<int>(Type);

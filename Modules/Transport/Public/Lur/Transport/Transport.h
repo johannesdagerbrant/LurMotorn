@@ -28,6 +28,14 @@ public:
 
     // True once the link is established and usable.
     virtual bool IsConnected() const = 0;
+
+    // Force the current link down and resume discovery. Called by the net layer when
+    // its keepalive times out — i.e. the link is silently dead but the backend never
+    // got a disconnect callback. This is the ONLY reliable path on an iOS peripheral,
+    // whose CBPeripheralManager gets no notification when a central is abruptly
+    // killed. Backends that always receive a real disconnect callback (any central,
+    // and Android's GATT server) can leave this a no-op.
+    virtual void ResetLink() {}
 };
 
 } // namespace Lur::Transport
