@@ -17,6 +17,13 @@ Do not violate these without explicit confirmation from the user:
   **MoltenVK** on iOS. MoltenVK is the *one* allowed third-party dependency, because no native GPU
   API spans both platforms. Otherwise: no ZXing/ML Kit, no networking or chess libraries, no model
   importers. If something else seems to need a library, hand-roll it or raise it with the user first.
+- **Build-time asset cookers are a separate category from runtime libraries** — and one is sanctioned:
+  **`msdf-atlas-gen`** (MIT). It runs OFFLINE on a dev machine / CI to bake OFL fonts into committed
+  MSDF atlas headers (`scripts/gen-font.ps1` → `Modules/Text/Private/Cooked/FontAtlas_*.h`); it is
+  **never linked into the app or its CMake build** — only its output ships, and text is rendered by our
+  own Vulkan pipeline + a hand-written median/`fwidth` shader. This is unlike MoltenVK (a *runtime*
+  dependency). It's the same category as the `images.weserv.nl` service that cooks the piece art. Fonts
+  must be **OFL** (commercial-safe). Other build-time cookers still need the same "raise it first" rule.
 - **No servers, ever.** Strictly local play. No backend, no internet relay — not even a seam for one.
 - **Cross-platform Android <-> iPhone.** Every wire/transport/render choice must work *between* an
   iPhone and an Android phone. This is why the link is BLE and the renderer is a single Vulkan
