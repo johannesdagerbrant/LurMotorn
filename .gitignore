@@ -38,3 +38,7 @@ scripts/*.log
 
 # Downloaded build artifacts (e.g. the sideloadable .ipa)
 /dist/
+
+# Offline cook tools (downloaded on demand by scripts/gen-font.ps1 — NOT committed;
+# msdf-atlas-gen is a sanctioned build-time tool, never linked into the app).
+/tools/
