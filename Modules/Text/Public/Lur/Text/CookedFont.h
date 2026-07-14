@@ -11,11 +11,18 @@
 //
 // All geometry is em-normalised (msdf-atlas-gen "em" units): multiply by a runtime
 // pixel size to get screen units. That is what makes the text resolution-independent.
+//
+// EVERYTHING IS Y-DOWN (cooked with msdf-atlas-gen -yorigin top), matching the
+// pixel-space ortho camera (Render/Sprite2D.h) and Vulkan texture space: +y goes down,
+// so a glyph's top edge / the ascender sit ABOVE the baseline with NEGATIVE y, and UVs
+// map straight onto the uploaded atlas with no V-flip. This keeps the render/layout
+// math free of sign flips.
 namespace Lur::Text {
 
-// One glyph's layout + atlas placement. Bounds are the msdf-atlas-gen convention:
-//   PlaneBounds  — baseline-relative quad in EM units, +x right, +y up.
-//   Uv*          — normalised [0,1] atlas rect, matching the atlas yOrigin (bottom).
+// One glyph's layout + atlas placement (y-DOWN, em-normalised):
+//   Plane* — baseline-relative quad in EM units. +x right, +y DOWN, so PlaneTop < 0
+//            (above baseline) and PlaneTop < PlaneBottom.
+//   Uv*    — normalised [0,1] atlas rect, top-down (v=0 = top row), so UvTop < UvBottom.
 // Whitespace glyphs (e.g. space) carry a zero quad (all Plane*/Uv* == 0) and only a
 // meaningful Advance.
 struct CookedGlyph {
@@ -37,9 +44,9 @@ struct CookedFont {
     int   AtlasChannels = 3;
 
     float EmSize        = 1.0f;   // reference em (metrics are in these units)
-    float LineHeight    = 0.0f;   // em, baseline-to-baseline
-    float Ascender      = 0.0f;   // em, +up
-    float Descender     = 0.0f;   // em, -down
+    float LineHeight    = 0.0f;   // em, baseline-to-baseline (positive)
+    float Ascender      = 0.0f;   // em, y-down: NEGATIVE (top of glyphs, above baseline)
+    float Descender     = 0.0f;   // em, y-down: positive (below baseline)
     float DistanceRange = 0.0f;   // atlas px (msdfgen -pxrange)
 
     const CookedGlyph*   Glyphs     = nullptr;

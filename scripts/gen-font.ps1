@@ -52,8 +52,11 @@ $Charset = Join-Path $Tmp 'charset.txt'
 Set-Content -LiteralPath $Charset -Value '[0x20, 0x7E]' -Encoding ascii
 $Png  = Join-Path $Tmp 'atlas.png'
 $Json = Join-Path $Tmp 'atlas.json'
+# -yorigin top: atlas Y grows downward (v=0 = top row), matching how System.Drawing
+# reads the PNG row-major and how the renderer uploads/samples it (Vulkan v=0 = top).
+# So the normalised UVs map straight onto the uploaded texture with no V-flip.
 & $ToolExe -font $FontPath -charset $Charset -type msdf -format png `
-           -imageout $Png -json $Json -size $Size -pxrange $PxRange -yorigin bottom
+           -imageout $Png -json $Json -size $Size -pxrange $PxRange -yorigin top
 if ($LASTEXITCODE -ne 0) { throw "msdf-atlas-gen failed ($LASTEXITCODE)" }
 
 $meta = Get-Content -LiteralPath $Json -Raw | ConvertFrom-Json
