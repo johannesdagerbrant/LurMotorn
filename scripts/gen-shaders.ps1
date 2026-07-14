@@ -14,9 +14,14 @@ $Root      = Split-Path -Parent $PSScriptRoot
 $ShaderDir = Join-Path $Root 'Modules\Render\Private\Vulkan\Shaders'
 $Ndk       = Join-Path $env:LOCALAPPDATA 'Android\Sdk\ndk\27.2.12479018'
 $Glslc     = Join-Path $Ndk 'shader-tools\windows-x86_64\glslc.exe'
-if (-not (Test-Path $Glslc)) { throw "glslc not found at $Glslc (install the Android NDK)." }
+if (-not (Test-Path $Glslc)) {
+    # Fall back to any glslc on PATH (e.g. the Vulkan SDK) — SPIR-V is portable.
+    $OnPath = (Get-Command glslc -ErrorAction SilentlyContinue).Source
+    if ($OnPath) { $Glslc = $OnPath }
+    else { throw "glslc not found at $Glslc and none on PATH (install the Android NDK or Vulkan SDK)." }
+}
 
-foreach ($stage in 'Sprite.vert', 'Sprite.frag') {
+foreach ($stage in 'Sprite.vert', 'Sprite.frag', 'Text.vert', 'Text.frag') {
     $src = Join-Path $ShaderDir $stage
     $inc = Join-Path $ShaderDir "$stage.inc"
     & $Glslc -mfmt=num $src -o $inc

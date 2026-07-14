@@ -32,6 +32,12 @@ static const uint32_t SpriteVertSpv[] = {
 static const uint32_t SpriteFragSpv[] = {
 #include "Shaders/Sprite.frag.inc"
 };
+static const uint32_t TextVertSpv[] = {
+#include "Shaders/Text.vert.inc"
+};
+static const uint32_t TextFragSpv[] = {
+#include "Shaders/Text.frag.inc"
+};
 
 namespace Lur::Render {
 namespace {
@@ -56,10 +62,14 @@ void LogF(bool Error, const char* Fmt, ...) {
             LOGE("Vulkan call failed (%d) at %s:%d", Result_, __FILE__, __LINE__);  \
     } while (0)
 
-// Pushed per draw. mat4 (64) + vec4 (16) = 80 bytes, under the 128-byte minimum.
+// Pushed per draw. mat4 (64) + vec4 (16) + float + pad = 96 bytes, under the 128-byte
+// portable minimum. The sprite shaders read only Mvp+Tint; the MSDF text shader also
+// reads DistanceRange (offset 80), so both pipelines share ONE pipeline layout.
 struct PushConstants {
     float Mvp[16];
     float Tint[4];
+    float DistanceRange;   // msdfgen -pxrange, atlas texels (text only)
+    float Pad[3];          // keep 16-byte alignment
 };
 
 struct Mesh {
@@ -98,6 +108,7 @@ public:
         if (!CreateSwapchain())        return false;
         if (!CreateDescriptorResources()) return false;
         if (!CreatePipeline())         return false;
+        if (!CreateTextBuffers())      return false;
         const uint8_t White[4] = {255, 255, 255, 255};
         DefaultTexture = LoadTexture(White, 1, 1);
         if (DefaultTexture == 0)       return false;
@@ -117,6 +128,11 @@ public:
         Textures.clear();
         Materials.clear();  // sets freed with the pool below
         if (Device != VK_NULL_HANDLE) {
+            if (TextVB != VK_NULL_HANDLE)    vkDestroyBuffer(Device, TextVB, nullptr);
+            if (TextVBMem != VK_NULL_HANDLE) vkFreeMemory(Device, TextVBMem, nullptr);
+            if (TextIB != VK_NULL_HANDLE)    vkDestroyBuffer(Device, TextIB, nullptr);
+            if (TextIBMem != VK_NULL_HANDLE) vkFreeMemory(Device, TextIBMem, nullptr);
+            if (TextPipeline != VK_NULL_HANDLE)   vkDestroyPipeline(Device, TextPipeline, nullptr);
             if (Pipeline != VK_NULL_HANDLE)       vkDestroyPipeline(Device, Pipeline, nullptr);
             if (PipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(Device, PipelineLayout, nullptr);
             if (DescriptorPool != VK_NULL_HANDLE) vkDestroyDescriptorPool(Device, DescriptorPool, nullptr);
@@ -259,13 +275,25 @@ public:
         Pass.pClearValues = &Clear;
         vkCmdBeginRenderPass(CommandBuffer, &Pass, VK_SUBPASS_CONTENTS_INLINE);
 
-        vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, Pipeline);
+        // Viewport/scissor are dynamic state (independent of the bound pipeline).
+        // Pipelines are bound lazily per draw (DrawMesh/DrawGlyphs) so draw order can
+        // freely mix meshes and text; the text arena resets each frame.
         VkViewport Vp{0.0f, 0.0f, static_cast<float>(Extent.width),
                       static_cast<float>(Extent.height), 0.0f, 1.0f};
         VkRect2D Sc{{0, 0}, Extent};
         vkCmdSetViewport(CommandBuffer, 0, 1, &Vp);
         vkCmdSetScissor(CommandBuffer, 0, 1, &Sc);
+        BoundPipeline = VK_NULL_HANDLE;
+        TextVBCursor = 0;
+        TextIBCursor = 0;
         Recording = true;
+    }
+
+    void BindPipeline(VkPipeline P) {
+        if (BoundPipeline != P) {
+            vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, P);
+            BoundPipeline = P;
+        }
     }
 
     void DrawMesh(MeshHandle MeshId, MaterialHandle MaterialId,
@@ -276,7 +304,9 @@ public:
         const Mesh& M = Meshes[MeshId - 1];
         const Material& Mat = Materials[MaterialId - 1];
 
-        PushConstants Pc;
+        BindPipeline(Pipeline);
+
+        PushConstants Pc{};
         const Math::Mat4 Mvp = CurrentCamera.Projection * CurrentCamera.View * Model;
         std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
         Pc.Tint[0] = Mat.Tint.R; Pc.Tint[1] = Mat.Tint.G;
@@ -292,6 +322,50 @@ public:
         vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &M.VertexBuffer, &Offset);
         vkCmdBindIndexBuffer(CommandBuffer, M.IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
         vkCmdDrawIndexed(CommandBuffer, M.IndexCount, 1, 0, 0, 0);
+    }
+
+    void DrawGlyphs(const Vertex* Vertices, uint32_t VertexCount,
+                    const uint32_t* Indices, uint32_t IndexCount,
+                    MaterialHandle MaterialId, float DistanceRange) override {
+        if (!Recording || VertexCount == 0 || IndexCount == 0) return;
+        if (MaterialId == 0 || MaterialId > Materials.size()) return;
+        // Sub-allocate this batch from the per-frame arena; drop it (visibly) if full.
+        if (TextVBCursor + VertexCount > MaxTextVertices ||
+            TextIBCursor + IndexCount  > MaxTextIndices) {
+            LOGE("text arena full (%u verts / %u idx) — batch dropped",
+                 TextVBCursor + VertexCount, TextIBCursor + IndexCount);
+            return;
+        }
+        const Material& Mat = Materials[MaterialId - 1];
+
+        std::memcpy(static_cast<Vertex*>(TextVBMapped) + TextVBCursor,
+                    Vertices, static_cast<size_t>(VertexCount) * sizeof(Vertex));
+        std::memcpy(static_cast<uint32_t*>(TextIBMapped) + TextIBCursor,
+                    Indices, static_cast<size_t>(IndexCount) * sizeof(uint32_t));
+
+        BindPipeline(TextPipeline);
+
+        PushConstants Pc{};
+        const Math::Mat4 Mvp = CurrentCamera.Projection * CurrentCamera.View;  // model = identity
+        std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
+        Pc.Tint[0] = Mat.Tint.R; Pc.Tint[1] = Mat.Tint.G;
+        Pc.Tint[2] = Mat.Tint.B; Pc.Tint[3] = Mat.Tint.A;
+        Pc.DistanceRange = DistanceRange;
+        vkCmdPushConstants(CommandBuffer, PipelineLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(Pc), &Pc);
+
+        vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                PipelineLayout, 0, 1, &Mat.DescriptorSet, 0, nullptr);
+
+        VkDeviceSize Offset = 0;
+        vkCmdBindVertexBuffers(CommandBuffer, 0, 1, &TextVB, &Offset);
+        vkCmdBindIndexBuffer(CommandBuffer, TextIB, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(CommandBuffer, IndexCount, 1, TextIBCursor,
+                         static_cast<int32_t>(TextVBCursor), 0);
+
+        TextVBCursor += VertexCount;
+        TextIBCursor += IndexCount;
     }
 
     void EndFrame() override {
@@ -483,8 +557,19 @@ private:
         VkResult LR = vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &PipelineLayout);
         if (LR != VK_SUCCESS) { LOGE("vkCreatePipelineLayout failed (%d)", LR); return false; }
 
-        VkShaderModule Vert = CreateShaderModule(SpriteVertSpv, sizeof(SpriteVertSpv));
-        VkShaderModule Frag = CreateShaderModule(SpriteFragSpv, sizeof(SpriteFragSpv));
+        // Two pipelines share this layout: the sprite/quad pipeline and the MSDF text
+        // pipeline (same vertex layout + push-constant prefix, different shaders).
+        return CreateGraphicsPipeline(SpriteVertSpv, sizeof(SpriteVertSpv),
+                                      SpriteFragSpv, sizeof(SpriteFragSpv), Pipeline)
+            && CreateGraphicsPipeline(TextVertSpv, sizeof(TextVertSpv),
+                                      TextFragSpv, sizeof(TextFragSpv), TextPipeline);
+    }
+
+    bool CreateGraphicsPipeline(const uint32_t* VertSpv, size_t VertSize,
+                                const uint32_t* FragSpv, size_t FragSize,
+                                VkPipeline& Out) {
+        VkShaderModule Vert = CreateShaderModule(VertSpv, VertSize);
+        VkShaderModule Frag = CreateShaderModule(FragSpv, FragSize);
 
         VkPipelineShaderStageCreateInfo Stages[2]{};
         Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -562,12 +647,49 @@ private:
         Info.layout = PipelineLayout;
         Info.renderPass = RenderPass;
         Info.subpass = 0;
-        VkResult R = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr, &Pipeline);
+        VkResult R = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr, &Out);
 
         vkDestroyShaderModule(Device, Vert, nullptr);
         vkDestroyShaderModule(Device, Frag, nullptr);
         if (R != VK_SUCCESS) { LOGE("vkCreateGraphicsPipelines failed (%d)", R); return false; }
         return true;
+    }
+
+    // Per-frame dynamic arena for text glyph quads (host-visible, persistently mapped).
+    // Single-buffered is safe: BeginFrame waits on the in-flight fence before the arena
+    // is reset/reused, so the GPU has finished reading last frame's glyphs.
+    bool CreateTextBuffers() {
+        const VkDeviceSize VbSize = static_cast<VkDeviceSize>(MaxTextVertices) * sizeof(Vertex);
+        const VkDeviceSize IbSize = static_cast<VkDeviceSize>(MaxTextIndices) * sizeof(uint32_t);
+        if (!CreateMappedBuffer(VbSize, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, TextVB, TextVBMem, TextVBMapped))
+            return false;
+        if (!CreateMappedBuffer(IbSize, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, TextIB, TextIBMem, TextIBMapped))
+            return false;
+        return true;
+    }
+
+    bool CreateMappedBuffer(VkDeviceSize Size, VkBufferUsageFlags Usage,
+                            VkBuffer& OutBuffer, VkDeviceMemory& OutMemory, void*& OutMapped) {
+        VkBufferCreateInfo BufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        BufInfo.size = Size;
+        BufInfo.usage = Usage;
+        BufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(Device, &BufInfo, nullptr, &OutBuffer) != VK_SUCCESS) {
+            LOGE("vkCreateBuffer (dynamic) failed (size=%llu)", (unsigned long long)Size);
+            return false;
+        }
+        VkMemoryRequirements Req{};
+        vkGetBufferMemoryRequirements(Device, OutBuffer, &Req);
+        VkMemoryAllocateInfo Alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        Alloc.allocationSize = Req.size;
+        Alloc.memoryTypeIndex = FindMemoryType(Req.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(Device, &Alloc, nullptr, &OutMemory) != VK_SUCCESS) {
+            LOGE("vkAllocateMemory (dynamic) failed"); return false;
+        }
+        vkBindBufferMemory(Device, OutBuffer, OutMemory, 0);
+        vkMapMemory(Device, OutMemory, 0, Size, 0, &OutMapped);  // persistently mapped
+        return OutMapped != nullptr;
     }
 
     // ---- Buffers ----
@@ -892,7 +1014,18 @@ private:
     std::vector<VkFramebuffer> Framebuffers;
 
     VkPipelineLayout PipelineLayout = VK_NULL_HANDLE;
-    VkPipeline       Pipeline = VK_NULL_HANDLE;
+    VkPipeline       Pipeline = VK_NULL_HANDLE;       // sprite / quad
+    VkPipeline       TextPipeline = VK_NULL_HANDLE;   // MSDF text
+    VkPipeline       BoundPipeline = VK_NULL_HANDLE;  // currently bound (lazy rebind)
+
+    // Per-frame dynamic text arena (fixed capacity — ~1024 glyphs/frame).
+    static constexpr uint32_t MaxTextVertices = 4096;
+    static constexpr uint32_t MaxTextIndices  = 6144;
+    VkBuffer       TextVB = VK_NULL_HANDLE, TextIB = VK_NULL_HANDLE;
+    VkDeviceMemory TextVBMem = VK_NULL_HANDLE, TextIBMem = VK_NULL_HANDLE;
+    void*          TextVBMapped = nullptr;
+    void*          TextIBMapped = nullptr;
+    uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
     static constexpr uint32_t MaxMaterials = 32;
     VkSampler             Sampler = VK_NULL_HANDLE;

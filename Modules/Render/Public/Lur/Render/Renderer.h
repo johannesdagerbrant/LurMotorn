@@ -61,6 +61,20 @@ public:
     // --- Per-frame. ---
     virtual void BeginFrame(const Camera& Camera) = 0;
     virtual void DrawMesh(MeshHandle Mesh, MaterialHandle Material, const Math::Mat4& Model) = 0;
+
+    // Draw a batch of dynamic 2D glyph quads (MSDF text) in one call. Vertices/Indices
+    // are transient — the HUD text layer rebuilds them each frame in pixel space
+    // (screen-fixed); Indices are 0-based into Vertices. `Atlas` is a material bound to
+    // the font's MSDF atlas texture (its Tint multiplies the per-vertex colour), and
+    // `DistanceRange` is the font's msdfgen -pxrange (atlas texels). Uses the MSDF text
+    // pipeline. Default no-op so non-text backends need not implement it.
+    virtual void DrawGlyphs(const Vertex* Vertices, uint32_t VertexCount,
+                            const uint32_t* Indices, uint32_t IndexCount,
+                            MaterialHandle Atlas, float DistanceRange) {
+        (void)Vertices; (void)VertexCount; (void)Indices; (void)IndexCount;
+        (void)Atlas; (void)DistanceRange;
+    }
+
     virtual void EndFrame() = 0;  // submit + present
 };
 
