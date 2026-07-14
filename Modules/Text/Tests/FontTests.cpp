@@ -202,11 +202,36 @@ static void CheckRegistry() {
     CHECK(Reg.Count() == 1);
 }
 
+// Multi-font seam (#28): the DSEG7 clock font cooks + registers alongside the UI font.
+static void CheckMultiFont() {
+    // DSEG7 is a 7-segment display face: digits present, not full ASCII.
+    Font Dseg(Dseg7Font());
+    CHECK(Dseg.IsValid());
+    CHECK(Dseg.Cooked().GlyphCount > 10);
+    CHECK(Dseg.Cooked().GlyphCount < 95);        // segmented font ≠ full ASCII
+    for (uint32_t C = '0'; C <= '9'; ++C) CHECK(Dseg.Find(C) != nullptr);
+    CHECK(Dseg.Advance('8') > 0.0f);
+
+    // Two distinct fonts coexist in one registry (distinct handles), the intended
+    // multi-font model for e.g. a UI font + a clock font.
+    FontRegistry Reg;
+    const FontHandle Ui   = Reg.Register("Inter", InterFont());
+    const FontHandle Clock = Reg.Register("Dseg7", Dseg7Font());
+    CHECK(Ui != 0 && Clock != 0);
+    CHECK(Ui != Clock);
+    CHECK(Reg.Count() == 2);
+    CHECK(Reg.Find("Inter") == Ui);
+    CHECK(Reg.Find("Dseg7") == Clock);
+    CHECK(&Reg.Get(Ui).Cooked()   == &InterFont());
+    CHECK(&Reg.Get(Clock).Cooked() == &Dseg7Font());
+}
+
 int main() {
     CheckCookedAsset();
     CheckFontRuntime();
     CheckLayout();
     CheckRegistry();
+    CheckMultiFont();
 
     if (GFailures == 0) {
         std::printf("text_tests: all checks passed\n");
