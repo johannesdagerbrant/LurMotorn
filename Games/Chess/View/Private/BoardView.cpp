@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 #include "Chess/MoveCodec.h"
@@ -9,6 +10,7 @@
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
+#include "Lur/Text/BuiltinFonts.h"
 #include "PieceMasks.h"  // cooked rhosgfx (CC0) silhouette masks, one per piece type
 
 namespace Chess {
@@ -79,6 +81,11 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
         PieceLight[Type] = Renderer->CreateMaterial(MaterialDesc{Tex, PieceLightTint, false});
         PieceDark[Type]  = Renderer->CreateMaterial(MaterialDesc{Tex, PieceDarkTint, false});
     }
+
+    // Built-in MSDF UI font: upload its atlas, then bind the score/result text field.
+    UiFont.Init(Lur::Text::InterFont());
+    UiFont.UploadAtlas(*Renderer);
+    Text.CreateResources(Renderer, &UiFont);
 }
 
 bool BoardView::FlipBoard() const {
@@ -170,6 +177,37 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         float BarH = Sq * 0.5f;
         if (BarH > MaxH) BarH = MaxH;
         StatusBar.Draw(Renderer, Net->GetLinkState(), L.OriginX, Inset, Sq * 8.0f, BarH);
+    }
+
+    // All-time W/L/D from THIS player's perspective, in the bottom margin (#22). The
+    // record is player-agnostic (lower/higher GUID); IsLocalLower() orients it to me.
+    if (State != nullptr && State->HasIdentity()) {
+        const ChessRecord& Rec = State->Record();
+        const int My    = State->IsLocalLower() ? Rec.WinsLower  : Rec.WinsHigher;
+        const int Their = State->IsLocalLower() ? Rec.WinsHigher : Rec.WinsLower;
+        char Buf[64];
+        std::snprintf(Buf, sizeof(Buf), "You %d   Them %d   Draw %d", My, Their, Rec.Draws);
+
+        const float Inset = Sq * 0.12f;
+        const float BY = L.OriginY + Sq * 8.0f + Inset;   // bottom margin
+        const float BH = L.OriginY - 2.0f * Inset;
+        if (BH > 4.0f) {
+            Text.Draw(Renderer, Buf, L.OriginX, BY, Sq * 8.0f, BH, BH * 0.55f,
+                      Color{0.92f, 0.92f, 0.95f, 1.0f},
+                      Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
+        }
+    }
+
+    // Between-match result banner: shown centred over the (reset) board after a match
+    // concludes, until the first move of the next match is played (#22).
+    if (State != nullptr && State->Record().Moves.empty() &&
+        State->LastResult() != EGameResult::Ongoing) {
+        const char* Msg = "Draw";
+        if (State->LastResult() == EGameResult::Checkmate)      Msg = "Checkmate";
+        else if (State->LastResult() == EGameResult::Stalemate) Msg = "Stalemate";
+        Text.Draw(Renderer, Msg, L.OriginX, L.OriginY, Sq * 8.0f, Sq * 8.0f, Sq * 0.9f,
+                  Color{0.98f, 0.85f, 0.30f, 1.0f},
+                  Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
     }
 
     Renderer->EndFrame();

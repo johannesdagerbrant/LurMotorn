@@ -3,6 +3,8 @@
 #include <cstdint>
 #include "Lur/Render/Renderer.h"
 #include "Lur/Hud/LinkStatusBar.h"
+#include "Lur/Hud/TextField.h"
+#include "Lur/Text/Font.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/Types.h"
 
@@ -52,6 +54,9 @@ private:
     Lur::Render::MaterialHandle DarkSquare = 0;
     Lur::Render::MaterialHandle Highlight = 0;
     Lur::Hud::LinkStatusBar     StatusBar;  // engine widget: draws the link-state bar
+    // MSDF text: the all-time W/L/D score line + the between-match result banner (#22).
+    Lur::Text::Font             UiFont;
+    Lur::Hud::TextField         Text;
     // Per piece TYPE (Chess::EPieceType order), light- and dark-tinted materials
     // over that type's single silhouette texture (the "tint trick").
     Lur::Render::MaterialHandle PieceLight[6] = {};
