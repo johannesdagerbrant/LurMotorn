@@ -188,14 +188,13 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         char Buf[64];
         std::snprintf(Buf, sizeof(Buf), "You %d   Them %d   Draw %d", My, Their, Rec.Draws);
 
-        const float Inset = Sq * 0.12f;
-        const float BY = L.OriginY + Sq * 8.0f + Inset;   // bottom margin
-        const float BH = L.OriginY - 2.0f * Inset;
-        if (BH > 4.0f) {
-            Text.Draw(Renderer, Buf, L.OriginX, BY, Sq * 8.0f, BH, BH * 0.55f,
-                      Color{0.92f, 0.92f, 0.95f, 1.0f},
-                      Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
-        }
+        // A compact score line in a band just below the board. Size is tied to the
+        // square (not the margin — portrait margins are very tall), centred in the band.
+        const float Band = Sq * 1.2f;
+        const float BY   = L.OriginY + Sq * 8.0f;
+        Text.Draw(Renderer, Buf, L.OriginX, BY, Sq * 8.0f, Band, Sq * 0.34f,
+                  Color{0.92f, 0.92f, 0.95f, 1.0f},
+                  Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
     }
 
     // Between-match result banner: shown centred over the (reset) board after a match
@@ -205,7 +204,7 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         const char* Msg = "Draw";
         if (State->LastResult() == EGameResult::Checkmate)      Msg = "Checkmate";
         else if (State->LastResult() == EGameResult::Stalemate) Msg = "Stalemate";
-        Text.Draw(Renderer, Msg, L.OriginX, L.OriginY, Sq * 8.0f, Sq * 8.0f, Sq * 0.9f,
+        Text.Draw(Renderer, Msg, L.OriginX, L.OriginY, Sq * 8.0f, Sq * 8.0f, Sq * 0.8f,
                   Color{0.98f, 0.85f, 0.30f, 1.0f},
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
     }
