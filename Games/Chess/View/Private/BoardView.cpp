@@ -187,6 +187,10 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         }
     }
 
+    // Everything below is HUD — enter the GUI layer so it composites on top of the
+    // board, drawn by the engine's orthographic camera (see IRenderer::BeginGui).
+    Renderer->BeginGui();
+
     // Link-state indicator: hand the engine widget a slim rect in the top margin;
     // it owns the colour per state. Absent in a local hot-seat (no session).
     if (Net != nullptr) {

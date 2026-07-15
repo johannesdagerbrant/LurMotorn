@@ -83,6 +83,21 @@ public:
 
     // --- Per-frame. ---
     virtual void BeginFrame(const Camera& Camera) = 0;
+
+    // Enter the GUI layer: everything drawn after this call composites ON TOP of the
+    // world pass, drawn by an engine-owned ORTHOGRAPHIC camera sized to the
+    // framebuffer (pixels, top-left origin, Y-down — same convention as
+    // MakeOrthoCamera). No camera argument by design: "always ortho, engine-sized" is
+    // the invariant, so game code never builds a UI matrix by hand. A 3D game runs a
+    // perspective world camera then this ortho GUI layer; a 2D game's world camera is
+    // already ortho, so the switch is a no-op-shaped repeat.
+    //
+    // The world pass has no depth attachment today (colour-only), so this is a camera
+    // swap plus painter's-order submission. When the world pass gains depth for 3D,
+    // GUI pipelines must bind with depth test/write disabled here so GUI always paints
+    // over the scene. Default no-op so non-graphical backends need not implement it.
+    virtual void BeginGui() {}
+
     virtual void DrawMesh(MeshHandle Mesh, MaterialHandle Material, const Math::Mat4& Model) = 0;
 
     // Draw a batch of dynamic 2D glyph quads (MSDF text) in one call. Vertices/Indices

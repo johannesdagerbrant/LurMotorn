@@ -17,6 +17,7 @@
 
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Render/Vulkan/PlatformSurface.h"
+#include "Lur/Render/Sprite2D.h"   // MakeOrthoCamera — canonical pixel-space GUI camera
 
 // Older SDK headers may predate VK_KHR_portability_enumeration; define the flag
 // so the source compiles everywhere (only ever set when the extension is present).
@@ -303,6 +304,15 @@ public:
         TextVBCursor = 0;
         TextIBCursor = 0;
         Recording = true;
+    }
+
+    void BeginGui() override {
+        // Switch to the engine-owned orthographic GUI camera sized to the framebuffer.
+        // Everything drawn after this composites on top of the world pass (painter's
+        // order — no depth attachment yet; see IRenderer::BeginGui). MakeOrthoCamera
+        // is the single source of the pixel-space top-left / Y-down convention.
+        CurrentCamera = MakeOrthoCamera(static_cast<float>(Extent.width),
+                                        static_cast<float>(Extent.height));
     }
 
     void BindPipeline(VkPipeline P) {
