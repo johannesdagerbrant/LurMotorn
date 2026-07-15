@@ -67,17 +67,21 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
 
     StatusBar.CreateResources(Renderer);  // engine link-state widget owns its palette
 
-    // Expand each single-channel coverage mask to RGBA (white, mask as alpha) and
-    // upload once; the material tint supplies the piece colour at draw time.
+    // Pack each piece into an R8G8 texture — R = shade (the source art's tones),
+    // G = coverage (silhouette alpha) — and upload once. The shader multiplies the
+    // material tint by the shade, so the tint supplies the piece colour while the
+    // art's highlights / mid-tones / dark outline survive instead of flattening to
+    // a solid blob (issue #30).
     const int N = ChessArt::PieceMaskSize;
-    std::vector<uint8_t> Rgba(static_cast<size_t>(N) * N * 4);
+    std::vector<uint8_t> Rg(static_cast<size_t>(N) * N * 2);
     for (int Type = 0; Type < 6; ++Type) {
-        const unsigned char* Mask = ChessArt::PieceMask[Type];
+        const unsigned char* Shade    = ChessArt::PieceShade[Type];
+        const unsigned char* Coverage = ChessArt::PieceCoverage[Type];
         for (int i = 0; i < N * N; ++i) {
-            Rgba[i * 4 + 0] = 255; Rgba[i * 4 + 1] = 255;
-            Rgba[i * 4 + 2] = 255; Rgba[i * 4 + 3] = Mask[i];
+            Rg[i * 2 + 0] = Shade[i];      // R = shade
+            Rg[i * 2 + 1] = Coverage[i];   // G = coverage
         }
-        const TextureHandle Tex = Renderer->LoadTexture(Rgba.data(), N, N);
+        const TextureHandle Tex = Renderer->LoadTexture(Rg.data(), N, N, ETextureFormat::Rg8);
         PieceLight[Type] = Renderer->CreateMaterial(MaterialDesc{Tex, PieceLightTint, false});
         PieceDark[Type]  = Renderer->CreateMaterial(MaterialDesc{Tex, PieceDarkTint, false});
     }

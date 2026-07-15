@@ -22,6 +22,12 @@ using MeshHandle     = uint32_t;
 using TextureHandle  = uint32_t;
 using MaterialHandle = uint32_t;
 
+// Pixel layout of the bytes handed to LoadTexture. Rgba8 is the general case;
+// Rg8 is the slim two-channel case (2 bytes/texel) used by the tint-trick sprites
+// — R carries a shade/luminance value, G carries coverage (silhouette alpha) —
+// so the piece art keeps its tonal detail without a full RGBA upload (issue #30).
+enum class ETextureFormat { Rgba8, Rg8 };
+
 // A material is a shader plus its parameters. 2D sprites use an unlit textured
 // material; 3D meshes can opt into lighting. Kept tiny on purpose — richer PBR
 // fields slot in here later without changing the interface.
@@ -55,7 +61,8 @@ public:
     // --- Resources (created once, reused across frames). ---
     virtual MeshHandle     CreateMesh(const Vertex* Vertices, uint32_t VertexCount,
                                       const uint32_t* Indices, uint32_t IndexCount) = 0;
-    virtual TextureHandle  LoadTexture(const uint8_t* Rgba, int Width, int Height) = 0;
+    virtual TextureHandle  LoadTexture(const uint8_t* Data, int Width, int Height,
+                                       ETextureFormat Format = ETextureFormat::Rgba8) = 0;
     virtual MaterialHandle CreateMaterial(const MaterialDesc& Desc) = 0;
 
     // --- Per-frame. ---

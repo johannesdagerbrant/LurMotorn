@@ -110,7 +110,7 @@ public:
         if (!CreatePipeline())         return false;
         if (!CreateTextBuffers())      return false;
         const uint8_t White[4] = {255, 255, 255, 255};
-        DefaultTexture = LoadTexture(White, 1, 1);
+        DefaultTexture = LoadTexture(White, 1, 1, ETextureFormat::Rgba8);
         if (DefaultTexture == 0)       return false;
         LOGI("Vulkan renderer up: %ux%u, %u swapchain images",
              Extent.width, Extent.height, static_cast<uint32_t>(SwapImages.size()));
@@ -167,18 +167,25 @@ public:
         return static_cast<MeshHandle>(Meshes.size());
     }
 
-    TextureHandle LoadTexture(const uint8_t* Rgba, int Width, int Height) override {
-        const VkDeviceSize Size = static_cast<VkDeviceSize>(Width) * Height * 4;
+    TextureHandle LoadTexture(const uint8_t* Data, int Width, int Height,
+                              ETextureFormat Format) override {
+        // R8G8_UNORM for the slim two-channel (shade + coverage) sprites, else
+        // R8G8B8A8_UNORM. Both are mandatory optimal-tiling sampled formats, so no
+        // feature query is needed (holds on MoltenVK's portability subset too).
+        const int      Bpp   = (Format == ETextureFormat::Rg8) ? 2 : 4;
+        const VkFormat VkFmt = (Format == ETextureFormat::Rg8) ? VK_FORMAT_R8G8_UNORM
+                                                               : VK_FORMAT_R8G8B8A8_UNORM;
+        const VkDeviceSize Size = static_cast<VkDeviceSize>(Width) * Height * Bpp;
 
         VkBuffer Staging = VK_NULL_HANDLE;
         VkDeviceMemory StagingMem = VK_NULL_HANDLE;
-        if (!CreateBuffer(Size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Rgba, Staging, StagingMem))
+        if (!CreateBuffer(Size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, Data, Staging, StagingMem))
             return 0;
 
         Texture Tex;
         VkImageCreateInfo ImgInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ImgInfo.imageType = VK_IMAGE_TYPE_2D;
-        ImgInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ImgInfo.format = VkFmt;
         ImgInfo.extent = {static_cast<uint32_t>(Width), static_cast<uint32_t>(Height), 1};
         ImgInfo.mipLevels = 1;
         ImgInfo.arrayLayers = 1;
@@ -220,7 +227,7 @@ public:
         VkImageViewCreateInfo ViewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
         ViewInfo.image = Tex.Image;
         ViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        ViewInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ViewInfo.format = VkFmt;
         ViewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         ViewInfo.subresourceRange.levelCount = 1;
         ViewInfo.subresourceRange.layerCount = 1;
