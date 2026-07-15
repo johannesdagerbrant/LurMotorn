@@ -1,8 +1,13 @@
-# Generates Games/Chess/Android/app/src/main/cpp/PieceMasks.h from the rhosgfx
-# (CC0) piece SVGs in Games/Chess/Content/Pieces/. This is a prototype of the
-# LurMotorn asset "cook" pipeline (see the cook GitHub issue): host-side decode
-# of Content/ sources into runtime-ready raw bytes, embedded so no image decoder
-# ships in the app.
+# Cooks Games/Chess/View/Private/PieceMasks.h from the prepped PNG content in
+# Games/Chess/Content/Pieces/ (w*.png). This is the LurMotorn asset "cook": a
+# host-side decode of committed Content/ into runtime-ready raw bytes, embedded so
+# no image decoder ships in the app.
+#
+# The cook reads ONLY the committed local PNGs -- it never touches the network. It
+# DEMANDS the content honours the convention (raises otherwise): each white piece
+# is present as w<X>.png, square, with an alpha channel, and all six share one
+# resolution. That resolution becomes PieceMaskSize. To (re)author the PNGs from
+# the rhosgfx (CC0) SVGs, run scripts/gen-piece-pngs.py first, then this cook.
 #
 # We cook TWO single-byte channels per piece TYPE (see issue #30):
 #   * COVERAGE (alpha)   -- the silhouette cutout, straight-alpha composited.
@@ -14,31 +19,33 @@
 # preserves the art's tonal detail instead of flattening it to a solid blob. The
 # app ships only raw bytes -- no SVG/PNG decoder at runtime.
 #
-# There is no local SVG rasteriser on the dev host, so this one-time content step
-# rasterises each SVG to PNG via the weserv.nl image proxy, then reads the alpha +
-# RGB channels via System.Drawing. Re-run only when the art or resolution changes.
-#
-# Usage:  powershell -ExecutionPolicy Bypass -File scripts/gen-piece-masks.ps1 [-Size 96]
-param([int]$Size = 96)
-
+# Usage:  powershell -ExecutionPolicy Bypass -File scripts/gen-piece-masks.ps1
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
 $Root      = Split-Path -Parent $PSScriptRoot
 $AssetsDir = Join-Path $Root 'Games\Chess\Content\Pieces'
 $OutHeader = Join-Path $Root 'Games\Chess\View\Private\PieceMasks.h'
-$Tmp       = Join-Path $env:TEMP 'lur_piece_raster'
-New-Item -ItemType Directory -Force -Path $Tmp | Out-Null
-$ua = "LurMotorn/0.1 (johannesdagerbrant@gmail.com)"
 
 # White variants, in Chess::EPieceType order: Pawn, Knight, Bishop, Rook, Queen, King.
 $pieces = 'wP','wN','wB','wR','wQ','wK'
 
 # Read the coverage (alpha) and shade (Rec.601 luminance) bytes, row-major, from a
-# rasterised PNG. Returns a hashtable with .Coverage and .Shade byte arrays.
-function Get-MaskAndShade([string]$png, [int]$size) {
+# committed PNG, asserting the content convention. Returns a hashtable with .Size,
+# .Coverage and .Shade.
+function Get-MaskAndShade([string]$png) {
+    if (-not (Test-Path $png)) {
+        throw "Missing content PNG: $png (run scripts/gen-piece-pngs.py to author it)."
+    }
     $bmp = [System.Drawing.Bitmap]::FromFile($png)
     try {
+        if ($bmp.Width -ne $bmp.Height) {
+            throw "$png must be square (got $($bmp.Width)x$($bmp.Height))."
+        }
+        if (-not [System.Drawing.Image]::IsAlphaPixelFormat($bmp.PixelFormat)) {
+            throw "$png must have an alpha channel (the silhouette coverage)."
+        }
+        $size = $bmp.Width
         $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
         $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly,
                               [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
@@ -61,7 +68,7 @@ function Get-MaskAndShade([string]$png, [int]$size) {
                     $shade[$i] = [byte][math]::Round(0.299 * $r + 0.587 * $g + 0.114 * $b)
                 }
             }
-            return @{ Coverage = $coverage; Shade = $shade }
+            return @{ Size = $size; Coverage = $coverage; Shade = $shade }
         } finally { $bmp.UnlockBits($data) }
     } finally { $bmp.Dispose() }
 }
@@ -78,16 +85,17 @@ function Add-ByteBlock($sb, [string]$label, [byte[]]$bytes) {
     [void]$sb.AppendLine("  },")
 }
 
-# Rasterise + extract every piece first, so both arrays can be emitted in order.
+# Extract every piece first, so both arrays can be emitted in order. The first
+# piece sets the resolution; the rest must match it (one shared PieceMaskSize).
 $masks = @{}
+$Size = 0
 foreach ($p in $pieces) {
-    $svg = Join-Path $AssetsDir "$p.svg"
-    if (-not (Test-Path $svg)) { throw "Missing $svg" }
-    $src = "raw.githubusercontent.com/lichess-org/lila/master/public/piece/rhosgfx/$p.svg"
-    $url = "https://images.weserv.nl/?url=$([uri]::EscapeDataString($src))&w=$Size&h=$Size&fit=contain&output=png"
-    $png = Join-Path $Tmp "$p.png"
-    Invoke-WebRequest -Uri $url -OutFile $png -UserAgent $ua -TimeoutSec 30
-    $masks[$p] = Get-MaskAndShade $png $Size
+    $m = Get-MaskAndShade (Join-Path $AssetsDir "$p.png")
+    if ($Size -eq 0) { $Size = $m.Size }
+    elseif ($m.Size -ne $Size) {
+        throw "All piece PNGs must share one resolution; $p is $($m.Size) but expected $Size."
+    }
+    $masks[$p] = $m
     Write-Host "  $p : coverage + shade extracted ($Size x $Size)"
 }
 

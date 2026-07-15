@@ -1,0 +1,5 @@
+# Protect committed binary assets from any end-of-line conversion (this repo is
+# developed on Windows, where autocrlf would otherwise corrupt binaries).
+*.png binary
+*.jpg binary
+*.ico binary
