@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """One-off CONTENT AUTHORING step -- NOT part of the repeatable asset cook.
 
-Rasterises the rhosgfx (CC0) white piece SVGs into committed square RGBA PNGs in
-Games/Chess/Content/Pieces/. Those PNGs are the prepped content that the engine's
-cook (scripts/gen-piece-masks.ps1) consumes: the cook reads ONLY these local files
-and asserts they meet the convention (square, alpha, one shared resolution) -- it
-never touches the network. Re-run this only when the piece art or its resolution
-changes, then re-run the cook.
+Rasterises the rhosgfx (CC0) white piece SVGs into committed square grayscale+alpha
+PNGs in Games/Chess/Content/Pieces/. Those PNGs are the prepped content that the
+engine's cook (scripts/gen-piece-masks.ps1) consumes: the cook reads ONLY these
+local files and asserts they meet the convention (square, alpha, one shared
+resolution) -- it never touches the network. Re-run this only when the piece art or
+its resolution changes, then re-run the cook.
+
+Output is 2-channel grayscale+alpha ("LA") because that is exactly the piece
+packaging plan: the runtime R8G8 texture packs R = shade (luminance) and
+G = coverage (alpha). The RGB colour is not stored -- piece colour comes from the
+material tint at draw time -- so luminance+alpha is the whole, lossless source.
 
 There is no local SVG rasteriser on the dev host, so authoring uses the
 images.weserv.nl proxy (already the sanctioned way we rasterise piece art) to
@@ -43,10 +48,12 @@ for piece in PIECES:
     img = Image.open(io.BytesIO(data)).convert("RGBA")
     if img.size != (SIZE, SIZE):
         img = img.resize((SIZE, SIZE), Image.LANCZOS)
+    # Collapse to luminance + alpha to match the R8G8 packaging plan (shade+coverage).
+    img = img.convert("LA")
 
     dst = OUT / f"{piece}.png"
     img.save(dst, "PNG")
-    print(f"  {piece} -> {dst.relative_to(ROOT)} ({img.width}x{img.height} RGBA)")
+    print(f"  {piece} -> {dst.relative_to(ROOT)} ({img.width}x{img.height} grayscale+alpha)")
 
 print(f"Wrote {len(PIECES)} PNGs to {OUT.relative_to(ROOT)}.")
 print("Next: run scripts/gen-piece-masks.ps1 to cook PieceMasks.h.")

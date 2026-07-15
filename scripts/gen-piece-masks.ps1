@@ -30,6 +30,35 @@ $OutHeader = Join-Path $Root 'Games\Chess\View\Private\PieceMasks.h'
 # White variants, in Chess::EPieceType order: Pawn, Knight, Bishop, Rook, Queen, King.
 $pieces = 'wP','wN','wB','wR','wQ','wK'
 
+# The packaging plan every piece PNG is registered to. The runtime texture is R8G8:
+# R = shade (luminance), G = coverage (alpha), so the plan's canonical source is a
+# 2-channel grayscale+alpha PNG (RGB colour is never used -- it comes from the tint).
+#   * FEWER source channels than the plan (e.g. grayscale-only, or RGB with no
+#     alpha -> no coverage) is a hard error: the plan cannot be satisfied.
+#   * MORE source channels (e.g. RGBA) only warns: the surplus RGB is reduced to
+#     luminance, so the cook still works but the content carries dead data.
+$PlanName          = 'R8G8 shade+coverage'
+$PlanChannels      = 2
+$PlanRequiresAlpha = $true
+
+# Read a PNG's true channel layout from its IHDR colour-type byte -- authoritative,
+# unlike System.Drawing, which normalises the pixel format on load. Returns .Channels
+# and .HasAlpha. (PNG colour types: 0=gray, 2=RGB, 3=palette, 4=gray+alpha, 6=RGBA.)
+function Get-PngInfo([string]$png) {
+    $head = [System.IO.File]::ReadAllBytes($png) | Select-Object -First 26
+    $sig = 137,80,78,71,13,10,26,10
+    for ($i = 0; $i -lt 8; $i++) {
+        if ($head[$i] -ne $sig[$i]) { throw "$png is not a PNG (bad signature)." }
+    }
+    switch ($head[25]) {   # IHDR colour type
+        0       { return @{ Channels = 1; HasAlpha = $false } }
+        2       { return @{ Channels = 3; HasAlpha = $false } }
+        4       { return @{ Channels = 2; HasAlpha = $true  } }
+        6       { return @{ Channels = 4; HasAlpha = $true  } }
+        default { throw "$png uses unsupported PNG colour type $($head[25]) (palette?); export grayscale+alpha or RGBA." }
+    }
+}
+
 # Read the coverage (alpha) and shade (Rec.601 luminance) bytes, row-major, from a
 # committed PNG, asserting the content convention. Returns a hashtable with .Size,
 # .Coverage and .Shade.
@@ -37,13 +66,26 @@ function Get-MaskAndShade([string]$png) {
     if (-not (Test-Path $png)) {
         throw "Missing content PNG: $png (run scripts/gen-piece-pngs.py to author it)."
     }
+
+    # Validate the source against its packaging plan before decoding pixels.
+    $info = Get-PngInfo $png
+    if ($info.Channels -lt $PlanChannels) {
+        throw ("$png has $($info.Channels) channel(s), fewer than the '$PlanName' " +
+               "plan requires ($PlanChannels): cannot be packed.")
+    }
+    if ($PlanRequiresAlpha -and -not $info.HasAlpha) {
+        throw ("$png has no alpha channel, but the '$PlanName' plan needs one for " +
+               "coverage: cannot be packed.")
+    }
+    if ($info.Channels -gt $PlanChannels) {
+        Write-Warning ("$png has $($info.Channels) channels, more than the '$PlanName' " +
+                       "plan uses ($PlanChannels); the surplus colour is reduced to luminance.")
+    }
+
     $bmp = [System.Drawing.Bitmap]::FromFile($png)
     try {
         if ($bmp.Width -ne $bmp.Height) {
             throw "$png must be square (got $($bmp.Width)x$($bmp.Height))."
-        }
-        if (-not [System.Drawing.Image]::IsAlphaPixelFormat($bmp.PixelFormat)) {
-            throw "$png must have an alpha channel (the silhouette coverage)."
         }
         $size = $bmp.Width
         $rect = New-Object System.Drawing.Rectangle 0, 0, $bmp.Width, $bmp.Height
