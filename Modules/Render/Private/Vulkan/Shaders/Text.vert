@@ -2,7 +2,7 @@
 
 // MSDF text vertex shader. Same vertex layout as Sprite.vert (Lur::Render::Vertex),
 // and the same push-constant prefix (Mvp + Tint) so both pipelines share ONE pipeline
-// layout — the fragment stage additionally reads DistanceRange at offset 80. Text is
+// layout — the fragment stage additionally reads DistanceRange from Shape.w. Text is
 // emitted in pixel space (screen-fixed) with the ortho MVP, one quad per glyph, UVs
 // and colour baked per vertex by the HUD layer.
 layout(location = 0) in vec3 InPosition;

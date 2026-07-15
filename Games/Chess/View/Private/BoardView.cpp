@@ -16,11 +16,21 @@
 namespace Chess {
 namespace {
 
-// Near-white / near-black piece tints. Each also serves as the OTHER colour's
-// outline (a slightly larger silhouette behind the fill), so a white piece reads
-// on a light square and a black piece on a dark one.
+// Piece shading, fed to the generic sprite shader per material (see MaterialDesc).
+// One mask set renders both colours: the art's dark "ink" band [InkLo,InkHi] is
+// recoloured to Outline and the fills get a Gamma tone curve.
+//   * White pieces: near-white fill, DARK outline, gentle gamma (soft shadows).
+//   * Black pieces: dark fill, WHITE outline, steep gamma (deep shadows).
+// Legibility on same-colour squares comes from the baked outline, so no separate
+// outline pass is needed.
 constexpr Lur::Render::Color PieceLightTint{0.97f, 0.97f, 0.95f, 1.0f};
-constexpr Lur::Render::Color PieceDarkTint{0.13f, 0.13f, 0.15f, 1.0f};
+constexpr Lur::Render::Color PieceDarkTint{0.20f, 0.20f, 0.22f, 1.0f};
+constexpr Lur::Render::Color OutlineOnLight{0.0f, 0.0f, 0.0f, 1.0f};  // dark outline for white pieces
+constexpr Lur::Render::Color OutlineOnDark{1.0f, 1.0f, 1.0f, 1.0f};   // white outline for black pieces
+constexpr float PieceInkLo = 0.32f;      // shade band the art's outline ink occupies
+constexpr float PieceInkHi = 0.60f;
+constexpr float PieceGammaLight = 1.3f;  // white pieces: gentle shadow contrast
+constexpr float PieceGammaDark  = 3.0f;  // black pieces: deep shadow contrast
 
 // Board placement in the window: a centred square, 0.95 of the shorter side.
 struct BoardLayout { float OriginX, OriginY, Square; };
@@ -82,8 +92,16 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
             Rg[i * 2 + 1] = Coverage[i];   // G = coverage
         }
         const TextureHandle Tex = Renderer->LoadTexture(Rg.data(), N, N, ETextureFormat::Rg8);
-        PieceLight[Type] = Renderer->CreateMaterial(MaterialDesc{Tex, PieceLightTint, false});
-        PieceDark[Type]  = Renderer->CreateMaterial(MaterialDesc{Tex, PieceDarkTint, false});
+
+        MaterialDesc Light{Tex, PieceLightTint, false};
+        Light.Outline = OutlineOnLight; Light.Gamma = PieceGammaLight;
+        Light.InkLo = PieceInkLo; Light.InkHi = PieceInkHi;
+        PieceLight[Type] = Renderer->CreateMaterial(Light);
+
+        MaterialDesc Dark{Tex, PieceDarkTint, false};
+        Dark.Outline = OutlineOnDark; Dark.Gamma = PieceGammaDark;
+        Dark.InkLo = PieceInkLo; Dark.InkHi = PieceInkHi;
+        PieceDark[Type] = Renderer->CreateMaterial(Dark);
     }
 
     // Built-in MSDF UI font: upload its atlas, then bind the score/result text field.
@@ -152,13 +170,9 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
 
             float X, Y; CellTopLeft(L, S, Flip, X, Y);
             const int Idx = static_cast<int>(Type);
-            const float FillSize = Sq * 0.90f;
+            const float FillSize = Sq * 0.94f;
             const float FillOff  = (Sq - FillSize) * 0.5f;
-            const float OutSize  = FillSize * 1.08f;
-            const float OutOff   = (Sq - OutSize) * 0.5f;
-            const MaterialHandle Fill    = White ? PieceLight[Idx] : PieceDark[Idx];
-            const MaterialHandle Outline = White ? PieceDark[Idx]  : PieceLight[Idx];
-            Renderer->DrawMesh(QuadMesh, Outline, CellModel(X + OutOff, Y + OutOff, OutSize));
+            const MaterialHandle Fill = White ? PieceLight[Idx] : PieceDark[Idx];
             Renderer->DrawMesh(QuadMesh, Fill, CellModel(X + FillOff, Y + FillOff, FillSize));
         }
 

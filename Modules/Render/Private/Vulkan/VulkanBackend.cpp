@@ -62,14 +62,15 @@ void LogF(bool Error, const char* Fmt, ...) {
             LOGE("Vulkan call failed (%d) at %s:%d", Result_, __FILE__, __LINE__);  \
     } while (0)
 
-// Pushed per draw. mat4 (64) + vec4 (16) + float + pad = 96 bytes, under the 128-byte
-// portable minimum. The sprite shaders read only Mvp+Tint; the MSDF text shader also
-// reads DistanceRange (offset 80), so both pipelines share ONE pipeline layout.
+// Pushed per draw. mat4 (64) + 3x vec4 (48) = 112 bytes, under the 128-byte portable
+// minimum. One layout is shared by both pipelines: the sprite shader reads Tint +
+// Outline + Shape.xyz (ink band + gamma); the MSDF text shader reads Tint and the
+// distance range from Shape.w. Unused fields are simply left zero per draw.
 struct PushConstants {
-    float Mvp[16];
-    float Tint[4];
-    float DistanceRange;   // msdfgen -pxrange, atlas texels (text only)
-    float Pad[3];          // keep 16-byte alignment
+    float Mvp[16];      // offset 0
+    float Tint[4];      // offset 64  fill colour
+    float Outline[4];   // offset 80  sprite ink-band colour
+    float Shape[4];     // offset 96  x=InkLo, y=InkHi, z=Gamma, w=DistanceRange (text)
 };
 
 struct Mesh {
@@ -88,6 +89,10 @@ struct Texture {
 
 struct Material {
     Color           Tint;
+    Color           Outline;                         // ink-band colour (see MaterialDesc)
+    float           Gamma = 1.0f;
+    float           InkLo = 0.0f;
+    float           InkHi = 0.0f;
     VkDescriptorSet DescriptorSet = VK_NULL_HANDLE;  // binds the base-colour texture
 };
 
@@ -240,6 +245,10 @@ public:
     MaterialHandle CreateMaterial(const MaterialDesc& Desc) override {
         Material M;
         M.Tint = Desc.Tint;
+        M.Outline = Desc.Outline;
+        M.Gamma = Desc.Gamma;
+        M.InkLo = Desc.InkLo;
+        M.InkHi = Desc.InkHi;
         const TextureHandle Tex = (Desc.BaseColor != 0) ? Desc.BaseColor : DefaultTexture;
         M.DescriptorSet = AllocateDescriptorSet(Textures[Tex - 1].View);
         Materials.push_back(M);
@@ -318,6 +327,9 @@ public:
         std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
         Pc.Tint[0] = Mat.Tint.R; Pc.Tint[1] = Mat.Tint.G;
         Pc.Tint[2] = Mat.Tint.B; Pc.Tint[3] = Mat.Tint.A;
+        Pc.Outline[0] = Mat.Outline.R; Pc.Outline[1] = Mat.Outline.G;
+        Pc.Outline[2] = Mat.Outline.B; Pc.Outline[3] = Mat.Outline.A;
+        Pc.Shape[0] = Mat.InkLo; Pc.Shape[1] = Mat.InkHi; Pc.Shape[2] = Mat.Gamma;
         vkCmdPushConstants(CommandBuffer, PipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(Pc), &Pc);
@@ -357,7 +369,7 @@ public:
         std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
         Pc.Tint[0] = Mat.Tint.R; Pc.Tint[1] = Mat.Tint.G;
         Pc.Tint[2] = Mat.Tint.B; Pc.Tint[3] = Mat.Tint.A;
-        Pc.DistanceRange = DistanceRange;
+        Pc.Shape[3] = DistanceRange;   // text reads the msdf range from Shape.w
         vkCmdPushConstants(CommandBuffer, PipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(Pc), &Pc);

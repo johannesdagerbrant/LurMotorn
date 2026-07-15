@@ -31,10 +31,26 @@ enum class ETextureFormat { Rgba8, Rg8 };
 // A material is a shader plus its parameters. 2D sprites use an unlit textured
 // material; 3D meshes can opt into lighting. Kept tiny on purpose — richer PBR
 // fields slot in here later without changing the interface.
+//
+// The sprite shading is deliberately GENERIC — the fields below are engine knobs a
+// game sets per material, not game-specific logic baked into the shader:
+//   * Tint     — the fill colour (multiplied by the texture's shade channel, R).
+//   * Gamma    — tone curve on the fill's shade; 1 = linear. >1 deepens the darker
+//                tones while leaving highlights (shade ~1) put; <1 lifts them.
+//   * Outline  — colour that the texture's dark "ink" band maps to (see Ink below).
+//   * InkLo/Hi — the shade band treated as "ink": shade below the band blends fully
+//                to Outline, above it stays the tinted fill. Disabled (plain
+//                tint×shade) when InkHi <= InkLo, which is the default.
+// Chess uses these to render both piece colours from one mask set: e.g. a dark
+// outline + gentle gamma for white pieces, a white outline + steep gamma for black.
 struct MaterialDesc {
     TextureHandle BaseColor = 0;   // 0 = flat white
     Color         Tint;
     bool          Lit = false;     // unlit for 2D, lit for 3D
+    Color         Outline;         // ink-band colour (only used when InkHi > InkLo)
+    float         Gamma = 1.0f;    // fill tone curve; 1 = linear (no change)
+    float         InkLo = 0.0f;    // ink band; InkHi <= InkLo disables the recolour
+    float         InkHi = 0.0f;
 };
 
 // View + projection. Projection is Mat4::Ortho() for 2D and Mat4::Perspective()
