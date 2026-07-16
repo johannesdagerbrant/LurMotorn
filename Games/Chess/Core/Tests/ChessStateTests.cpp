@@ -2,16 +2,20 @@
 // serialisation, identity-based colour (GUID order + match parity), and the
 // link-time record merge (adopt the strictly-newer record). Pure logic — no
 // transport, no device. Same tiny CHECK harness as the other suites.
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <string>
 #include <vector>
 
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/ChessRecord.h"
+#include "Chess/OpponentRegistry.h"
 #include "Chess/Types.h"
+#include "Lur/Save/Store.h"
 
 using namespace Chess;
 
@@ -178,6 +182,50 @@ static void TestSeventyFiveMoveDraw() {
     CHECK(S.Record().Moves.empty());   // next match started
 }
 
+// EnumerateOpponents lists every stored opponent record, derives whose turn it is
+// from GUID order + parity (no live link needed), and filters out control keys and
+// this device's own id (#35).
+static void TestEnumerateOpponents() {
+    namespace fs = std::filesystem;
+    const fs::path Dir = fs::temp_directory_path() / "lur_opp_enum_tests";
+    std::error_code Ec; fs::remove_all(Dir, Ec);
+    Lur::Save::Store S(Dir.string());
+
+    const std::string Local  = "55555555555555555555555555555555";  // 32-hex
+    const std::string PeerHi = "99999999999999999999999999999999";  // Local < PeerHi
+    const std::string PeerLo = "11111111111111111111111111111111";  // Local > PeerLo
+
+    // Store a fresh (empty) record per key. Records are identity-agnostic, so we can
+    // write a default ChessRecord directly.
+    auto SaveFresh = [&](const std::string& Key) {
+        ChessRecord R; std::vector<uint8_t> B; R.Write(B);
+        CHECK(S.Save(Key, B.data(), B.size()));
+    };
+    SaveFresh(PeerHi);
+    SaveFresh(PeerLo);
+    SaveFresh(Local);          // our own id — must be excluded
+    SaveFresh("device-id");    // a control key (not 32-hex) — must be excluded
+
+    std::vector<OpponentInfo> Ops = EnumerateOpponents(S, Local);
+    CHECK(Ops.size() == 2);    // only PeerHi + PeerLo
+
+    auto Get = [&](const std::string& G) -> const OpponentInfo* {
+        auto It = std::find_if(Ops.begin(), Ops.end(),
+                               [&](const OpponentInfo& O) { return O.Guid == G; });
+        return It == Ops.end() ? nullptr : &*It;
+    };
+    const OpponentInfo* Hi = Get(PeerHi);
+    const OpponentInfo* Lo = Get(PeerLo);
+    CHECK(Hi != nullptr);
+    CHECK(Lo != nullptr);
+    // Fresh game, even parity -> lower-GUID device is White and moves first. Against
+    // PeerHi we are the lower GUID (our turn); against PeerLo we are higher (not).
+    if (Hi) { CHECK(Hi->MyTurn); CHECK(Hi->MoveCount == 0); }
+    if (Lo) CHECK(!Lo->MyTurn);
+    CHECK(Get(Local) == nullptr);
+    CHECK(Get("device-id") == nullptr);
+}
+
 int main() {
     TestRecordRoundTrip();
     TestReadAbsentIsFresh();
@@ -186,6 +234,7 @@ int main() {
     TestMergeMatchesDominate();
     TestCheckmateConcludesMatch();
     TestSeventyFiveMoveDraw();
+    TestEnumerateOpponents();
 
     if (GFailures == 0) {
         std::printf("All chess state tests passed.\n");

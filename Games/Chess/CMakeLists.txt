@@ -5,7 +5,8 @@ add_library(chess_core
     Core/Private/MoveGen.cpp
     Core/Private/MoveCodec.cpp
     Core/Private/ChessRecord.cpp
-    Core/Private/ChessMatchState.cpp)
+    Core/Private/ChessMatchState.cpp
+    Core/Private/OpponentRegistry.cpp)
 
 target_include_directories(chess_core PUBLIC Core/Public PRIVATE Core/Private)
 # lur::save for the ISaveState contract ChessMatchState implements (issue #18).
