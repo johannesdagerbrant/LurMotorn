@@ -13,6 +13,7 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/ChessRecord.h"
+#include "Chess/MatchMeta.h"
 #include "Chess/OpponentRegistry.h"
 #include "Chess/Types.h"
 #include "Lur/Save/Store.h"
@@ -226,6 +227,31 @@ static void TestEnumerateOpponents() {
     CHECK(Get("device-id") == nullptr);
 }
 
+// The local-only last-move sidecar round-trips, defaults to 0 when absent, and its
+// "meta-"+guid key is never mistaken for an opponent record (#36).
+static void TestMatchMeta() {
+    namespace fs = std::filesystem;
+    const fs::path Dir = fs::temp_directory_path() / "lur_meta_tests";
+    std::error_code Ec; fs::remove_all(Dir, Ec);
+    Lur::Save::Store S(Dir.string());
+    const std::string Guid = "abcdef0123456789abcdef0123456789";
+
+    CHECK(LoadMatchMeta(S, Guid).LastMoveMs == 0);                 // absent -> 0
+    MatchMeta M; M.LastMoveMs = 1752600000123ull;                  // > 32 bits, exercises full u64
+    CHECK(SaveMatchMeta(S, Guid, M));
+    CHECK(LoadMatchMeta(S, Guid).LastMoveMs == M.LastMoveMs);      // round-trip
+
+    // Storing the real opponent record too, the sidecar key must not be enumerated.
+    ChessRecord R; std::vector<uint8_t> B; R.Write(B);
+    CHECK(S.Save(Guid, B.data(), B.size()));
+    std::vector<OpponentInfo> Ops =
+        EnumerateOpponents(S, "00000000000000000000000000000000");
+    CHECK(Ops.size() == 1);                                        // only the record
+    CHECK(Ops.size() == 1 && Ops[0].Guid == Guid);
+
+    CHECK(NowMillisUtc() > 0);                                     // clock is sane
+}
+
 int main() {
     TestRecordRoundTrip();
     TestReadAbsentIsFresh();
@@ -235,6 +261,7 @@ int main() {
     TestCheckmateConcludesMatch();
     TestSeventyFiveMoveDraw();
     TestEnumerateOpponents();
+    TestMatchMeta();
 
     if (GFailures == 0) {
         std::printf("All chess state tests passed.\n");
