@@ -34,6 +34,15 @@ public:
     // the new one, never a torn one. Returns false on I/O failure.
     bool Save(std::string_view Key, const uint8_t* Data, std::size_t Size);
 
+    // Every key currently stored, in UNSPECIFIED order — the exact keys prior
+    // Save() calls used, recovered by reversing PathFor's %XX sanitisation.
+    // Interrupted-write temp files are skipped; an absent/unreadable directory
+    // yields an empty vector. This is what lets a caller discover records whose
+    // key it doesn't already know — e.g. enumerate every historical opponent GUID
+    // (issue #33). The store stays game-agnostic: callers filter (e.g. to 32-hex
+    // GUIDs) to tell opponent records from control keys like "device-id".
+    std::vector<std::string> ListKeys() const;
+
 private:
     // Map a key to its on-disk filename, escaping any byte outside [A-Za-z0-9._-]
     // as %XX. Reversible and collision-free, so distinct keys never share a file

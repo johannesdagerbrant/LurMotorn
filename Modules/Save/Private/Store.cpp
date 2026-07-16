@@ -41,6 +41,47 @@ std::vector<uint8_t> Store::Load(std::string_view Key) const {
     return Buffer;
 }
 
+namespace {
+// A hex nibble 0..15, or -1 if C is not a hex digit. PathFor emits uppercase, but
+// accept both cases so the decode is robust.
+int HexNibble(char C) {
+    if (C >= '0' && C <= '9') return C - '0';
+    if (C >= 'A' && C <= 'F') return C - 'A' + 10;
+    if (C >= 'a' && C <= 'f') return C - 'a' + 10;
+    return -1;
+}
+}  // namespace
+
+std::vector<std::string> Store::ListKeys() const {
+    std::vector<std::string> Keys;
+    std::error_code Ec;
+    fs::directory_iterator It(Dir, Ec);
+    if (Ec) return Keys;  // directory absent (nothing saved yet) or unreadable
+
+    for (const auto& Entry : It) {
+        if (!Entry.is_regular_file(Ec)) continue;
+        const std::string Name = Entry.path().filename().string();
+        // Skip the transient temp files an interrupted Save() may have left behind.
+        if (Name.size() >= 4 && Name.compare(Name.size() - 4, 4, ".tmp") == 0) continue;
+
+        // Reverse PathFor: literal bytes pass through; %XX decodes back to one byte.
+        std::string Key;
+        Key.reserve(Name.size());
+        for (std::size_t i = 0; i < Name.size(); ++i) {
+            const int Hi = (Name[i] == '%' && i + 2 < Name.size()) ? HexNibble(Name[i + 1]) : -1;
+            const int Lo = (Hi >= 0) ? HexNibble(Name[i + 2]) : -1;
+            if (Hi >= 0 && Lo >= 0) {
+                Key.push_back(static_cast<char>((Hi << 4) | Lo));
+                i += 2;
+            } else {
+                Key.push_back(Name[i]);
+            }
+        }
+        Keys.push_back(std::move(Key));
+    }
+    return Keys;
+}
+
 bool Store::Save(std::string_view Key, const uint8_t* Data, std::size_t Size) {
     std::error_code Ec;
     fs::create_directories(Dir, Ec);  // ok if it already exists

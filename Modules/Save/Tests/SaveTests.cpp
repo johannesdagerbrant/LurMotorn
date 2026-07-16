@@ -2,6 +2,7 @@
 // Store (round-trip, absent-key, overwrite, atomicity) and LoadOrCreateDeviceId
 // (generated once, then stable). No framework: each CHECK records a failure and the
 // process exits non-zero if any failed, which CTest reports. Mirrors net_tests.
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -82,6 +83,29 @@ static void TestUnsafeKeys() {
     CHECK(S.Save("a\\b*c", B.data(), B.size()));     // backslash + star (distinct key)
     CHECK(S.Load("a/b:c") == A);
     CHECK(S.Load("a\\b*c") == B);                    // no collision between the two
+}
+
+// ListKeys returns exactly the keys written (order-independent) and reverses the
+// %XX sanitisation, so an unsafe key round-trips identically — this is what lets
+// the opponent list enumerate records it didn't already know the key of (#33).
+static void TestListKeys() {
+    Store S(ScratchDir());
+    CHECK(S.ListKeys().empty());  // nothing saved yet (the directory may not exist)
+
+    const std::vector<uint8_t> V = Bytes({0x2A});
+    CHECK(S.Save("device-id", V.data(), V.size()));   // a control key (not 32-hex)
+    CHECK(S.Save("7f3ac9e104b2", V.data(), V.size())); // a GUID-shaped key
+    CHECK(S.Save("a/b:c", V.data(), V.size()));        // unsafe -> %XX on disk, must decode back
+
+    std::vector<std::string> Got = S.ListKeys();
+    std::sort(Got.begin(), Got.end());
+    std::vector<std::string> Want = {"7f3ac9e104b2", "a/b:c", "device-id"};
+    std::sort(Want.begin(), Want.end());
+    CHECK(Got == Want);
+
+    // Overwriting an existing key must not create a duplicate entry.
+    CHECK(S.Save("a/b:c", V.data(), V.size()));
+    CHECK(S.ListKeys().size() == 3);
 }
 
 // The device id is created on first call and identical on every later call — the
@@ -178,6 +202,7 @@ int main() {
     TestOverwrite();
     TestPersistsAcrossInstances();
     TestUnsafeKeys();
+    TestListKeys();
     TestDeviceIdStableWithinInstance();
     TestDeviceIdStableAcrossRestart();
     TestDeviceIdsAreDistinctAndHex();
