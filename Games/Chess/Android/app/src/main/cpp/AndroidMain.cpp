@@ -118,11 +118,14 @@ void android_main(android_app* App) {
         State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
     // The view applies the hijack rule and sets identity + loads the record for the
-    // adopted peer; we send our record only when it adopted this peer.
-    State.Session.SetReadyHandler([&State, &SendRecord] {
+    // adopted peer; we send our record only when it adopted this peer. Both the
+    // initial link (ReadyHandler) AND a reconnect (ResyncHandler) go through it, so a
+    // peer that (re)joins is adopted per the hijack rule — not just on first contact.
+    auto OnLive = [&State, &SendRecord] {
         if (State.View.OnPeerLinked(State.Session.GetPeerGuid())) SendRecord();
-    });
-    State.Session.SetResyncHandler(SendRecord);                          // reconnect: re-sync records
+    };
+    State.Session.SetReadyHandler(OnLive);
+    State.Session.SetResyncHandler(OnLive);                              // reconnect: re-adopt + re-sync
     State.Session.SetHandler(Lur::Net::EMsgType::Sync,
                              [&State, &Sync](const uint8_t* D, std::size_t N) {
                                  if (State.View.ActiveOpponentGuid() == State.Session.GetPeerGuid())

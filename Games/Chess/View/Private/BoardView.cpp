@@ -430,8 +430,10 @@ void BoardView::RebuildItems() {
     constexpr Color Black {0.06f, 0.07f, 0.09f, 1.0f};   // not linked
     constexpr Color Yellow{0.98f, 0.85f, 0.30f, 1.0f};   // your turn
 
-    const std::string LinkedGuid =
-        (Net != nullptr && Net->IsReady()) ? Net->GetPeerGuid() : std::string();
+    // "Linked" must reflect the CURRENT connection, not the IsReady() latch (which
+    // stays set after a later disconnect) — else a dropped peer keeps its green dot.
+    const bool Live = Net != nullptr && Net->GetLinkState() == Lur::Net::ELinkState::Linked;
+    const std::string LinkedGuid = Live ? Net->GetPeerGuid() : std::string();
 
     std::vector<OpponentInfo> Ops = EnumerateOpponents(*Persist, DeviceId);
     std::vector<OpponentInfo> Online, Offline;

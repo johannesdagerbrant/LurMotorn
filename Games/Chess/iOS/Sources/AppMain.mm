@@ -110,11 +110,14 @@
         Session->Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
     // The view applies the hijack rule and sets identity + loads the record for the
-    // adopted peer; we send our record only when it adopted this peer.
-    Session->SetReadyHandler([View, Session, SendRecord] {
+    // adopted peer; we send our record only when it adopted this peer. Both the
+    // initial link (ReadyHandler) AND a reconnect (ResyncHandler) go through it, so a
+    // peer that (re)joins is adopted per the hijack rule — not just on first contact.
+    auto OnLive = [View, Session, SendRecord] {
         if (View->OnPeerLinked(Session->GetPeerGuid())) SendRecord();
-    });
-    Session->SetResyncHandler(SendRecord);                     // reconnect: re-sync records
+    };
+    Session->SetReadyHandler(OnLive);
+    Session->SetResyncHandler(OnLive);                         // reconnect: re-adopt + re-sync
     Session->SetHandler(Lur::Net::EMsgType::Sync,
                         [View, Sync, Session](const uint8_t* D, std::size_t N) {
                             if (View->ActiveOpponentGuid() == Session->GetPeerGuid())
