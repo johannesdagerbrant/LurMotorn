@@ -119,6 +119,10 @@
 
     _View.SetState(&_Match);
     _View.AttachSession(&_Session);
+    _View.AttachPersistence(_Store, _DeviceId);            // opponent selector list
+    _View.SetLogger([](const char* M) {
+        os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
+    });
     _Session.Start(_Transport, _DeviceId);
 }
 

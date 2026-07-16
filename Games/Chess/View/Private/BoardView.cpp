@@ -1,11 +1,15 @@
 #include "Chess/View/BoardView.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 
+#include "Chess/MatchMeta.h"
 #include "Chess/MoveCodec.h"
+#include "Chess/OpponentRegistry.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Serialization/BitReader.h"
@@ -75,8 +79,6 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
     Highlight   = Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
 
-    StatusBar.CreateResources(Renderer);  // engine link-state widget owns its palette
-
     // Pack each piece into an R8G8 texture — R = shade (the source art's tones),
     // G = coverage (silhouette alpha) — and upload once. The shader multiplies the
     // material tint by the shade, so the tint supplies the piece colour while the
@@ -104,10 +106,12 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
         PieceDark[Type] = Renderer->CreateMaterial(Dark);
     }
 
-    // Built-in MSDF UI font: upload its atlas, then bind the score/result text field.
+    // Built-in MSDF UI font: upload its atlas, then bind the score/result text field
+    // and the opponent selector (both need the font atlas material).
     UiFont.Init(Lur::Text::InterFont());
     UiFont.UploadAtlas(*Renderer);
     Text.CreateResources(Renderer, &UiFont);
+    Selector.CreateResources(Renderer, &UiFont);
 }
 
 bool BoardView::FlipBoard() const {
@@ -191,14 +195,17 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     // board, drawn by the engine's orthographic camera (see IRenderer::BeginGui).
     Renderer->BeginGui();
 
-    // Link-state indicator: hand the engine widget a slim rect in the top margin;
-    // it owns the colour per state. Absent in a local hot-seat (no session).
-    if (Net != nullptr) {
-        const float Inset = Sq * 0.12f;
-        const float MaxH  = L.OriginY - 2.0f * Inset;   // available top-margin height
-        float BarH = Sq * 0.5f;
-        if (BarH > MaxH) BarH = MaxH;
-        StatusBar.Draw(Renderer, Net->GetLinkState(), L.OriginX, Inset, Sq * 8.0f, BarH);
+    // Opponent selector in the top margin (replaces the old link-state bar). Rebuild
+    // the list when the link state changes (a peer linked/dropped) or a move landed.
+    if (Persist != nullptr) {
+        const int Link = (Net != nullptr) ? static_cast<int>(Net->GetLinkState()) : -1;
+        if (Link != LastLink) { LastLink = Link; ItemsDirty = true; }
+        if (ItemsDirty) { RebuildItems(); ItemsDirty = false; }
+
+        // Top margin clears the system status bar (the surface is edge-to-edge). A
+        // proportional inset is a stopgap until a real safe-area inset is plumbed in.
+        const float TopInset = Sq * 0.62f;
+        Selector.Draw(Renderer, "Current opponent", L.OriginX, TopInset, Sq * 8.0f, Sq * 0.62f);
     }
 
     // All-time W/L/D from THIS player's perspective, in the bottom margin (#22). The
@@ -252,10 +259,29 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     if (!R.IsOk() || Mv == Move{}) return;                         // corrupt/out-of-range guard
     if (State->HasIdentity() && State->SideToMove() == State->MyColor()) return;  // not the peer's turn
     State->ApplyMove(Mv);
+    StampMove();
     Selected = NoSquare;
 }
 
 void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
+    // The GUI layer gets first crack: if the selector consumed the tap (pill or an
+    // open menu row), it must not also reach the board.
+    if (Selector.OnTap(XPx, YPx)) {
+        if (Selector.TookSelection()) {
+            const int Sel = Selector.Selected();
+            ActiveOpponent = (Sel >= 0 && Sel < static_cast<int>(ItemGuid.size()))
+                                 ? ItemGuid[Sel] : std::string();
+            ItemsDirty = true;   // reflect the new selection in the pill
+            if (Log) {
+                char B[96];
+                std::snprintf(B, sizeof(B), "selector: chose %s",
+                              ActiveOpponent.empty() ? "same-device" : ActiveOpponent.c_str());
+                Log(B);
+            }
+        }
+        return;
+    }
+
     if (State == nullptr) return;
     const BoardLayout L = ComputeLayout(WidthPx, HeightPx);
     const Square Sq = SquareAt(L, XPx, YPx, FlipBoard());
@@ -291,6 +317,7 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
                 Net->SendMove(Bytes.data(), Bytes.size());
             }
             State->ApplyMove(*Chosen);
+            StampMove();
             Selected = NoSquare;
             return;
         }
@@ -298,6 +325,127 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
 
     // Not a move: select one's own piece (only on your turn), otherwise clear.
     Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
+}
+
+void BoardView::AttachPersistence(Lur::Save::Store* Store, std::string LocalGuid) {
+    Persist = Store;
+    DeviceId = std::move(LocalGuid);
+    ItemsDirty = true;
+}
+
+void BoardView::StampMove() {
+    // Record the last-move time against the currently-linked opponent (offline /
+    // same-device stamping arrives with #38). Also refresh the selector's sublabels.
+    if (Persist != nullptr && Net != nullptr && Net->IsReady()) {
+        Chess::MatchMeta M; M.LastMoveMs = Chess::NowMillisUtc();
+        Chess::SaveMatchMeta(*Persist, Net->GetPeerGuid(), M);
+    }
+    ItemsDirty = true;
+}
+
+namespace {
+// First 12 hex of a GUID as three upper-case groups (e.g. "7F3A-C9E1-04B2"). The
+// font atlas is ASCII, so use '-' (not a middot) as the separator.
+std::string ShortGuid(const std::string& G) {
+    auto Up = [](char C) { return (C >= 'a' && C <= 'f') ? static_cast<char>(C - 32) : C; };
+    std::string S;
+    for (int Grp = 0; Grp < 3; ++Grp) {
+        if (Grp) S += '-';
+        for (int K = 0; K < 4; ++K) {
+            const std::size_t Idx = static_cast<std::size_t>(Grp) * 4 + K;
+            S += (Idx < G.size()) ? Up(G[Idx]) : '0';
+        }
+    }
+    return S;
+}
+
+// Coarse "time ago" for the last-move sublabel.
+std::string RelTime(std::uint64_t Ms) {
+    const std::uint64_t S = Ms / 1000;
+    char B[24];
+    if (S < 60)         std::snprintf(B, sizeof(B), "%llus", static_cast<unsigned long long>(S));
+    else if (S < 3600)  std::snprintf(B, sizeof(B), "%llum", static_cast<unsigned long long>(S / 60));
+    else if (S < 86400) std::snprintf(B, sizeof(B), "%lluh", static_cast<unsigned long long>(S / 3600));
+    else                std::snprintf(B, sizeof(B), "%llud", static_cast<unsigned long long>(S / 86400));
+    return B;
+}
+}  // namespace
+
+void BoardView::RebuildItems() {
+    using Lur::Hud::DropdownItem;
+    using Lur::Hud::ELeadStyle;
+    using Lur::Render::Color;
+    constexpr Color Green {0.30f, 0.85f, 0.40f, 1.0f};   // linked
+    constexpr Color Black {0.06f, 0.07f, 0.09f, 1.0f};   // not linked
+    constexpr Color Yellow{0.98f, 0.85f, 0.30f, 1.0f};   // your turn
+
+    const std::string LinkedGuid =
+        (Net != nullptr && Net->IsReady()) ? Net->GetPeerGuid() : std::string();
+
+    std::vector<OpponentInfo> Ops = EnumerateOpponents(*Persist, DeviceId);
+    std::vector<OpponentInfo> Online, Offline;
+    for (const OpponentInfo& O : Ops) {
+        if (!LinkedGuid.empty() && O.Guid == LinkedGuid) Online.push_back(O);
+        else                                             Offline.push_back(O);
+    }
+    // Your-turn rows float to the top of each group (stable within the group).
+    auto TurnFirst = [](const OpponentInfo& A, const OpponentInfo& B) {
+        return A.MyTurn && !B.MyTurn;
+    };
+    std::stable_sort(Online.begin(),  Online.end(),  TurnFirst);
+    std::stable_sort(Offline.begin(), Offline.end(), TurnFirst);
+
+    std::vector<DropdownItem> Items;
+    ItemGuid.clear();
+    auto AddHeader = [&](const char* T) {
+        DropdownItem H; H.Header = true; H.Label = T;
+        Items.push_back(std::move(H)); ItemGuid.emplace_back();
+    };
+    auto AddOpp = [&](const OpponentInfo& O, bool Linked) {
+        DropdownItem It;
+        It.Lead = ELeadStyle::Dot;
+        It.LeadFill = Linked ? Green : Black;
+        It.Ring = O.MyTurn; It.RingColor = Yellow;
+        It.Label = ShortGuid(O.Guid);
+        const Chess::MatchMeta M = Chess::LoadMatchMeta(*Persist, O.Guid);
+        if (M.LastMoveMs == 0) {
+            It.Sublabel = O.MyTurn ? "your move" : "waiting";
+        } else {
+            const std::uint64_t Now = Chess::NowMillisUtc();
+            const std::string Rel = RelTime(Now > M.LastMoveMs ? Now - M.LastMoveMs : 0);
+            It.Sublabel = (O.MyTurn ? "moved " + Rel + " ago" : "you moved " + Rel + " ago");
+        }
+        Items.push_back(std::move(It)); ItemGuid.push_back(O.Guid);
+    };
+
+    if (!Online.empty())  { AddHeader("Online");  for (const auto& O : Online)  AddOpp(O, true);  }
+    if (!Offline.empty()) { AddHeader("Offline"); for (const auto& O : Offline) AddOpp(O, false); }
+    // "Same device" pinned at the very bottom.
+    {
+        DropdownItem It;
+        It.Lead = ELeadStyle::Split;
+        It.Label = "Same device";
+        It.Sublabel = "Both sides";
+        Items.push_back(std::move(It)); ItemGuid.emplace_back();
+    }
+
+    Selector.SetItems(Items.data(), static_cast<int>(Items.size()));
+
+    // Select the row matching the active opponent; default to "same device" (last).
+    int Sel = static_cast<int>(Items.size()) - 1;
+    if (!ActiveOpponent.empty()) {
+        for (std::size_t i = 0; i < ItemGuid.size(); ++i)
+            if (!Items[i].Header && ItemGuid[i] == ActiveOpponent) { Sel = static_cast<int>(i); break; }
+    }
+    Selector.SetSelected(Sel);
+
+    if (Log) {
+        char B[128];
+        std::snprintf(B, sizeof(B), "selector: %zu opp (%zu online) active=%s",
+                      Ops.size(), Online.size(),
+                      ActiveOpponent.empty() ? "same-device" : ShortGuid(ActiveOpponent).c_str());
+        Log(B);
+    }
 }
 
 } // namespace Chess

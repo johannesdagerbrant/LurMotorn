@@ -108,6 +108,8 @@ void android_main(android_app* App) {
     State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
     State.View.SetState(&State.Match);
     State.View.AttachSession(&State.Session);
+    State.View.AttachPersistence(&Store, DeviceId);        // opponent selector list
+    State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
 
     auto SendRecord = [&State, &Sync] {
         const std::vector<uint8_t> Snap = Sync.Snapshot();
