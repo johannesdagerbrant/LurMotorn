@@ -252,6 +252,17 @@ static void TestMatchMeta() {
     CHECK(NowMillisUtc() > 0);                                     // clock is sane
 }
 
+// ClearIdentity drops to a hot-seat: no identity, IsMyTurn false (either side may
+// move) — the "same device / both sides" mode (#38).
+static void TestClearIdentityHotSeat() {
+    ChessMatchState S;
+    S.SetIdentity("11111111111111111111111111111111", "99999999999999999999999999999999");
+    CHECK(S.HasIdentity());
+    S.ClearIdentity();
+    CHECK(!S.HasIdentity());
+    CHECK(!S.IsMyTurn());
+}
+
 int main() {
     TestRecordRoundTrip();
     TestReadAbsentIsFresh();
@@ -262,6 +273,7 @@ int main() {
     TestSeventyFiveMoveDraw();
     TestEnumerateOpponents();
     TestMatchMeta();
+    TestClearIdentityHotSeat();
 
     if (GFailures == 0) {
         std::printf("All chess state tests passed.\n");

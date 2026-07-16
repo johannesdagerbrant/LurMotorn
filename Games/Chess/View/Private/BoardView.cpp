@@ -251,6 +251,11 @@ void BoardView::AttachSession(Lur::Net::Session* Session) {
 
 void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     if (State == nullptr) return;
+    // Ignore moves from a peer that isn't the opponent we're currently playing — we
+    // may be on a different (selected) game, and this peer's move index maps to their
+    // board, not ours (hijack rule, #38).
+    if (Net != nullptr && !ActiveOpponent.empty() && Net->GetPeerGuid() != ActiveOpponent)
+        return;
     // Regenerate the identical legal list from our in-sync position; move ORDER is
     // the wire protocol, so the peer's index maps back to the exact same move.
     MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);
@@ -269,15 +274,9 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     if (Selector.OnTap(XPx, YPx)) {
         if (Selector.TookSelection()) {
             const int Sel = Selector.Selected();
-            ActiveOpponent = (Sel >= 0 && Sel < static_cast<int>(ItemGuid.size()))
-                                 ? ItemGuid[Sel] : std::string();
-            ItemsDirty = true;   // reflect the new selection in the pill
-            if (Log) {
-                char B[96];
-                std::snprintf(B, sizeof(B), "selector: chose %s",
-                              ActiveOpponent.empty() ? "same-device" : ActiveOpponent.c_str());
-                Log(B);
-            }
+            const std::string Chosen = (Sel >= 0 && Sel < static_cast<int>(ItemGuid.size()))
+                                           ? ItemGuid[Sel] : std::string();
+            SwitchActive(Chosen);   // switch the active match (or same-device local game)
         }
         return;
     }
@@ -327,20 +326,72 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
 }
 
-void BoardView::AttachPersistence(Lur::Save::Store* Store, std::string LocalGuid) {
+void BoardView::AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManager* SyncMgr,
+                                  std::string LocalGuid) {
     Persist = Store;
+    Sync = SyncMgr;
     DeviceId = std::move(LocalGuid);
     ItemsDirty = true;
 }
 
 void BoardView::StampMove() {
-    // Record the last-move time against the currently-linked opponent (offline /
-    // same-device stamping arrives with #38). Also refresh the selector's sublabels.
-    if (Persist != nullptr && Net != nullptr && Net->IsReady()) {
+    // Stamp the last-move time against the active opponent and persist its record, so
+    // an offline move survives and syncs on the next link. Same-device (empty) has no
+    // opponent record to keep.
+    if (Persist != nullptr && !ActiveOpponent.empty()) {
         Chess::MatchMeta M; M.LastMoveMs = Chess::NowMillisUtc();
-        Chess::SaveMatchMeta(*Persist, Net->GetPeerGuid(), M);
+        Chess::SaveMatchMeta(*Persist, ActiveOpponent, M);
+        if (Sync != nullptr) Sync->Persist();
     }
     ItemsDirty = true;
+}
+
+void BoardView::SwitchActive(const std::string& Guid) {
+    if (State == nullptr) return;
+    if (Guid == ActiveOpponent) return;   // already active — nothing to do
+
+    if (Sync != nullptr) Sync->Persist();  // save the game we're leaving (under its key)
+    Selected = NoSquare;
+    ActiveOpponent = Guid;
+
+    if (Guid.empty()) {
+        // "Same device": a fresh local both-sides game (no colour lock, no flip).
+        State->ClearIdentity();
+        State->Read(nullptr, 0);            // reset to the start position
+        if (Sync != nullptr) Sync->Rebind("");
+    } else {
+        // Hard-load this opponent's stored game (a deliberate switch, not a merge).
+        State->SetIdentity(DeviceId, Guid);
+        const std::vector<uint8_t> Blob = Persist ? Persist->Load(Guid) : std::vector<uint8_t>{};
+        State->Read(Blob.data(), Blob.size());
+        if (Sync != nullptr) Sync->Rebind(Guid);
+    }
+    ItemsDirty = true;
+    if (Log) {
+        char B[96];
+        std::snprintf(B, sizeof(B), "active -> %s", Guid.empty() ? "same-device" : Guid.c_str());
+        Log(B);
+    }
+}
+
+bool BoardView::OnPeerLinked(const std::string& PeerGuid) {
+    // Hijack rule: adopt the peer only when we're on "same device" (the sole
+    // auto-switch) or when it IS the opponent we've selected; otherwise keep playing
+    // the opponent we're on.
+    const bool Adopt = ActiveOpponent.empty() || ActiveOpponent == PeerGuid;
+    if (Log) {
+        char B[112];
+        std::snprintf(B, sizeof(B), "peer linked %s -> %s", PeerGuid.c_str(),
+                      Adopt ? "adopt (go live)" : "ignored (other game active)");
+        Log(B);
+    }
+    if (!Adopt) { ItemsDirty = true; return false; }
+
+    ActiveOpponent = PeerGuid;
+    if (State != nullptr) State->SetIdentity(DeviceId, PeerGuid);
+    if (Sync != nullptr)  Sync->OnLink(PeerGuid);   // monotonic reconcile (live)
+    ItemsDirty = true;
+    return true;
 }
 
 namespace {

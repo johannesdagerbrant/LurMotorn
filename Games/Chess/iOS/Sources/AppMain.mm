@@ -100,26 +100,30 @@
         os_log(OS_LOG_DEFAULT, "OnlyChess: Net: %{public}s", M);
     });
 
-    auto* Match = &_Match;
     auto* Sync = _Sync;
     auto* Session = &_Session;
-    std::string DeviceId = _DeviceId;
-    auto SendRecord = [Sync, Session] {
+    auto* View = &_View;
+    auto SendRecord = [View, Sync, Session] {
+        // Only share OUR game with the peer we're actually playing (hijack rule, #38).
+        if (View->ActiveOpponentGuid() != Session->GetPeerGuid()) return;
         const std::vector<uint8_t> Snap = Sync->Snapshot();
         Session->Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
-    Session->SetReadyHandler([Match, Sync, Session, DeviceId, SendRecord] {
-        Match->SetIdentity(DeviceId, Session->GetPeerGuid());  // colour + anchor
-        Sync->OnLink(Session->GetPeerGuid());                  // load our stored record
-        SendRecord();                                          // let the peer reconcile
+    // The view applies the hijack rule and sets identity + loads the record for the
+    // adopted peer; we send our record only when it adopted this peer.
+    Session->SetReadyHandler([View, Session, SendRecord] {
+        if (View->OnPeerLinked(Session->GetPeerGuid())) SendRecord();
     });
     Session->SetResyncHandler(SendRecord);                     // reconnect: re-sync records
     Session->SetHandler(Lur::Net::EMsgType::Sync,
-                        [Sync](const uint8_t* D, std::size_t N) { Sync->OnSync(D, N); });
+                        [View, Sync, Session](const uint8_t* D, std::size_t N) {
+                            if (View->ActiveOpponentGuid() == Session->GetPeerGuid())
+                                Sync->OnSync(D, N);
+                        });
 
     _View.SetState(&_Match);
     _View.AttachSession(&_Session);
-    _View.AttachPersistence(_Store, _DeviceId);            // opponent selector list
+    _View.AttachPersistence(_Store, _Sync, _DeviceId);     // selector + match switching
     _View.SetLogger([](const char* M) {
         os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
     });

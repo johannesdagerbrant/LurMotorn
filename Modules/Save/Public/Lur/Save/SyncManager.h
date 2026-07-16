@@ -58,6 +58,12 @@ public:
         return Adopted;
     }
 
+    // Re-key to a different peer WITHOUT loading/merging its record — for when the
+    // caller has already hard-loaded the target opponent's game (a deliberate switch,
+    // #38), as opposed to OnLink's monotonic reconnect merge. Subsequent Persist()/
+    // OnSync() then target this peer. Pass "" to unbind (local hot-seat).
+    void Rebind(std::string_view PeerId) { Peer = std::string(PeerId); }
+
     const std::string& PeerId() const { return Peer; }
 
 private:

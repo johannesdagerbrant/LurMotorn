@@ -108,21 +108,26 @@ void android_main(android_app* App) {
     State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
     State.View.SetState(&State.Match);
     State.View.AttachSession(&State.Session);
-    State.View.AttachPersistence(&Store, DeviceId);        // opponent selector list
+    State.View.AttachPersistence(&Store, &Sync, DeviceId);  // selector + match switching
     State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
 
     auto SendRecord = [&State, &Sync] {
+        // Only share OUR game with the peer we're actually playing (hijack rule, #38).
+        if (State.View.ActiveOpponentGuid() != State.Session.GetPeerGuid()) return;
         const std::vector<uint8_t> Snap = Sync.Snapshot();
         State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
     };
-    State.Session.SetReadyHandler([&State, &Sync, &SendRecord, &DeviceId] {
-        State.Match.SetIdentity(DeviceId, State.Session.GetPeerGuid());  // colour + anchor
-        Sync.OnLink(State.Session.GetPeerGuid());                        // load our stored record
-        SendRecord();                                                    // let the peer reconcile
+    // The view applies the hijack rule and sets identity + loads the record for the
+    // adopted peer; we send our record only when it adopted this peer.
+    State.Session.SetReadyHandler([&State, &SendRecord] {
+        if (State.View.OnPeerLinked(State.Session.GetPeerGuid())) SendRecord();
     });
     State.Session.SetResyncHandler(SendRecord);                          // reconnect: re-sync records
     State.Session.SetHandler(Lur::Net::EMsgType::Sync,
-                             [&Sync](const uint8_t* D, std::size_t N) { Sync.OnSync(D, N); });
+                             [&State, &Sync](const uint8_t* D, std::size_t N) {
+                                 if (State.View.ActiveOpponentGuid() == State.Session.GetPeerGuid())
+                                     Sync.OnSync(D, N);
+                             });
     State.Session.Start(Transport, DeviceId);
     LOGI("Net session started (device id %zuB)", DeviceId.size());
 

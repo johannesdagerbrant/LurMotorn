@@ -33,6 +33,10 @@ public:
     bool HasIdentity() const { return Identified; }
     bool IsLocalLower() const { return LocalLower; }
 
+    // Drop identity: the match becomes a local hot-seat (either side may move, no
+    // colour lock, board not flipped) — the "same device / both sides" mode (#38).
+    void ClearIdentity() { Identified = false; }
+
     // This device's colour for the current match (valid once identity is set).
     EColor MyColor() const;
     EColor SideToMove() const { return Position.SideToMove; }

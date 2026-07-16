@@ -197,12 +197,32 @@ static void TestSyncOnSyncAdoptsNewer() {
     CHECK(St2.Data.size() == 3);
 }
 
+// Rebind re-keys the manager without loading/merging, so Persist targets the new
+// peer — the "switch to a different opponent" path (#38).
+static void TestSyncRebind() {
+    const std::string Dir = ScratchDir();
+    Store S(Dir);
+    FakeState St;
+    SyncManager Sync(S, St);
+    Sync.OnLink("peerA");
+    CHECK(Sync.PeerId() == "peerA");
+    Sync.Rebind("peerB");
+    CHECK(Sync.PeerId() == "peerB");
+    St.Data = Bytes({7, 7, 7});
+    Sync.Persist();                               // writes under peerB, not peerA
+    { Store R(Dir); FakeState St2; SyncManager Sync2(R, St2);
+      Sync2.OnLink("peerB"); CHECK(St2.Data.size() == 3); }
+    { Store R(Dir); FakeState St2; SyncManager Sync2(R, St2);
+      Sync2.OnLink("peerA"); CHECK(St2.Data.empty()); }   // nothing landed under peerA
+}
+
 int main() {
     TestRoundTripAndAbsent();
     TestOverwrite();
     TestPersistsAcrossInstances();
     TestUnsafeKeys();
     TestListKeys();
+    TestSyncRebind();
     TestDeviceIdStableWithinInstance();
     TestDeviceIdStableAcrossRestart();
     TestDeviceIdsAreDistinctAndHex();

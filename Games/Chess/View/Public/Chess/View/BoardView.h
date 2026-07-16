@@ -9,6 +9,7 @@
 #include "Lur/Hud/TextField.h"
 #include "Lur/Text/Font.h"
 #include "Lur/Save/Store.h"
+#include "Lur/Save/SyncManager.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/Types.h"
 
@@ -39,18 +40,26 @@ public:
     // a session (and before identity is set) the view is a local hot-seat.
     void AttachSession(Lur::Net::Session* Session);
 
-    // Give the view the save store + this device's GUID so it can populate the
-    // opponent selector (list historical opponents, per-opponent last-move times).
+    // Give the view the save store + sync manager + this device's GUID so it can
+    // populate the opponent selector and switch the active match between opponents.
     // Without it, the selector is hidden (a store-less hot-seat).
-    void AttachPersistence(Lur::Save::Store* Store, std::string LocalGuid);
+    void AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManager* Sync,
+                           std::string LocalGuid);
 
     // Optional log sink (the platform wires it to the "OnlyChess" tag). Used for the
     // selector's diagnostic line; no-op if unset.
     void SetLogger(std::function<void(const char*)> Logger) { Log = std::move(Logger); }
 
-    // The opponent the selector currently targets: a GUID, or empty for "same device"
-    // (local both-sides play). Display state in #37; drives the active match in #38.
+    // The opponent the active match is against: a GUID, or empty for "same device"
+    // (local both-sides play).
     const std::string& ActiveOpponentGuid() const { return ActiveOpponent; }
+
+    // A peer link came up. Applies the hijack rule (#38) and returns whether we
+    // adopted this peer as the active game (the app sends its record iff true):
+    //   - active is "same device" (empty) -> adopt the peer (the only auto-switch);
+    //   - active == this peer            -> adopt (the selected game just went live);
+    //   - active is a DIFFERENT opponent -> do NOT hijack (stay on the selected game).
+    bool OnPeerLinked(const std::string& PeerGuid);
 
 private:
     // Decode a peer move (its index in our regenerated legal list) and apply it.
@@ -58,8 +67,12 @@ private:
 
     // Rebuild the selector's item list from the store + live link state.
     void RebuildItems();
-    // Record the last move's wall-clock time against the currently-linked opponent.
+    // Record the last move's wall-clock time + persist the record for the active
+    // opponent (so offline moves survive and sync on the next link).
     void StampMove();
+    // Switch the active match to an opponent GUID (hard-load its record) or, for an
+    // empty GUID, to a fresh "same device" local game. Persists the outgoing game.
+    void SwitchActive(const std::string& Guid);
 
     // True when the local player views from Black's side (board rotated 180°).
     bool FlipBoard() const;
@@ -73,6 +86,7 @@ private:
 
     // Opponent selector (replaces the old link-status bar). Populated from the store.
     Lur::Save::Store*         Persist = nullptr;   // null => selector hidden
+    Lur::Save::SyncManager*   Sync = nullptr;      // rekeyed as the active opponent switches
     std::string               DeviceId;            // this device's GUID
     std::string               ActiveOpponent;      // "" => same device (local)
     std::vector<std::string>  ItemGuid;            // GUID per selector row ("" = header/same-device)
