@@ -75,7 +75,7 @@ const wchar_t* kClassName = L"LurMotornWindow";
 
 Window::~Window() { Destroy(); }
 
-bool Window::Create(const char* Title, int Width, int Height) {
+bool Window::Create(const char* Title, int Width, int Height, int X, int Y) {
     HINSTANCE Instance = GetModuleHandleW(nullptr);
 
     WNDCLASSEXW Wc{};
@@ -95,7 +95,7 @@ bool Window::Create(const char* Title, int Width, int Height) {
     MultiByteToWideChar(CP_UTF8, 0, Title, -1, WideTitle, 256);
 
     HWND Hwnd = CreateWindowExW(0, kClassName, WideTitle, WS_OVERLAPPEDWINDOW,
-                                CW_USEDEFAULT, CW_USEDEFAULT,
+                                X < 0 ? CW_USEDEFAULT : X, Y < 0 ? CW_USEDEFAULT : Y,
                                 R.right - R.left, R.bottom - R.top,
                                 nullptr, nullptr, Instance, this);
     if (Hwnd == nullptr) return false;

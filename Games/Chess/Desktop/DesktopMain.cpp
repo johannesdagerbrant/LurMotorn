@@ -1,15 +1,17 @@
 // Desktop entry point for the Workbench build (roadmap Phase 0.5). A thin platform
-// shim — like AndroidMain.cpp / AppMain.mm — that owns a Win32 window + the loop,
-// creates the shared Vulkan renderer, and drives the shared Chess::BoardView. This is
-// deliberately a THIRD copy-pasted chess main (Phase-4 extraction evidence); the
+// shim — like AndroidMain.cpp / AppMain.mm — that owns the Win32 windows + the loop,
+// creates the shared Vulkan renderer(s), and drives the shared Chess::BoardView. This
+// is deliberately a THIRD copy-pasted chess main (Phase-4 extraction evidence); the
 // point of Phase 0.5 is to bring up the Windows platform against the known-good game.
 //
-// Single-window for now (issue #51: platform bring-up + render + input). Two windows
-// over a LoopbackTransport for real local play arrives in issue #53.
+// TWO windows, two full game instances, one process, a LoopbackTransport between them
+// (issue #53): human-vs-human on one PC. Every net-flow bug is now reproducible in a
+// debugger with both peers visible — the whole reason for the Workbench.
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -25,90 +27,125 @@
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Transport/Loopback.h"
 
+namespace {
+
+// Everything one peer needs. Two of these, linked by loopback, are a full local game.
+struct GameInstance {
+    Lur::Platform::Window            Win;
+    Lur::Render::IRenderer*          Renderer = nullptr;
+    std::unique_ptr<Lur::Save::Store>       Store;   // distinct dir -> distinct GUID -> colour
+    std::string                      DeviceId;
+    Chess::ChessMatchState           Match;
+    std::unique_ptr<Lur::Save::SyncManager> Sync;
+    Lur::Net::Session                Session;
+    Chess::BoardView                 View;
+    Lur::Transport::LoopbackTransport Transport;
+};
+
+// The hijack-guarded record share, mirroring the phone mains: only send OUR game to
+// the peer we're actually playing.
+void SendRecord(GameInstance& G) {
+    if (G.View.ActiveOpponentGuid() != G.Session.GetPeerGuid()) return;
+    const std::vector<uint8_t> Snap = G.Sync->Snapshot();
+    G.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
+}
+
+// Link (ReadyHandler) and reconnect (ResyncHandler): adopt the peer per the hijack
+// rule, and if adopted, share our record.
+void OnLive(GameInstance& G) {
+    if (G.View.OnPeerLinked(G.Session.GetPeerGuid())) SendRecord(G);
+}
+
+bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
+    if (!G.Win.Create(Title, 720, 720, X, 80)) return false;
+    G.Renderer = Lur::Render::VulkanRenderer::Create();
+    if (G.Renderer == nullptr || !G.Renderer->Init(G.Win.NativeHandle())) return false;
+
+    G.Store    = std::make_unique<Lur::Save::Store>(SaveDir);
+    G.DeviceId = Lur::Save::LoadOrCreateDeviceId(*G.Store);
+    G.Sync     = std::make_unique<Lur::Save::SyncManager>(*G.Store, G.Match);
+
+    G.Match.SetOnMatchEnd([&G] { G.Sync->Persist(); });
+
+    G.View.SetState(&G.Match);
+    G.View.AttachSession(&G.Session);
+    G.View.AttachPersistence(G.Store.get(), G.Sync.get(), G.DeviceId);
+    G.View.CreateResources(G.Renderer);
+
+    G.Session.SetReadyHandler([&G] { OnLive(G); });
+    G.Session.SetResyncHandler([&G] { OnLive(G); });
+    G.Session.SetHandler(Lur::Net::EMsgType::Sync, [&G](const uint8_t* D, std::size_t N) {
+        if (G.View.ActiveOpponentGuid() == G.Session.GetPeerGuid()) G.Sync->OnSync(D, N);
+    });
+    return true;
+}
+
+void PumpInput(GameInstance& G) {
+    int W = 0, H = 0;
+    G.Win.GetSize(&W, &H);
+    for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
+        if (T.Phase == Lur::Input::ETouchPhase::Ended && W > 0 && H > 0)
+            G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+    }
+    if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered so logs flush live/on kill
 
-    // Headless smoke mode: "--frames N" renders N frames then exits 0. Lets CI / an
-    // agent confirm the platform + Vulkan bring-up without a human closing the window.
-    int MaxFrames = 0;  // 0 = run until the window is closed
+    int MaxFrames = 0;  // 0 = run until a window is closed; "--frames N" = headless smoke
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
 
-    std::printf("[Desktop] LurMotorn desktop (Workbench) starting\n");
+    std::printf("[Desktop] LurMotorn desktop (Workbench) — two-window loopback\n");
 
-    Lur::Platform::Window Win;
-    if (!Win.Create("OnlyChess - Desktop", 720, 720)) {
-        std::fprintf(stderr, "[Desktop] window creation failed\n");
+    GameInstance A, B;
+    if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 60) ||
+        !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 800)) {
+        std::fprintf(stderr, "[Desktop] setup failed\n");
         return 1;
     }
+    std::printf("[Desktop] two renderers up; ids A=%.8s B=%.8s\n",
+                A.DeviceId.c_str(), B.DeviceId.c_str());
 
-    Lur::Render::IRenderer* Renderer = Lur::Render::VulkanRenderer::Create();
-    if (Renderer == nullptr || !Renderer->Init(Win.NativeHandle())) {
-        std::fprintf(stderr, "[Desktop] renderer init failed\n");
-        return 1;
-    }
-    std::printf("[Desktop] renderer initialized\n");
-
-    // Smoke test: the shared, perft-verified core runs on the desktop too.
-    {
-        Chess::Board B = Chess::Board::StartPosition();
-        Chess::MoveList M;
-        Chess::GenerateLegalMoves(B, M);
-        std::printf("[Desktop] chess core alive: %d legal moves from the start\n", M.Count);
-    }
-
-    // Full game wiring, mirroring the phone mains (persistence + session) so the shared
-    // BoardView runs against the exact same code paths. No peer this issue, so the
-    // session stays in Searching — the board renders and taps are handled, but real
-    // 2-player play needs the two-window loopback of issue #53.
-    Lur::Save::Store Store(".lur-desktop-save");
-    const std::string DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
-    Chess::ChessMatchState Match;
-    Lur::Save::SyncManager Sync(Store, Match);
-    Lur::Net::Session Session;
-    Lur::Transport::LoopbackTransport Transport;  // unlinked: no peer this issue
-
-    Chess::BoardView View;
-    View.SetState(&Match);
-    View.AttachSession(&Session);
-    View.AttachPersistence(&Store, &Sync, DeviceId);
-    View.SetLogger([](const char* M) { std::printf("[View] %s\n", M); });
-    View.CreateResources(Renderer);
-
-    Session.SetLogger([](const char* M) { std::printf("[Net] %s\n", M); });
-    Match.SetOnMatchEnd([&Sync] { Sync.Persist(); });
-    Session.Start(&Transport, DeviceId);
+    // One in-process link. Start both, then Tick drives the Hello handshake to Ready.
+    Lur::Transport::LoopbackTransport::Link(A.Transport, B.Transport);
+    A.Session.Start(&A.Transport, A.DeviceId);
+    B.Session.Start(&B.Transport, B.DeviceId);
 
     std::printf("[Desktop] entering frame loop (%s)\n",
-                MaxFrames > 0 ? "headless --frames" : "close the window to quit");
+                MaxFrames > 0 ? "headless --frames" : "close either window to quit");
     int Frame = 0;
+    bool Linked = false;
     auto PrevTime = std::chrono::steady_clock::now();
-    while (Win.PumpEvents()) {
+    while (A.Win.PumpEvents() && B.Win.PumpEvents()) {
         const auto Now = std::chrono::steady_clock::now();
         const uint64_t ElapsedNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
 
-        Session.Tick(ElapsedNs);
-
-        int W = 0, H = 0;
-        Win.GetSize(&W, &H);
-        for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
-            if (T.Phase == Lur::Input::ETouchPhase::Ended && W > 0 && H > 0)
-                View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+        A.Session.Tick(ElapsedNs);
+        B.Session.Tick(ElapsedNs);
+        if (!Linked && A.Session.IsReady() && B.Session.IsReady()) {
+            Linked = true;
+            std::printf("[Desktop] handshake complete — both sessions linked\n");
         }
 
-        if (W > 0 && H > 0)
-            View.Render(Renderer, static_cast<float>(W), static_cast<float>(H));
+        PumpInput(A);
+        PumpInput(B);
 
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
-            std::printf("[Desktop] rendered %d frames headless — exiting\n", Frame);
+            std::printf("[Desktop] rendered %d frames headless (linked=%d) — exiting\n",
+                        Frame, Linked ? 1 : 0);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
 
-    Renderer->Shutdown();
+    A.Renderer->Shutdown();
+    B.Renderer->Shutdown();
     std::printf("[Desktop] clean exit\n");
     return 0;
 }

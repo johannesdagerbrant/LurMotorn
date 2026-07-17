@@ -17,7 +17,9 @@ class Window {
 public:
     ~Window();
 
-    bool Create(const char* Title, int Width, int Height);
+    // X/Y default to -1 (let the OS place the window); pass explicit coords to lay
+    // out several windows side by side (the two-window desktop game, issue #53).
+    bool Create(const char* Title, int Width, int Height, int X = -1, int Y = -1);
     void Destroy();
 
     void* NativeHandle() const { return Hwnd; }   // HWND, for the Vulkan surface
