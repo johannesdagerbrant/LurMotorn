@@ -13,6 +13,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(LUR_BUILD_TESTS "Build host unit tests" ON)
+option(LUR_DESKTOP "Build the desktop Workbench app (Windows window + Vulkan)" OFF)
 
 # Shared compiler discipline (-Wall/-Wextra/-Werror, RTTI off) for the host build.
 # Must precede the add_subdirectory calls so it applies to their targets.
@@ -33,9 +34,13 @@ add_subdirectory(Modules/Net)
 add_subdirectory(Modules/Render)
 add_subdirectory(Modules/Input)
 add_subdirectory(Modules/Hud)
+add_subdirectory(Modules/Platform)  # desktop window + input seam (guarded by LUR_DESKTOP)
 
 # --- Games ---
 add_subdirectory(Games/Chess)
+if(LUR_DESKTOP)
+    add_subdirectory(Games/Chess/Desktop)
+endif()
 
 if(LUR_BUILD_TESTS)
     enable_testing()

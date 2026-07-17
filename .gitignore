@@ -1,7 +1,11 @@
 # Build output
 /build/
+/build-desktop/
 **/build/
 **/.cxx/
+
+# Desktop Workbench local save dir (Phase 0.5)
+.lur-desktop-save/
 *.o
 *.obj
 *.a
