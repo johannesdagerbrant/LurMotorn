@@ -56,8 +56,13 @@ void OnLive(GameInstance& G) {
     if (G.View.OnPeerLinked(G.Session.GetPeerGuid())) SendRecord(G);
 }
 
+// Portrait, matching the phones (~9:20) — the HUD margins above/below the square
+// board are designed for that shape, so a square desktop window mislaid them.
+constexpr int kWinW = 360;
+constexpr int kWinH = 800;
+
 bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
-    if (!G.Win.Create(Title, 720, 720, X, 80)) return false;
+    if (!G.Win.Create(Title, kWinW, kWinH, X, 30)) return false;
     G.Renderer = Lur::Render::VulkanRenderer::Create();
     if (G.Renderer == nullptr || !G.Renderer->Init(G.Win.NativeHandle())) return false;
 
@@ -102,8 +107,8 @@ int main(int argc, char** argv) {
     std::printf("[Desktop] LurMotorn desktop (Workbench) — two-window loopback\n");
 
     GameInstance A, B;
-    if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 60) ||
-        !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 800)) {
+    if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 120) ||
+        !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 520)) {
         std::fprintf(stderr, "[Desktop] setup failed\n");
         return 1;
     }
