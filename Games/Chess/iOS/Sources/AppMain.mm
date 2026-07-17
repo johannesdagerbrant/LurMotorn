@@ -45,6 +45,7 @@
     Lur::Save::SyncManager* _Sync;
     std::string _DeviceId;
     CADisplayLink* _DisplayLink;
+    double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
     bool _Ready;
 }
 
@@ -161,7 +162,11 @@
 
 - (void)renderFrame {
     if (!_Ready) return;
-    _Session.Tick();  // drive the Hello handshake until it completes
+    const double Now = CACurrentMediaTime();  // monotonic seconds
+    const uint64_t ElapsedNs =
+        _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
+    _PrevFrameTime = Now;
+    _Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));

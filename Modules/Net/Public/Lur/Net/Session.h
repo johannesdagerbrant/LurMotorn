@@ -67,10 +67,14 @@ public:
     // transport receiver and sends the first Hello.
     void Start(Lur::Transport::ITransport* NewTransport, std::string_view LocalGuid);
 
-    // Drive Hello retransmission. Call periodically (e.g. once per rendered frame):
-    // the first Hello can be dropped when it is sent before the BLE link is up, so
-    // we resend until the handshake completes. A no-op once ready.
-    void Tick();
+    // Drive Hello retransmission + link liveness. Call once per frame with the wall-
+    // clock nanoseconds elapsed since the previous call. Timing is denominated in real
+    // time, NOT frame count, so keepalive/timeout behave identically at 60 Hz, 120 Hz,
+    // or under a throttled loop. (A paused loop — e.g. a backgrounded iOS app whose
+    // CADisplayLink stops — simply sends no keepalives; the peer's own timeout +
+    // reconnect flow is the recovery path, by design.) A no-op for handshaking once
+    // ready except for keepalive/timeout.
+    void Tick(uint64_t ElapsedNs);
 
     bool IsReady() const { return Ready; }
 
@@ -128,8 +132,14 @@ private:
     void Logf(const char* Fmt, ...);
 
     static constexpr int         MaxMsgTypes     = 8;   // indices 0..7 (covers Sync = 7)
-    static constexpr unsigned    HelloResendTicks = 30; // ~0.5s at 60 fps
     static constexpr std::size_t GuidLen          = 32;  // 128-bit id as hex (Lur::Save::DeviceIdHexLen)
+
+    // Real-time link timing (nanoseconds). Frame-rate-independent: derived from the
+    // ElapsedNs fed to Tick(), not a tick count, so these mean the same on a 60 Hz or
+    // 120 Hz display and don't drift under a throttled loop.
+    static constexpr uint64_t HelloResendNs = 500'000'000ull;   // resend Hello every ~0.5s
+    static constexpr uint64_t KeepaliveNs   = 1'000'000'000ull; // keepalive every ~1s
+    static constexpr uint64_t LinkTimeoutNs = 5'000'000'000ull; // ~5s of silence -> dead
 
     // Max payload for a FRAMED ([type][payload]) message. Sized to a BLE MTU-class
     // datagram (negotiated ATT MTU ~247 -> ~244 usable) so a full-history Sync of a
@@ -139,22 +149,20 @@ private:
     // fragmentation is a separate follow-up. Send() now refuses+logs past this bound.
     static constexpr std::size_t MaxFramedPayload = 254;
 
-    // Link liveness (assuming ~60 fps ticks). Once ready we send a Keepalive every
-    // second; if NO datagram arrives for LinkTimeoutTicks we declare the link dead
-    // and ask the transport to reset. This is what lets an iOS peripheral notice an
-    // abruptly-killed central (its CBPeripheralManager gets no disconnect callback);
-    // every other role also detects a real drop via the backend, so this is a
-    // belt-and-suspenders safety net there.
-    static constexpr unsigned KeepaliveTicks  = 60;  // ~1s between keepalives
-    static constexpr unsigned LinkTimeoutTicks = 300; // ~5s of silence -> dead
+    // Link liveness: once ready we send a Keepalive every KeepaliveNs; if NO datagram
+    // arrives for LinkTimeoutNs we declare the link dead and ask the transport to
+    // reset. This is what lets an iOS peripheral notice an abruptly-killed central (its
+    // CBPeripheralManager gets no disconnect callback); every other role also detects a
+    // real drop via the backend, so this is a belt-and-suspenders safety net there.
 
     Lur::Transport::ITransport* Transport = nullptr;
     std::string LocalGuid;
     std::string PeerGuid;
-    bool     Ready        = false;
-    unsigned TickCounter  = 0;
-    unsigned KeepaliveCounter = 0;   // ticks since our last keepalive send
-    unsigned SinceRecvTicks   = 0;   // ticks since ANY datagram arrived (liveness)
+    bool     Ready         = false;
+    bool     HelloEverSent = false;  // send the first Hello immediately, then resend on interval
+    uint64_t HelloResendAccumNs = 0; // ns since our last Hello (handshake)
+    uint64_t KeepaliveAccumNs   = 0; // ns since our last keepalive send
+    uint64_t SinceRecvNs        = 0; // ns since ANY datagram arrived (liveness)
     bool     EverConnected      = false;  // for Disconnected vs never-connected
     bool     VersionMismatchSeen = false;
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook

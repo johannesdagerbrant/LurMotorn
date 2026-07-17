@@ -26,7 +26,7 @@ void Session::Start(Lur::Transport::ITransport* NewTransport, std::string_view G
     SendHello();  // best-effort; if the link isn't up yet, Tick() resends
 }
 
-void Session::Tick() {
+void Session::Tick(uint64_t ElapsedNs) {
     const bool Connected = Transport != nullptr && Transport->IsConnected();
 
     // Reconnect edge (post-handshake): the link came back after a drop. Poke the
@@ -41,20 +41,27 @@ void Session::Tick() {
 
     if (Ready && Connected) {
         // Liveness: keep the link warm and notice if the peer went silent. Any inbound
-        // datagram resets SinceRecvTicks (see OnDatagram); if it runs out, the link is
+        // datagram resets SinceRecvNs (see OnDatagram); if it runs out, the link is
         // dead even though the backend never told us (the iOS-peripheral case).
-        if (++KeepaliveCounter >= KeepaliveTicks) { KeepaliveCounter = 0; SendKeepalive(); }
-        if (++SinceRecvTicks >= LinkTimeoutTicks) {
+        KeepaliveAccumNs += ElapsedNs;
+        if (KeepaliveAccumNs >= KeepaliveNs) { KeepaliveAccumNs = 0; SendKeepalive(); }
+        SinceRecvNs += ElapsedNs;
+        if (SinceRecvNs >= LinkTimeoutNs) {
             Logf("link timeout — peer silent, resetting transport");
-            SinceRecvTicks = 0;
+            SinceRecvNs = 0;
             if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
         }
         return;
     }
     if (Ready) return;
-    // Resend on tick 0 (snappy once connected) and every HelloResendTicks after,
-    // until the handshake completes.
-    if (TickCounter++ % HelloResendTicks == 0) SendHello();
+    // Resend Hello: immediately the first time (snappy once connected), then every
+    // HelloResendNs, until the handshake completes.
+    HelloResendAccumNs += ElapsedNs;
+    if (!HelloEverSent || HelloResendAccumNs >= HelloResendNs) {
+        HelloEverSent = true;
+        HelloResendAccumNs = 0;
+        SendHello();
+    }
 }
 
 void Session::SetHandler(EMsgType Type, Handler H) {
@@ -103,7 +110,7 @@ void Session::SendKeepalive() {
 
 void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (Size == 0) return;
-    SinceRecvTicks = 0;  // any traffic from the peer proves the link is alive
+    SinceRecvNs = 0;  // any traffic from the peer proves the link is alive
 
     // A bare 1-byte datagram is a live move (framed messages are always >=2 bytes).
     if (Size == 1) {

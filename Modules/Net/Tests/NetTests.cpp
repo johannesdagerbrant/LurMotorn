@@ -35,6 +35,9 @@ static int GFailures = 0;
 // A 32-char device id filled with one character (matches Lur::Save::DeviceIdHexLen).
 static std::string Guid(char C) { return std::string(32, C); }
 
+// One ~60 Hz frame in nanoseconds — Session::Tick is now real-time-denominated.
+static constexpr uint64_t FrameNs = 16'666'667ull;
+
 // Two sessions over a linked loopback pair, already connected before Start, must
 // both become ready and each learns the OTHER's device id from the Hello.
 static void TestHandshakeExchangesGuids() {
@@ -63,7 +66,7 @@ static void TestHandshakeResendsUntilConnected() {
     CHECK(!SB.IsReady());
 
     LoopbackTransport::Link(TA, TB);
-    for (int i = 0; i < 4 && !(SA.IsReady() && SB.IsReady()); ++i) { SA.Tick(); SB.Tick(); }
+    for (int i = 0; i < 4 && !(SA.IsReady() && SB.IsReady()); ++i) { SA.Tick(FrameNs); SB.Tick(FrameNs); }
 
     CHECK(SA.IsReady() && SB.IsReady());
     CHECK(SA.GetPeerGuid() == Guid('b') && SB.GetPeerGuid() == Guid('a'));
@@ -139,8 +142,8 @@ static void TestKeepaliveTimeoutResetsLink() {
     T.Deliver(H, sizeof(H));
     CHECK(S.IsReady());
 
-    // No inbound traffic: well past LinkTimeoutTicks (~300) the link is declared dead.
-    for (int i = 0; i < 400; ++i) S.Tick();
+    // No inbound traffic: ~6.7s of frames (well past the ~5s LinkTimeoutNs) -> dead.
+    for (int i = 0; i < 400; ++i) S.Tick(FrameNs);
     CHECK(T.ResetCount == 1);  // fired once (ResetLink drops Connected, so it can't re-fire)
 }
 
@@ -156,8 +159,8 @@ static void TestKeepaliveKeepsLinkAlive() {
 
     const uint8_t KA[1] = { static_cast<uint8_t>(EMsgType::Keepalive) };
     for (int i = 0; i < 400; ++i) {
-        S.Tick();
-        if (i % 50 == 0) T.Deliver(KA, sizeof(KA));  // peer alive, well within the timeout
+        S.Tick(FrameNs);
+        if (i % 50 == 0) T.Deliver(KA, sizeof(KA));  // peer alive (~every 0.83s), within timeout
     }
     CHECK(T.ResetCount == 0);
 }

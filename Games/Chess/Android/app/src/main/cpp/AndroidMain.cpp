@@ -4,6 +4,7 @@
 // same BoardView from its UIKit shim — one source of truth for the game view.
 #include <android_native_app_glue.h>
 #include <android/log.h>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -134,8 +135,13 @@ void android_main(android_app* App) {
     State.Session.Start(Transport, DeviceId);
     LOGI("Net session started (device id %zuB)", DeviceId.size());
 
+    auto PrevTime = std::chrono::steady_clock::now();
     while (!App->destroyRequested) {
-        State.Session.Tick();  // drive the Hello handshake until it completes
+        const auto Now = std::chrono::steady_clock::now();
+        const uint64_t ElapsedNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
+        PrevTime = Now;
+        State.Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
         int Events = 0;
         android_poll_source* Source = nullptr;
         // Re-evaluate the timeout on every poll: INIT_WINDOW flips State.Ready
