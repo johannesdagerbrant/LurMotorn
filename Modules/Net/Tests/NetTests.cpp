@@ -13,6 +13,7 @@
 #include "Lur/Transport/Loopback.h"
 
 #include "Chess/Board.h"
+#include "Chess/ChessRecord.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/Types.h"
 #include "Lur/Serialization/BitReader.h"
@@ -286,6 +287,73 @@ static void TestGameHistoryResync() {
     CHECK(PDecoded.SideToMove == Chess::EColor::White);  // after two plies, White to move
 }
 
+// Regression (P0): a framed Sync payload larger than the old 64-byte frame cap must
+// still reach the peer. A mid-game reconnect resyncs by sending the full ChessRecord
+// as an EMsgType::Sync; past ply ~61 the serialized record exceeds 64 bytes, and the
+// old Session::Send() dropped it SILENTLY (returned void), so a long in-progress match
+// never resynced. Build a genuinely >64-byte record, send it, and assert the peer
+// decodes it back byte-for-byte.
+static void TestLongGameSyncNotDropped() {
+    // 160 plies of knight shuffles (g1-f3-g1 / g8-f6-g8) -> a serialized record well
+    // over the old 64-byte cap. Repetition is legal here (EncodeGame just replays
+    // legal moves; it does not adjudicate draws).
+    const Chess::Square G1 = 6, F3 = 21, G8 = 62, F6 = 45;
+    Chess::Board B = Chess::Board::StartPosition();
+    std::vector<Chess::Move> History;
+    auto Play = [&](Chess::Square From, Chess::Square To) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(B, L);
+        const Chess::Move* M = Find(L, From, To);
+        CHECK(M != nullptr);
+        if (M) { B.MakeMove(*M); History.push_back(*M); }
+    };
+    for (int i = 0; i < 40; ++i) { Play(G1, F3); Play(G8, F6); Play(F3, G1); Play(F6, G8); }
+
+    Chess::ChessRecord Rec;
+    Rec.WinsLower = 3; Rec.WinsHigher = 2; Rec.Draws = 1;
+    Rec.Moves = History;
+    std::vector<uint8_t> Bytes;
+    Rec.Write(Bytes);
+    CHECK(Bytes.size() > 64);  // guard: we are genuinely testing the past-cap regime
+
+    LoopbackTransport TA, TB;
+    LoopbackTransport::Link(TA, TB);
+    Session SA, SB;
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
+    CHECK(SA.IsReady() && SB.IsReady());
+
+    Chess::ChessRecord Got;
+    bool GotSync = false;
+    SB.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { GotSync = Got.Read(D, N); });
+
+    const bool Sent = SA.Send(EMsgType::Sync, Bytes.data(), Bytes.size());
+    CHECK(Sent);        // no longer silently dropped
+    CHECK(GotSync);     // and the peer actually decoded a valid record
+    CHECK(Got.Moves.size() == History.size());
+    CHECK(Got.WinsLower == 3 && Got.WinsHigher == 2 && Got.Draws == 1);
+}
+
+// The other half of the fix: a payload beyond the datagram bound must fail LOUDLY —
+// Send() returns false and delivers nothing — never a silent drop or a truncated wire.
+static void TestOversizedFramedSendRefused() {
+    LoopbackTransport TA, TB;
+    LoopbackTransport::Link(TA, TB);
+    Session SA, SB;
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
+
+    int SyncCalls = 0;
+    SB.SetHandler(EMsgType::Sync, [&](const uint8_t*, std::size_t) { ++SyncCalls; });
+
+    std::vector<uint8_t> Huge(300, 0xEE);  // > MaxFramedPayload
+    CHECK(!SA.Send(EMsgType::Sync, Huge.data(), Huge.size()));
+    CHECK(SyncCalls == 0);
+
+    std::vector<uint8_t> Ok(200, 0x11);    // < MaxFramedPayload -> accepted + delivered
+    CHECK(SA.Send(EMsgType::Sync, Ok.data(), Ok.size()));
+    CHECK(SyncCalls == 1);
+}
+
 int main() {
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
@@ -296,6 +364,8 @@ int main() {
     TestGameHistoryResync();
     TestKeepaliveTimeoutResetsLink();
     TestKeepaliveKeepsLinkAlive();
+    TestLongGameSyncNotDropped();
+    TestOversizedFramedSendRefused();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");

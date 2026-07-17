@@ -113,9 +113,12 @@ public:
     using LogFn = std::function<void(const char* Line)>;
     void SetLogger(LogFn L) { Log = std::move(L); }
 
-    // Frame [Type][Payload] and send it to the peer. Payloads are tiny (a move is
-    // ~1 byte); oversized payloads are dropped rather than truncated.
-    void Send(EMsgType Type, const uint8_t* Payload, std::size_t Size);
+    // Frame [Type][Payload] and send it to the peer. Returns false (and logs) if the
+    // payload exceeds MaxFramedPayload, so an over-budget message fails LOUDLY instead
+    // of being silently dropped — most payloads are tiny (a move is ~1 byte), but a
+    // reconnect Sync grows with the game (issue: the old 64-byte cap silently killed
+    // resync past ply ~61). Never truncates the wire.
+    bool Send(EMsgType Type, const uint8_t* Payload, std::size_t Size);
 
 private:
     void SendHello();
@@ -124,9 +127,17 @@ private:
     void OnHello(const uint8_t* Payload, std::size_t Size);
     void Logf(const char* Fmt, ...);
 
-    static constexpr int         MaxMsgTypes     = 8;   // covers EMsgType 0..6
+    static constexpr int         MaxMsgTypes     = 8;   // indices 0..7 (covers Sync = 7)
     static constexpr unsigned    HelloResendTicks = 30; // ~0.5s at 60 fps
     static constexpr std::size_t GuidLen          = 32;  // 128-bit id as hex (Lur::Save::DeviceIdHexLen)
+
+    // Max payload for a FRAMED ([type][payload]) message. Sized to a BLE MTU-class
+    // datagram (negotiated ATT MTU ~247 -> ~244 usable) so a full-history Sync of a
+    // realistic in-progress match fits in one datagram. This was 64, which silently
+    // dropped a Sync past ply ~61 — a mid-game reconnect then never resynced. A game
+    // long enough to exceed this genuinely can't fit one BLE datagram; transport-level
+    // fragmentation is a separate follow-up. Send() now refuses+logs past this bound.
+    static constexpr std::size_t MaxFramedPayload = 254;
 
     // Link liveness (assuming ~60 fps ticks). Once ready we send a Keepalive every
     // second; if NO datagram arrives for LinkTimeoutTicks we declare the link dead

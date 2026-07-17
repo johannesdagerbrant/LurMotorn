@@ -62,13 +62,18 @@ void Session::SetHandler(EMsgType Type, Handler H) {
     if (Idx >= 0 && Idx < MaxMsgTypes) Handlers[Idx] = std::move(H);
 }
 
-void Session::Send(EMsgType Type, const uint8_t* Payload, std::size_t Size) {
-    if (Transport == nullptr) return;
-    uint8_t Frame[1 + 64];                        // [type][payload]; messages are tiny
-    if (Size > sizeof(Frame) - 1) return;         // guard, don't truncate the wire
+bool Session::Send(EMsgType Type, const uint8_t* Payload, std::size_t Size) {
+    if (Transport == nullptr) return false;
+    if (Size > MaxFramedPayload) {                // never truncate the wire — fail loudly
+        Logf("send DROPPED: framed payload %zu > max %zu (type=%u)",
+             Size, MaxFramedPayload, static_cast<unsigned>(Type));
+        return false;
+    }
+    uint8_t Frame[1 + MaxFramedPayload];          // [type][payload]
     Frame[0] = static_cast<uint8_t>(Type);
     for (std::size_t i = 0; i < Size; ++i) Frame[1 + i] = Payload[i];
     Transport->Send(Frame, 1 + Size);
+    return true;
 }
 
 void Session::SendHello() {
