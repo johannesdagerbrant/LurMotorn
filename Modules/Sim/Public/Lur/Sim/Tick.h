@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 
+#include "Lur/Core/Assert.h"
+
 namespace Lur::Sim {
 
 // Fixed-timestep accumulator.
@@ -16,16 +18,29 @@ namespace Lur::Sim {
 class TickClock {
 public:
     explicit TickClock(uint32_t TicksPerSecond)
-        : StepNs(1'000'000'000ull / TicksPerSecond) {}
+        : StepNs(1'000'000'000ull / (TicksPerSecond ? TicksPerSecond : 1)) {
+        LUR_ASSERT_MSG(TicksPerSecond > 0, "TickClock: TicksPerSecond must be > 0");
+    }
+
+    // The most ticks Advance() will return in one call. A long pause (debugger,
+    // backgrounded app) would otherwise return thousands of catch-up ticks in a
+    // burst — a stutter for chess, a spiral of death for a reflex game. We cap the
+    // burst and DISCARD the backlog beyond it. Both peers clamp identically, so this
+    // stays deterministic (it changes the tick COUNT after a stall, never a tick's
+    // computation). Sized generously above any real frame hitch.
+    static constexpr uint32_t MaxCatchup = 8;
 
     // Feed elapsed wall-clock nanoseconds; returns how many whole sim ticks to
-    // run now. Leftover time is retained for the next call (no drift).
+    // run now. Leftover sub-tick time is retained for interpolation (no drift).
     uint32_t Advance(uint64_t ElapsedNs) {
         AccumulatorNs += ElapsedNs;
         uint32_t Ticks = 0;
         while (AccumulatorNs >= StepNs) {
             AccumulatorNs -= StepNs;
-            ++Ticks;
+            if (++Ticks >= MaxCatchup) {
+                AccumulatorNs %= StepNs;  // drop the backlog, keep the sub-tick remainder
+                break;
+            }
         }
         return Ticks;
     }

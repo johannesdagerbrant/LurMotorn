@@ -30,7 +30,11 @@ inline uint64_t ReadVarUint(BitReader& R, int GroupBits = 4) {
     for (;;) {
         const bool More = R.ReadBit();
         const uint64_t Group = R.ReadBits(GroupBits);
-        Value |= Group << Shift;
+        // Ignore any bits past bit 63: `Group << Shift` is undefined once Shift >= 64,
+        // and a corrupt/overlong stream (continuation bit stuck on) would drive it
+        // there. This decodes peer-supplied bytes, so guard quietly; the loop still
+        // terminates on the last group or when the reader runs dry (!R.IsOk()).
+        if (Shift < 64) Value |= Group << Shift;
         Shift += GroupBits;
         if (!More || !R.IsOk()) break;
     }

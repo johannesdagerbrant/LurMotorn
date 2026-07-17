@@ -10,8 +10,9 @@ add_library(chess_core
     Core/Private/MatchMeta.cpp)
 
 target_include_directories(chess_core PUBLIC Core/Public PRIVATE Core/Private)
-# lur::save for the ISaveState contract ChessMatchState implements (issue #18).
-target_link_libraries(chess_core PUBLIC lur::serialization lur::save)
+# lur::save for the ISaveState contract ChessMatchState implements (issue #18);
+# lur::core for LUR_ASSERT (public: Board.h's MoveList::Add uses it).
+target_link_libraries(chess_core PUBLIC lur::serialization lur::save lur::core)
 target_compile_features(chess_core PUBLIC cxx_std_20)
 add_library(chess::core ALIAS chess_core)
 

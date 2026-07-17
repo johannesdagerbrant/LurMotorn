@@ -95,12 +95,25 @@ static void TestVarintRoundtrip() {
     }
 }
 
+// A hostile/corrupt varint (continuation bit stuck on) must not shift by >= 64
+// (UB) or loop forever — it terminates when the reader runs dry. Feeding all-ones
+// bytes keeps More=1 group after group; the guard drops bits past bit 63 and the
+// loop ends at end-of-buffer with IsOk() false.
+static void TestVarintHostileStreamTerminates() {
+    std::vector<uint8_t> AllOnes(32, 0xFF);   // way more continuation groups than 64/4=16
+    BitReader R(AllOnes.data(), AllOnes.size());
+    const uint64_t V = ReadVarUint(R);        // must return (no UB / no hang)
+    (void)V;
+    CHECK(!R.IsOk());                          // consumed past the end -> not ok
+}
+
 int main() {
     TestRoundtripFixedWidths();
     TestMixedSequence();
     TestOverreadIsSafe();
     TestBitsForIndex();
     TestVarintRoundtrip();
+    TestVarintHostileStreamTerminates();
 
     if (GFailures == 0) {
         std::printf("All bitstream tests passed.\n");

@@ -1,4 +1,5 @@
 #include "Chess/MoveCodec.h"
+#include "Lur/Core/Assert.h"
 #include "Lur/Serialization/Varint.h"
 
 namespace Chess {
@@ -11,16 +12,22 @@ void EncodeMove(const Move& MoveToSend, const MoveList& Legal,
 
     // Linear scan is fine: Legal.Count is tiny (<= ~40 in practice) and this runs
     // once per move, not in any tight loop.
-    uint32_t Index = 0;
+    int Index = -1;
     for (int I = 0; I < Legal.Count; ++I) {
         if (Legal.Moves[I] == MoveToSend) {
-            Index = static_cast<uint32_t>(I);
+            Index = I;
             break;
         }
     }
 
+    // A move that isn't in the legal list is a caller bug: silently encoding index 0
+    // would make the peer apply a different (legal) move — maximally confusing to
+    // debug. Trap in dev; fall back to 0 in release (old behaviour) so a shipped game
+    // doesn't crash.
+    LUR_ASSERT_MSG(Index >= 0, "EncodeMove: move not in legal list (Count=%d)", Legal.Count);
+
     // When Bits == 0 (a forced move) this is a no-op: nothing crosses the wire.
-    W.WriteBits(Index, Bits);
+    W.WriteBits(Index >= 0 ? static_cast<uint32_t>(Index) : 0u, Bits);
 }
 
 Move DecodeMove(Lur::Serialization::BitReader& R, const MoveList& Legal) {

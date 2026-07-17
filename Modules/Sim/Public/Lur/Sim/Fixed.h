@@ -19,7 +19,12 @@ struct Fixed {
     constexpr Fixed() = default;
     constexpr explicit Fixed(int32_t Raw) : Raw(Raw) {}
 
-    static constexpr Fixed FromInt(int32_t Value) { return Fixed{Value << FracBits}; }
+    // Q16.16 represents integers in [-32768, 32767]. Outside that range the shift
+    // overflows; we do it in unsigned to keep the behaviour DEFINED (wrap) instead of
+    // signed-overflow UB — but callers must stay in range (documented precondition).
+    static constexpr Fixed FromInt(int32_t Value) {
+        return Fixed{static_cast<int32_t>(static_cast<uint32_t>(Value) << FracBits)};
+    }
     constexpr int32_t ToInt() const { return Raw >> FracBits; }
 
     constexpr Fixed operator+(Fixed O) const { return Fixed{Raw + O.Raw}; }
@@ -28,7 +33,12 @@ struct Fixed {
         return Fixed{static_cast<int32_t>((static_cast<int64_t>(Raw) * O.Raw) >> FracBits)};
     }
     constexpr Fixed operator/(Fixed O) const {
-        return Fixed{static_cast<int32_t>((static_cast<int64_t>(Raw) << FracBits) / O.Raw)};
+        // Divide-by-zero is a programmer error: in a constant expression it hard-errors
+        // at compile time (loud, as intended); at runtime it saturates to 0 rather than
+        // hardware-trapping the process.
+        return O.Raw == 0
+                   ? Fixed{0}
+                   : Fixed{static_cast<int32_t>((static_cast<int64_t>(Raw) << FracBits) / O.Raw)};
     }
     constexpr bool operator==(Fixed O) const { return Raw == O.Raw; }
     constexpr bool operator<(Fixed O) const { return Raw < O.Raw; }

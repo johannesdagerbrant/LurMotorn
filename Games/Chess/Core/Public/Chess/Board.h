@@ -2,16 +2,23 @@
 #include <cstdint>
 #include <string_view>
 #include "Chess/Types.h"
+#include "Lur/Core/Assert.h"
 
 namespace Chess {
 
-constexpr int MaxMoves = 256;  // safe upper bound on legal moves in any position
+constexpr int MaxMoves = 256;  // safe upper bound on legal moves in any position (true max 218)
 
 // Fixed-capacity move list — no heap allocation in the hot path.
 struct MoveList {
     Move Moves[MaxMoves];
     int  Count = 0;
-    void Add(const Move& M) { Moves[Count++] = M; }
+    // 256 bounds legal chess (max 218 moves), so this can't overflow from real move
+    // generation — but a future off-by-one would silently smash the stack. Assert loudly
+    // in dev; the write is unchanged in release.
+    void Add(const Move& M) {
+        LUR_ASSERT_MSG(Count < MaxMoves, "MoveList overflow (Count=%d)", Count);
+        Moves[Count++] = M;
+    }
 };
 
 enum ECastleRight : uint8_t {

@@ -143,7 +143,10 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
         if (!PeerReady) SendHello();
         return;
     }
-    if (LocalGuid == PeerGuid) return;            // identical id (shouldn't happen): wait
+    if (LocalGuid == PeerGuid) {                  // identical id (cloned save dir?): can't seat
+        Logf("hello RECV self-collision: identical GUID — stalling (cloned save dir?)");
+        return;
+    }
 
     Ready = true;
     Logf("READY (peer id known)");

@@ -14,6 +14,11 @@ namespace Lur::Transport {
 // before any BLE backend is wired up. Because it satisfies the same ITransport
 // contract the BLE backends do, code tested against Loopback runs unchanged over
 // the real link.
+//
+// CAUTION: delivery is synchronous and re-entrant — Send() calls the peer's receiver
+// on the calling stack. If a receiver Sends back from inside its own callback, it
+// recurses (A->B->A...). Tests must not reply from within a receiver; a real backend
+// queues instead (see the transport inbox, issue #40).
 class LoopbackTransport : public ITransport {
 public:
     void Send(const uint8_t* Data, std::size_t Size) override {
