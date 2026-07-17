@@ -27,6 +27,11 @@ void Session::Start(Lur::Transport::ITransport* NewTransport, std::string_view G
 }
 
 void Session::Tick(uint64_t ElapsedNs) {
+    // Drain any radio-thread events onto THIS (engine) thread first, so inbound
+    // datagrams + connect/disconnect are processed here, before we read link state
+    // below — honouring the "receiver fires on the engine thread" contract (issue #40).
+    if (Transport != nullptr) Transport->Pump();
+
     const bool Connected = Transport != nullptr && Transport->IsConnected();
 
     // Reconnect edge (post-handshake): the link came back after a drop. Poke the

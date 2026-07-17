@@ -4,12 +4,15 @@
 // codec round-trips real moves over the live link" proven in software, no radio.
 // No framework: each CHECK records a failure; the process exits non-zero if any
 // failed, which CTest reports.
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <thread>
 #include <vector>
 
 #include "Lur/Transport/BleProtocol.h"
+#include "Lur/Transport/EventInbox.h"
 #include "Lur/Transport/Loopback.h"
 
 #include "Chess/Board.h"
@@ -136,12 +139,109 @@ static void TestProtocolConstants() {
     CHECK(!BleAdvertisedName.empty());
 }
 
+// A recording sink that captures the order and payloads Drain() dispatches.
+struct RecordingSink : EventInbox::Sink {
+    std::vector<EventInbox::EKind> Kinds;
+    std::vector<std::vector<uint8_t>> Datagrams;
+    void OnConnected() override    { Kinds.push_back(EventInbox::EKind::Connected); }
+    void OnDisconnected() override { Kinds.push_back(EventInbox::EKind::Disconnected); }
+    void OnDatagram(const uint8_t* D, std::size_t N) override {
+        Kinds.push_back(EventInbox::EKind::Datagram);
+        Datagrams.emplace_back(D, D + N);
+    }
+};
+
+// Events drain in FIFO order across kinds, with datagram payloads intact — connect/
+// disconnect can't reorder around the datagrams between them (issue #40 ordering).
+static void TestInboxFifoOrder() {
+    EventInbox Inbox;
+    const uint8_t A[] = {0x11, 0x22};
+    const uint8_t B[] = {0x33};
+    Inbox.PushConnected();
+    Inbox.PushDatagram(A, sizeof(A));
+    Inbox.PushDatagram(B, sizeof(B));
+    Inbox.PushDisconnected();
+
+    RecordingSink Sink;
+    Inbox.Drain(Sink);
+    CHECK(Sink.Kinds.size() == 4);
+    CHECK(Sink.Kinds[0] == EventInbox::EKind::Connected);
+    CHECK(Sink.Kinds[1] == EventInbox::EKind::Datagram);
+    CHECK(Sink.Kinds[2] == EventInbox::EKind::Datagram);
+    CHECK(Sink.Kinds[3] == EventInbox::EKind::Disconnected);
+    CHECK(Sink.Datagrams.size() == 2);
+    CHECK(Sink.Datagrams[0].size() == 2 && Sink.Datagrams[0][0] == 0x11 && Sink.Datagrams[0][1] == 0x22);
+    CHECK(Sink.Datagrams[1].size() == 1 && Sink.Datagrams[1][0] == 0x33);
+    CHECK(!Inbox.Overflowed());
+}
+
+// Overrunning the ring drops the OLDEST events (never corrupts), flags the overflow,
+// and the survivors are the most-recent Capacity, still in order.
+static void TestInboxOverflowDropsOldest() {
+    EventInbox Inbox;
+    const int N = 40;                 // Capacity is 32 -> 8 oldest dropped
+    for (int i = 0; i < N; ++i) {
+        const uint8_t Byte = static_cast<uint8_t>(i);
+        Inbox.PushDatagram(&Byte, 1);
+    }
+    RecordingSink Sink;
+    Inbox.Drain(Sink);
+    CHECK(Inbox.Overflowed());
+    CHECK(Sink.Datagrams.size() == 32);          // exactly Capacity survive
+    CHECK(Sink.Datagrams.front()[0] == 8);       // oldest 8 (0..7) dropped
+    CHECK(Sink.Datagrams.back()[0] == 39);       // newest kept
+    // Survivors are contiguous + in order.
+    for (std::size_t i = 0; i < Sink.Datagrams.size(); ++i)
+        CHECK(Sink.Datagrams[i][0] == static_cast<uint8_t>(8 + i));
+}
+
+// Thread-safety: a producer thread Pushes while the engine thread Drains. Events are
+// never torn/corrupt and per-producer FIFO holds — the drained tags are a strictly
+// increasing subsequence of what was sent (some may drop under overflow), and if no
+// overflow occurred, all arrive.
+static void TestInboxThreadedHandoff() {
+    EventInbox Inbox;
+    constexpr int N = 5000;
+    std::atomic<bool> Done{false};
+
+    // Each datagram carries its send index as a little-endian 16-bit payload.
+    std::thread Producer([&] {
+        for (int i = 0; i < N; ++i) {
+            const uint8_t Payload[2] = { static_cast<uint8_t>(i & 0xFF),
+                                         static_cast<uint8_t>((i >> 8) & 0xFF) };
+            Inbox.PushDatagram(Payload, sizeof(Payload));
+        }
+        Done.store(true, std::memory_order_release);
+    });
+
+    struct IdxSink : EventInbox::Sink {
+        std::vector<int> Indices;
+        void OnConnected() override {}
+        void OnDisconnected() override {}
+        void OnDatagram(const uint8_t* D, std::size_t N2) override {
+            if (N2 == 2) Indices.push_back(D[0] | (D[1] << 8));
+        }
+    } Sink;
+
+    while (!Done.load(std::memory_order_acquire)) Inbox.Drain(Sink);
+    Producer.join();
+    Inbox.Drain(Sink);  // final sweep after the producer finished
+
+    // Strictly increasing subsequence of 0..N-1 (per-producer FIFO, no torn payloads).
+    for (std::size_t i = 1; i < Sink.Indices.size(); ++i) CHECK(Sink.Indices[i] > Sink.Indices[i - 1]);
+    for (int V : Sink.Indices) CHECK(V >= 0 && V < N);
+    if (!Inbox.Overflowed()) CHECK(static_cast<int>(Sink.Indices.size()) == N);
+}
+
 int main() {
     TestRoleTieBreakIsOpposite();
     TestRoleTieBreakIsDeterministic();
     TestLoopbackRoundtrip();
     TestMoveRoundtripsOverTransport();
     TestProtocolConstants();
+    TestInboxFifoOrder();
+    TestInboxOverflowDropsOldest();
+    TestInboxThreadedHandoff();
 
     if (GFailures == 0) {
         std::printf("All transport tests passed.\n");

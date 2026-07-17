@@ -29,6 +29,12 @@ public:
     // True once the link is established and usable.
     virtual bool IsConnected() const = 0;
 
+    // Drain any inbound events queued by the radio thread onto the CALLING thread,
+    // which the net layer calls once per Tick() so the receiver + connection state
+    // always land on the engine thread (see EventInbox / issue #40). A synchronous
+    // backend (loopback, tests) delivers inline and leaves this a no-op.
+    virtual void Pump() {}
+
     // Force the current link down and resume discovery. Called by the net layer when
     // its keepalive times out — i.e. the link is silently dead but the backend never
     // got a disconnect callback. This is the ONLY reliable path on an iOS peripheral,

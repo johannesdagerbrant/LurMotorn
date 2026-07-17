@@ -13,6 +13,7 @@
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/BleProtocol.h"
+#include "Lur/Transport/EventInbox.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyChess", __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "OnlyChess", __VA_ARGS__)
@@ -20,15 +21,28 @@
 namespace Lur::Transport {
 namespace {
 
-class AndroidBleTransport : public ITransport {
+// The BLE radio callbacks (below) fire on Binder threads; they Push into Inbox, and
+// the engine thread drains it via Pump() (called from Session::Tick). So ReceiverFn
+// and Connected are only ever touched on the engine thread — the documented contract
+// (issue #40). Inbox is the one thread-crossing point.
+class AndroidBleTransport : public ITransport, public EventInbox::Sink {
 public:
     void Send(const uint8_t* Data, std::size_t Size) override;
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
     void ResetLink() override;
+    void Pump() override { Inbox.Drain(*this); }  // engine thread: dispatch queued events
 
-    Receiver ReceiverFn;
-    bool     Connected = false;
+    // EventInbox::Sink — invoked by Drain() on the engine thread, in arrival order.
+    void OnConnected() override    { Connected = true; }
+    void OnDisconnected() override { Connected = false; }
+    void OnDatagram(const uint8_t* Data, std::size_t Size) override {
+        if (ReceiverFn) ReceiverFn(Data, Size);
+    }
+
+    EventInbox Inbox;              // Binder threads Push; the engine thread Drains
+    Receiver   ReceiverFn;
+    bool       Connected = false;  // engine-thread only (mutated in OnConnected/OnDisconnected)
 };
 
 // One link to one peer — local multiplayer is strictly 1:1.
@@ -169,16 +183,17 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSavePeerId(JNIEnv* Env, jobject /*Sel
 extern "C" JNIEXPORT void JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
                                                        jboolean AsPeripheral) {
-    g_Transport.Connected = true;
+    // Binder thread: queue the event; the engine thread applies it in Pump().
     LOGI("BLE connected as %s", AsPeripheral ? "peripheral" : "central");
+    g_Transport.Inbox.PushConnected();
     // The net Session sends the first Hello (central writes first) once it sees the
     // link up — no demo ping needed, and a bare 1-byte ping would now look like a move.
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeOnDisconnected(JNIEnv* /*Env*/, jobject /*Self*/) {
-    g_Transport.Connected = false;
     LOGI("BLE disconnected");
+    g_Transport.Inbox.PushDisconnected();  // Binder thread: engine applies it in Pump()
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -186,5 +201,6 @@ Java_com_lurmotorn_onlychess_BleShim_nativeOnReceived(JNIEnv* Env, jobject /*Sel
     const jsize Len = Env->GetArrayLength(Data);
     std::vector<uint8_t> Bytes(static_cast<std::size_t>(Len));
     if (Len > 0) Env->GetByteArrayRegion(Data, 0, Len, reinterpret_cast<jbyte*>(Bytes.data()));
-    if (g_Transport.ReceiverFn) g_Transport.ReceiverFn(Bytes.data(), Bytes.size());
+    // Binder thread: hand the datagram to the engine thread; Pump() calls the receiver.
+    g_Transport.Inbox.PushDatagram(Bytes.data(), Bytes.size());
 }
