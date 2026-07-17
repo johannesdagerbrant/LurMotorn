@@ -50,6 +50,11 @@ public:
     // selector's diagnostic line; no-op if unset.
     void SetLogger(std::function<void(const char*)> Logger) { Log = std::move(Logger); }
 
+    // Optional draw hook invoked at the very end of the GUI layer, inside the frame
+    // (after all game GUI, before EndFrame) — the seam an app uses to composite an
+    // engine overlay (e.g. Hud::DebugOverlay, issue #54) on top. No-op if unset.
+    void SetPostGuiHook(std::function<void()> Hook) { PostGuiHook = std::move(Hook); }
+
     // The opponent the active match is against: a GUID, or empty for "same device"
     // (local both-sides play).
     const std::string& ActiveOpponentGuid() const { return ActiveOpponent; }
@@ -93,6 +98,7 @@ private:
     bool                      ItemsDirty = true;   // rebuild the list on next Render
     int                       LastLink = -1;       // last ELinkState, to detect changes
     std::function<void(const char*)> Log;          // optional "OnlyChess" log sink
+    std::function<void()>            PostGuiHook;  // optional overlay draw (issue #54)
 
     Lur::Render::MeshHandle     QuadMesh = 0;
     Lur::Render::MaterialHandle LightSquare = 0;

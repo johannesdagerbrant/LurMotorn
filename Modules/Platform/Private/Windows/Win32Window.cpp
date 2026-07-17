@@ -61,6 +61,9 @@ LRESULT CALLBACK WndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam) {
                             static_cast<float>(GET_X_LPARAM(LParam)),
                             static_cast<float>(GET_Y_LPARAM(LParam)));
             return 0;
+        case WM_KEYDOWN:
+            if (WParam == VK_F1) Self->RequestOverlayToggle();
+            return 0;
         case WM_CLOSE:
             Self->RequestClose();
             return 0;

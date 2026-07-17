@@ -21,6 +21,7 @@
 #include "Chess/View/BoardView.h"
 #include "Lur/Core/FlightRecorder.h"
 #include "Lur/Core/Log.h"
+#include "Lur/Hud/DebugOverlay.h"
 #include "Lur/Input/Input.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Platform/Window.h"
@@ -45,6 +46,9 @@ struct GameInstance {
     Lur::Transport::LoopbackTransport Transport;
     Lur::Core::FlightRecorder        Recorder;   // record the session for replay/debug
     std::string                      RecPath;
+    Lur::Hud::DebugOverlay           Overlay;
+    bool                             ShowOverlay = true;  // F1 toggles
+    float                            FrameMs = 0.0f;
 };
 
 // The hijack-guarded record share, mirroring the phone mains: only send OUR game to
@@ -82,6 +86,24 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     G.View.AttachPersistence(G.Store.get(), G.Sync.get(), G.DeviceId);
     G.View.SetLogger([](const char* M) { Lur::Log::Info("View: %s", M); });
     G.View.CreateResources(G.Renderer);
+    G.Overlay.CreateResources(G.Renderer);
+
+    // Debug overlay drawn inside the frame, on top of the board (F1 toggles it).
+    G.View.SetPostGuiHook([&G] {
+        if (!G.ShowOverlay) return;
+        int W = 0, H = 0;
+        G.Win.GetSize(&W, &H);
+        const std::string& Peer = G.Session.GetPeerGuid();
+        const std::string Short = Peer.empty() ? std::string() : Peer.substr(0, 8);
+        Lur::Hud::DebugStats S;
+        S.FrameMs = G.FrameMs;
+        S.Link = G.Session.GetLinkState();
+        S.NsSinceRecv = G.Session.GetNsSinceRecv();
+        S.Sent = G.Session.GetDatagramsSent();
+        S.Recv = G.Session.GetDatagramsReceived();
+        S.PeerShort = Short.c_str();
+        G.Overlay.Draw(G.Renderer, static_cast<float>(W), static_cast<float>(H), S);
+    });
 
     G.Session.SetLogger([](const char* M) { Lur::Log::Info("Net: %s", M); });
 
@@ -96,6 +118,7 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
 }
 
 void PumpInput(GameInstance& G, uint64_t TimeNs) {
+    if (G.Win.TakeOverlayToggle()) G.ShowOverlay = !G.ShowOverlay;  // F1
     int W = 0, H = 0;
     G.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
@@ -158,6 +181,7 @@ int main(int argc, char** argv) {
 
         const uint64_t NowNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now.time_since_epoch()).count();
+        A.FrameMs = B.FrameMs = static_cast<float>(ElapsedNs) / 1.0e6f;
         PumpInput(A, NowNs);
         PumpInput(B, NowNs);
 

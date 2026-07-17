@@ -91,6 +91,11 @@ public:
         return EverConnected ? ELinkState::Disconnected : ELinkState::Searching;
     }
 
+    // Lightweight counters + liveness, for the debug overlay (issue #54). Cheap reads.
+    uint32_t GetDatagramsSent() const { return DatagramsSent; }
+    uint32_t GetDatagramsReceived() const { return DatagramsReceived; }
+    uint64_t GetNsSinceRecv() const { return SinceRecvNs; }
+
     // Register the handler for one application message type (framed, >=2 bytes).
     void SetHandler(EMsgType Type, Handler H);
 
@@ -163,6 +168,8 @@ private:
     uint64_t HelloResendAccumNs = 0; // ns since our last Hello (handshake)
     uint64_t KeepaliveAccumNs   = 0; // ns since our last keepalive send
     uint64_t SinceRecvNs        = 0; // ns since ANY datagram arrived (liveness)
+    uint32_t DatagramsSent      = 0; // total datagrams sent (overlay/debug)
+    uint32_t DatagramsReceived  = 0; // total datagrams received (overlay/debug)
     bool     EverConnected      = false;  // for Disconnected vs never-connected
     bool     VersionMismatchSeen = false;
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook

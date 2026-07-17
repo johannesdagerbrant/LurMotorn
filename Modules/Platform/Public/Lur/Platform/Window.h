@@ -33,13 +33,18 @@ public:
     // Move out the touch events collected since the last call (mouse taps/drags).
     std::vector<Lur::Input::TouchEvent> TakeTouches();
 
+    // True once per F1 press — a debug toggle the game consumes (issue #54 overlay).
+    bool TakeOverlayToggle() { bool T = OverlayToggle; OverlayToggle = false; return T; }
+
     // --- Internal: driven by the Win32 WndProc. Not for game code. ---
     void PushTouch(Lur::Input::ETouchPhase Phase, float XPx, float YPx);
     void RequestClose() { ShouldClose = true; }
+    void RequestOverlayToggle() { OverlayToggle = true; }
 
 private:
     void* Hwnd = nullptr;   // HWND
     bool  ShouldClose = false;
+    bool  OverlayToggle = false;
     std::vector<Lur::Input::TouchEvent> Touches;
 };
 

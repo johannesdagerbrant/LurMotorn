@@ -238,6 +238,8 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
     }
 
+    if (PostGuiHook) PostGuiHook();  // app overlay (e.g. debug HUD), composited last
+
     Renderer->EndFrame();
 }
 
