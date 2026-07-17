@@ -14,7 +14,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(LUR_BUILD_TESTS "Build host unit tests" ON)
 
+# Shared compiler discipline (-Wall/-Wextra/-Werror, RTTI off) for the host build.
+# Must precede the add_subdirectory calls so it applies to their targets.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EngineFlags.cmake)
+
 # --- Pure-C++ engine modules (shared verbatim across host / Android / iOS) ---
+add_subdirectory(Modules/Core)
 add_subdirectory(Modules/Serialization)
 add_subdirectory(Modules/Sim)
 add_subdirectory(Modules/Math)

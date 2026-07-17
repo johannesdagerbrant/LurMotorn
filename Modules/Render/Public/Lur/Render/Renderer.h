@@ -47,7 +47,7 @@ struct MaterialDesc {
     TextureHandle BaseColor = 0;   // 0 = flat white
     Color         Tint;
     bool          Lit = false;     // unlit for 2D, lit for 3D
-    Color         Outline;         // ink-band colour (only used when InkHi > InkLo)
+    Color         Outline{};       // ink-band colour (only used when InkHi > InkLo)
     float         Gamma = 1.0f;    // fill tone curve; 1 = linear (no change)
     float         InkLo = 0.0f;    // ink band; InkHi <= InkLo disables the recolour
     float         InkHi = 0.0f;
