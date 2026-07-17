@@ -18,6 +18,7 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
+#include "Lur/Core/Log.h"
 #include "Lur/Input/Input.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Platform/Window.h"
@@ -75,7 +76,10 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     G.View.SetState(&G.Match);
     G.View.AttachSession(&G.Session);
     G.View.AttachPersistence(G.Store.get(), G.Sync.get(), G.DeviceId);
+    G.View.SetLogger([](const char* M) { Lur::Log::Info("View: %s", M); });
     G.View.CreateResources(G.Renderer);
+
+    G.Session.SetLogger([](const char* M) { Lur::Log::Info("Net: %s", M); });
 
     G.Session.SetReadyHandler([&G] { OnLive(G); });
     G.Session.SetResyncHandler([&G] { OnLive(G); });
@@ -99,29 +103,29 @@ void PumpInput(GameInstance& G) {
 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered so logs flush live/on kill
+    Lur::Log::Init(nullptr, "Desktop");        // built-in stdout/stderr sink for the host
 
     int MaxFrames = 0;  // 0 = run until a window is closed; "--frames N" = headless smoke
     for (int i = 1; i < argc; ++i)
         if (std::string(argv[i]) == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
 
-    std::printf("[Desktop] LurMotorn desktop (Workbench) — two-window loopback\n");
+    Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 
     GameInstance A, B;
     if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 120) ||
         !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 520)) {
-        std::fprintf(stderr, "[Desktop] setup failed\n");
+        Lur::Log::Error("setup failed");
         return 1;
     }
-    std::printf("[Desktop] two renderers up; ids A=%.8s B=%.8s\n",
-                A.DeviceId.c_str(), B.DeviceId.c_str());
+    Lur::Log::Info("two renderers up; ids A=%.8s B=%.8s", A.DeviceId.c_str(), B.DeviceId.c_str());
 
     // One in-process link. Start both, then Tick drives the Hello handshake to Ready.
     Lur::Transport::LoopbackTransport::Link(A.Transport, B.Transport);
     A.Session.Start(&A.Transport, A.DeviceId);
     B.Session.Start(&B.Transport, B.DeviceId);
 
-    std::printf("[Desktop] entering frame loop (%s)\n",
-                MaxFrames > 0 ? "headless --frames" : "close either window to quit");
+    Lur::Log::Info("entering frame loop (%s)",
+                   MaxFrames > 0 ? "headless --frames" : "close either window to quit");
     int Frame = 0;
     bool Linked = false;
     auto PrevTime = std::chrono::steady_clock::now();
@@ -135,15 +139,14 @@ int main(int argc, char** argv) {
         B.Session.Tick(ElapsedNs);
         if (!Linked && A.Session.IsReady() && B.Session.IsReady()) {
             Linked = true;
-            std::printf("[Desktop] handshake complete — both sessions linked\n");
+            Lur::Log::Info("handshake complete - both sessions linked");
         }
 
         PumpInput(A);
         PumpInput(B);
 
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
-            std::printf("[Desktop] rendered %d frames headless (linked=%d) — exiting\n",
-                        Frame, Linked ? 1 : 0);
+            Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
@@ -151,6 +154,6 @@ int main(int argc, char** argv) {
 
     A.Renderer->Shutdown();
     B.Renderer->Shutdown();
-    std::printf("[Desktop] clean exit\n");
+    Lur::Log::Info("clean exit");
     return 0;
 }

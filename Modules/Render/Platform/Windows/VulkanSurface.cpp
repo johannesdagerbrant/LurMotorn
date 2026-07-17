@@ -10,8 +10,7 @@
 #include <windows.h>
 #include <vulkan/vulkan.h>
 
-#include <cstdio>
-
+#include "Lur/Core/Log.h"
 #include "Lur/Render/Vulkan/PlatformSurface.h"
 
 namespace Lur::Render::Vk {
@@ -38,7 +37,8 @@ void PlatformDrawableSize(void* NativeHandle, uint32_t* Width, uint32_t* Height)
 }
 
 void PlatformLog(bool Error, const char* Message) {
-    std::fprintf(Error ? stderr : stdout, "[Vk] %s\n", Message);
+    if (Error) Lur::Log::Error("Vk: %s", Message);
+    else       Lur::Log::Info("Vk: %s", Message);
 }
 
 } // namespace Lur::Render::Vk

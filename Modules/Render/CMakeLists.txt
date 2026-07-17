@@ -24,7 +24,7 @@ elseif(LUR_DESKTOP AND WIN32)
         Platform/Windows/VulkanSurface.cpp)
     target_include_directories(lur_render PUBLIC Public)
     target_compile_features(lur_render PUBLIC cxx_std_20)
-    target_link_libraries(lur_render PUBLIC lur_math Vulkan::Vulkan)
+    target_link_libraries(lur_render PUBLIC lur_math PRIVATE lur::core Vulkan::Vulkan)
     # The Vulkan structs are initialized sType-only ({VK_STRUCTURE_TYPE_x}) by design
     # (the rest zero-inits); that idiom trips -Wmissing-field-initializers. Suppress
     # just that one warning here (overrides the global -Wextra) rather than spell out

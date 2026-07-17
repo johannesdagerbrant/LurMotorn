@@ -44,6 +44,7 @@ endif()
 
 if(LUR_BUILD_TESTS)
     enable_testing()
+    add_subdirectory(Modules/Core/Tests)
     add_subdirectory(Modules/Serialization/Tests)
     add_subdirectory(Modules/Sim/Tests)
     add_subdirectory(Modules/Transport/Tests)
