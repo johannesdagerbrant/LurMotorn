@@ -12,6 +12,9 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Transport/Loopback.h"
 
+#include "Lur/Core/FlightRecorder.h"
+#include "Lur/Core/Hash.h"
+
 #include "Chess/Board.h"
 #include "Chess/ChessRecord.h"
 #include "Chess/MoveCodec.h"
@@ -357,6 +360,58 @@ static void TestOversizedFramedSendRefused() {
     CHECK(SyncCalls == 1);
 }
 
+// Flight recorder (Review #2 §4.2): record a game's input stream to a FILE, read it
+// back, replay it into a fresh board, and assert a byte-identical final state (hash).
+// This is the "a bug becomes a file that replays" property, proven end to end.
+static void TestFlightRecordReplayHashIdentical() {
+    Chess::Board B = Chess::Board::StartPosition();
+    Chess::ChessRecord Live;
+    Lur::Core::FlightRecorder Rec;
+    uint64_t T = 0;
+    auto Play = [&](Chess::Square From, Chess::Square To) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(B, L);
+        const Chess::Move* M = Find(L, From, To);
+        CHECK(M != nullptr);
+        if (M == nullptr) return;
+        Lur::Serialization::BitWriter W;
+        Chess::EncodeMove(*M, L, W);
+        const std::vector<uint8_t> Bytes = W.Finish();
+        Rec.Record(Lur::Core::EFlightEvent::Input, T += 1000, Bytes.data(), Bytes.size());
+        B.MakeMove(*M);
+        Live.Moves.push_back(*M);
+    };
+    // Ruy Lopez: 1.e4 e5 2.Nf3 Nc6 3.Bb5 a6 (rank-major squares).
+    Play(12, 28); Play(52, 36); Play(6, 21); Play(57, 42); Play(5, 33); Play(48, 40);
+
+    // The recording becomes a file, then is read back (the crash-ships-as-a-file path).
+    const char* Path = "flightrec_test.bin";
+    CHECK(Rec.WriteFile(Path));
+    std::vector<Lur::Core::FlightRecorder::Event> Events;
+    CHECK(Lur::Core::FlightRecorder::ReadFile(Path, Events));
+    std::remove(Path);
+    CHECK(Events.size() == 6);
+
+    // Replay the recorded input stream into a FRESH board.
+    Chess::Board Replay = Chess::Board::StartPosition();
+    Chess::ChessRecord Rebuilt;
+    for (const Lur::Core::FlightRecorder::Event& E : Events) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(Replay, L);
+        Lur::Serialization::BitReader R(E.Data.data(), E.Data.size());
+        const Chess::Move M = Chess::DecodeMove(R, L);
+        CHECK(R.IsOk() && !(M == Chess::Move{}));
+        Replay.MakeMove(M);
+        Rebuilt.Moves.push_back(M);
+    }
+
+    // Hash-identical final state (records serialize the same bytes; positions match).
+    std::vector<uint8_t> LiveBytes, RebuiltBytes;
+    Live.Write(LiveBytes);
+    Rebuilt.Write(RebuiltBytes);
+    CHECK(Lur::Core::Fnv1a64(LiveBytes.data(), LiveBytes.size()) ==
+          Lur::Core::Fnv1a64(RebuiltBytes.data(), RebuiltBytes.size()));
+    CHECK(SamePosition(B, Replay));
+}
+
 int main() {
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
@@ -369,6 +424,7 @@ int main() {
     TestKeepaliveKeepsLinkAlive();
     TestLongGameSyncNotDropped();
     TestOversizedFramedSendRefused();
+    TestFlightRecordReplayHashIdentical();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");

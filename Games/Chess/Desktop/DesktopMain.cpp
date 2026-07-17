@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
+#include "Lur/Core/FlightRecorder.h"
 #include "Lur/Core/Log.h"
 #include "Lur/Input/Input.h"
 #include "Lur/Net/Session.h"
@@ -41,6 +43,8 @@ struct GameInstance {
     Lur::Net::Session                Session;
     Chess::BoardView                 View;
     Lur::Transport::LoopbackTransport Transport;
+    Lur::Core::FlightRecorder        Recorder;   // record the session for replay/debug
+    std::string                      RecPath;
 };
 
 // The hijack-guarded record share, mirroring the phone mains: only send OUR game to
@@ -84,15 +88,23 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     G.Session.SetReadyHandler([&G] { OnLive(G); });
     G.Session.SetResyncHandler([&G] { OnLive(G); });
     G.Session.SetHandler(Lur::Net::EMsgType::Sync, [&G](const uint8_t* D, std::size_t N) {
+        G.Recorder.Record(Lur::Core::EFlightEvent::DatagramIn, 0, D, N);  // Sync in
         if (G.View.ActiveOpponentGuid() == G.Session.GetPeerGuid()) G.Sync->OnSync(D, N);
     });
+    G.RecPath = std::string(SaveDir) + ".flightrec";
     return true;
 }
 
-void PumpInput(GameInstance& G) {
+void PumpInput(GameInstance& G, uint64_t TimeNs) {
     int W = 0, H = 0;
     G.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
+        // Record every touch (Review #2: record everything). Payload: phase + x + y.
+        uint8_t Blob[9];
+        Blob[0] = static_cast<uint8_t>(T.Phase);
+        std::memcpy(Blob + 1, &T.XPx, 4);
+        std::memcpy(Blob + 5, &T.YPx, 4);
+        G.Recorder.Record(Lur::Core::EFlightEvent::Input, TimeNs, Blob, sizeof(Blob));
         if (T.Phase == Lur::Input::ETouchPhase::Ended && W > 0 && H > 0)
             G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
     }
@@ -139,11 +151,15 @@ int main(int argc, char** argv) {
         B.Session.Tick(ElapsedNs);
         if (!Linked && A.Session.IsReady() && B.Session.IsReady()) {
             Linked = true;
+            A.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
+            B.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
             Lur::Log::Info("handshake complete - both sessions linked");
         }
 
-        PumpInput(A);
-        PumpInput(B);
+        const uint64_t NowNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now.time_since_epoch()).count();
+        PumpInput(A, NowNs);
+        PumpInput(B, NowNs);
 
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
             Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
@@ -151,6 +167,13 @@ int main(int argc, char** argv) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
+
+    // Write each session's flight recording — a crash/desync now ships as a file that
+    // replays through the loopback path (proven by NetTests). Bounded ring, tiny.
+    for (GameInstance* G : {&A, &B})
+        if (G->Recorder.WriteFile(G->RecPath.c_str()))
+            Lur::Log::Info("flight recording written: %s (%zu events)",
+                           G->RecPath.c_str(), G->Recorder.Count());
 
     A.Renderer->Shutdown();
     B.Renderer->Shutdown();

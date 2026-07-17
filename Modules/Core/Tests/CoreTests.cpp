@@ -3,7 +3,10 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
+#include "Lur/Core/FlightRecorder.h"
+#include "Lur/Core/Hash.h"
 #include "Lur/Core/Log.h"
 
 static int GFailures = 0;
@@ -48,8 +51,57 @@ static void TestLogRoutesToSink() {
     Lur::Log::Init(nullptr, "Lur");  // restore the default writer
 }
 
+// FNV-1a is deterministic and sensitive to any byte change (the desync-hash property).
+static void TestHashDeterministicAndSensitive() {
+    const uint8_t A[] = {1, 2, 3, 4, 5};
+    uint8_t B[] = {1, 2, 3, 4, 5};
+    CHECK(Lur::Core::Fnv1a64(A, sizeof(A)) == Lur::Core::Fnv1a64(B, sizeof(B)));
+    B[2] = 0x33;  // flip one byte
+    CHECK(Lur::Core::Fnv1a64(A, sizeof(A)) != Lur::Core::Fnv1a64(B, sizeof(B)));
+}
+
+// A recording serializes and parses back byte-identically (kind, time, payload).
+static void TestFlightRecorderRoundtrip() {
+    using Lur::Core::EFlightEvent;
+    Lur::Core::FlightRecorder Rec;
+    const uint8_t D1[] = {0xAB};
+    const uint8_t D2[] = {0x01, 0x02, 0x03};
+    Rec.Record(EFlightEvent::LinkUp, 100, nullptr, 0);
+    Rec.Record(EFlightEvent::DatagramIn, 200, D1, sizeof(D1));
+    Rec.Record(EFlightEvent::DatagramOut, 300, D2, sizeof(D2));
+
+    const std::vector<uint8_t> Blob = Rec.Serialize();
+    std::vector<Lur::Core::FlightRecorder::Event> Back;
+    CHECK(Lur::Core::FlightRecorder::Parse(Blob.data(), Blob.size(), Back));
+    CHECK(Back.size() == 3);
+    CHECK(Back[0].Kind == EFlightEvent::LinkUp && Back[0].TimeNs == 100 && Back[0].Data.empty());
+    CHECK(Back[1].Kind == EFlightEvent::DatagramIn && Back[1].TimeNs == 200);
+    CHECK(Back[1].Data.size() == 1 && Back[1].Data[0] == 0xAB);
+    CHECK(Back[2].Data.size() == 3 && Back[2].Data[2] == 0x03);
+
+    // A truncated blob is rejected, not read as garbage.
+    std::vector<Lur::Core::FlightRecorder::Event> Junk;
+    CHECK(!Lur::Core::FlightRecorder::Parse(Blob.data(), Blob.size() - 1, Junk));
+}
+
+// The ring is bounded: past capacity it drops the oldest and flags it.
+static void TestFlightRecorderRingBounded() {
+    Lur::Core::FlightRecorder Rec(/*Capacity*/ 4);
+    for (int i = 0; i < 10; ++i) {
+        const uint8_t B = static_cast<uint8_t>(i);
+        Rec.Record(Lur::Core::EFlightEvent::Input, static_cast<uint64_t>(i), &B, 1);
+    }
+    CHECK(Rec.Count() == 4);
+    CHECK(Rec.Dropped());
+    CHECK(Rec.Events().front().Data[0] == 6);  // oldest kept is #6 (0..5 dropped)
+    CHECK(Rec.Events().back().Data[0] == 9);
+}
+
 int main() {
     TestLogRoutesToSink();
+    TestHashDeterministicAndSensitive();
+    TestFlightRecorderRoundtrip();
+    TestFlightRecorderRingBounded();
 
     if (GFailures == 0) {
         std::printf("All core tests passed.\n");
