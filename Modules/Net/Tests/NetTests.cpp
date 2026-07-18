@@ -352,11 +352,11 @@ static void TestOversizedFramedSendRefused() {
     int SyncCalls = 0;
     SB.SetHandler(EMsgType::Sync, [&](const uint8_t*, std::size_t) { ++SyncCalls; });
 
-    std::vector<uint8_t> Huge(300, 0xEE);  // > MaxFramedPayload
+    std::vector<uint8_t> Huge(600, 0xEE);  // > MaxFramedPayload (512)
     CHECK(!SA.Send(EMsgType::Sync, Huge.data(), Huge.size()));
     CHECK(SyncCalls == 0);
 
-    std::vector<uint8_t> Ok(200, 0x11);    // < MaxFramedPayload -> accepted + delivered
+    std::vector<uint8_t> Ok(500, 0x11);    // < MaxFramedPayload -> accepted + delivered
     CHECK(SA.Send(EMsgType::Sync, Ok.data(), Ok.size()));
     CHECK(SyncCalls == 1);
 }

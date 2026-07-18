@@ -175,13 +175,15 @@ private:
     // stop blocking moves after this so a missing Sync can't wedge the game forever.
     static constexpr uint64_t ResyncTimeoutNs = 3'000'000'000ull; // ~3s fallback
 
-    // Max payload for a FRAMED ([type][payload]) message. Sized to a BLE MTU-class
-    // datagram (negotiated ATT MTU ~247 -> ~244 usable) so a full-history Sync of a
-    // realistic in-progress match fits in one datagram. This was 64, which silently
-    // dropped a Sync past ply ~61 — a mid-game reconnect then never resynced. A game
-    // long enough to exceed this genuinely can't fit one BLE datagram; transport-level
-    // fragmentation is a separate follow-up. Send() now refuses+logs past this bound.
-    static constexpr std::size_t MaxFramedPayload = 254;
+    // Max payload for a FRAMED ([type][payload]) message. Both backends negotiate an
+    // ATT MTU of 517 (seen on every link), so one datagram carries MTU-3 = 514 bytes;
+    // minus the 1-byte type tag that leaves 513 for the payload. This was 254 — which
+    // still silently dropped a full-history Sync once the accumulated move record passed
+    // ~254 bytes (issue #41 / #72: a mid-game resync then never delivered and the game
+    // wedged). Sized to the real MTU now. A game whose record exceeds even this can't
+    // fit one datagram; a compact position-snapshot resync (or fragmentation) is the
+    // follow-up. Send() refuses+logs past this bound rather than truncating the wire.
+    static constexpr std::size_t MaxFramedPayload = 512;
 
     // Link liveness: once ready we send a Keepalive every KeepaliveNs; if NO datagram
     // arrives for LinkTimeoutNs we declare the link dead and ask the transport to
