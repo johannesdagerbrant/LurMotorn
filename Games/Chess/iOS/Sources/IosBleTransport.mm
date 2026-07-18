@@ -164,12 +164,12 @@ static void SaveIosPeerId(const std::string& Id) {
 - (void)transmit:(const std::vector<uint8_t>&)Bytes {
     NSData* Payload = [NSData dataWithBytes:Bytes.data() length:Bytes.size()];
     if (_RemoteDatagram && _PeerDevice) {            // we are central -> write
-        // WithResponse: the peer's datagram characteristic only declares
-        // write-with-response (PROPERTY_WRITE on Android), and chess payloads are
-        // tiny so latency is irrelevant. Both platforms write-with-response.
+        // WithoutResponse (issue #49): drop the ATT ack round-trip per datagram. The
+        // peer now declares PROPERTY_WRITE_NO_RESPONSE; app-level keepalives cover
+        // liveness and the reverse path (notify) is unacknowledged anyway.
         [_PeerDevice writeValue:Payload
               forCharacteristic:_RemoteDatagram
-                           type:CBCharacteristicWriteWithResponse];
+                           type:CBCharacteristicWriteWithoutResponse];
     } else if (_LocalDatagram && _Subscriber) {      // we are peripheral -> notify
         [_Peripheral updateValue:Payload
                forCharacteristic:_LocalDatagram
@@ -341,7 +341,8 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 
     _LocalDatagram = [[CBMutableCharacteristic alloc]
         initWithType:_DatagramUuid
-          properties:(CBCharacteristicPropertyWrite | CBCharacteristicPropertyNotify)
+          properties:(CBCharacteristicPropertyWrite | CBCharacteristicPropertyWriteWithoutResponse |
+                      CBCharacteristicPropertyNotify)   // WriteWithoutResponse: drop the ATT ack (#49)
                value:nil
          permissions:CBAttributePermissionsWriteable];
 

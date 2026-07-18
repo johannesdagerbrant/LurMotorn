@@ -214,12 +214,14 @@ class BleRadio {
             try {
                 var writer = new DataWriter();
                 writer.WriteBytes(payload);
-                // The phone's datagram characteristic is WRITE (with response), so the
-                // async completes on the ATT write RESPONSE — one BLE connection-interval
-                // round trip. Timing it is a real per-datagram link-latency probe.
+                // Write WITHOUT response (issue #49): no ATT ack round-trip — the async
+                // completes once the local stack accepts the buffer, so the timed value
+                // is ENQUEUE time (`wr=`), not a link round trip. The real latency signal
+                // now is end-to-end move cadence (QUAL moves/sec). Requires the peripheral
+                // to expose PROPERTY_WRITE_NO_RESPONSE.
                 var sw = Stopwatch.StartNew();
                 var res = Wait(data.WriteValueWithResultAsync(writer.DetachBuffer(),
-                                                              GattWriteOption.WriteWithResponse));
+                                                              GattWriteOption.WriteWithoutResponse));
                 sw.Stop();
                 double ms = sw.Elapsed.TotalMilliseconds;
                 if (res.Status != GattCommunicationStatus.Success) {
@@ -227,7 +229,7 @@ class BleRadio {
                 } else {
                     g_txCount++; g_txBytes += payload.Length;
                     g_txMs += ms; if (ms < g_txMin) g_txMin = ms; if (ms > g_txMax) g_txMax = ms;
-                    Log(string.Format("TX {0}B rtt={1:F1}ms (n={2} avg={3:F1} min={4:F1} max={5:F1})",
+                    Log(string.Format("TX {0}B wr={1:F1}ms (n={2} avg={3:F1} min={4:F1} max={5:F1})",
                                       payload.Length, ms, g_txCount, g_txMs / g_txCount, g_txMin, g_txMax));
                 }
             } catch (Exception e) {

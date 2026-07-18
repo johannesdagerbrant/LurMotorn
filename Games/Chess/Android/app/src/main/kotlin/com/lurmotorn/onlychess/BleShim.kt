@@ -140,7 +140,11 @@ class BleShim(private val context: Context) {
             val serverCh = serverDatagram
             if (client != null && clientCh != null) {           // we are central -> write
                 clientCh.value = bytes
-                clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                // Write WITHOUT response (issue #49): drop the ATT ack round-trip per
+                // datagram. App-level keepalives already provide the liveness net, and
+                // notifications (the reverse path) are unacknowledged anyway. Requires the
+                // peripheral to expose PROPERTY_WRITE_NO_RESPONSE (see startGattServer).
+                clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                 client.writeCharacteristic(clientCh)
             } else if (central != null && serverCh != null) {   // we are peripheral -> notify
                 serverCh.value = bytes
@@ -291,7 +295,11 @@ class BleShim(private val context: Context) {
 
             val datagram = BluetoothGattCharacteristic(
                 DATAGRAM_UUID,
-                BluetoothGattCharacteristic.PROPERTY_WRITE or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
+                // WRITE_NO_RESPONSE alongside WRITE (issue #49): let a central write
+                // datagrams without the ATT ack round-trip. NOTIFY carries the reverse path.
+                BluetoothGattCharacteristic.PROPERTY_WRITE or
+                    BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE or
+                    BluetoothGattCharacteristic.PROPERTY_NOTIFY,
                 BluetoothGattCharacteristic.PERMISSION_WRITE,
             )
             datagram.addDescriptor(
