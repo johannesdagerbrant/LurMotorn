@@ -10,6 +10,9 @@
 #include <cstdio>
 #include <string>
 #include <vector>
+#if LUR_INTERNAL
+#include <sys/system_properties.h>  // read debug.onlychess.autoplay (dev soak/autoplay)
+#endif
 
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
@@ -135,13 +138,61 @@ void android_main(android_app* App) {
     State.Session.Start(Transport, DeviceId);
     LOGI("Net session started (device id %zuB)", DeviceId.size());
 
+#if LUR_INTERNAL
+    // Dev-only autoplayer (issue #57/#58): when debug.onlychess.autoplay=1, play a
+    // random legal move the SAME frame it becomes our turn — so a reply ships the frame
+    // the opponent's move was received. Gated by a runtime prop so an ordinary dev
+    // build still plays by hand; compiled out entirely of a SHIPPING build.
+    bool AutoEnabled = false;
+    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(DeviceId.size());
+    uint64_t Frame = 0, PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
+    uint64_t ReportAccumNs = 0;
+#endif
     auto PrevTime = std::chrono::steady_clock::now();
     while (!App->destroyRequested) {
         const auto Now = std::chrono::steady_clock::now();
         const uint64_t ElapsedNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
+
+#if LUR_INTERNAL
+        const bool     WasMyTurn = State.Match.IsMyTurn();
+        const uint32_t MatchesBefore = State.Match.Record().TotalMatches();
+#endif
         State.Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
+#if LUR_INTERNAL
+        {
+            const bool     NowMyTurn = State.Match.IsMyTurn();
+            const uint32_t MatchesAfter = State.Match.Record().TotalMatches();
+            const bool     GotPeerMove = !WasMyTurn && NowMyTurn;       // peer moved -> our turn, this frame
+            const bool     PeerEndedGame = MatchesAfter != MatchesBefore;
+            if (!AutoEnabled) {
+                char V[8] = {0};
+                if (__system_property_get("debug.onlychess.autoplay", V) > 0 && V[0] == '1') {
+                    AutoEnabled = true;
+                    LOGI("autoplay ENABLED (debug.onlychess.autoplay=1): random legal move on our turn");
+                }
+            }
+            bool Played = false;
+            if (AutoEnabled && State.Session.IsReady() && NowMyTurn)
+                Played = State.View.AutoPlayRandomLegalMove(Rng);
+            if (GotPeerMove) {
+                ++PeerReplies;
+                if (PeerEndedGame)   ++NewGameOpens;
+                else if (Played)     ++SameFrame;
+                else               { ++DelayedReplies; LOGI("WARN: our turn, no same-frame reply @frame %llu",
+                                                            (unsigned long long)Frame); }
+            }
+            ReportAccumNs += ElapsedNs;
+            if (AutoEnabled && ReportAccumNs > 2'000'000'000ull) {
+                ReportAccumNs = 0;
+                LOGI("AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu",
+                     MatchesAfter, (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
+                     (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies);
+            }
+            ++Frame;
+        }
+#endif
         int Events = 0;
         android_poll_source* Source = nullptr;
         // Re-evaluate the timeout on every poll: INIT_WINDOW flips State.Ready

@@ -34,12 +34,22 @@ public:
     void Render(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx);
     void OnTap(float XPx, float YPx, float WidthPx, float HeightPx);
 
-    // Play a move by squares through the SAME wire path a tap uses (build the legal
-    // list, encode the index, SendMove, then apply locally). For scripted/bot play
-    // such as the BLE dev-rig's PC endpoint (issue #58). A promotion defaults to a
-    // queen. Returns true iff a legal From->To move existed for the side to move on
-    // our turn and was played; a no-op (false) otherwise.
+#if LUR_INTERNAL
+    // --- Developer-only scripted/bot play (issue #57/#58) — compiled out of a
+    // SHIPPING build (LUR_INTERNAL=0). Both go through the SAME wire path a real tap
+    // uses (build the legal list, encode the index, SendMove, then apply locally), so
+    // a bot exercises the exact protocol a human does.
+
+    // Play a move by squares. A promotion defaults to a queen. Returns true iff a
+    // legal From->To move existed for the side to move on our turn and was played.
     bool PlayMove(Chess::Square From, Chess::Square To);
+
+    // Play a uniformly-random legal move for the side to move, on our turn. RngState
+    // is an in/out LCG seed (each device keeps its own). Returns true iff a move was
+    // played. The dev-rig autoplayer calls this every frame it's our turn, so a reply
+    // ships the same frame the opponent's move was received.
+    bool AutoPlayRandomLegalMove(uint32_t& RngState);
+#endif
 
     // Attach a networked session: peer moves arrive as EMsgType::Move and are applied
     // to the state; our own moves are sent on it; the link-state bar reads it. Colour

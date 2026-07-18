@@ -42,6 +42,18 @@ target_link_libraries(onlychess
     log       # __android_log_print
     vulkan)   # the GPU API (Vulkan backend, task #9)
 
+# The build-config capability macros (LUR_INTERNAL etc.) are derived by
+# cmake/EngineFlags.cmake during the add_subdirectory(LUR_ROOT) above and published
+# as cache vars. This app target lives in the parent (onlychess) project scope, out
+# of reach of the engine tree's add_compile_definitions, so apply them explicitly —
+# AndroidMain's soak/autoplayer (issue #57/#58) is #if LUR_INTERNAL. Default config
+# is Development (INTERNAL=1); a release build passes -DLUR_CONFIG=Shipping.
+target_compile_definitions(onlychess PRIVATE
+    LUR_SHIPPING=${LUR_SHIPPING}
+    LUR_INTERNAL=${LUR_INTERNAL}
+    LUR_ASSERTS=${LUR_ASSERTS}
+    LUR_SLOW=${LUR_SLOW})
+
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlychess PROPERTIES
     LINK_FLAGS "-u ANativeActivity_onCreate")

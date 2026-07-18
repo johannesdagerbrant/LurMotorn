@@ -55,6 +55,21 @@ powershell -ExecutionPolicy Bypass -File Tools\BleDevRig\build.ps1 -Source BleRa
 build-desktop\Games\Chess\Desktop\onlychess_desktop.exe --ble Tools\BleDevRig\BleRadio.exe
 ```
 
+## Fully automated play (both ends autoplay — dev builds only)
+
+Both ends play a random legal move the **same frame** they receive the opponent's move (so the only
+per-move delay is the radio RTT). All of this is `#if LUR_INTERNAL` — compiled out of a `Shipping` build.
+
+- **PC endpoint:** `onlychess_desktop --ble <radio> --auto [--games N]` — `--auto` autoplays our colour;
+  `--games N` stops (draining the link first so the peer gets the deciding move + resets) after N
+  completed matches. `--script f2f3,e7e5,...` instead plays a fixed line (e.g. a Fool's mate).
+- **Android endpoint:** the app autoplays when the runtime prop is set — the app must be a Development
+  build (`LUR_INTERNAL=1`, the Gradle default):
+  ```
+  adb shell setprop debug.onlychess.autoplay 1   # arm BEFORE launch; set 0 to disarm
+  ```
+  Each end logs a same-frame tally: `sameFrame=<answered>/<peer moves> ... delayed=<should be 0>`.
+
 The Android app must be **advertising** (foreground, fresh identity so it serves as a
 peripheral). Agentic setup over adb (no manual taps):
 

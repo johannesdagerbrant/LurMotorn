@@ -61,6 +61,16 @@ add_executable(OnlyChess MACOSX_BUNDLE
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
+# Build-config capability macros (LUR_INTERNAL etc.), derived by EngineFlags.cmake in
+# the add_subdirectory(root) above. Like the Android main, this app target is in the
+# parent scope, out of the engine tree's add_compile_definitions reach, so apply them
+# here. Default Development; a release build passes -DLUR_CONFIG=Shipping.
+target_compile_definitions(OnlyChess PRIVATE
+    LUR_SHIPPING=${LUR_SHIPPING}
+    LUR_INTERNAL=${LUR_INTERNAL}
+    LUR_ASSERTS=${LUR_ASSERTS}
+    LUR_SLOW=${LUR_SLOW})
+
 target_link_libraries(OnlyChess PRIVATE
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
     chess::core

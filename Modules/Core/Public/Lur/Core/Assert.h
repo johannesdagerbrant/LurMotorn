@@ -11,12 +11,18 @@
 // So: LUR_ASSERT for our own invariants; ordinary if-guards + logging for wire input.
 //
 // Toggle: define LUR_ASSERTS_ENABLED=1 to force on, =0 to force off. Otherwise it
-// follows NDEBUG (on in Debug, off in Release).
+// follows the build-configuration macro LUR_ASSERTS (set by cmake/EngineFlags.cmake
+// from LUR_CONFIG): on in DEVELOPMENT/DEBUGGING, off in SHIPPING. This is DECOUPLED
+// from NDEBUG on purpose — an optimized DEVELOPMENT build (NDEBUG defined, e.g. the
+// overnight soak) must still trap. Only when neither is defined (a bare compile with
+// no EngineFlags) do we fall back to NDEBUG so a stray host tool still behaves.
 #include <cstdio>
 #include <cstdlib>
 
 #if !defined(LUR_ASSERTS_ENABLED)
-    #if defined(NDEBUG)
+    #if defined(LUR_ASSERTS)
+        #define LUR_ASSERTS_ENABLED LUR_ASSERTS
+    #elif defined(NDEBUG)
         #define LUR_ASSERTS_ENABLED 0
     #else
         #define LUR_ASSERTS_ENABLED 1

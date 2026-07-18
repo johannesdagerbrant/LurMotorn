@@ -332,6 +332,22 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
 }
 
+#if LUR_INTERNAL
+namespace {
+// Commit an already-chosen legal move over the SAME wire path OnTap uses: ship the
+// index (encoded off the pre-move legal list) BEFORE applying, so both boards advance
+// in lockstep. Factored so PlayMove and AutoPlay share one identical path.
+void CommitMove(Lur::Net::Session* Net, ChessMatchState* State, const Move& Chosen, const MoveList& Legal) {
+    if (Net != nullptr) {
+        Lur::Serialization::BitWriter W;
+        EncodeMove(Chosen, Legal, W);
+        const std::vector<uint8_t>& Bytes = W.Finish();
+        Net->SendMove(Bytes.data(), Bytes.size());
+    }
+    State->ApplyMove(Chosen);
+}
+}  // namespace
+
 bool BoardView::PlayMove(Square From, Square To) {
     if (State == nullptr || !CanMoveNow()) return false;
     const Board& B = State->CurrentBoard();
@@ -344,19 +360,24 @@ bool BoardView::PlayMove(Square From, Square To) {
         else { Chosen = &M; }
     }
     if (Chosen == nullptr) return false;
-    // Identical to OnTap's move branch: ship the index BEFORE applying, so both
-    // boards advance off the same pre-move legal list.
-    if (Net != nullptr) {
-        Lur::Serialization::BitWriter W;
-        EncodeMove(*Chosen, Legal, W);
-        const std::vector<uint8_t>& Bytes = W.Finish();
-        Net->SendMove(Bytes.data(), Bytes.size());
-    }
-    State->ApplyMove(*Chosen);
+    CommitMove(Net, State, *Chosen, Legal);
     StampMove();
     Selected = NoSquare;
     return true;
 }
+
+bool BoardView::AutoPlayRandomLegalMove(uint32_t& RngState) {
+    if (State == nullptr || !CanMoveNow()) return false;
+    MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);
+    if (Legal.Count <= 0) return false;                       // no move (game would have concluded)
+    RngState = RngState * 1664525u + 1013904223u;             // Numerical-Recipes LCG
+    const int Idx = static_cast<int>((RngState >> 8) % static_cast<uint32_t>(Legal.Count));
+    CommitMove(Net, State, Legal.Moves[Idx], Legal);
+    StampMove();
+    Selected = NoSquare;
+    return true;
+}
+#endif  // LUR_INTERNAL
 
 void BoardView::AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManager* SyncMgr,
                                   std::string LocalGuid) {

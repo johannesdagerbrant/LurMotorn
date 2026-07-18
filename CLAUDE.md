@@ -84,6 +84,33 @@ since the players share a room, genuine disputes can be settled out-of-band, soc
 
 ## Build and test
 
+### Build configurations & capability macros (issue #65, Review #2 §5)
+
+One ordinal ladder of configs (Unreal-style), each a strict **superset** of the one below, selected
+with `-DLUR_CONFIG=`:
+
+| `LUR_CONFIG` | Tooling | Asserts | Slow checks | Opt |
+|---|---|---|---|---|
+| `Shipping` | ✗ | ✗ (quiet guards) | ✗ | on |
+| `Development` *(default)* | ✓ | ✓ (deafening) | ✗ | on |
+| `Debugging` | ✓ | ✓ | ✓ | `-O0 -g` |
+
+`cmake/EngineFlags.cmake` derives four **capability macros** from the config —
+`LUR_SHIPPING`, `LUR_INTERNAL` (dev-only tooling: bots, `BoardView::PlayMove`, the soak/autoplayer),
+`LUR_ASSERTS` (drives `LUR_ASSERT`), `LUR_SLOW` (expensive validation). **Gate code on the
+capability, never on the config name** (`#if LUR_INTERNAL`, not `#if <config>`), so a future off-ladder
+build (e.g. profiling = shipping + stats) never forces a call-site rewrite — same discipline as
+Unreal's `WITH_EDITOR`/`DO_CHECK` and Casey's `HANDMADE_INTERNAL`/`HANDMADE_SLOW`.
+
+Two rules that fall out of this and must hold: **(1)** asserts live in `Development`, not just
+`Debugging` — so the *optimized* dev build (the overnight soak) still traps; `LUR_ASSERT` therefore
+keys on `LUR_ASSERTS`, **decoupled from `NDEBUG`**. **(2)** `LUR_INTERNAL` code must **never** ship —
+anything a player shouldn't reach (autoplayers, cheats, direct move injection) is `#if LUR_INTERNAL`,
+compiled out of `Shipping`, not merely a runtime toggle. Default config is `Development`; a release
+pipeline passes `-DLUR_CONFIG=Shipping`. Out-of-tree app targets (the Android/iOS mains) can't see the
+engine tree's `add_compile_definitions`, so they re-apply the derived `LUR_*` cache vars to their own
+target — see `Games/Chess/Android/app/src/main/cpp/CMakeLists.txt`.
+
 ### Shared C++ core (do this for any core change)
 
 ```

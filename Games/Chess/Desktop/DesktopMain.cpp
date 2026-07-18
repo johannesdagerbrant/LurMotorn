@@ -81,7 +81,13 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     G.DeviceId = Lur::Save::LoadOrCreateDeviceId(*G.Store);
     G.Sync     = std::make_unique<Lur::Save::SyncManager>(*G.Store, G.Match);
 
-    G.Match.SetOnMatchEnd([&G] { G.Sync->Persist(); });
+    G.Match.SetOnMatchEnd([&G] {
+        G.Sync->Persist();
+        Lur::Log::Info("MATCH END result=%d WLD(lo/hi/dr)=%u/%u/%u total=%u",
+                       static_cast<int>(G.Match.LastResult()), G.Match.Record().WinsLower,
+                       G.Match.Record().WinsHigher, G.Match.Record().Draws,
+                       G.Match.Record().TotalMatches());
+    });
 
     G.View.SetState(&G.Match);
     G.View.AttachSession(&G.Session);
@@ -149,11 +155,14 @@ const char* ColorName(Chess::EColor C) { return C == Chess::EColor::White ? "Whi
 // it were a second phone — the whole point of the Workbench's third radio. Returns a
 // process exit code.
 //
-// Script is a comma-separated move list ("f2f3,e7e5,g2g4,d8h4"); on our turn the
-// endpoint plays the first entry that's currently legal for our colour and drops it
-// (the peer's entries are played on the phone), so one shared script drives both
-// sides of a full match. Every ~1s it logs a connection-quality line.
-int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
+// Two dev drivers (LUR_INTERNAL only), both firing on the SAME frame our turn opens:
+//   * Auto: play a random legal move every frame it's our turn (fully automated match).
+//   * Script: a comma-separated move list ("f2f3,g2g4,..."); play the first entry legal
+//     on our turn and drop it (the peer's entries are played on the phone).
+// GamesToPlay > 0 stops after that many completed matches (0 = run until the window
+// closes). Every ~1s it logs a connection-quality line; on exit it reports the
+// same-frame reply tally (did our reply ship the frame we received the peer's move?).
+int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool Auto, int GamesToPlay) {
     Lur::Log::Info("LurMotorn desktop (Workbench) - BLE peer vs phone (radio=%s)", RadioExe);
 
     GameInstance G;
@@ -184,12 +193,16 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
         i += 4;
     }
     if (!Moves.empty()) Lur::Log::Info("script: %zu moves loaded (we play the ones legal on our turn)", Moves.size());
+    if (Auto) Lur::Log::Info("autoplay: random legal move every frame it's our turn (games=%d)", GamesToPlay);
 
     int Frame = 0;
     bool Linked = false;
-    uint64_t SinceMoveNs = 0;    // pace scripted moves so both boards keep lockstep
+    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(G.DeviceId.size());  // per-device autoplay seed
     uint64_t TraceAccumNs = 0;   // ~1 Hz connection-quality trace
-    uint32_t LastRecv = 0;
+    // Same-frame reply accounting: did we move the frame we received the peer's move?
+    uint64_t PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
+    bool Draining = false;          // hit the games target: stop playing, keep the link alive
+    uint64_t DrainAccumNs = 0;      // so the deciding move flushes + the peer converges before exit
     auto PrevTime = std::chrono::steady_clock::now();
     while (G.Win.PumpEvents()) {
         const auto Now = std::chrono::steady_clock::now();
@@ -197,7 +210,11 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
 
-        G.Session.Tick(ElapsedNs);  // pumps the radio inbox, drives Hello + liveness
+        const bool     WasMyTurn = G.Match.IsMyTurn();
+        const uint32_t MatchesBefore = G.Match.Record().TotalMatches();
+
+        G.Session.Tick(ElapsedNs);  // pumps the radio inbox -> applies any peer move THIS frame
+
         if (!Linked && G.Session.IsReady()) {
             Linked = true;
             G.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
@@ -205,39 +222,43 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
                            G.Session.GetPeerGuid().c_str(), ColorName(G.Match.MyColor()));
         }
 
-        // Note peer moves as they land (recv counter ticks) so the trace shows both dirs.
-        const uint32_t Recv = G.Session.GetDatagramsReceived();
-        if (Linked && Recv != LastRecv) {
-            Lur::Log::Info("<- peer datagram (#%u); side to move now %s", Recv, ColorName(G.Match.SideToMove()));
-            LastRecv = Recv;
-            SinceMoveNs = 0;  // give the local board a beat to apply before we reply
-        }
+        const bool     NowMyTurn = G.Match.IsMyTurn();
+        const uint32_t MatchesAfterTick = G.Match.Record().TotalMatches();
+        const bool     GotPeerMove   = !WasMyTurn && NowMyTurn;   // peer moved -> our turn, this frame
+        const bool     PeerEndedGame = MatchesAfterTick != MatchesBefore;
 
-        // Scripted move driver: on our turn, play the first legal remaining move.
-        SinceMoveNs += ElapsedNs;
-        if (Linked && !Moves.empty() && G.Match.IsMyTurn() && SinceMoveNs > 600'000'000ull) {
-            for (std::size_t i = 0; i < Moves.size(); ++i) {
-                if (G.View.PlayMove(static_cast<Chess::Square>(Moves[i].first),
-                                    static_cast<Chess::Square>(Moves[i].second))) {
-                    Lur::Log::Info("-> played %c%c%c%c (%zu scripted moves left)",
-                                   'a' + Moves[i].first % 8, '1' + Moves[i].first / 8,
-                                   'a' + Moves[i].second % 8, '1' + Moves[i].second / 8, Moves.size() - 1);
-                    Moves.erase(Moves.begin() + i);
-                    SinceMoveNs = 0;
-                    break;
-                }
+        // Move driver — fires in the SAME loop iteration the peer's move was applied.
+        bool Played = false;
+#if LUR_INTERNAL
+        if (Linked && NowMyTurn && !Draining) {
+            if (Auto) {
+                Played = G.View.AutoPlayRandomLegalMove(Rng);
+            } else {
+                for (std::size_t i = 0; i < Moves.size(); ++i)
+                    if (G.View.PlayMove(static_cast<Chess::Square>(Moves[i].first),
+                                        static_cast<Chess::Square>(Moves[i].second))) {
+                        Moves.erase(Moves.begin() + i); Played = true; break;
+                    }
             }
+        }
+#endif
+        if (GotPeerMove) {
+            ++PeerReplies;
+            if (PeerEndedGame)   ++NewGameOpens;   // peer's move ended a game; we opened the next, same frame
+            else if (Played)     ++SameFrame;      // replied the same frame we received
+            else               { ++DelayedReplies; Lur::Log::Info("WARN: our turn but no same-frame reply @frame %d", Frame); }
         }
 
         // Connection-quality trace (~1 Hz): link, byte/datagram throughput, liveness.
         TraceAccumNs += ElapsedNs;
         if (Linked && TraceAccumNs > 1'000'000'000ull) {
             TraceAccumNs = 0;
-            Lur::Log::Info("QUAL link=%d tx=%u/%lluB rx=%u/%lluB sinceRx=%llums frame=%.1fms",
-                           static_cast<int>(G.Session.GetLinkState()),
+            Lur::Log::Info("QUAL link=%d game=%u tx=%u/%lluB rx=%u/%lluB sinceRx=%llums sameFrame=%llu/%llu",
+                           static_cast<int>(G.Session.GetLinkState()), MatchesAfterTick,
                            G.Session.GetDatagramsSent(), (unsigned long long)Ble.GetBytesOut(),
                            G.Session.GetDatagramsReceived(), (unsigned long long)Ble.GetBytesIn(),
-                           (unsigned long long)(G.Session.GetNsSinceRecv() / 1'000'000ull), G.FrameMs);
+                           (unsigned long long)(G.Session.GetNsSinceRecv() / 1'000'000ull),
+                           (unsigned long long)SameFrame, (unsigned long long)PeerReplies);
         }
 
         const uint64_t NowNs =
@@ -245,12 +266,31 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
         G.FrameMs = static_cast<float>(ElapsedNs) / 1.0e6f;
         PumpInput(G, NowNs);
 
-        if (MaxFrames > 0 && ++Frame >= MaxFrames) {
+        ++Frame;
+        // Reached the games target: DON'T exit instantly — the deciding move we just
+        // made is still being written to the peer (a ~100ms write-with-response), and
+        // killing the radio now strands the peer mid-game (it never concludes/resets).
+        // Drain: stop playing, keep ticking so the move flushes + the peer converges.
+        if (GamesToPlay > 0 && !Draining && static_cast<int>(MatchesAfterTick) >= GamesToPlay) {
+            Draining = true;
+            Lur::Log::Info("completed %d games - draining ~3s so the peer gets the deciding move + resets",
+                           GamesToPlay);
+        }
+        if (Draining) {
+            DrainAccumNs += ElapsedNs;
+            if (DrainAccumNs > 3'000'000'000ull) { Lur::Log::Info("drain complete - stopping"); break; }
+        }
+        if (MaxFrames > 0 && Frame >= MaxFrames) {
             Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
+
+    Lur::Log::Info("SAME-FRAME REPLY REPORT: %llu/%llu peer moves answered same frame "
+                   "(%llu new-game opens same frame, %llu DELAYED)",
+                   (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
+                   (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies);
 
     if (G.Recorder.WriteFile(G.RecPath.c_str()))
         Lur::Log::Info("flight recording written: %s (%zu events)", G.RecPath.c_str(), G.Recorder.Count());
@@ -269,10 +309,14 @@ int main(int argc, char** argv) {
     bool Ble = false;   // "--ble [path]" = one window, live over real BLE to the phone
     std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
     std::string Script;  // "--script f2f3,e7e5,..." = scripted match (we play our colour's)
+    bool Auto = false;   // "--auto" = play a random legal move every frame it's our turn
+    int Games = 0;       // "--games N" = stop after N completed matches (0 = until closed)
     for (int i = 1; i < argc; ++i) {
         std::string Arg = argv[i];
         if (Arg == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
         else if (Arg == "--script" && i + 1 < argc) Script = argv[++i];
+        else if (Arg == "--auto") Auto = true;
+        else if (Arg == "--games" && i + 1 < argc) Games = std::atoi(argv[++i]);
         else if (Arg == "--ble") {
             Ble = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') RadioExe = argv[++i];
@@ -280,7 +324,7 @@ int main(int argc, char** argv) {
     }
 
     // Dev-rig mode: a single window driven over real Bluetooth by the C# radio.
-    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames, Script);
+    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames, Script, Auto, Games);
 
     Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 
