@@ -106,7 +106,10 @@ function Role-Android {
 function ClearHistory-Android {
     Say 'android: clear opponent history (records + meta + peer-id; device-id kept)'
     Kill-Android
-    AdbQuiet shell run-as $App.AndroidPackage sh -c 'cd files && rm -f peer-id meta-* $(ls | grep -E \"^[0-9a-f]{32}$\")'
+    # run-as starts in the app data dir; sh -c so the DEVICE shell expands the globs.
+    # A record file's name is exactly 32 hex chars -> the 32-'?' glob (device-id is 9).
+    $wipe = 'rm -f files/peer-id files/meta-* files/' + ('?' * 32)
+    AdbQuiet shell "run-as $($App.AndroidPackage) sh -c '$wipe'"
 }
 function Disarm-Android { Say 'android: disarm autoplay'; AdbQuiet shell setprop $App.AutoplayProp 0; AdbQuiet shell am force-stop $App.AndroidPackage }
 function Launch-Android {
@@ -151,7 +154,9 @@ function Role-Ios {
         try { Pmd apps rm $App.IosBundleId "Documents/$($App.RoleMarker)" 2>&1 | Out-Null } catch {}
     } else {
         $f = Join-Path $logs $App.RoleMarker
-        Set-Content -Path $f -Value $IosRole -NoNewline
+        # ASCII bytes, NOT Set-Content: PS 5.1 writes UTF-16LE+BOM, which fails the
+        # app's strict UTF-8 read and silently disables the override (learned on-device).
+        [System.IO.File]::WriteAllText($f, $IosRole)
         Pmd apps push $App.IosBundleId $f "Documents/$($App.RoleMarker)" 2>&1 | Out-Null
     }
 }
@@ -160,10 +165,9 @@ function Role-Ios {
 function ClearHistory-Ios {
     Say 'ios: clear opponent history (records + meta + peer-id; device-id kept)'
     $f = Join-Path $logs $App.ClearMarker
-    Set-Content -Path $f -Value '1' -NoNewline
+    [System.IO.File]::WriteAllText($f, '1')
     Pmd apps push $App.IosBundleId $f "Documents/$($App.ClearMarker)" 2>&1 | Out-Null
-    Kill-Ios; Start-Sleep -Seconds 1
-    [void](Launch-Ios)   # startup consumes the marker and wipes
+    [void](Launch-Ios -FreshProcess)   # process restart consumes the marker and wipes
 }
 
 # Install a NEW build of the app. Code signing is the one Apple gate that cannot be
@@ -215,13 +219,22 @@ function Install-Ios {
 }
 
 # Headless launch via the iOS 17+ userspace tunnel (no admin). Returns $true on success.
-# Uses --no-kill-existing: `dvt launch` DEFAULTS to killing a running instance, and
-# relaunching a live app churns its CAMetalLayer to a BLACK screen (learned the hard way);
-# --no-kill-existing brings the running app forward without that disruption.
-function Launch-Ios {
+# Two modes:
+#   default        --no-kill-existing: foreground the running app without disturbing it
+#                  (repeated kill-existing relaunches churn the CAMetalLayer black).
+#   -FreshProcess  default kill-existing: the ONLY reliable way to restart the process
+#                  (`dvt kill`/`pkill` proved unable to kill it), which is required for
+#                  anything read at startup — the role override + clearsave markers.
+function Launch-Ios([switch]$FreshProcess) {
     try {
-        PmdDev launch --no-kill-existing $App.IosBundleId 2>&1 | Out-Null
-        Say 'ios: launched/foregrounded (userspace tunnel, no admin)'; return $true
+        if ($FreshProcess) {
+            PmdDev launch $App.IosBundleId 2>&1 | Out-Null
+            Say 'ios: fresh-launched (killed old instance; startup markers re-read)'
+        } else {
+            PmdDev launch --no-kill-existing $App.IosBundleId 2>&1 | Out-Null
+            Say 'ios: launched/foregrounded (userspace tunnel, no admin)'
+        }
+        return $true
     } catch {
         Warn 'ios: launch failed. The app must be installed + Developer Mode on; first run needs a one-time Bluetooth allow.'
         return $false
@@ -250,9 +263,30 @@ function Shot-Ios($path) {
     try { PmdDev screenshot $path 2>&1 | Out-Null; Say "ios: screenshot -> $path" }
     catch { Warn 'ios: screenshot failed (userspace tunnel) - is the device unlocked + Developer Mode on?' }
 }
-# Kill the running app so the next launch is CLEAN. Relaunching a live iOS app churns its
-# CAMetalLayer black; a kill-then-launch renders correctly and re-runs the BLE handshake.
-function Kill-Ios { try { PmdDev pkill $App.LogTag 2>&1 | Out-Null; Say 'ios: killed running app' } catch { Warn 'ios: kill skipped (app not running or tunnel unavailable)' } }
+# The app's current pid, or 0 if not running (parses the last integer the tool prints).
+function Get-IosPid {
+    try {
+        $out = (PmdDev process-id-for-bundle-id $App.IosBundleId 2>$null) | Out-String
+        $m = [regex]::Matches($out, '\d+')
+        if ($m.Count -gt 0) { return [int]$m[$m.Count - 1].Value }
+    } catch {}
+    return 0
+}
+# Kill the running app so the next launch is CLEAN — and VERIFY it died. pkill-by-name
+# proved unreliable (the process survived and a later --no-kill-existing launch just
+# foregrounded it, so startup-read markers like the role override never re-read). Kill
+# by pid and poll until the pid is gone or changed.
+function Kill-Ios {
+    $procId = Get-IosPid
+    if ($procId -eq 0) { Say 'ios: app not running (no kill needed)'; return }
+    for ($try = 1; $try -le 3; $try++) {
+        try { PmdDev kill $procId 2>&1 | Out-Null } catch {}
+        Start-Sleep -Seconds 1
+        $now = Get-IosPid
+        if ($now -ne $procId) { Say "ios: killed running app (pid $procId)"; return }
+    }
+    Warn "ios: could NOT kill pid $procId - a marker-dependent (re)launch may not take effect."
+}
 
 # --- same-frame summary (engine log lines, game-agnostic) --------------------------
 function Summarize($file, $label) {
@@ -310,9 +344,10 @@ function Invoke-Run([bool]$Interactive) {
     Remove-Item $andLog,$iosLog -ErrorAction SilentlyContinue
     if ($doIos) {
         Ensure-Ios
-        if ($Fresh) { Kill-Ios; Start-Sleep -Seconds 2 }   # clean relaunch -> fresh handshake + no black screen
         Role-Ios                                            # role marker read at app startup
-        if (-not (Launch-Ios)) {
+        # -Fresh: kill-existing launch restarts the PROCESS (startup markers re-read);
+        # otherwise just foreground whatever is running.
+        if (-not (Launch-Ios -FreshProcess:$Fresh)) {
             if ($Interactive) { Read-Host 'Press Enter once the iPhone app is foregrounded + Bluetooth allowed' }
             else { Warn 'ios: launch failed and running non-interactively - continuing; log may be empty.' }
         }
