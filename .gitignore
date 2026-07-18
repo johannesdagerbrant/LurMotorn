@@ -53,6 +53,9 @@ Tools/**/*.exe
 Tools/**/*.obj
 Tools/**/*.pdb
 
+# BLE dev-rig captured logs + pulled flight recorder (issue #58).
+Tools/BleDevRig/.logs/
+
 # Python bytecode caches
 __pycache__/
 *.pyc

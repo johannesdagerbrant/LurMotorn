@@ -31,6 +31,8 @@
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Transport/Loopback.h"
 
+#include "WindowsBleTransport.h"
+
 namespace {
 
 // Everything one peer needs. Two of these, linked by loopback, are a full local game.
@@ -134,6 +136,66 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
     if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
 }
 
+// The dev-rig path (issue #58): ONE desktop window, wired to the phone over real BLE
+// via WindowsBleTransport instead of the loopback pair. The phone talks to it as if
+// it were a second phone — the whole point of the Workbench's third radio. Returns a
+// process exit code.
+int RunBle(const char* RadioExe, int MaxFrames) {
+    Lur::Log::Info("LurMotorn desktop (Workbench) - BLE peer vs phone (radio=%s)", RadioExe);
+
+    GameInstance G;
+    if (!Setup(G, "OnlyChess - BLE peer", ".lur-desktop-save/ble", 320)) {
+        Lur::Log::Error("setup failed");
+        return 1;
+    }
+
+    Lur::DevRig::WindowsBleTransport Ble(RadioExe);
+    Ble.SetLogger([](const char* M) { Lur::Log::Info("%s", M); });
+    if (!Ble.Start()) {
+        Lur::Log::Error("BLE radio failed to start - build it first: "
+                        "powershell -File Tools\\BleDevRig\\build.ps1 -Source BleRadio.cs");
+        return 1;
+    }
+
+    G.Session.Start(&Ble, G.DeviceId);
+    Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", G.DeviceId.c_str());
+
+    int Frame = 0;
+    bool Linked = false;
+    auto PrevTime = std::chrono::steady_clock::now();
+    while (G.Win.PumpEvents()) {
+        const auto Now = std::chrono::steady_clock::now();
+        const uint64_t ElapsedNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
+        PrevTime = Now;
+
+        G.Session.Tick(ElapsedNs);  // pumps the radio inbox, drives Hello + liveness
+        if (!Linked && G.Session.IsReady()) {
+            Linked = true;
+            G.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
+            Lur::Log::Info("handshake complete - live over BLE with peer %.8s",
+                           G.Session.GetPeerGuid().c_str());
+        }
+
+        const uint64_t NowNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now.time_since_epoch()).count();
+        G.FrameMs = static_cast<float>(ElapsedNs) / 1.0e6f;
+        PumpInput(G, NowNs);
+
+        if (MaxFrames > 0 && ++Frame >= MaxFrames) {
+            Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+
+    if (G.Recorder.WriteFile(G.RecPath.c_str()))
+        Lur::Log::Info("flight recording written: %s (%zu events)", G.RecPath.c_str(), G.Recorder.Count());
+    G.Renderer->Shutdown();
+    Lur::Log::Info("clean exit");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -141,8 +203,19 @@ int main(int argc, char** argv) {
     Lur::Log::Init(nullptr, "Desktop");        // built-in stdout/stderr sink for the host
 
     int MaxFrames = 0;  // 0 = run until a window is closed; "--frames N" = headless smoke
-    for (int i = 1; i < argc; ++i)
-        if (std::string(argv[i]) == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
+    bool Ble = false;   // "--ble [path]" = one window, live over real BLE to the phone
+    std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
+    for (int i = 1; i < argc; ++i) {
+        std::string Arg = argv[i];
+        if (Arg == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
+        else if (Arg == "--ble") {
+            Ble = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') RadioExe = argv[++i];
+        }
+    }
+
+    // Dev-rig mode: a single window driven over real Bluetooth by the C# radio.
+    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames);
 
     Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 

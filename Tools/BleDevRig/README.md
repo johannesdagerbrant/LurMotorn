@@ -21,10 +21,38 @@ Visual Studio, no SDK install, no license. `build.ps1` finds `csc` + the SDK win
   persistent GUID), and confirms the datagram characteristic exists with props
   `Write, Notify`. **No pairing needed.**
 
-## Build / run
+## The one-command loop
 
 ```
-powershell -ExecutionPolicy Bypass -File Tools\BleDevRig\build.ps1 -Source BleConnect.cs -Run
+Tools\BleDevRig\dev-rig.bat      REM build + install + play + force a reconnect + capture
+```
+
+`dev-rig.ps1` builds the radio + the `onlychess_desktop --ble` endpoint, (re)connects
+wireless adb, installs the app and forces it to advertise as a peripheral, launches the
+desktop peer, forces ≥1 link-death reconnect (`svc bluetooth disable/enable`), tails both
+logs into `.logs\`, and pulls the flight recorder on exit. Options: `-Serial`, `-SkipBuild`,
+`-SkipInstall`, `-Reconnects N`, `-ReconnectAfterSec S`, `-DurationSec S`.
+See operational notes (adapter power management, LMP version) in `scripts\README.md`.
+
+## Pieces
+
+- **`BleRadio.cs` → `BleRadio.exe`** — the full central radio: scan → connect (unpaired)
+  → read peer device-id → subscribe to datagram notifications → relay datagrams both ways
+  over stdio (length-prefixed binary frames; logs on stderr). Reconnect loop survives BT
+  toggling. This is the subprocess `WindowsBleTransport` drives.
+- **`WindowsBleTransport`** (`Games/Chess/Desktop/`) — the C++ `ITransport` that spawns
+  `BleRadio.exe`, bridges datagrams over the pipe, and lifts inbound events onto the engine
+  thread via `EventInbox`/`Pump()` (issue #40). Lives in the app build (not the
+  cross-platform `Modules/Transport`) because it's a Windows-only dev instrument that spawns
+  a subprocess — like `AndroidBleTransport` lives in the Android app.
+- **`BleScan.cs` / `BleConnect.cs`** — the original bring-up probes (scan; connect + read +
+  channel discovery), kept as the minimal reproducers.
+
+## Manual run (without the full loop)
+
+```
+powershell -ExecutionPolicy Bypass -File Tools\BleDevRig\build.ps1 -Source BleRadio.cs
+build-desktop\Games\Chess\Desktop\onlychess_desktop.exe --ble Tools\BleDevRig\BleRadio.exe
 ```
 
 The Android app must be **advertising** (foreground, fresh identity so it serves as a
@@ -44,9 +72,14 @@ adb shell monkey -p com.lurmotorn.onlychess -c android.intent.category.LAUNCHER 
 - Datagram `4C55524D-4F54-4F52-4E01-446174616772` (central writes; peripheral notifies)
 - Device-id `4C55524D-4F54-4F52-4E02-4E6F6E636500` (central reads; drives `DecideBleRole`)
 
-## Status / next
+Because the PC is central-**only** and never advertises, the phone always settles as the
+peripheral naturally — no GATT server on the PC is needed. The PC learns the peer's GUID
+from the device-id read; peer identity for colour/stats still flows through the engine's
+own `Hello` handshake over the datagram channel.
 
-Scan + connect + GATT read + channel discovery are proven. Next: subscribe to datagram
-notifications + write datagrams, then bridge datagrams to the C++ engine
-(`WindowsBleTransport : ITransport`, C# radio subprocess ⇄ C++ over a pipe) so the desktop
-chess app is a live BLE peer, driven by a one-command `dev-rig.ps1`.
+## Status
+
+The whole central data path is wired: scan → connect → read → subscribe → **relay
+datagrams**, bridged into a live desktop chess peer over `WindowsBleTransport`, all driven
+by `dev-rig.ps1`. Central data path proven on hardware (Galaxy A14). Remaining: soak +
+throughput measurement against the phone radio.
