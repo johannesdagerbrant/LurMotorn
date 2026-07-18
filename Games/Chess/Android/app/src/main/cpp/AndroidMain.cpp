@@ -168,9 +168,9 @@ void android_main(android_app* App) {
             const bool     PeerEndedGame = MatchesAfter != MatchesBefore;
             if (!AutoEnabled) {
                 char V[8] = {0};
-                if (__system_property_get("debug.onlychess.autoplay", V) > 0 && V[0] == '1') {
+                if (__system_property_get("debug.lur.autoplay", V) > 0 && V[0] == '1') {
                     AutoEnabled = true;
-                    LOGI("autoplay ENABLED (debug.onlychess.autoplay=1): random legal move on our turn");
+                    LOGI("autoplay ENABLED (debug.lur.autoplay=1): auto-drive our turn");
                 }
             }
             if (AutoEnabled) {

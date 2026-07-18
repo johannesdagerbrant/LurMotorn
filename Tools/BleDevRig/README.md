@@ -66,7 +66,7 @@ per-move delay is the radio RTT). All of this is `#if LUR_INTERNAL` — compiled
 - **Android endpoint:** the app autoplays when the runtime prop is set — the app must be a Development
   build (`LUR_INTERNAL=1`, the Gradle default):
   ```
-  adb shell setprop debug.onlychess.autoplay 1   # arm BEFORE launch; set 0 to disarm
+  adb shell setprop debug.lur.autoplay 1   # arm BEFORE launch; set 0 to disarm
   ```
   Each end logs a same-frame tally: `sameFrame=<answered>/<peer moves> ... delayed=<should be 0>`.
 
