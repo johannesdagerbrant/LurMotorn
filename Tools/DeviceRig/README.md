@@ -23,20 +23,29 @@ tally after N matches. Other actions: `install`, `arm`, `disarm`, `reset`, `laun
 
 ## Bringing the iOS loop closer to Android
 
-Android is fully headless (adb). iOS has two gates that are Apple's design, not ours —
-after each is done **once**, I can drive the rest myself:
+Android is fully headless (adb). iOS is *mostly* headless after some one-time setup —
+with an honest exception for install:
 
-| Step | Android | iOS | Headless after… |
+| Step | Android | iOS | Headless? |
 |---|---|---|---|
-| Install a new build | `adb install -r` | `-Action install` → Sideloadly signs+installs the `.ipa` via its `localhost:28811` `/enqueue` API, reusing a **cached credential token** | one interactive Apple-ID login + 2FA in the Sideloadly GUI (then silent; the Sideloadly daemon auto-refreshes before the 7-day free-cert expiry) |
-| Launch the app | `adb monkey` | `-Action launch` → `pymobiledevice3 developer dvt launch` | a RemoteXPC **tunnel** running: `sudo python -m pymobiledevice3 remote tunneld` (needs admin; **one-time per boot**, persists) |
-| Arm autoplay | `setprop debug.lur.autoplay 1` | push `Documents/autoplay` marker (`apps push … Documents/autoplay`, container-vend — **not** `--documents`, which 404s on iOS 26) | always |
-| Tail engine log | `logcat -s OnlyChess:*` | `syslog live | grep OnlyChess` (the `-m` message match does **not** filter on iOS 26) | always |
-| Screenshot | `screencap` | `developer dvt screenshot` | the same tunnel as launch |
+| Launch the app | `adb monkey` | `-Action launch` → `pymobiledevice3 developer dvt launch` | **Yes**, once a RemoteXPC **tunnel** is up: `sudo python -m pymobiledevice3 remote tunneld` (needs admin; **one-time per boot**, persists) |
+| Arm autoplay | `setprop debug.lur.autoplay 1` | push `Documents/autoplay` marker (`apps push … Documents/autoplay`, container-vend — **not** `--documents`, which `InstallationLookupFailed`s on iOS 26) | **Yes** |
+| Tail engine log | `logcat -s OnlyChess:*` | `syslog live \| grep OnlyChess` (the `-m` message match does **not** filter on iOS 26) | **Yes** |
+| Screenshot | `screencap` | `developer dvt screenshot` | **Yes**, via the same tunnel as launch |
+| Install a NEW build | `adb install -r` | `-Action install` opens Sideloadly at the `.ipa` | **No — assisted (GUI).** See below. |
 
-So the smooth iOS loop is: **you do two one-time things** — log into Sideloadly once
-(2FA), and start `remote tunneld` once per boot with admin — and after that
-`device-rig.bat -Action run` installs, launches, arms, plays, and measures without you.
+**Install is honestly not headless, and here's why (learned this session):** Sideloadly's
+CLI just raises the already-running GUI instance — its `--silent`/`--enqueue` flags are
+ignored whenever an instance holds `localhost:28811` (always). The only headless path is
+POSTing a plist (`appleId` + a cached `passwordToken`) to its **private** `/enqueue` API —
+fragile and credential-sensitive, so we don't automate it. **But you rarely need it:** the
+Sideloadly **daemon auto-refreshes** the installed build's signature before the 7-day
+free-cert expiry, so a re-install is only required when the `.ipa` itself changes (new
+code) — a quick GUI drag-drop/confirm (first time also does Apple-ID login + 2FA).
+
+So the practical smooth loop is: **start `remote tunneld` once per boot (admin)**, and
+after any new-build install, `device-rig.bat -Action run` **launches, arms, plays, and
+measures without you** — re-installs only when the code changed.
 
 ## App config (`$App` in device-rig.ps1)
 

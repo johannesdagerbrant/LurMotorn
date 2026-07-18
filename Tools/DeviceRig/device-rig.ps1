@@ -1,12 +1,12 @@
-# device-rig.ps1 — game-agnostic on-device run + debug rig for LurMotorn apps.
+# device-rig.ps1 - game-agnostic on-device run + debug rig for LurMotorn apps.
 #
-# An ENGINE dev instrument (hand-run, never shipped, not tied to any game): it drives
-# a LurMotorn app on real phones to arm the dev autoplayer, launch, tail the engine
-# log, screenshot, and summarize the engine's SAME-FRAME reply metric — over adb
-# (Android) and pymobiledevice3 (iOS). It knows nothing about any particular game; it
-# speaks only engine terms (peer, link, autoplay, datagram, same-frame, match) and
-# parses only engine log lines (`AUTOPLAY …`, `MATCH END …`). Point it at an app via
-# the $App block; a different game reuses it verbatim with a different $App.
+# An ENGINE dev instrument (hand-run, never shipped, not tied to any game): it drives a
+# LurMotorn app on real phones to arm the dev autoplayer, launch, tail the engine log,
+# screenshot, and summarize the engine's SAME-FRAME reply metric - over adb (Android)
+# and pymobiledevice3 / Sideloadly (iOS). It knows nothing about any particular game; it
+# speaks only engine terms (peer, link, autoplay, datagram, same-frame, match) and parses
+# only engine log lines (AUTOPLAY ..., MATCH END ...). Point it at an app via the $App
+# block; a different game reuses it verbatim with a different $App.
 #
 # Autoplay + same-frame instrumentation are #if LUR_INTERNAL in the app (a Development
 # build); this rig just toggles and observes them. See Tools/DeviceRig/README.md.
@@ -21,15 +21,15 @@ param(
     [ValidateSet('android','ios','both')]
     [string]$Peer = 'both',
     [string]$AndroidSerial,         # pin when several transports point at one phone
-    [string]$AppleId,              # iOS 'install': Apple ID for Sideloadly (once; then a token is cached)
-    [string]$Ipa,                  # iOS 'install': .ipa to sign+install (default: dist\ below)
-    [int]$Matches = 3,              # 'run': stop after this many completed matches (0 = until Ctrl-C)
-    [int]$DurationSec = 0,          # 'run': hard cap in seconds (0 = none)
-    [int]$SettleSec = 12            # 'run': grace for the two peers to discover + link
+    [string]$AppleId,               # iOS install: Apple ID for Sideloadly (once; then a token is cached)
+    [string]$Ipa,                   # iOS install: .ipa to sign+install (default: dist\ below)
+    [int]$Matches = 3,              # run: stop after this many completed matches (0 = until Ctrl-C)
+    [int]$DurationSec = 0,          # run: hard cap in seconds (0 = none)
+    [int]$SettleSec = 12            # run: grace for the two peers to discover + link
 )
 $ErrorActionPreference = 'Stop'
 
-# --- App under test — the ONLY app-specific config. The rig body stays game-agnostic. ---
+# --- App under test - the ONLY app-specific config. The rig body stays game-agnostic. ---
 $App = @{
     LogTag         = 'OnlyChess'                          # engine log tag the app emits
     AndroidPackage = 'com.lurmotorn.onlychess'
@@ -39,8 +39,8 @@ $App = @{
 }
 
 $root = (Resolve-Path (Join-Path (Split-Path $MyInvocation.MyCommand.Path) '..\..')).Path
-$Sideloadly = Join-Path $env:LOCALAPPDATA 'Sideloadly\sideloadly.exe'   # signs+installs a .ipa headlessly (cached token)
-if (-not $Ipa) { $Ipa = Join-Path $root 'dist\OnlyChess-unsigned.ipa' } # CI artifact (see CLAUDE.md)
+$Sideloadly = Join-Path $env:LOCALAPPDATA 'Sideloadly\sideloadly.exe'
+if (-not $Ipa) { $Ipa = Join-Path $root 'dist\OnlyChess-unsigned.ipa' }
 
 $rig  = Split-Path $MyInvocation.MyCommand.Path
 $logs = Join-Path $rig '.logs'
@@ -51,7 +51,7 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
 function Say($m)  { Write-Host "[device-rig] $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "[device-rig] $m" -ForegroundColor Yellow }
 
-# ── Android peer (adb) ───────────────────────────────────────────────────────
+# --- Android peer (adb) ------------------------------------------------------------
 $adb = (Get-Command adb -ErrorAction SilentlyContinue).Source
 function Adb { & $adb @args }
 function Ensure-Android {
@@ -68,8 +68,8 @@ function Reset-Android {
         Adb shell pm grant $App.AndroidPackage "android.permission.$p"
     }
 }
-function Arm-Android   { Say "android: arm autoplay ($($App.AutoplayProp)=1)"; Adb shell setprop $App.AutoplayProp 1 }
-function Disarm-Android{ Say "android: disarm autoplay"; Adb shell setprop $App.AutoplayProp 0; Adb shell am force-stop $App.AndroidPackage }
+function Arm-Android    { Say "android: arm autoplay ($($App.AutoplayProp)=1)"; Adb shell setprop $App.AutoplayProp 1 }
+function Disarm-Android { Say 'android: disarm autoplay'; Adb shell setprop $App.AutoplayProp 0; Adb shell am force-stop $App.AndroidPackage }
 function Launch-Android {
     Say 'android: wake + launch'
     Adb shell input keyevent KEYCODE_WAKEUP | Out-Null
@@ -82,9 +82,9 @@ function Shot-Android($path) {
     Say "android: screenshot -> $path"
 }
 
-# ── iOS peer (pymobiledevice3) ───────────────────────────────────────────────
-# Free-sideloaded + no RemoteXPC tunnel: arm (container file push) and tail (syslog)
-# are automatable; launch/screenshot need a human / a sudo tunnel, so they PROMPT.
+# --- iOS peer (pymobiledevice3 + Sideloadly) ---------------------------------------
+# Free-sideloaded + no RemoteXPC tunnel: arm (container file push) and tail (syslog) are
+# automatable; launch/screenshot need a tunnel, and install needs Sideloadly - see below.
 function Pmd { & python -m pymobiledevice3 @args }
 function Ensure-Ios {
     $j = (Pmd usbmux list 2>$null) | Out-String
@@ -94,82 +94,73 @@ function Arm-Ios {
     Say "ios: arm autoplay (push Documents/$($App.AutoplayMarker))"
     $marker = Join-Path $logs $App.AutoplayMarker
     Set-Content -Path $marker -Value '1' -NoNewline
-    # VendContainer push (container-relative Documents/<marker>); VendDocuments/--documents
-    # fails on iOS 26 with InstallationLookupFailed, so DON'T pass --documents.
+    # VendContainer push (container-relative Documents/<marker>). Do NOT pass --documents
+    # (VendDocuments), which fails on iOS 26 with InstallationLookupFailed.
     Pmd apps push $App.IosBundleId $marker "Documents/$($App.AutoplayMarker)" 2>&1 | Out-Null
     Say 'ios: marker pushed (app arms within ~1s if running)'
 }
-function Disarm-Ios { Warn 'ios: to disarm, relaunch the app without the marker (running app stays armed for the session).' }
+function Disarm-Ios { Warn 'ios: to disarm, relaunch the app without the marker (a running app stays armed for the session).' }
 
-# Headless sign+install of a .ipa via Sideloadly's CLI, reusing its cached credential
-# token (localhost:28811 /enqueue). The FIRST run needs an interactive Apple-ID login
-# + 2FA in the Sideloadly GUI; after that the token is cached and installs are silent,
-# and the Sideloadly daemon auto-refreshes before the 7-day free-cert expiry.
+# Kick off a Sideloadly sign+install of the .ipa. HONEST LIMITATION: assisted, not fully
+# headless. Sideloadly CLI flags are ignored while an instance holds localhost:28811
+# (always); the only headless path is POSTing a plist to its private /enqueue API with a
+# cached credential token, which is fragile + credential-sensitive, so we do not automate
+# it. The Sideloadly daemon auto-refreshes the installed build before the 7-day cert
+# expiry, so a re-install is only needed when the .ipa changes. This opens Sideloadly at
+# the ipa to make that quick. See Tools/DeviceRig/README.md.
 function Install-Ios {
     if (-not (Test-Path $Sideloadly)) { throw "Sideloadly not found: $Sideloadly" }
-    if (-not (Test-Path $Ipa)) { throw "ipa not found: $Ipa (download the CI artifact to dist\ first)" }
-    $a = @('--silent','--enqueue','-i', $Ipa)
-    if ($AppleId) { $a += @('-a', $AppleId) }
-    Say "ios: enqueue sign+install of $(Split-Path $Ipa -Leaf) via Sideloadly (cached token; first login is interactive)"
-    & $Sideloadly @a 2>&1 | Where-Object { $_ -match 'enqueue|Task|error|fail|login|token' } | ForEach-Object { Write-Host "  sideloadly: $_" }
-    Say 'ios: enqueued — watch the Sideloadly window on first login; the daemon reports install status.'
+    if (-not (Test-Path $Ipa)) { throw "ipa not found: $Ipa" }
+    Say ('ios: opening Sideloadly for ' + (Split-Path $Ipa -Leaf) + ' - finish sign+install in its window.')
+    Start-Process $Sideloadly -ArgumentList @('-i', $Ipa)
+    Warn 'ios: install is assisted via the Sideloadly GUI, not headless. Daemon auto-refreshes existing builds; re-install only on a new ipa.'
 }
 
-# Headless launch via a RemoteXPC tunnel. Needs `pymobiledevice3 remote tunneld` running
-# (ADMIN — a one-time-per-boot step you start; I can't elevate). With it up, this launches
-# without touching the phone.
+# Headless launch via a RemoteXPC tunnel. Needs pymobiledevice3 remote tunneld running
+# under admin - a one-time-per-boot step you start, since I cannot elevate. With it up,
+# this launches without touching the phone. Returns $true on success.
 function Launch-Ios {
     try {
         Pmd developer dvt launch $App.IosBundleId 2>&1 | Out-Null
         Say 'ios: launched via tunnel'; return $true
     } catch {
-        Warn 'ios: launch needs a tunnel. Start it once (admin, persists): sudo python -m pymobiledevice3 remote tunneld'
-        Warn 'ios: (until then, launch the app by hand — foreground + allow Bluetooth on first run).'
+        Warn 'ios: launch needs a tunnel. Start once (admin, persists): sudo python -m pymobiledevice3 remote tunneld'
+        Warn 'ios: until then, launch the app by hand (foreground + allow Bluetooth on first run).'
         return $false
     }
 }
 function Shot-Ios($path) {
     try { Pmd developer dvt screenshot $path 2>&1 | Out-Null; Say "ios: screenshot -> $path" }
-    catch { Warn 'ios: screenshot needs a RemoteXPC tunnel (sudo pymobiledevice3 remote tunneld) — skipped.' }
-}
-# Tail the engine log, filtered to the app's tag. Android: logcat tag filter. iOS: broad
-# syslog + grep (the `-m` message match does NOT filter on iOS 26).
-function Tail-Ios($outFile, $seconds) {
-    $tag = $App.LogTag
-    if ($seconds -gt 0) {
-        & python -m pymobiledevice3 syslog live 2>$null | Select-String -Pattern $tag |
-            ForEach-Object { $_.Line } | Tee-Object -FilePath $outFile
-    }
+    catch { Warn 'ios: screenshot needs a RemoteXPC tunnel (sudo pymobiledevice3 remote tunneld) - skipped.' }
 }
 
-# ── same-frame summary (engine log lines, game-agnostic) ─────────────────────
+# --- same-frame summary (engine log lines, game-agnostic) --------------------------
 function Summarize($file, $label) {
     if (-not (Test-Path $file)) { Warn "$label : no log captured"; return }
     $auto = Get-Content $file | Select-String 'AUTOPLAY ' | Select-Object -Last 1
     $ends = (Get-Content $file | Select-String 'MATCH END').Count
-    Say "$label : $($auto.Line -replace '.*AUTOPLAY','AUTOPLAY') ; matches ended=$ends"
+    $line = if ($auto) { ($auto.Line -replace '.*AUTOPLAY','AUTOPLAY') } else { '(no AUTOPLAY line)' }
+    Say "$label : $line ; matches ended=$ends"
 }
 
-# ── actions ──────────────────────────────────────────────────────────────────
+# --- actions -----------------------------------------------------------------------
 $doAndroid = $Peer -in @('android','both')
 $doIos     = $Peer -in @('ios','both')
 
 switch ($Action) {
     'reset'   { if ($doAndroid) { Ensure-Android; Reset-Android }; if ($doIos) { Warn 'ios: reset = re-sideload for a fresh identity (no pm clear).' } }
-    'install' { if ($doIos) { Ensure-Ios; Install-Ios }; if ($doAndroid) { Ensure-Android; Say 'android: use android-install.bat (adb install -r)'; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
+    'install' { if ($doIos) { Ensure-Ios; Install-Ios }; if ($doAndroid) { Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
     'arm'     { if ($doAndroid) { Ensure-Android; Arm-Android }; if ($doIos) { Ensure-Ios; Arm-Ios } }
     'disarm'  { if ($doAndroid) { Ensure-Android; Disarm-Android }; if ($doIos) { Ensure-Ios; Disarm-Ios } }
-    'launch'  { if ($doAndroid) { Ensure-Android; Launch-Android }; if ($doIos) { Launch-Ios } }
+    'launch'  { if ($doAndroid) { Ensure-Android; Launch-Android }; if ($doIos) { Ensure-Ios; [void](Launch-Ios) } }
     'shot'    { if ($doAndroid) { Ensure-Android; Shot-Android (Join-Path $logs 'android.png') }; if ($doIos) { Ensure-Ios; Shot-Ios (Join-Path $logs 'ios.png') } }
     'tail'    {
-        if ($doIos -and -not $doAndroid) { Say "ios: tailing engine log (Ctrl-C to stop)"; Tail-Ios (Join-Path $logs 'ios.log') 999999 }
+        if ($doIos -and -not $doAndroid) { Say 'ios: tailing engine log (Ctrl-C to stop)'; & python -m pymobiledevice3 syslog live 2>$null | Select-String -Pattern $App.LogTag | ForEach-Object { $_.Line } }
         elseif ($doAndroid -and -not $doIos) { Ensure-Android; Say 'android: tailing engine log (Ctrl-C to stop)'; Adb logcat -s "$($App.LogTag):*" }
         else { Warn 'tail: choose one -Peer (android or ios)' }
     }
     'status'  { Summarize (Join-Path $logs 'android.log') 'android'; Summarize (Join-Path $logs 'ios.log') 'ios' }
     'run'     {
-        # A full measurement session: arm both peers, (re)launch, capture both engine
-        # logs, and summarize the same-frame reply metric until N matches complete.
         $andLog = Join-Path $logs 'android.log'; $iosLog = Join-Path $logs 'ios.log'
         Remove-Item $andLog,$iosLog -ErrorAction SilentlyContinue
         if ($doIos) {
@@ -178,11 +169,10 @@ switch ($Action) {
             Arm-Ios
         }
         if ($doAndroid) { Ensure-Android; Reset-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android }
-        # background log capture per peer
         $jobs = @()
         if ($doAndroid) { $jobs += Start-Job -Name and -ScriptBlock { param($a,$s,$t,$o) & $a -s $s logcat -s "$t`:*" | Out-File -FilePath $o -Encoding utf8 } -ArgumentList $adb,$AndroidSerial,$App.LogTag,$andLog }
         if ($doIos)     { $jobs += Start-Job -Name ios -ScriptBlock { param($t,$o) & python -m pymobiledevice3 syslog live 2>$null | Select-String -Pattern $t | ForEach-Object { $_.Line } | Out-File -FilePath $o -Encoding utf8 } -ArgumentList $App.LogTag,$iosLog }
-        Say "linking… (settling ${SettleSec}s)"; Start-Sleep -Seconds $SettleSec
+        Say "linking... (settling ${SettleSec}s)"; Start-Sleep -Seconds $SettleSec
         $start = Get-Date
         try {
             while ($true) {
