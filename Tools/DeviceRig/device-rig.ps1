@@ -16,8 +16,12 @@
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action arm   -Peer both
 [CmdletBinding()]
 param(
-    [ValidateSet('run','cycle','arm','disarm','reset','install','uninstall','launch','tail','shot','status')]
+    [ValidateSet('run','cycle','arm','disarm','reset','clearhistory','install','uninstall','launch','tail','shot','status')]
     [string]$Action = 'run',
+    [ValidateSet('auto','central','peripheral')]
+    [string]$AndroidRole = 'auto',  # dev BLE role override (LUR_INTERNAL): pin this peer's role
+    [ValidateSet('auto','central','peripheral')]
+    [string]$IosRole = 'auto',      # set the two COMPLEMENTARY (or both auto) or they never link
     [ValidateSet('android','ios','both')]
     [string]$Peer = 'both',
     [string]$AndroidSerial,         # pin when several transports point at one phone
@@ -49,6 +53,9 @@ $App = @{
     IosBundleBase  = 'com.lurmotorn.onlychess'            # uninstall sweeps every ...<SIGNER> variant
     AutoplayProp   = 'debug.lur.autoplay'                 # Android: engine autoplay toggle (setprop)
     AutoplayMarker = 'autoplay'                           # iOS: Documents/<marker> engine autoplay toggle
+    RoleProp       = 'debug.lur.role'                     # Android: dev BLE role override (setprop)
+    RoleMarker     = 'role'                               # iOS: Documents/<marker> dev BLE role override
+    ClearMarker    = 'clearsave'                          # iOS: Documents/<marker> one-shot history wipe
 }
 
 $root = (Resolve-Path (Join-Path (Split-Path $MyInvocation.MyCommand.Path) '..\..')).Path
@@ -88,6 +95,19 @@ function Reset-Android {
     }
 }
 function Arm-Android    { Say "android: arm autoplay ($($App.AutoplayProp)=1)"; Adb shell setprop $App.AutoplayProp 1 }
+# Pin/clear the dev BLE role override (read by the app per role decision).
+function Role-Android {
+    $v = if ($AndroidRole -eq 'auto') { '""' } else { $AndroidRole }
+    Say "android: BLE role override = $AndroidRole"
+    AdbQuiet shell setprop $App.RoleProp $v
+}
+# Wipe opponent history: per-opponent records (32-hex files), their meta sidecars, and
+# the cached peer-id — the DEVICE-ID IS KEPT (stable identity/colour). Fresh pairing state.
+function ClearHistory-Android {
+    Say 'android: clear opponent history (records + meta + peer-id; device-id kept)'
+    Kill-Android
+    AdbQuiet shell run-as $App.AndroidPackage sh -c 'cd files && rm -f peer-id meta-* $(ls | grep -E \"^[0-9a-f]{32}$\")'
+}
 function Disarm-Android { Say 'android: disarm autoplay'; AdbQuiet shell setprop $App.AutoplayProp 0; AdbQuiet shell am force-stop $App.AndroidPackage }
 function Launch-Android {
     Say 'android: wake + launch'
@@ -124,6 +144,27 @@ function Arm-Ios {
     Say 'ios: marker pushed (app arms within ~1s if running)'
 }
 function Disarm-Ios { Warn 'ios: to disarm, relaunch the app without the marker (a running app stays armed for the session).' }
+# Pin/clear the dev BLE role override marker. Read at app STARTUP — apply before launch.
+function Role-Ios {
+    Say "ios: BLE role override = $IosRole"
+    if ($IosRole -eq 'auto') {
+        try { Pmd apps rm $App.IosBundleId "Documents/$($App.RoleMarker)" 2>&1 | Out-Null } catch {}
+    } else {
+        $f = Join-Path $logs $App.RoleMarker
+        Set-Content -Path $f -Value $IosRole -NoNewline
+        Pmd apps push $App.IosBundleId $f "Documents/$($App.RoleMarker)" 2>&1 | Out-Null
+    }
+}
+# Wipe opponent history via the one-shot clearsave marker (consumed at next launch;
+# device-id kept). Kill + relaunch so the wipe actually runs.
+function ClearHistory-Ios {
+    Say 'ios: clear opponent history (records + meta + peer-id; device-id kept)'
+    $f = Join-Path $logs $App.ClearMarker
+    Set-Content -Path $f -Value '1' -NoNewline
+    Pmd apps push $App.IosBundleId $f "Documents/$($App.ClearMarker)" 2>&1 | Out-Null
+    Kill-Ios; Start-Sleep -Seconds 1
+    [void](Launch-Ios)   # startup consumes the marker and wipes
+}
 
 # Install a NEW build of the app. Code signing is the one Apple gate that cannot be
 # automated away without handling Apple-ID credentials (which this project deliberately
@@ -270,6 +311,7 @@ function Invoke-Run([bool]$Interactive) {
     if ($doIos) {
         Ensure-Ios
         if ($Fresh) { Kill-Ios; Start-Sleep -Seconds 2 }   # clean relaunch -> fresh handshake + no black screen
+        Role-Ios                                            # role marker read at app startup
         if (-not (Launch-Ios)) {
             if ($Interactive) { Read-Host 'Press Enter once the iPhone app is foregrounded + Bluetooth allowed' }
             else { Warn 'ios: launch failed and running non-interactively - continuing; log may be empty.' }
@@ -282,7 +324,7 @@ function Invoke-Run([bool]$Interactive) {
             # Clean-measurement mode: force-stop (NOT pm clear, so identity/opponent survive)
             # and clear the log window so we capture a fresh handshake + uninterrupted play.
             Say 'android: -Fresh -> force-stop + clear log, then relaunch (identity kept)'
-            Kill-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android
+            Kill-Android; Role-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android
         } elseif ($NoReset) {
             # Peers are already paired + linked: don't wipe identity (pm clear would drop
             # the link) and don't clear logcat (keep the just-happened handshake lines).
@@ -319,6 +361,12 @@ function Invoke-Run([bool]$Interactive) {
 
 switch ($Action) {
     'reset'   { if ($doAndroid) { Ensure-Android; Reset-Android }; if ($doIos) { Warn 'ios: reset = re-sideload for a fresh identity (no pm clear).' } }
+    'clearhistory' {
+        # Wipe both peers' opponent history (records/meta/peer-id; device-id KEPT), so the
+        # next link is a clean pairing — used between role-configuration test runs.
+        if ($doAndroid) { Ensure-Android; ClearHistory-Android }
+        if ($doIos)     { Ensure-Ios;     ClearHistory-Ios }
+    }
     'install'   { if ($doIos) { [void](Install-Ios) }; if ($doAndroid) { Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
     'uninstall' { if ($doIos) { Uninstall-Ios }; if ($doAndroid) { Ensure-Android; Uninstall-Android } }
     'arm'     { if ($doAndroid) { Ensure-Android; Arm-Android }; if ($doIos) { Ensure-Ios; Arm-Ios } }

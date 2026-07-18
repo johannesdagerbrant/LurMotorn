@@ -148,6 +148,11 @@ void android_main(android_app* App) {
     uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(DeviceId.size());
     uint64_t Frame = 0, PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
     uint64_t ReportAccumNs = 0;
+    // Net-ms RTT: our move leaves -> the peer's same-frame reply arrives. Measured on
+    // this device's clock alone (no cross-device sync): stamp when we send, close when
+    // the reply lands. Includes 2x transit + <=1 peer frame + <=1 our frame.
+    uint64_t ClockNs = 0, MoveSentNs = 0;
+    uint64_t RttCount = 0, RttSumMs = 0, RttMinMs = ~0ull, RttMaxMs = 0;
 #endif
     auto PrevTime = std::chrono::steady_clock::now();
     while (!App->destroyRequested) {
@@ -175,8 +180,17 @@ void android_main(android_app* App) {
                 }
             }
             if (AutoEnabled) {
+                ClockNs += ElapsedNs;
+                if (GotPeerMove && MoveSentNs != 0) {   // reply to our outstanding move
+                    const uint64_t Ms = (ClockNs - MoveSentNs) / 1'000'000ull;
+                    ++RttCount; RttSumMs += Ms;
+                    if (Ms < RttMinMs) RttMinMs = Ms;
+                    if (Ms > RttMaxMs) RttMaxMs = Ms;
+                    MoveSentNs = 0;
+                }
                 const bool Played = (State.Session.IsReady() && NowMyTurn)
                                         ? State.View.AutoPlayRandomLegalMove(Rng) : false;
+                if (Played) MoveSentNs = ClockNs;       // our move is on the wire; await reply
                 if (GotPeerMove) {
                     ++PeerReplies;
                     if (PeerEndedGame)   ++NewGameOpens;
@@ -192,12 +206,16 @@ void android_main(android_app* App) {
                 // alone — whose move it is, how deep the game is, whether the boards
                 // agree (hash), and whether the resync gate is holding moves (#72).
                 LOGI("AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
-                     "myTurn=%d ply=%zu hash=%08x gate=%d",
+                     "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums)",
                      MatchesAfter, (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
                      (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies,
                      State.Match.IsMyTurn() ? 1 : 0, State.Match.Record().Moves.size(),
                      (unsigned)(State.Match.PositionHash() & 0xFFFFFFFFu),
-                     State.Session.IsAwaitingResync() ? 1 : 0);
+                     State.Session.IsAwaitingResync() ? 1 : 0,
+                     (unsigned long long)RttCount,
+                     (unsigned long long)(RttCount ? RttSumMs / RttCount : 0),
+                     (unsigned long long)(RttCount ? RttMinMs : 0),
+                     (unsigned long long)RttMaxMs);
             }
             ++Frame;
         }

@@ -68,7 +68,23 @@ inline constexpr std::string_view BleAdvertisedName = "LurMotorn";
 // for two devices (a 128-bit-space collision is negligible). Comparison is a plain
 // lexicographic compare of the hex, which for fixed-width hex equals a numeric
 // compare of the underlying 128-bit value.
+#if LUR_INTERNAL
+// Dev-only role override (compiled out of Shipping): pin THIS device's role regardless
+// of the GUID tie-break, so the rig can exercise BOTH role configurations on the same
+// device pair — the tie-break is deterministic, so e.g. Android-as-peripheral would
+// otherwise never run against a given peer. Set complementary values on the two phones
+// (one Central, one Peripheral) or they will never link (two centrals: nobody
+// advertises). Sourced per-platform: Android `debug.lur.role` prop, iOS a
+// `Documents/role` marker — both read at transport startup.
+inline int GBleRoleOverride = -1;  // -1 none, else static_cast<int>(EBleRole)
+inline void SetBleRoleOverride(EBleRole Role) { GBleRoleOverride = static_cast<int>(Role); }
+inline void ClearBleRoleOverride() { GBleRoleOverride = -1; }
+#endif
+
 inline EBleRole DecideBleRole(std::string_view LocalId, std::string_view PeerId) {
+#if LUR_INTERNAL
+    if (GBleRoleOverride >= 0) return static_cast<EBleRole>(GBleRoleOverride);
+#endif
     return LocalId < PeerId ? EBleRole::Peripheral : EBleRole::Central;
 }
 

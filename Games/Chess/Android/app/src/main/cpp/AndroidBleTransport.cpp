@@ -6,8 +6,12 @@
 #include <jni.h>
 #include <android/log.h>
 #include <cstdint>
+#include <cstring>
 #include <string>
 #include <vector>
+#if LUR_INTERNAL
+#include <sys/system_properties.h>   // dev role override via debug.lur.role
+#endif
 
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
@@ -116,6 +120,18 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
                                                       jbyteArray LocalId, jbyteArray PeerId) {
+#if LUR_INTERNAL
+    // Dev role override (issue: test BOTH role configs on one device pair). Read the
+    // prop on every decision so `adb shell setprop debug.lur.role central|peripheral`
+    // takes effect on the next (re)launch/discovery without a reinstall; empty = auto.
+    {
+        char Prop[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.lur.role", Prop);
+        if (std::strcmp(Prop, "central") == 0)         SetBleRoleOverride(EBleRole::Central);
+        else if (std::strcmp(Prop, "peripheral") == 0) SetBleRoleOverride(EBleRole::Peripheral);
+        else                                           ClearBleRoleOverride();
+    }
+#endif
     const jsize LocalLen = Env->GetArrayLength(LocalId);
     const jsize PeerLen  = Env->GetArrayLength(PeerId);
     std::string Local(static_cast<std::size_t>(LocalLen), '\0');

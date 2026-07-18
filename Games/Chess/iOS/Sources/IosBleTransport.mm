@@ -138,6 +138,22 @@ static void SaveIosPeerId(const std::string& Id) {
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
 
+#if LUR_INTERNAL
+        // Dev role override (rig-pushed Documents/role = "central"|"peripheral"):
+        // pins DecideBleRole so the rig can test BOTH role configs on one device
+        // pair. Read once at driver startup — push the marker BEFORE launching.
+        {
+            NSString* Dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            NSString* Marker = [NSString stringWithContentsOfFile:[Dir stringByAppendingPathComponent:@"role"]
+                                                         encoding:NSUTF8StringEncoding error:nil];
+            NSString* Role = [Marker stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+            if ([Role isEqualToString:@"central"])         SetBleRoleOverride(EBleRole::Central);
+            else if ([Role isEqualToString:@"peripheral"]) SetBleRoleOverride(EBleRole::Peripheral);
+            else                                           ClearBleRoleOverride();
+            if (Role.length) NSLog(@"OnlyChess BLE: dev role override = %@", Role);
+        }
+#endif
+
         _PeerId = LoadIosPeerId();
         _HaveCachedRole = !_PeerId.empty();
         _CachedPeripheral = _HaveCachedRole && (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);

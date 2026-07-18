@@ -54,6 +54,9 @@
     uint32_t _Rng;
     uint64_t _Frame, _PeerReplies, _SameFrame, _NewGameOpens, _DelayedReplies;
     uint64_t _AutoCheckAccumNs, _ReportAccumNs;
+    // Net-ms RTT (mirrors AndroidMain): our move leaves -> the peer's reply arrives,
+    // measured on this device's clock alone (2x transit + <=1 frame each side).
+    uint64_t _ClockNs, _MoveSentNs, _RttCount, _RttSumMs, _RttMinMs, _RttMaxMs;
 #endif
 }
 
@@ -85,6 +88,31 @@
     NSArray<NSString*>* Dirs =
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
+#if LUR_INTERNAL
+    // Dev clear-history (rig-pushed Documents/clearsave): wipe opponent records,
+    // their meta sidecars, and the cached peer-id BEFORE the store opens — a fresh
+    // pairing state for role/matrix tests. The device-id is KEPT (stable identity).
+    // One-shot: the marker is consumed. No pm-clear equivalent exists on iOS.
+    {
+        NSString* Docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+        NSString* Marker = [Docs stringByAppendingPathComponent:@"clearsave"];
+        if ([[NSFileManager defaultManager] fileExistsAtPath:Marker]) {
+            NSRegularExpression* Guid =
+                [NSRegularExpression regularExpressionWithPattern:@"^[0-9a-fA-F]{32}$" options:0 error:nil];
+            int Removed = 0;
+            for (NSString* Name in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:Dir error:nil]) {
+                const bool IsRecord = [Guid numberOfMatchesInString:Name options:0
+                                                              range:NSMakeRange(0, Name.length)] > 0;
+                if (IsRecord || [Name hasPrefix:@"meta-"] || [Name isEqualToString:@"peer-id"]) {
+                    if ([[NSFileManager defaultManager] removeItemAtPath:[Dir stringByAppendingPathComponent:Name]
+                                                                   error:nil]) ++Removed;
+                }
+            }
+            [[NSFileManager defaultManager] removeItemAtPath:Marker error:nil];
+            os_log(OS_LOG_DEFAULT, "OnlyChess: dev clearsave: removed %d file(s), device-id kept", Removed);
+        }
+    }
+#endif
     _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
     _Sync = new Lur::Save::SyncManager(*_Store, _Match);
@@ -143,6 +171,7 @@
     _Session.Start(_Transport, _DeviceId);
 #if LUR_INTERNAL
     _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_DeviceId.size());  // per-device autoplay seed
+    _RttMinMs = ~0ull;                                           // other RTT ivars zero-init
 #endif
 }
 
@@ -202,7 +231,16 @@
             const uint32_t MatchesAfter = _Match.Record().TotalMatches();
             const bool GotPeerMove = !WasMyTurn && NowMyTurn;
             const bool PeerEndedGame = MatchesAfter != MatchesBefore;
+            _ClockNs += ElapsedNs;
+            if (GotPeerMove && _MoveSentNs != 0) {      // reply to our outstanding move
+                const uint64_t Ms = (_ClockNs - _MoveSentNs) / 1'000'000ull;
+                ++_RttCount; _RttSumMs += Ms;
+                if (Ms < _RttMinMs) _RttMinMs = Ms;
+                if (Ms > _RttMaxMs) _RttMaxMs = Ms;
+                _MoveSentNs = 0;
+            }
             const bool Played = (_Session.IsReady() && NowMyTurn) ? _View.AutoPlayRandomLegalMove(_Rng) : false;
+            if (Played) _MoveSentNs = _ClockNs;         // our move is on the wire; await reply
             if (GotPeerMove) {
                 ++_PeerReplies;
                 if (PeerEndedGame)   ++_NewGameOpens;
@@ -216,12 +254,16 @@
                 // turn/ply/hash/gate: enough context to diagnose a stall from the log
                 // alone (#72) — mirrors the Android diag line.
                 os_log(OS_LOG_DEFAULT, "OnlyChess: AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
-                       "myTurn=%d ply=%zu hash=%08x gate=%d",
+                       "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums)",
                        MatchesAfter, (unsigned long long)_SameFrame, (unsigned long long)_PeerReplies,
                        (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies,
                        _Match.IsMyTurn() ? 1 : 0, _Match.Record().Moves.size(),
                        (unsigned)(_Match.PositionHash() & 0xFFFFFFFFu),
-                       _Session.IsAwaitingResync() ? 1 : 0);
+                       _Session.IsAwaitingResync() ? 1 : 0,
+                       (unsigned long long)_RttCount,
+                       (unsigned long long)(_RttCount ? _RttSumMs / _RttCount : 0),
+                       (unsigned long long)(_RttCount ? _RttMinMs : 0),
+                       (unsigned long long)_RttMaxMs);
             }
         }
         ++_Frame;
