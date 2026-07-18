@@ -8,7 +8,8 @@ REM Requires pymobiledevice3 (run setup-ios-logging.bat once) and the iPhone
 REM connected via USB, unlocked + trusted, with Apple Mobile Device Service
 REM running (ships with iTunes). No Mac / Xcode needed.
 REM
-REM Extra flags pass through, e.g.  scripts\ios-syslog.bat -m Renderer
+REM NOTE (iOS 26): `syslog live -m <text>` does NOT filter — stream broad and
+REM filter with findstr instead.
 REM For the full app-process firehose (incl. iOS framework noise) instead:
 REM   pymobiledevice3 syslog live -pn OnlyChess
-pymobiledevice3 syslog live -m "OnlyChess:" %*
+pymobiledevice3 syslog live 2>nul | findstr /C:"OnlyChess"

@@ -136,15 +136,19 @@ Built from `Games/Chess/iOS` with Xcode, linking **MoltenVK** for the Vulkan-on-
 iOS half is Mac-only (local Mac or a cloud Mac). In practice the iPhone build comes from the free
 macOS CI, not a local Mac: the `ios-ipa` job produces an unsigned device `.ipa` artifact.
 
-**Getting the `.ipa` onto the iPhone:** always download the CI artifact to
-**`dist/OnlyChess-unsigned.ipa`** (overwrite it in place — `dist/` is gitignored), so the Sideloadly
-flow always points at the same file:
+**Getting the `.ipa` onto the iPhone — HEADLESS:** download the CI artifact to
+**`dist/OnlyChess-unsigned.ipa`** (overwrite in place — `dist/` is gitignored), then let the rig
+sign+install with zero interaction (zsign + the persisted free dev cert + the newest provisioning
+profile re-dumped from the device):
 
 ```
 gh run download <run-id> -n OnlyChess-unsigned-ipa -D dist
+powershell -File Tools\DeviceRig\device-rig.ps1 -Action install -Peer ios
 ```
 
-Then sideload with Sideloadly + a free Apple ID (see the `device-testing-ops` memory).
+The only remaining ritual is the **weekly** profile renewal (free Apple accounts get 7-day
+profiles): one Sideloadly run with the Apple ID, then the rig is headless again. See
+`Tools/DeviceRig/README.md`.
 
 ### Reading device logs (WITHOUT burning tokens on noise)
 
@@ -165,11 +169,12 @@ Two wireless transports (`<ip>:<port>` and `adb-<serial>._adb-tls-connect._tcp`)
 Gradle's `installDebug` isn't ambiguous. When hunting the BLE handshake specifically, also drop the
 per-frame chatter: `... -s OnlyChess:* | grep -vE 'hello: link not up|Chess core alive|Renderer'`.
 
-**iOS** — no logcat; use `pymobiledevice3` with a process/message match, and **bound the capture with
-`timeout`** (the stream never ends on its own):
+**iOS** — no logcat; use `pymobiledevice3` and **bound the capture with `timeout`** (the stream
+never ends on its own). NOTE: `syslog live -m <text>` does NOT filter on iOS 26 — stream broad and
+grep the tag yourself:
 
 ```
-timeout 15 python -m pymobiledevice3 syslog live -m "OnlyChess" | grep -i onlychess
+timeout 15 python -m pymobiledevice3 syslog live 2>/dev/null | grep -a "OnlyChess"
 ```
 
 **BLE log vocabulary to grep for** (both platforms): `BLE up` / `powered on` (radio started),

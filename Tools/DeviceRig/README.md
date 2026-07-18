@@ -37,38 +37,38 @@ something this project deliberately does not do.
 | Arm autoplay | `setprop debug.lur.autoplay 1` | push `Documents/autoplay` marker (`apps push … Documents/autoplay`, container-vend — **not** `--documents`, which `InstallationLookupFailed`s on iOS 26) | **Yes** |
 | Tail engine log | `logcat -s OnlyChess:*` | `syslog live \| grep OnlyChess` (the `-m` message match does **not** filter on iOS 26) | **Yes** |
 | Screenshot | `screencap` | `developer dvt screenshot --userspace` | **Yes — no admin** (same userspace tunnel as launch). |
-| Install a NEW build | `adb install -r` | `-SignedIpa`/`-ZsignP12` → `apps install` (headless), else Sideloadly GUI (assisted) | **Yes if signed; assisted otherwise.** See below. |
+| Install a NEW build | `adb install -r` | auto-zsign → `apps install` | **Yes — fully headless** (see below). |
 
 **Launch/screenshot no longer need admin (superseded).** On `pymobiledevice3` 9.33.4,
 `developer dvt … --userspace` stands up the iOS 17+ tunnel *in-process* with a userspace
 network stack, so it needs **no root/admin** — verified launching + screenshotting the app
 from this non-admin shell. The old `sudo remote tunneld` one-time-per-boot step is gone.
 
-**Install of a new binary — three routes, most-headless first:**
-1. **`-SignedIpa <path>`** → `pymobiledevice3 apps install` — fully headless, no GUI.
-2. **`-ZsignP12 <p12> -ZsignProfile <mobileprovision>`** → the rig `zsign`s the unsigned CI
-   `.ipa` with a **persisted free dev cert**, then `apps install` — fully headless for the
-   7-day life of that cert. `zsign` is a dev-only Tool (MIT), never linked into the app.
-3. **Neither** → opens Sideloadly at the `.ipa` (**assisted** — the one human touch; first
-   run also does the Apple-ID login + 2FA). We don't drive Sideloadly's private `/enqueue`
-   API — it's credential-sensitive and fragile.
+**Install of a new binary is fully headless (auto-zsign, the default).** `-Action install`
+locates everything itself: `zsign` (PATH or `%LOCALAPPDATA%\LurMotorn\tools`), the free dev
+**cert/key PEMs Sideloadly persists** in `%APPDATA%\Sideloadly` (the cert lasts ~1 year),
+and the **newest matching provisioning profile re-dumped from the device** each install
+(`provision dump`), so Sideloadly's weekly profile renewal is picked up automatically. It
+zsigns the CI `.ipa` (rewriting the bundle id to the signed identity) and `apps install`s
+it — verified end to end on hardware, zero interaction. Overrides: `-SignedIpa <path>`
+(pre-signed) or explicit `-ZsignP12`/`-ZsignProfile`; if signing material is missing the
+rig falls back to opening Sideloadly (drag the `.ipa` in — its `-i` flag is unreliable).
+`zsign` is a dev-only Tool (MIT), never linked into the app.
 
-**You rarely re-install at all:** `cycle` hashes the `.ipa` and **skips install when it's
-unchanged** — the Sideloadly daemon keeps an unchanged build's signature fresh until the
-7-day cert expiry. So re-running experiments back-to-back is entirely hands-off; only a
-genuinely new binary hits the signing gate.
+`cycle` additionally hashes the `.ipa` and **skips install when unchanged**, so re-running
+experiments back-to-back never reinstalls at all.
 
-### One-time setup (minimal, each an unavoidable Apple gate)
+### One-time / periodic setup (each an unavoidable Apple gate)
 
-1. **Sideloadly login once** (or drop in a persisted free dev cert for zsign) — needed
-   because Apple requires a signing identity + 2FA. Renew the free cert **weekly** (Apple's
-   7-day free-provisioning limit).
+1. **Weekly profile renewal**: free Apple accounts get **7-day provisioning profiles**; one
+   Sideloadly run (Apple ID + 2FA) renews it, and the rig auto-adopts the fresh profile on
+   its next install. This is the ONLY recurring human step.
 2. **First-launch Bluetooth allow** — one tap the first time a *fresh install* runs (Apple
-   TCC). Unchanged installs keep the grant, so this is per-new-binary, not per-iteration.
-3. ~~Admin tunnel per boot~~ — **no longer required** (userspace tunnel).
+   TCC). Same-bundle-id reinstalls keep the grant, so this is per-new-identity, not
+   per-build.
 
-After that, `device-rig.bat -Action cycle` launches, arms, plays, measures, and repeats
-with no human touch — re-signing only when the code actually changes.
+After that, `device-rig.bat -Action cycle` fetches, signs, installs, launches, arms, plays,
+measures, and repeats with no human touch.
 
 ## App config (`$App` in device-rig.ps1)
 
@@ -80,7 +80,9 @@ AutoplayProp   debug.lur.autoplay                     Android engine autoplay to
 AutoplayMarker autoplay                               iOS: Documents/<marker> engine autoplay toggle
 ```
 
-Apple ID is **not** stored here — pass `-AppleId` (used once; Sideloadly then caches a token).
+No Apple-ID credential is stored or handled anywhere in the rig — signing uses the local
+cert/key PEMs + device-dumped profile; the Apple ID is only ever typed into Sideloadly
+itself during the weekly profile renewal.
 
 ## Relationship to BleDevRig
 

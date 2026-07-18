@@ -25,7 +25,6 @@ param(
     [ValidateSet('android','ios','both')]
     [string]$Peer = 'both',
     [string]$AndroidSerial,         # pin when several transports point at one phone
-    [string]$AppleId,               # iOS install: Apple ID for Sideloadly (once; then a token is cached)
     [string]$Ipa,                   # iOS install: unsigned .ipa from CI (default: dist\ below)
     [string]$SignedIpa,             # iOS install: a pre-signed .ipa -> headless `apps install` (no GUI)
     [string]$ZsignP12,              # iOS install: zsign a fresh cert (.p12) to sign $Ipa headlessly
@@ -298,30 +297,9 @@ function Shot-Ios($path) {
     try { PmdDev screenshot $path 2>&1 | Out-Null; Say "ios: screenshot -> $path" }
     catch { Warn 'ios: screenshot failed (userspace tunnel) - is the device unlocked + Developer Mode on?' }
 }
-# The app's current pid, or 0 if not running (parses the last integer the tool prints).
-function Get-IosPid {
-    try {
-        $out = (PmdDev process-id-for-bundle-id $App.IosBundleId 2>$null) | Out-String
-        $m = [regex]::Matches($out, '\d+')
-        if ($m.Count -gt 0) { return [int]$m[$m.Count - 1].Value }
-    } catch {}
-    return 0
-}
-# Kill the running app so the next launch is CLEAN — and VERIFY it died. pkill-by-name
-# proved unreliable (the process survived and a later --no-kill-existing launch just
-# foregrounded it, so startup-read markers like the role override never re-read). Kill
-# by pid and poll until the pid is gone or changed.
-function Kill-Ios {
-    $procId = Get-IosPid
-    if ($procId -eq 0) { Say 'ios: app not running (no kill needed)'; return }
-    for ($try = 1; $try -le 3; $try++) {
-        try { PmdDev kill $procId 2>&1 | Out-Null } catch {}
-        Start-Sleep -Seconds 1
-        $now = Get-IosPid
-        if ($now -ne $procId) { Say "ios: killed running app (pid $procId)"; return }
-    }
-    Warn "ios: could NOT kill pid $procId - a marker-dependent (re)launch may not take effect."
-}
+# NOTE: there is deliberately NO Kill-Ios. `dvt kill`/`dvt pkill` proved unreliable on
+# this device (they report the kill but the process survives), so the ONLY dependable
+# process restart is the kill-existing `dvt launch` — Launch-Ios -FreshProcess above.
 
 # --- same-frame summary (engine log lines, game-agnostic) --------------------------
 function Summarize($file, $label) {
