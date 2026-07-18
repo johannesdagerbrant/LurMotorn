@@ -36,15 +36,27 @@ void Session::Tick(uint64_t ElapsedNs) {
 
     // Reconnect edge (post-handshake): the link came back after a drop. Poke the
     // game to resynchronise its state. Generic flow — the payload is game-defined.
+    // Also arm the resync gate: hold moves until the peer's Sync reconciles boards (#71).
     if (Ready && Connected && !PrevConnected) {
         Logf("reconnected — requesting resync");
+        AwaitingResync = true; ResyncWaitNs = 0;
         if (ResyncHandler) ResyncHandler();
     }
     PrevConnected = Connected;
 
     if (Connected) EverConnected = true;  // latch, so a later drop reads as Disconnected
+    else AwaitingResync = false;          // offline: not awaiting a resync (offline moves ok, #19)
 
     if (Ready && Connected) {
+        // Resync-gate fallback: if the peer's Sync never arrives, stop blocking moves
+        // after ResyncTimeoutNs so a missing Sync can't wedge the game (#71).
+        if (AwaitingResync) {
+            ResyncWaitNs += ElapsedNs;
+            if (ResyncWaitNs >= ResyncTimeoutNs) {
+                AwaitingResync = false;
+                Logf("resync wait timed out — enabling moves");
+            }
+        }
         // Liveness: keep the link warm and notice if the peer went silent. Any inbound
         // datagram resets SinceRecvNs (see OnDatagram); if it runs out, the link is
         // dead even though the backend never told us (the iOS-peripheral case).
@@ -134,6 +146,12 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (Type == EMsgType::Keepalive) return;  // liveness only; already counted above
 
     Logf("recv msg type=%u size=%zu", static_cast<unsigned>(Data[0]), PayloadSize);
+    // The peer's link-time Sync reconciles both boards: lift the resync gate so live
+    // moves may flow again (#71). The handler below applies the reconciling payload.
+    if (Type == EMsgType::Sync && AwaitingResync) {
+        AwaitingResync = false;
+        Logf("resync received — moves enabled");
+    }
     const int Idx = static_cast<int>(Type);
     if (Idx >= 0 && Idx < MaxMsgTypes && Handlers[Idx]) Handlers[Idx](Payload, PayloadSize);
 }
@@ -164,6 +182,7 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
     }
 
     Ready = true;
+    AwaitingResync = true; ResyncWaitNs = 0;  // hold moves until the peer's Sync lands (#71)
     Logf("READY (peer id known)");
     SendHello();  // ready-flagged reply, so the peer learns our id + that we're set
     if (ReadyHandler) ReadyHandler();

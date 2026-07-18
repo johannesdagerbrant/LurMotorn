@@ -125,6 +125,11 @@ bool BoardView::FlipBoard() const {
 bool BoardView::CanMoveNow() const {
     if (State == nullptr) return false;
     if (!State->HasIdentity()) return true;   // local hot-seat: either side may tap
+    // Hold moves through the link-time resync: a move made before the peer's Sync
+    // reconciles both boards would be decoded against a stale board and desync the
+    // game permanently (issue #71). The gate lifts the instant the Sync lands (or a
+    // short fallback timeout). Offline (link down) is NOT gated — see below.
+    if (Net != nullptr && Net->IsAwaitingResync()) return false;
     // Offline move (issue #19): a player may move on their turn even while the link
     // is down — you can only ever be one move ahead (then it's the opponent's turn),
     // and the next link-establishment record sync heals it.
@@ -262,6 +267,10 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     // board, not ours (hijack rule, #38).
     if (Net != nullptr && !ActiveOpponent.empty() && Net->GetPeerGuid() != ActiveOpponent)
         return;
+    // Drop a live move that arrives before the link-time resync reconciles our board:
+    // decoding it now would map the index onto a stale board (issue #71). On an in-order
+    // link the peer's Sync precedes its first move, so this only guards the racy case.
+    if (Net != nullptr && Net->IsAwaitingResync()) return;
     // Regenerate the identical legal list from our in-sync position; move ORDER is
     // the wire protocol, so the peer's index maps back to the exact same move.
     MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);

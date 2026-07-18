@@ -16,6 +16,7 @@
 #include "Lur/Core/Hash.h"
 
 #include "Chess/Board.h"
+#include "Chess/ChessMatchState.h"
 #include "Chess/ChessRecord.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/Types.h"
@@ -412,6 +413,133 @@ static void TestFlightRecordReplayHashIdentical() {
     CHECK(SamePosition(B, Replay));
 }
 
+// --- issue #71: the resync gate ------------------------------------------------------
+// A live move is a bare 1-byte INDEX into the side-to-move's legal list; it only means
+// anything against the exact board the sender encoded it on. If a peer applies a move
+// before the link-time Sync has reconciled both boards, the index maps onto a stale
+// board -> a DIFFERENT move -> permanent divergence -> the cross-peer deadlock (#71).
+// Session now holds a resync gate (IsAwaitingResync) from (re)link until the peer's
+// Sync arrives, and the game refuses to make/apply moves while it is set.
+
+// The hazard the gate prevents: the same wire bytes applied to two different boards
+// produce two different positions.
+static Chess::Board PlayedBoard(const Chess::Square* From, const Chess::Square* To, int N) {
+    Chess::Board B = Chess::Board::StartPosition();
+    for (int i = 0; i < N; ++i) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(B, L);
+        const Chess::Move* M = Find(L, From[i], To[i]);
+        if (M) B.MakeMove(*M);
+    }
+    return B;
+}
+static void TestPrematureMoveDesyncsUnreconciledBoard() {
+    const Chess::Square LF[3] = {12, 52, 6}, LT[3] = {28, 36, 21};  // 1.e4 e5 2.Nf3
+    const Chess::Square SF[1] = {12},        ST[1] = {28};          // 1.e4 (unreconciled peer)
+    Chess::Board Long  = PlayedBoard(LF, LT, 3);   // Black to move
+    Chess::Board Short = PlayedBoard(SF, ST, 1);   // Black to move, but a DIFFERENT position
+
+    Chess::MoveList LL; Chess::GenerateLegalMoves(Long, LL);
+    CHECK(LL.Count > 0);
+    Lur::Serialization::BitWriter W; Chess::EncodeMove(LL.Moves[0], LL, W);
+    const std::vector<uint8_t>& Bytes = W.Finish();
+
+    Chess::Board LongAfter = Long; LongAfter.MakeMove(LL.Moves[0]);  // sender's true result
+
+    Chess::MoveList SL; Chess::GenerateLegalMoves(Short, SL);
+    Lur::Serialization::BitReader R(Bytes.data(), Bytes.size());
+    const Chess::Move Decoded = Chess::DecodeMove(R, SL);
+    Chess::Board ShortAfter = Short;
+    if (R.IsOk() && !(Decoded == Chess::Move{})) ShortAfter.MakeMove(Decoded);
+
+    CHECK(!SamePosition(LongAfter, ShortAfter));  // same bytes, divergent result -> why we gate
+}
+
+// The gate arms the moment we go ready and lifts when the peer's Sync arrives.
+static void TestResyncGateHoldsThenLiftsOnSync() {
+    SilentTransport T; Session S;
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', /*ready*/ true);
+    T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+    CHECK(S.IsAwaitingResync());                 // armed at link
+    const uint8_t Sync[2] = { static_cast<uint8_t>(EMsgType::Sync), 0x00 };
+    T.Deliver(Sync, sizeof(Sync));
+    CHECK(!S.IsAwaitingResync());                // lifted by the peer's Sync
+}
+
+// Fallback: if the peer's Sync never arrives, the gate lifts after ~3s so a missing
+// Sync can't wedge the game forever.
+static void TestResyncGateTimeoutFallback() {
+    SilentTransport T; Session S;
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', true);
+    T.Deliver(H, sizeof(H));
+    CHECK(S.IsAwaitingResync());
+    const uint8_t KA[2] = { static_cast<uint8_t>(EMsgType::Keepalive), 0 };  // keep link alive
+    for (int i = 0; i < 120; ++i) { S.Tick(FrameNs); if (i % 20 == 0) T.Deliver(KA, sizeof(KA)); }  // ~2s
+    CHECK(S.IsAwaitingResync());                 // still gated under the fallback window
+    for (int i = 0; i < 120; ++i) { S.Tick(FrameNs); if (i % 20 == 0) T.Deliver(KA, sizeof(KA)); }  // ~4s total
+    CHECK(!S.IsAwaitingResync());                // fallback lifted the gate
+}
+
+// End to end: two peers link, exchange Sync, then autoplay stays in lockstep — and a
+// pre-Sync move is correctly HELD (the exact regression #71 reproduced on device).
+static void TestResyncGateEnablesCleanCrossPeerPlay() {
+    LoopbackTransport TA, TB; LoopbackTransport::Link(TA, TB);
+    Session SA, SB;
+    Chess::ChessMatchState MA, MB;
+    MA.SetIdentity(Guid('a'), Guid('b'));   // A lower GUID -> White (even parity)
+    MB.SetIdentity(Guid('b'), Guid('a'));   // B higher GUID -> Black
+
+    SA.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MA.MergeIfNewer(D, N); });
+    SB.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MB.MergeIfNewer(D, N); });
+    auto ApplyRemote = [&](Chess::ChessMatchState& M, Session& S, const uint8_t* D, std::size_t N) {
+        if (S.IsAwaitingResync()) return;                               // the #71 inbound gate
+        Chess::MoveList L; Chess::GenerateLegalMoves(M.CurrentBoard(), L);
+        Lur::Serialization::BitReader R(D, N);
+        const Chess::Move Mv = Chess::DecodeMove(R, L);
+        if (!R.IsOk() || Mv == Chess::Move{}) return;
+        if (M.SideToMove() == M.MyColor()) return;                      // not the peer's turn
+        M.ApplyMove(Mv);
+    };
+    SA.SetMoveHandler([&](const uint8_t* D, std::size_t N) { ApplyRemote(MA, SA, D, N); });
+    SB.SetMoveHandler([&](const uint8_t* D, std::size_t N) { ApplyRemote(MB, SB, D, N); });
+
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
+    CHECK(SA.IsReady() && SB.IsReady());
+    CHECK(SA.IsAwaitingResync() && SB.IsAwaitingResync());   // both gated at link
+
+    // A gated autoplay step (mirrors BoardView::CanMoveNow) must NOT move pre-resync.
+    auto Step = [&](Chess::ChessMatchState& M, Session& S) -> bool {
+        if (S.IsAwaitingResync()) return false;                         // the #71 local gate
+        if (M.SideToMove() != M.MyColor()) return false;                // not our turn
+        Chess::MoveList L; Chess::GenerateLegalMoves(M.CurrentBoard(), L);
+        if (L.Count <= 0) return false;
+        Lur::Serialization::BitWriter W; Chess::EncodeMove(L.Moves[0], L, W);
+        const std::vector<uint8_t>& B = W.Finish();
+        S.SendMove(B.data(), B.size());   // synchronous loopback -> peer's move handler
+        M.ApplyMove(L.Moves[0]);
+        return true;
+    };
+    CHECK(!Step(MA, SA));   // White held pre-resync (this is what breaks the deadlock)
+    CHECK(SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));
+
+    // The link-time Sync exchange (what the app's ready/resync handler does) lifts both.
+    { std::vector<uint8_t> Snap; MA.Write(Snap); SA.Send(EMsgType::Sync, Snap.data(), Snap.size()); }
+    { std::vector<uint8_t> Snap; MB.Write(Snap); SB.Send(EMsgType::Sync, Snap.data(), Snap.size()); }
+    CHECK(!SA.IsAwaitingResync() && !SB.IsAwaitingResync());
+
+    // Now play 20 plies alternating; boards must stay byte-identical throughout.
+    int Plies = 0;
+    for (int i = 0; i < 60 && Plies < 20; ++i) {
+        if (Step(MA, SA)) ++Plies;
+        if (Step(MB, SB)) ++Plies;
+        CHECK(SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));
+    }
+    CHECK(Plies >= 20);    // progressed to 20 plies with no stall (the deadlock is gone)
+}
+
 int main() {
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
@@ -425,6 +553,10 @@ int main() {
     TestLongGameSyncNotDropped();
     TestOversizedFramedSendRefused();
     TestFlightRecordReplayHashIdentical();
+    TestPrematureMoveDesyncsUnreconciledBoard();
+    TestResyncGateHoldsThenLiftsOnSync();
+    TestResyncGateTimeoutFallback();
+    TestResyncGateEnablesCleanCrossPeerPlay();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");

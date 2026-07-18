@@ -78,6 +78,15 @@ public:
 
     bool IsReady() const { return Ready; }
 
+    // True from the moment the link is (re)established until the peer's link-time Sync
+    // has been received (or a short fallback timeout elapses). While this holds, the
+    // game must NOT make or apply live moves: a bare move index is only meaningful
+    // against a board both peers agree on, and the reconciling Sync hasn't landed yet.
+    // Applying a move before the resync silently decodes it against an unreconciled
+    // board -> permanent divergence -> deadlock (issue #71). The game gates on this in
+    // CanMoveNow() (local moves) and its move handler (inbound moves).
+    bool IsAwaitingResync() const { return AwaitingResync; }
+
     // The peer's persistent device id once ready, else empty. The game pairs it with
     // our own id to derive colour + the per-opponent stats key (independent of the
     // BLE radio role).
@@ -145,6 +154,9 @@ private:
     static constexpr uint64_t HelloResendNs = 500'000'000ull;   // resend Hello every ~0.5s
     static constexpr uint64_t KeepaliveNs   = 1'000'000'000ull; // keepalive every ~1s
     static constexpr uint64_t LinkTimeoutNs = 5'000'000'000ull; // ~5s of silence -> dead
+    // If the peer's link-time Sync never arrives (e.g. it adopted a different game),
+    // stop blocking moves after this so a missing Sync can't wedge the game forever.
+    static constexpr uint64_t ResyncTimeoutNs = 3'000'000'000ull; // ~3s fallback
 
     // Max payload for a FRAMED ([type][payload]) message. Sized to a BLE MTU-class
     // datagram (negotiated ATT MTU ~247 -> ~244 usable) so a full-history Sync of a
@@ -173,6 +185,8 @@ private:
     bool     EverConnected      = false;  // for Disconnected vs never-connected
     bool     VersionMismatchSeen = false;
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook
+    bool     AwaitingResync     = false;  // hold moves until the link-time Sync lands (#71)
+    uint64_t ResyncWaitNs       = 0;      // ns spent awaiting the peer's Sync (fallback timeout)
 
     Handler               Handlers[MaxMsgTypes];
     Handler               MoveHandler;          // bare 1-byte live move (issue #19)
