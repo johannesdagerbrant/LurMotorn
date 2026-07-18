@@ -16,7 +16,7 @@
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action arm   -Peer both
 [CmdletBinding()]
 param(
-    [ValidateSet('run','cycle','arm','disarm','reset','install','launch','tail','shot','status')]
+    [ValidateSet('run','cycle','arm','disarm','reset','install','uninstall','launch','tail','shot','status')]
     [string]$Action = 'run',
     [ValidateSet('android','ios','both')]
     [string]$Peer = 'both',
@@ -32,8 +32,13 @@ param(
     [int]$Matches = 3,              # run: stop after this many completed matches (0 = until Ctrl-C)
     [int]$DurationSec = 0,          # run: hard cap in seconds (0 = none)
     [int]$SettleSec = 12,           # run: grace for the two peers to discover + link
-    [int]$Iterations = 1            # cycle: repeat the loop this many times back-to-back
-)
+    [int]$Iterations = 1,           # cycle: repeat the loop this many times back-to-back
+    [switch]$NoReset,               # run: DON'T pm-clear Android or clear logcat - arm the
+                                    #   already-running/linked apps + keep the buffered
+                                    #   handshake. Use when peers are already paired live.
+    [switch]$Fresh                  # run: force-stop + relaunch BOTH (fresh handshake) WITHOUT
+)                                   #   pm-clear (identity kept), and clear the log window.
+                                    #   The clean-measurement mode: fresh link, no churn.
 $ErrorActionPreference = 'Stop'
 
 # --- App under test - the ONLY app-specific config. The rig body stays game-agnostic. ---
@@ -41,6 +46,7 @@ $App = @{
     LogTag         = 'OnlyChess'                          # engine log tag the app emits
     AndroidPackage = 'com.lurmotorn.onlychess'
     IosBundleId    = 'com.lurmotorn.onlychess.L5XBWVZ7N3' # sideload appends the signer suffix
+    IosBundleBase  = 'com.lurmotorn.onlychess'            # uninstall sweeps every ...<SIGNER> variant
     AutoplayProp   = 'debug.lur.autoplay'                 # Android: engine autoplay toggle (setprop)
     AutoplayMarker = 'autoplay'                           # iOS: Documents/<marker> engine autoplay toggle
 }
@@ -61,6 +67,12 @@ function Warn($m) { Write-Host "[device-rig] $m" -ForegroundColor Yellow }
 # --- Android peer (adb) ------------------------------------------------------------
 $adb = (Get-Command adb -ErrorAction SilentlyContinue).Source
 function Adb { & $adb @args }
+# For adb calls whose native stderr is benign (monkey/force-stop): PS 5.1 turns ANY native
+# stderr into a fatal NativeCommandError under ErrorActionPreference=Stop, so relax it here.
+function AdbQuiet {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+    try { & $adb @args 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
+}
 function Ensure-Android {
     if (-not $adb) { throw 'adb not found on PATH (Android platform-tools).' }
     if ($AndroidSerial) { $env:ANDROID_SERIAL = $AndroidSerial }
@@ -76,12 +88,13 @@ function Reset-Android {
     }
 }
 function Arm-Android    { Say "android: arm autoplay ($($App.AutoplayProp)=1)"; Adb shell setprop $App.AutoplayProp 1 }
-function Disarm-Android { Say 'android: disarm autoplay'; Adb shell setprop $App.AutoplayProp 0; Adb shell am force-stop $App.AndroidPackage }
+function Disarm-Android { Say 'android: disarm autoplay'; AdbQuiet shell setprop $App.AutoplayProp 0; AdbQuiet shell am force-stop $App.AndroidPackage }
 function Launch-Android {
     Say 'android: wake + launch'
-    Adb shell input keyevent KEYCODE_WAKEUP | Out-Null
-    Adb shell monkey -p $App.AndroidPackage -c android.intent.category.LAUNCHER 1 2>&1 | Out-Null
+    AdbQuiet shell input keyevent KEYCODE_WAKEUP
+    AdbQuiet shell monkey -p $App.AndroidPackage -c android.intent.category.LAUNCHER 1
 }
+function Kill-Android { Say 'android: force-stop'; AdbQuiet shell am force-stop $App.AndroidPackage }
 function Shot-Android($path) {
     Adb shell screencap -p /sdcard/_devrig.png | Out-Null
     Adb pull /sdcard/_devrig.png $path 2>&1 | Out-Null
@@ -156,19 +169,44 @@ function Install-Ios {
 }
 
 # Headless launch via the iOS 17+ userspace tunnel (no admin). Returns $true on success.
+# Uses --no-kill-existing: `dvt launch` DEFAULTS to killing a running instance, and
+# relaunching a live app churns its CAMetalLayer to a BLACK screen (learned the hard way);
+# --no-kill-existing brings the running app forward without that disruption.
 function Launch-Ios {
     try {
-        PmdDev launch $App.IosBundleId 2>&1 | Out-Null
-        Say 'ios: launched (userspace tunnel, no admin)'; return $true
+        PmdDev launch --no-kill-existing $App.IosBundleId 2>&1 | Out-Null
+        Say 'ios: launched/foregrounded (userspace tunnel, no admin)'; return $true
     } catch {
         Warn 'ios: launch failed. The app must be installed + Developer Mode on; first run needs a one-time Bluetooth allow.'
         return $false
     }
 }
+# Remove EVERY installed build of the app. Re-signing with a different cert yields a new
+# bundle-id suffix (e.g. ...onlychess.<SIGNER>), so stale copies accumulate; this sweeps
+# all bundles under $App.IosBundleBase. Android takes the fixed package id.
+function Uninstall-Ios {
+    Ensure-Ios
+    $json = (Pmd apps list) | Out-String
+    $base = [regex]::Escape($App.IosBundleBase)
+    $ids  = [regex]::Matches($json, ('"(' + $base + '[^"]*)"\s*:')) | ForEach-Object { $_.Groups[1].Value } | Select-Object -Unique
+    if (-not $ids) { Say "ios: no installed build under $($App.IosBundleBase)"; return }
+    foreach ($id in $ids) {
+        Say "ios: uninstalling $id"
+        Pmd apps uninstall $id | Out-Host
+    }
+    Say "ios: removed $($ids.Count) build(s)"
+}
+function Uninstall-Android {
+    Say "android: uninstalling $($App.AndroidPackage)"
+    & $adb uninstall $App.AndroidPackage 2>$null | Out-Host
+}
 function Shot-Ios($path) {
     try { PmdDev screenshot $path 2>&1 | Out-Null; Say "ios: screenshot -> $path" }
     catch { Warn 'ios: screenshot failed (userspace tunnel) - is the device unlocked + Developer Mode on?' }
 }
+# Kill the running app so the next launch is CLEAN. Relaunching a live iOS app churns its
+# CAMetalLayer black; a kill-then-launch renders correctly and re-runs the BLE handshake.
+function Kill-Ios { try { PmdDev pkill $App.LogTag 2>&1 | Out-Null; Say 'ios: killed running app' } catch { Warn 'ios: kill skipped (app not running or tunnel unavailable)' } }
 
 # --- same-frame summary (engine log lines, game-agnostic) --------------------------
 function Summarize($file, $label) {
@@ -226,13 +264,29 @@ function Invoke-Run([bool]$Interactive) {
     Remove-Item $andLog,$iosLog -ErrorAction SilentlyContinue
     if ($doIos) {
         Ensure-Ios
+        if ($Fresh) { Kill-Ios; Start-Sleep -Seconds 2 }   # clean relaunch -> fresh handshake + no black screen
         if (-not (Launch-Ios)) {
             if ($Interactive) { Read-Host 'Press Enter once the iPhone app is foregrounded + Bluetooth allowed' }
             else { Warn 'ios: launch failed and running non-interactively - continuing; log may be empty.' }
         }
         Arm-Ios
     }
-    if ($doAndroid) { Ensure-Android; Reset-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android }
+    if ($doAndroid) {
+        Ensure-Android
+        if ($Fresh) {
+            # Clean-measurement mode: force-stop (NOT pm clear, so identity/opponent survive)
+            # and clear the log window so we capture a fresh handshake + uninterrupted play.
+            Say 'android: -Fresh -> force-stop + clear log, then relaunch (identity kept)'
+            Kill-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android
+        } elseif ($NoReset) {
+            # Peers are already paired + linked: don't wipe identity (pm clear would drop
+            # the link) and don't clear logcat (keep the just-happened handshake lines).
+            Say 'android: -NoReset -> arming the running app, preserving the live link + log buffer'
+            Arm-Android; Launch-Android
+        } else {
+            Reset-Android; Arm-Android; Adb logcat -c | Out-Null; Launch-Android
+        }
+    }
     $jobs = @()
     if ($doAndroid) { $jobs += Start-Job -Name and -ScriptBlock { param($a,$s,$t,$o) & $a -s $s logcat -s "$t`:*" | Out-File -FilePath $o -Encoding utf8 } -ArgumentList $adb,$AndroidSerial,$App.LogTag,$andLog }
     if ($doIos)     { $jobs += Start-Job -Name ios -ScriptBlock { param($t,$o) & python -m pymobiledevice3 syslog live 2>$null | Select-String -Pattern $t | ForEach-Object { $_.Line } | Out-File -FilePath $o -Encoding utf8 } -ArgumentList $App.LogTag,$iosLog }
@@ -260,7 +314,8 @@ function Invoke-Run([bool]$Interactive) {
 
 switch ($Action) {
     'reset'   { if ($doAndroid) { Ensure-Android; Reset-Android }; if ($doIos) { Warn 'ios: reset = re-sideload for a fresh identity (no pm clear).' } }
-    'install' { if ($doIos) { [void](Install-Ios) }; if ($doAndroid) { Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
+    'install'   { if ($doIos) { [void](Install-Ios) }; if ($doAndroid) { Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
+    'uninstall' { if ($doIos) { Uninstall-Ios }; if ($doAndroid) { Ensure-Android; Uninstall-Android } }
     'arm'     { if ($doAndroid) { Ensure-Android; Arm-Android }; if ($doIos) { Ensure-Ios; Arm-Ios } }
     'disarm'  { if ($doAndroid) { Ensure-Android; Disarm-Android }; if ($doIos) { Ensure-Ios; Disarm-Ios } }
     'launch'  { if ($doAndroid) { Ensure-Android; Launch-Android }; if ($doIos) { Ensure-Ios; [void](Launch-Ios) } }
