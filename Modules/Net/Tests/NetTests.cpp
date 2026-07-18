@@ -493,8 +493,8 @@ static void TestResyncGateEnablesCleanCrossPeerPlay() {
 
     SA.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MA.MergeIfNewer(D, N); });
     SB.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MB.MergeIfNewer(D, N); });
-    auto ApplyRemote = [&](Chess::ChessMatchState& M, Session& S, const uint8_t* D, std::size_t N) {
-        if (S.IsAwaitingResync()) return;                               // the #71 inbound gate
+    auto ApplyRemote = [&](Chess::ChessMatchState& M, Session& /*S*/, const uint8_t* D, std::size_t N) {
+        // No inbound gate: apply if it decodes; a stale-board decode fails -> resync (#72).
         Chess::MoveList L; Chess::GenerateLegalMoves(M.CurrentBoard(), L);
         Lur::Serialization::BitReader R(D, N);
         const Chess::Move Mv = Chess::DecodeMove(R, L);

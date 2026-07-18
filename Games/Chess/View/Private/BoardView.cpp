@@ -267,10 +267,12 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     // board, not ours (hijack rule, #38).
     if (Net != nullptr && !ActiveOpponent.empty() && Net->GetPeerGuid() != ActiveOpponent)
         return;
-    // Drop a live move that arrives before the link-time resync reconciles our board:
-    // decoding it now would map the index onto a stale board (issue #71). On an in-order
-    // link the peer's Sync precedes its first move, so this only guards the racy case.
-    if (Net != nullptr && Net->IsAwaitingResync()) return;
+    // NOTE: we do NOT drop inbound moves while AwaitingResync. At link time both peers
+    // hold their OWN moves (CanMoveNow's send-gate), so nothing is in flight then; the
+    // only time an inbound move arrives during a resync is MID-GAME, when a resync has
+    // cleared asymmetrically — dropping it there caused a self-sustaining desync loop
+    // (one resync per move, #72). Instead we apply it if it decodes; a stale-board
+    // decode fails the guard below and triggers a resync, which self-heals.
     // Regenerate the identical legal list from our in-sync position; move ORDER is
     // the wire protocol, so the peer's index maps back to the exact same move.
     MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);

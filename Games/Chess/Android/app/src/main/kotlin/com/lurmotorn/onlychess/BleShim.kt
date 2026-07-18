@@ -108,6 +108,18 @@ class BleShim(private val context: Context) {
     // Post delayed retries/watchdogs on the main thread.
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
+    // Send flow control (issue #72). Android allows only ONE outstanding GATT operation:
+    // a second write/notify issued before the previous one's completion callback is
+    // SILENTLY DROPPED. Under autoplay (a move every turn + keepalives + resync) that
+    // dropped nearly every move, so state only propagated via the slower resync. We
+    // serialize sends here: enqueue, issue one, and issue the next only on
+    // onCharacteristicWrite / onNotificationSent. No added network time — writes stay
+    // WRITE_NO_RESPONSE, just paced to the connection interval instead of overrunning it.
+    private val sendQueue = ArrayDeque<ByteArray>()
+    private val sendLock = Any()
+    private var sendInFlight = false
+    private var sendWatchdogTok = 0
+
     @Volatile private var started = false
     @Volatile private var linked = false
     @Volatile private var connecting = false   // an outgoing central attempt is mid-flight
@@ -130,10 +142,20 @@ class BleShim(private val context: Context) {
 
     // --- Called FROM C++ (the Lur::Transport BLE backend) ---
 
-    /** Send one datagram to the peer. Bytes are already minimal — send as-is. */
+    /** Send one datagram to the peer. Enqueued + serialized via flow control (issue #72). */
     @Suppress("unused")
     fun send(bytes: ByteArray) {
-        try {
+        synchronized(sendLock) {
+            sendQueue.addLast(bytes)
+            pumpSendLocked()
+        }
+    }
+
+    /** Issue the next queued datagram iff none is outstanding. Call under sendLock. */
+    private fun pumpSendLocked() {
+        if (sendInFlight || sendQueue.isEmpty()) return
+        val bytes = sendQueue.first()
+        val issued = try {
             val client = gattClient
             val clientCh = clientDatagram
             val central = connectedCentral
@@ -141,17 +163,41 @@ class BleShim(private val context: Context) {
             if (client != null && clientCh != null) {           // we are central -> write
                 clientCh.value = bytes
                 // Write WITHOUT response (issue #49): drop the ATT ack round-trip per
-                // datagram. App-level keepalives already provide the liveness net, and
-                // notifications (the reverse path) are unacknowledged anyway. Requires the
-                // peripheral to expose PROPERTY_WRITE_NO_RESPONSE (see startGattServer).
+                // datagram. Flow control (below) still paces us to one outstanding write.
                 clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                client.writeCharacteristic(clientCh)
+                client.writeCharacteristic(clientCh)            // true if accepted for tx
             } else if (central != null && serverCh != null) {   // we are peripheral -> notify
                 serverCh.value = bytes
-                gattServer?.notifyCharacteristicChanged(central, serverCh, false)
+                gattServer?.notifyCharacteristicChanged(central, serverCh, false) ?: false
+            } else {
+                sendQueue.clear()                               // no link -> drop the backlog
+                false
             }
         } catch (e: SecurityException) {
-            Log.e(TAG, "send: missing BLE permission", e)
+            Log.e(TAG, "send: missing BLE permission", e); false
+        }
+        if (issued) {
+            sendQueue.removeFirst()
+            sendInFlight = true
+            // Watchdog: if the completion callback never fires (dropped link), don't stall
+            // the queue forever — clear + resume after a bounded wait.
+            val tok = ++sendWatchdogTok
+            handler.postDelayed({
+                synchronized(sendLock) {
+                    if (sendInFlight && tok == sendWatchdogTok) { sendInFlight = false; pumpSendLocked() }
+                }
+            }, 300)
+        }
+        // If not issued (stack momentarily busy / returned false), leave it queued; the
+        // in-flight completion (or the watchdog) will call pumpSendLocked again.
+    }
+
+    /** A send completed (write ack'd locally / notification handed to the stack). */
+    private fun onSendComplete() {
+        synchronized(sendLock) {
+            sendInFlight = false
+            ++sendWatchdogTok                                   // invalidate the pending watchdog
+            pumpSendLocked()
         }
     }
 
@@ -265,6 +311,7 @@ class BleShim(private val context: Context) {
         clientDatagram = null
         try { gattClient?.close() } catch (_: SecurityException) {}
         gattClient = null
+        synchronized(sendLock) { sendQueue.clear(); sendInFlight = false; ++sendWatchdogTok }  // drop stale send state (#72)
         nativeOnDisconnected()
         startDiscovery()   // role-aware: cached peer -> one-sided, no reconnect collision
     }
@@ -355,6 +402,12 @@ class BleShim(private val context: Context) {
                 try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) }
                 catch (_: SecurityException) {}
             }
+        }
+
+        // Peripheral notification handed off to the stack -> send the next queued datagram
+        // (flow control for the peripheral direction, mirrors onCharacteristicWrite; #72).
+        override fun onNotificationSent(device: BluetoothDevice, status: Int) {
+            onSendComplete()
         }
 
         override fun onDescriptorWriteRequest(
@@ -493,6 +546,12 @@ class BleShim(private val context: Context) {
 
         override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
             if (characteristic.uuid == DATAGRAM_UUID) nativeOnReceived(characteristic.value)
+        }
+
+        // Central write completed (even WRITE_NO_RESPONSE fires this) -> send the next
+        // queued datagram. This is the flow control that stops moves being dropped (#72).
+        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+            if (characteristic.uuid == DATAGRAM_UUID) onSendComplete()
         }
     }
 
