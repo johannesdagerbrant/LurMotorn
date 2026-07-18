@@ -23,7 +23,7 @@
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$Root      = Split-Path -Parent $PSScriptRoot
+$Root      = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)  # Tools/ChessPieceArt/ -> repo root
 $AssetsDir = Join-Path $Root 'Games\Chess\Content\Pieces'
 $OutHeader = Join-Path $Root 'Games\Chess\View\Private\PieceMasks.h'
 

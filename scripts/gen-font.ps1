@@ -4,7 +4,7 @@
 #
 # The heavy lifting (rasterise outlines -> multi-channel signed distance field) is done
 # by msdf-atlas-gen — a SANCTIONED OFFLINE BUILD TOOL (MIT). It is downloaded on demand
-# to tools/ (gitignored), run here on the dev host / CI, and NEVER linked into the app
+# to .cache/ (gitignored), run here on the dev host / CI, and NEVER linked into the app
 # or its CMake build: only its output (this header) is committed. See CLAUDE.md.
 #
 # Usage:
@@ -31,7 +31,7 @@ if (-not (Test-Path $FontPath)) { throw "Missing font: $FontPath" }
 
 # --- Locate (or fetch) the pinned msdf-atlas-gen build tool -----------------------
 $ToolVersion = '1.4'
-$ToolDir     = Join-Path $Root 'tools\msdf-atlas-gen'
+$ToolDir     = Join-Path $Root '.cache\msdf-atlas-gen'
 $ToolExe     = Get-ChildItem -Path $ToolDir -Recurse -Filter 'msdf-atlas-gen.exe' -ErrorAction SilentlyContinue |
                Select-Object -First 1 -ExpandProperty FullName
 if (-not $ToolExe) {

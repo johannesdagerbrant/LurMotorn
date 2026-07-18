@@ -29,7 +29,7 @@ from pathlib import Path
 from PIL import Image
 
 SIZE = int(sys.argv[1]) if len(sys.argv) > 1 else 96
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent  # Tools/ChessPieceArt/ -> repo root
 OUT = ROOT / "Games" / "Chess" / "Content" / "Pieces"
 UA = "LurMotorn/0.1 (johannesdagerbrant@gmail.com)"
 

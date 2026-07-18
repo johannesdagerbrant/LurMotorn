@@ -43,6 +43,12 @@ scripts/*.log
 # Downloaded build artifacts (e.g. the sideloadable .ipa)
 /dist/
 
-# Offline cook tools (downloaded on demand by scripts/gen-font.ps1 — NOT committed;
-# msdf-atlas-gen is a sanctioned build-time tool, never linked into the app).
-/tools/
+# Offline cook tools downloaded on demand (e.g. msdf-atlas-gen by scripts/gen-font.ps1)
+# — NOT committed; sanctioned build-time tools, never linked into the app. (Was /tools/,
+# renamed to avoid colliding with the committed Tools/ dir on case-insensitive Windows.)
+/.cache/
+
+# Tools/ dev-utility build outputs (source is committed; built binaries are not).
+Tools/**/*.exe
+Tools/**/*.obj
+Tools/**/*.pdb
