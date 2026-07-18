@@ -95,6 +95,43 @@ static void TestCodecRoundTrip() {
     CHECK(W.GetBitCount() == 5);
 }
 
+// --- move-ORDERING determinism (issue #72 / CLAUDE.md gotcha #1) --------------------
+// Move ORDER is the wire protocol: the codec sends only an index into the legal list, so
+// GenerateLegalMoves MUST produce a byte-identical order on every compiler we ship (host
+// g++, Android NDK clang, iOS Apple clang). If the orders diverge, the two phones decode
+// the same index to different moves and desync mid-game (#72). This golden hash folds the
+// FULL order of every move list in a fixed DFS; CI runs it under Apple clang, so a match
+// on both compilers is proof the ordering is identical across the link.
+static void HashMoveList(const MoveList& M, uint64_t& H) {
+    auto Mix = [&H](uint64_t V) { H = (H ^ V) * 1099511628211ull; };  // FNV-1a step
+    Mix(static_cast<uint64_t>(M.Count));
+    for (int I = 0; I < M.Count; ++I) {
+        const Move& Mv = M.Moves[I];
+        Mix(static_cast<uint64_t>(Mv.From));
+        Mix(static_cast<uint64_t>(Mv.To));
+        Mix(static_cast<uint64_t>(Mv.Promo));
+        Mix(static_cast<uint64_t>(Mv.Flags));
+    }
+}
+static uint64_t OrderHash(const Board& B, int Depth, uint64_t H) {
+    MoveList M; GenerateLegalMoves(B, M);
+    HashMoveList(M, H);
+    if (Depth <= 1) return H;
+    for (int I = 0; I < M.Count; ++I) { Board C = B; C.MakeMove(M.Moves[I]); H = OrderHash(C, Depth - 1, H); }
+    return H;
+}
+static void TestMoveOrderingGolden() {
+    uint64_t H = 14695981039346656037ull;  // FNV-1a 64 offset basis
+    H = OrderHash(Board::StartPosition(), 4, H);
+    H = OrderHash(Board::FromFen(
+        "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1"), 3, H);  // Kiwipete
+    constexpr uint64_t Golden = 7097020949352453854ull;  // host g++; CI validates Apple clang matches
+    if (H != Golden)
+        std::printf("MOVE-ORDER golden = %lluull  (update the constant)\n",
+                    static_cast<unsigned long long>(H));
+    CHECK(H == Golden);
+}
+
 static void TestResults() {
     // Scholar's mate final position, black to move and checkmated.
     CHECK(Result(Board::FromFen(
@@ -110,6 +147,7 @@ static void TestResults() {
 int main() {
     TestPerft();
     TestCodecRoundTrip();
+    TestMoveOrderingGolden();
     TestResults();
 
     if (GFailures == 0) {
