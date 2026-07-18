@@ -6,7 +6,7 @@ decisions now baked into issues #75/#76; where this doc and an issue disagree, *
 wire details, the §2/§3 ~64-units/side assumption, and the entity-storage layout. Everything else
 in the v1 spec (game design, tick phases, behavior rules, win rule) still stands.*
 
-*The game lives at `Games/RocksPappersScissors/` (namespace `Rps`); the working title
+*The game lives at `Games/RocksPapersScissors/` (namespace `Rps`); the working title
 "Sten Sax Skog" is retired.*
 
 ---

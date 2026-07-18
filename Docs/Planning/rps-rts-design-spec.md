@@ -1,7 +1,7 @@
 # RPS-RTS — Design & Engine Spec (v1)
 
-> **Partially superseded (2026-07-19):** the game is now **RocksPappersScissors**
-> (`Games/RocksPappersScissors/`, namespace `Rps`); §7's wire details (sparse watermarks → per-tick
+> **Partially superseded (2026-07-19):** the game is now **RocksPapersScissors**
+> (`Games/RocksPapersScissors/`, namespace `Rps`); §7's wire details (sparse watermarks → per-tick
 > input-or-empty, 1-byte event codec, chunked resync), the §2/§3 ~64-units/side cap (raised; spatial
 > grid pulled into Phase 1), and the §6 entity layout (AoS struct → SoA arrays + snapshot handover)
 > are replaced by **`rps-rts-netcode-and-unit-system.md`**. Game design (tick phases, behavior,
