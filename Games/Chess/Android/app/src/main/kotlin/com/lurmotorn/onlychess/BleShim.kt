@@ -479,7 +479,14 @@ class BleShim(private val context: Context) {
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
             try {
                 if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
-                    Log.i(TAG, "central: connected, requesting MTU")
+                    // The central owns the connection interval, and the interval is the
+                    // dominant latency term on the link (issue #68: ~100 ms move-RTT is
+                    // mostly interval, not payload). HIGH asks for ~11.25-15 ms intervals.
+                    // Best-effort: the peer/controller may negotiate it down. When iOS is
+                    // the central the interval is iOS-managed (~15-30 ms) and cannot be
+                    // requested — documented as best-effort in #68.
+                    val fast = gatt.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+                    Log.i(TAG, "central: connected, conn priority HIGH=$fast, requesting MTU")
                     gatt.requestMtu(247)
                     return
                 }
