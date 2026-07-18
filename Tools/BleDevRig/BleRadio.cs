@@ -74,6 +74,10 @@ class BleRadio {
     static long g_txCount, g_rxCount, g_txBytes, g_rxBytes;
     static double g_txMs, g_txMin = double.MaxValue, g_txMax;
 
+    // Keep the connection-parameters request referenced so the OS honours the fast
+    // interval for the life of the link (issue #68); GC'ing it drops the preference.
+    static object g_connReq;
+
     static int Main() {
         g_out = Console.OpenStandardOutput();
         Log("central radio starting (scan -> connect -> relay); Ctrl-C to stop");
@@ -127,6 +131,19 @@ class BleRadio {
             Log("no GATT service: " + svc.Status); dev.Dispose(); return;
         }
         var s = svc.Services[0];
+
+        // Ask the OS for the shortest connection interval it allows (issue #68): the
+        // central owns the interval, and it's the dominant latency term (baseline write
+        // RTT was interval-bound, min 26ms vs avg 111ms). Needs Windows 10 2004+.
+        try {
+            var req = dev.RequestPreferredConnectionParameters(
+                BluetoothLEPreferredConnectionParameters.ThroughputOptimized);
+            g_connReq = req;  // keep referenced so the preference persists
+            Log("connection params -> ThroughputOptimized: " +
+                (req != null ? req.Status.ToString() : "null"));
+        } catch (Exception e) {
+            Log("connection-params request unavailable (needs Win10 2004+): " + e.Message);
+        }
 
         // Read the peer's persistent device-id (drives colour/stats + role sanity).
         string peerId = "";
