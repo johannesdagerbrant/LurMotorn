@@ -14,38 +14,61 @@ Development build). This rig only toggles and observes them.
 ## One command
 
 ```
-Tools\DeviceRig\device-rig.bat -Action run -Matches 3
+Tools\DeviceRig\device-rig.bat -Action cycle -Iterations 3
 ```
 
-Arms both peers, (re)launches, captures both engine logs, and reports the same-frame
-tally after N matches. Other actions: `install`, `arm`, `disarm`, `reset`, `launch`,
-`tail -Peer <android|ios>`, `shot`, `status`.
+`cycle` is the **fully autonomous loop** (#70): `(fetch →) install-if-changed → [run →
+analyze] ×N`, with **zero human interaction per iteration** after the one-time setup
+below. `run` is one measured pass on its own — arms both peers, (re)launches, captures
+both engine logs, and reports the same-frame tally after N matches. Other actions:
+`install`, `arm`, `disarm`, `reset`, `launch`, `tail -Peer <android|ios>`, `shot`,
+`status`.
 
-## Bringing the iOS loop closer to Android
+## The iOS loop is now autonomous (no admin) — one Apple gate remains
 
-Android is fully headless (adb). iOS is *mostly* headless after some one-time setup —
-with an honest exception for install:
+Android is fully headless (adb). iOS is now headless too — the old admin-tunnel gate is
+gone. The single genuine exception is signing a **new** binary, which is an Apple security
+gate (code signing) that can't be automated away without handling Apple-ID credentials —
+something this project deliberately does not do.
 
 | Step | Android | iOS | Headless? |
 |---|---|---|---|
-| Launch the app | `adb monkey` | `-Action launch` → `pymobiledevice3 developer dvt launch` | **Yes**, once a RemoteXPC **tunnel** is up: `sudo python -m pymobiledevice3 remote tunneld` (needs admin; **one-time per boot**, persists) |
+| Launch the app | `adb monkey` | `-Action launch` → `developer dvt launch --userspace` | **Yes — no admin.** The iOS 17+ **userspace** tunnel is a pure-Python net stack; no `sudo`/`tunneld`. |
 | Arm autoplay | `setprop debug.lur.autoplay 1` | push `Documents/autoplay` marker (`apps push … Documents/autoplay`, container-vend — **not** `--documents`, which `InstallationLookupFailed`s on iOS 26) | **Yes** |
 | Tail engine log | `logcat -s OnlyChess:*` | `syslog live \| grep OnlyChess` (the `-m` message match does **not** filter on iOS 26) | **Yes** |
-| Screenshot | `screencap` | `developer dvt screenshot` | **Yes**, via the same tunnel as launch |
-| Install a NEW build | `adb install -r` | `-Action install` opens Sideloadly at the `.ipa` | **No — assisted (GUI).** See below. |
+| Screenshot | `screencap` | `developer dvt screenshot --userspace` | **Yes — no admin** (same userspace tunnel as launch). |
+| Install a NEW build | `adb install -r` | `-SignedIpa`/`-ZsignP12` → `apps install` (headless), else Sideloadly GUI (assisted) | **Yes if signed; assisted otherwise.** See below. |
 
-**Install is honestly not headless, and here's why (learned this session):** Sideloadly's
-CLI just raises the already-running GUI instance — its `--silent`/`--enqueue` flags are
-ignored whenever an instance holds `localhost:28811` (always). The only headless path is
-POSTing a plist (`appleId` + a cached `passwordToken`) to its **private** `/enqueue` API —
-fragile and credential-sensitive, so we don't automate it. **But you rarely need it:** the
-Sideloadly **daemon auto-refreshes** the installed build's signature before the 7-day
-free-cert expiry, so a re-install is only required when the `.ipa` itself changes (new
-code) — a quick GUI drag-drop/confirm (first time also does Apple-ID login + 2FA).
+**Launch/screenshot no longer need admin (superseded).** On `pymobiledevice3` 9.33.4,
+`developer dvt … --userspace` stands up the iOS 17+ tunnel *in-process* with a userspace
+network stack, so it needs **no root/admin** — verified launching + screenshotting the app
+from this non-admin shell. The old `sudo remote tunneld` one-time-per-boot step is gone.
 
-So the practical smooth loop is: **start `remote tunneld` once per boot (admin)**, and
-after any new-build install, `device-rig.bat -Action run` **launches, arms, plays, and
-measures without you** — re-installs only when the code changed.
+**Install of a new binary — three routes, most-headless first:**
+1. **`-SignedIpa <path>`** → `pymobiledevice3 apps install` — fully headless, no GUI.
+2. **`-ZsignP12 <p12> -ZsignProfile <mobileprovision>`** → the rig `zsign`s the unsigned CI
+   `.ipa` with a **persisted free dev cert**, then `apps install` — fully headless for the
+   7-day life of that cert. `zsign` is a dev-only Tool (MIT), never linked into the app.
+3. **Neither** → opens Sideloadly at the `.ipa` (**assisted** — the one human touch; first
+   run also does the Apple-ID login + 2FA). We don't drive Sideloadly's private `/enqueue`
+   API — it's credential-sensitive and fragile.
+
+**You rarely re-install at all:** `cycle` hashes the `.ipa` and **skips install when it's
+unchanged** — the Sideloadly daemon keeps an unchanged build's signature fresh until the
+7-day cert expiry. So re-running experiments back-to-back is entirely hands-off; only a
+genuinely new binary hits the signing gate.
+
+### One-time setup (minimal, each an unavoidable Apple gate)
+
+1. **Sideloadly login once** (or drop in a persisted free dev cert for zsign) — needed
+   because Apple requires a signing identity + 2FA. Renew the free cert **weekly** (Apple's
+   7-day free-provisioning limit).
+2. **First-launch Bluetooth allow** — one tap the first time a *fresh install* runs (Apple
+   TCC). Unchanged installs keep the grant, so this is per-new-binary, not per-iteration.
+3. ~~Admin tunnel per boot~~ — **no longer required** (userspace tunnel).
+
+After that, `device-rig.bat -Action cycle` launches, arms, plays, measures, and repeats
+with no human touch — re-signing only when the code actually changes.
 
 ## App config (`$App` in device-rig.ps1)
 
