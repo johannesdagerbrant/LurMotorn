@@ -162,7 +162,8 @@ const char* ColorName(Chess::EColor C) { return C == Chess::EColor::White ? "Whi
 // GamesToPlay > 0 stops after that many completed matches (0 = run until the window
 // closes). Every ~1s it logs a connection-quality line; on exit it reports the
 // same-frame reply tally (did our reply ship the frame we received the peer's move?).
-int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool Auto, int GamesToPlay) {
+int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool Auto, int GamesToPlay,
+           int LoopMs) {
     Lur::Log::Info("LurMotorn desktop (Workbench) - BLE peer vs phone (radio=%s)", RadioExe);
 
     GameInstance G;
@@ -284,7 +285,7 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
             Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        if (LoopMs > 0) std::this_thread::sleep_for(std::chrono::milliseconds(LoopMs));
     }
 
     Lur::Log::Info("SAME-FRAME REPLY REPORT: %llu/%llu peer moves answered same frame "
@@ -311,12 +312,14 @@ int main(int argc, char** argv) {
     std::string Script;  // "--script f2f3,e7e5,..." = scripted match (we play our colour's)
     bool Auto = false;   // "--auto" = play a random legal move every frame it's our turn
     int Games = 0;       // "--games N" = stop after N completed matches (0 = until closed)
+    int LoopMs = 8;      // "--loop-ms N" = per-frame sleep (0 = busy loop; probes loop-cadence latency)
     for (int i = 1; i < argc; ++i) {
         std::string Arg = argv[i];
         if (Arg == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
         else if (Arg == "--script" && i + 1 < argc) Script = argv[++i];
         else if (Arg == "--auto") Auto = true;
         else if (Arg == "--games" && i + 1 < argc) Games = std::atoi(argv[++i]);
+        else if (Arg == "--loop-ms" && i + 1 < argc) LoopMs = std::atoi(argv[++i]);
         else if (Arg == "--ble") {
             Ble = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') RadioExe = argv[++i];
@@ -324,7 +327,7 @@ int main(int argc, char** argv) {
     }
 
     // Dev-rig mode: a single window driven over real Bluetooth by the C# radio.
-    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames, Script, Auto, Games);
+    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames, Script, Auto, Games, LoopMs);
 
     Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 
