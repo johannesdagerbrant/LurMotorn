@@ -1,5 +1,12 @@
 # RPS-RTS — Design & Engine Spec (v1)
 
+> **Partially superseded (2026-07-19):** the game is now **RocksPappersScissors**
+> (`Games/RocksPappersScissors/`, namespace `Rps`); §7's wire details (sparse watermarks → per-tick
+> input-or-empty, 1-byte event codec, chunked resync), the §2/§3 ~64-units/side cap (raised; spatial
+> grid pulled into Phase 1), and the §6 entity layout (AoS struct → SoA arrays + snapshot handover)
+> are replaced by **`rps-rts-netcode-and-unit-system.md`**. Game design (tick phases, behavior,
+> economy, win rule) still stands. Issues #75/#76 are the actionable source of truth.
+
 *Working title: **Sten Sax Skog**. Two phones, BLE, LurMotorn. Purpose-built as game #2: it must stress what chess never touched (ticks, simultaneous input, continuous space, RNG, entity arrays) while staying inside the engine's thesis — derive everything from a tiny input stream.*
 
 *Locked by your answers: open 2D field · lumberjacks physically walk to trees and are raidable · win by wiping all enemy units. Standing assumptions (veto anytime): input is only the four buttons; whole battlefield on one screen, view flipped per player; RPS = damage multipliers, not instakills; ~64 units/side cap; nearest-enemy targeting as the first playtest knob.*

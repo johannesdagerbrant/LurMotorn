@@ -231,12 +231,21 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
 
 ## Planning & project state
 
-**GitHub issues are the source of truth** for sequencing, priority, current state, and any new
-planning — start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File
-or update an issue for new plans; don't record planning or current-state in `CLAUDE.md` (keep this file
-to durable, always-true guidance). The `Docs/Planning/*.md` files (master roadmap, the two reviews, the
-RPS-RTS spec) are **legacy artifacts** — read them for *rationale and narrative*, but where a doc
-disagrees with an issue, the issue wins.
+Planning lives in two homes, split by *kind*:
+
+- **GitHub issues own WORK** — tasks, bugs, epics, the roadmap, sequencing, priority, and current
+  state. Start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File or
+  update an issue for new plans; don't record planning or current-state in `CLAUDE.md` (keep this file
+  to durable, always-true guidance).
+- **`Docs/Planning/*.md` owns DESIGN** — design docs and feature specs (rationale, architecture, wire
+  formats, the "why"). These come in two states, marked in `Docs/Planning/README.md`'s index:
+  **LIVING** docs are amended in place (dated changelog note) whenever a design decision changes —
+  rationale must not rot in issue threads; **LEGACY** docs (the original July-2026 synthesis: master
+  roadmap, the two reviews) are frozen narrative.
+
+Precedence: where any doc disagrees with an issue on *sequencing/priority/state*, **the issue wins**;
+when a *design* changes, update the living doc and cross-link it from the issue. State never goes in
+docs (it rots); design never goes only in issues (it gets buried).
 
 ## Documentation (CodeViewer sessions)
 
