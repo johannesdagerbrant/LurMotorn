@@ -158,7 +158,8 @@ bool WindowsBleTransport::WriteFrame(char Tag, const uint8_t* Data, std::size_t 
 void WindowsBleTransport::Send(const uint8_t* Data, std::size_t Size) {
     if (!Connected) return;  // no link: drop, matching the BLE backends
     if (Size > kMaxFrame) { Log("BLE dev-rig: datagram too large (%zu) — dropped", Size); return; }
-    if (!WriteFrame('D', Data, Size)) Log("BLE dev-rig: failed to write datagram to radio");
+    if (WriteFrame('D', Data, Size)) { ++DatagramsOut; BytesOut += Size; }
+    else Log("BLE dev-rig: failed to write datagram to radio");
 }
 
 } // namespace Lur::DevRig

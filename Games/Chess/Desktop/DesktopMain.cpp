@@ -136,11 +136,24 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
     if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
 }
 
+// Parse an algebraic square ("e2") to an index 0..63 (a1=0, h8=63), or -1 if bad.
+int ParseSquare(const char* S) {
+    if (S[0] < 'a' || S[0] > 'h' || S[1] < '1' || S[1] > '8') return -1;
+    return (S[1] - '1') * 8 + (S[0] - 'a');
+}
+
+const char* ColorName(Chess::EColor C) { return C == Chess::EColor::White ? "White" : "Black"; }
+
 // The dev-rig path (issue #58): ONE desktop window, wired to the phone over real BLE
 // via WindowsBleTransport instead of the loopback pair. The phone talks to it as if
 // it were a second phone — the whole point of the Workbench's third radio. Returns a
 // process exit code.
-int RunBle(const char* RadioExe, int MaxFrames) {
+//
+// Script is a comma-separated move list ("f2f3,e7e5,g2g4,d8h4"); on our turn the
+// endpoint plays the first entry that's currently legal for our colour and drops it
+// (the peer's entries are played on the phone), so one shared script drives both
+// sides of a full match. Every ~1s it logs a connection-quality line.
+int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script) {
     Lur::Log::Info("LurMotorn desktop (Workbench) - BLE peer vs phone (radio=%s)", RadioExe);
 
     GameInstance G;
@@ -160,8 +173,23 @@ int RunBle(const char* RadioExe, int MaxFrames) {
     G.Session.Start(&Ble, G.DeviceId);
     Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", G.DeviceId.c_str());
 
+    // Parse the move script into (From,To) pairs we play on our turn.
+    std::vector<std::pair<int, int>> Moves;
+    for (std::size_t i = 0; i + 3 < Script.size();) {
+        while (i < Script.size() && Script[i] == ',') ++i;
+        if (i + 3 >= Script.size() + 1) break;
+        int From = ParseSquare(&Script[i]);
+        int To   = (i + 2 < Script.size()) ? ParseSquare(&Script[i + 2]) : -1;
+        if (From >= 0 && To >= 0) Moves.emplace_back(From, To);
+        i += 4;
+    }
+    if (!Moves.empty()) Lur::Log::Info("script: %zu moves loaded (we play the ones legal on our turn)", Moves.size());
+
     int Frame = 0;
     bool Linked = false;
+    uint64_t SinceMoveNs = 0;    // pace scripted moves so both boards keep lockstep
+    uint64_t TraceAccumNs = 0;   // ~1 Hz connection-quality trace
+    uint32_t LastRecv = 0;
     auto PrevTime = std::chrono::steady_clock::now();
     while (G.Win.PumpEvents()) {
         const auto Now = std::chrono::steady_clock::now();
@@ -173,8 +201,43 @@ int RunBle(const char* RadioExe, int MaxFrames) {
         if (!Linked && G.Session.IsReady()) {
             Linked = true;
             G.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
-            Lur::Log::Info("handshake complete - live over BLE with peer %.8s",
-                           G.Session.GetPeerGuid().c_str());
+            Lur::Log::Info("handshake complete - live over BLE with peer %.8s; we are %s",
+                           G.Session.GetPeerGuid().c_str(), ColorName(G.Match.MyColor()));
+        }
+
+        // Note peer moves as they land (recv counter ticks) so the trace shows both dirs.
+        const uint32_t Recv = G.Session.GetDatagramsReceived();
+        if (Linked && Recv != LastRecv) {
+            Lur::Log::Info("<- peer datagram (#%u); side to move now %s", Recv, ColorName(G.Match.SideToMove()));
+            LastRecv = Recv;
+            SinceMoveNs = 0;  // give the local board a beat to apply before we reply
+        }
+
+        // Scripted move driver: on our turn, play the first legal remaining move.
+        SinceMoveNs += ElapsedNs;
+        if (Linked && !Moves.empty() && G.Match.IsMyTurn() && SinceMoveNs > 600'000'000ull) {
+            for (std::size_t i = 0; i < Moves.size(); ++i) {
+                if (G.View.PlayMove(static_cast<Chess::Square>(Moves[i].first),
+                                    static_cast<Chess::Square>(Moves[i].second))) {
+                    Lur::Log::Info("-> played %c%c%c%c (%zu scripted moves left)",
+                                   'a' + Moves[i].first % 8, '1' + Moves[i].first / 8,
+                                   'a' + Moves[i].second % 8, '1' + Moves[i].second / 8, Moves.size() - 1);
+                    Moves.erase(Moves.begin() + i);
+                    SinceMoveNs = 0;
+                    break;
+                }
+            }
+        }
+
+        // Connection-quality trace (~1 Hz): link, byte/datagram throughput, liveness.
+        TraceAccumNs += ElapsedNs;
+        if (Linked && TraceAccumNs > 1'000'000'000ull) {
+            TraceAccumNs = 0;
+            Lur::Log::Info("QUAL link=%d tx=%u/%lluB rx=%u/%lluB sinceRx=%llums frame=%.1fms",
+                           static_cast<int>(G.Session.GetLinkState()),
+                           G.Session.GetDatagramsSent(), (unsigned long long)Ble.GetBytesOut(),
+                           G.Session.GetDatagramsReceived(), (unsigned long long)Ble.GetBytesIn(),
+                           (unsigned long long)(G.Session.GetNsSinceRecv() / 1'000'000ull), G.FrameMs);
         }
 
         const uint64_t NowNs =
@@ -205,9 +268,11 @@ int main(int argc, char** argv) {
     int MaxFrames = 0;  // 0 = run until a window is closed; "--frames N" = headless smoke
     bool Ble = false;   // "--ble [path]" = one window, live over real BLE to the phone
     std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
+    std::string Script;  // "--script f2f3,e7e5,..." = scripted match (we play our colour's)
     for (int i = 1; i < argc; ++i) {
         std::string Arg = argv[i];
         if (Arg == "--frames" && i + 1 < argc) MaxFrames = std::atoi(argv[++i]);
+        else if (Arg == "--script" && i + 1 < argc) Script = argv[++i];
         else if (Arg == "--ble") {
             Ble = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') RadioExe = argv[++i];
@@ -215,7 +280,7 @@ int main(int argc, char** argv) {
     }
 
     // Dev-rig mode: a single window driven over real Bluetooth by the C# radio.
-    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames);
+    if (Ble) return RunBle(RadioExe.c_str(), MaxFrames, Script);
 
     Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 

@@ -22,6 +22,7 @@
 // trips on winmd/facade type identity, so we drive IAsyncOperation<T> via
 // .Status/.GetResults() through the Wait<T> helper — never `await`.
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using Windows.Foundation;
@@ -68,6 +69,10 @@ class BleRadio {
 
     // Signalled when the current link drops, so the main loop rescans + reconnects.
     static readonly ManualResetEventSlim g_dropped = new ManualResetEventSlim(false);
+
+    // Connection-quality counters (write RTT = one ATT round trip; see StdinPump).
+    static long g_txCount, g_rxCount, g_txBytes, g_rxBytes;
+    static double g_txMs, g_txMin = double.MaxValue, g_txMax;
 
     static int Main() {
         g_out = Console.OpenStandardOutput();
@@ -148,6 +153,8 @@ class BleRadio {
         data.ValueChanged += (s2, e2) => {
             var b = new byte[e2.CharacteristicValue.Length];
             DataReader.FromBuffer(e2.CharacteristicValue).ReadBytes(b);
+            g_rxCount++; g_rxBytes += b.Length;
+            Log(string.Format("RX notify {0}B (total {1} pkt / {2}B)", b.Length, g_rxCount, g_rxBytes));
             SendFrame('D', b);          // datagram in -> host
         };
         var cccd = Wait(data.WriteClientCharacteristicConfigurationDescriptorAsync(
@@ -190,11 +197,22 @@ class BleRadio {
             try {
                 var writer = new DataWriter();
                 writer.WriteBytes(payload);
-                // The phone's datagram characteristic is WRITE (with response); match it.
+                // The phone's datagram characteristic is WRITE (with response), so the
+                // async completes on the ATT write RESPONSE — one BLE connection-interval
+                // round trip. Timing it is a real per-datagram link-latency probe.
+                var sw = Stopwatch.StartNew();
                 var res = Wait(data.WriteValueWithResultAsync(writer.DetachBuffer(),
                                                               GattWriteOption.WriteWithResponse));
-                if (res.Status != GattCommunicationStatus.Success)
+                sw.Stop();
+                double ms = sw.Elapsed.TotalMilliseconds;
+                if (res.Status != GattCommunicationStatus.Success) {
                     Log("write failed: " + res.Status);
+                } else {
+                    g_txCount++; g_txBytes += payload.Length;
+                    g_txMs += ms; if (ms < g_txMin) g_txMin = ms; if (ms > g_txMax) g_txMax = ms;
+                    Log(string.Format("TX {0}B rtt={1:F1}ms (n={2} avg={3:F1} min={4:F1} max={5:F1})",
+                                      payload.Length, ms, g_txCount, g_txMs / g_txCount, g_txMin, g_txMax));
+                }
             } catch (Exception e) {
                 Log("write threw: " + e.Message);
             }

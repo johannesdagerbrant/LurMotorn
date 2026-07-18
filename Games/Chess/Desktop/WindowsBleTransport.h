@@ -46,6 +46,13 @@ public:
     // The peer's persistent device id, learned when the radio announces the link.
     const std::string& GetPeerId() const { return PeerId; }
 
+    // Byte/datagram counters for the connection-quality trace (issue #58). Counted on
+    // the engine thread (Send + drained OnDatagram), so plain reads are consistent.
+    uint64_t GetBytesOut() const { return BytesOut; }
+    uint64_t GetBytesIn() const  { return BytesIn; }
+    uint64_t GetDatagramsOut() const { return DatagramsOut; }
+    uint64_t GetDatagramsIn() const  { return DatagramsIn; }
+
     // --- ITransport ---
     void Send(const uint8_t* Data, std::size_t Size) override;
     void SetReceiver(Lur::Transport::ITransport::Receiver NewReceiver) override {
@@ -59,6 +66,7 @@ private:
     void OnConnected() override    { Connected = true; }
     void OnDisconnected() override { Connected = false; }
     void OnDatagram(const uint8_t* Data, std::size_t Size) override {
+        ++DatagramsIn; BytesIn += Size;
         if (ReceiverFn) ReceiverFn(Data, Size);
     }
 
@@ -74,6 +82,7 @@ private:
     Lur::Transport::EventInbox Inbox;
     std::atomic<bool>          Connected{false};  // only mutated on engine thread
     std::string                PeerId;            // set on the reader thread pre-Connected
+    uint64_t BytesOut = 0, BytesIn = 0, DatagramsOut = 0, DatagramsIn = 0;  // engine-thread counters
 
     std::thread       Reader;
     std::atomic<bool> Running{false};

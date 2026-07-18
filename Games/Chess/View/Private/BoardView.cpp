@@ -332,6 +332,32 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
 }
 
+bool BoardView::PlayMove(Square From, Square To) {
+    if (State == nullptr || !CanMoveNow()) return false;
+    const Board& B = State->CurrentBoard();
+    MoveList Legal; GenerateLegalMoves(B, Legal);
+    const Move* Chosen = nullptr;
+    for (int i = 0; i < Legal.Count; ++i) {
+        const Move& M = Legal.Moves[i];
+        if (M.From != From || M.To != To) continue;
+        if (M.Flags & MoveFlagPromotion) { if (M.Promo == EPieceType::Queen) Chosen = &M; }
+        else { Chosen = &M; }
+    }
+    if (Chosen == nullptr) return false;
+    // Identical to OnTap's move branch: ship the index BEFORE applying, so both
+    // boards advance off the same pre-move legal list.
+    if (Net != nullptr) {
+        Lur::Serialization::BitWriter W;
+        EncodeMove(*Chosen, Legal, W);
+        const std::vector<uint8_t>& Bytes = W.Finish();
+        Net->SendMove(Bytes.data(), Bytes.size());
+    }
+    State->ApplyMove(*Chosen);
+    StampMove();
+    Selected = NoSquare;
+    return true;
+}
+
 void BoardView::AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManager* SyncMgr,
                                   std::string LocalGuid) {
     Persist = Store;
