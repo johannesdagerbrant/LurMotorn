@@ -565,14 +565,21 @@ static void TestKeepaliveHashMismatchTriggersResync() {
         T.Deliver(KA, sizeof(KA));
     };
     DeliverKA(0xB2B2B2B2ull);
+    CHECK(ResyncFires == 0);                      // one mismatch could be an in-flight move
+    CHECK(!S.IsAwaitingResync());
+    DeliverKA(0xB2B2B2B2ull);                     // SAME divergent hash again -> peer is stuck
     CHECK(ResyncFires == 1);
     CHECK(S.IsAwaitingResync());
 
     // Reconcile (a Sync clears the gate); a MATCHING keepalive must NOT re-trigger.
     T.Deliver(Sync, sizeof(Sync));
     CHECK(!S.IsAwaitingResync());
-    DeliverKA(MyHash);
+    DeliverKA(MyHash); DeliverKA(MyHash);
     CHECK(ResyncFires == 1);                      // no spurious resync when hashes agree
+
+    // A transient (in-flight) mismatch that changes each keepalive must NOT trigger.
+    DeliverKA(0xC3C3C3C3ull); DeliverKA(0xD4D4D4D4ull);
+    CHECK(ResyncFires == 1);                      // different hashes each time = normal play
 }
 
 // End to end: two synced peers, one loses a live move (never sent), so their boards

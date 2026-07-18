@@ -204,6 +204,8 @@ private:
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook
     bool     AwaitingResync     = false;  // hold moves until the link-time Sync lands (#71)
     uint64_t ResyncWaitNs       = 0;      // ns spent awaiting the peer's Sync (fallback timeout)
+    uint64_t LastPeerHash       = 0;      // peer's previous keepalive hash (#72 desync detect)
+    bool     HavePeerHash       = false;  // have we seen a peer keepalive hash yet?
 
     Handler               Handlers[MaxMsgTypes];
     Handler                 MoveHandler;        // bare 1-byte live move (issue #19)

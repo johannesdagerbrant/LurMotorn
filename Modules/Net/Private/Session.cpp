@@ -163,15 +163,20 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
 
     if (Type == EMsgType::Hello) { OnHello(Payload, PayloadSize); return; }
     if (Type == EMsgType::Keepalive) {
-        // v5 keepalives carry the peer's state hash: a mismatch means our boards have
-        // diverged mid-game (a lost move on a live link) — heal it by resyncing (#72).
+        // v5 keepalives carry the peer's state hash. A mismatch alone is NOT proof of
+        // desync: during normal play a move is often in flight (we moved, the peer's
+        // keepalive still reflects the pre-move board), which differs only transiently.
+        // Only resync when the peer is STUCK at the SAME divergent hash across two
+        // keepalives — an in-flight move advances the hash, so it won't repeat, but a
+        // genuine desync (both peers waiting) holds a constant, mismatched hash (#72).
         if (PayloadSize >= 8 && StateHashFn && Ready && !AwaitingResync) {
             uint64_t Peer = 0;
             for (int i = 0; i < 8; ++i) Peer |= static_cast<uint64_t>(Payload[i]) << (8 * i);
-            if (Peer != StateHashFn()) {
-                Logf("keepalive state mismatch — desync, requesting resync");
+            if (Peer != StateHashFn() && HavePeerHash && Peer == LastPeerHash) {
+                Logf("keepalive state mismatch persisted — desync, requesting resync");
                 RequestResync();
             }
+            LastPeerHash = Peer; HavePeerHash = true;
         }
         return;  // liveness only; already counted above
     }
