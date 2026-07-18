@@ -127,6 +127,7 @@
     };
     Session->SetReadyHandler(OnLive);
     Session->SetResyncHandler(OnLive);                         // reconnect: re-adopt + re-sync
+    Session->SetStateHashFn([M = &_Match] { return M->PositionHash(); });  // desync detection (#72)
     Session->SetHandler(Lur::Net::EMsgType::Sync,
                         [View, Sync, Session](const uint8_t* D, std::size_t N) {
                             if (View->ActiveOpponentGuid() == Session->GetPeerGuid())

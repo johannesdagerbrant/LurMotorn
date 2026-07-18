@@ -130,6 +130,7 @@ void android_main(android_app* App) {
     };
     State.Session.SetReadyHandler(OnLive);
     State.Session.SetResyncHandler(OnLive);                              // reconnect: re-adopt + re-sync
+    State.Session.SetStateHashFn([&State] { return State.Match.PositionHash(); });  // desync detection (#72)
     State.Session.SetHandler(Lur::Net::EMsgType::Sync,
                              [&State, &Sync](const uint8_t* D, std::size_t N) {
                                  if (State.View.ActiveOpponentGuid() == State.Session.GetPeerGuid())

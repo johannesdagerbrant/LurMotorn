@@ -276,7 +276,10 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     MoveList Legal; GenerateLegalMoves(State->CurrentBoard(), Legal);
     Lur::Serialization::BitReader R(Data, Size);
     const Move Mv = DecodeMove(R, Legal);
-    if (!R.IsOk() || Mv == Move{}) return;                         // corrupt/out-of-range guard
+    if (!R.IsOk() || Mv == Move{}) {                               // index won't decode -> boards diverged
+        if (Net != nullptr) Net->RequestResync();                 // heal instead of silently dropping (#72)
+        return;
+    }
     if (State->HasIdentity() && State->SideToMove() == State->MyColor()) return;  // not the peer's turn
     State->ApplyMove(Mv);
     StampMove();

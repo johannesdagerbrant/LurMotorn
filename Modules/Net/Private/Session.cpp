@@ -123,8 +123,27 @@ void Session::SendMove(const uint8_t* Data, std::size_t Size) {
 
 void Session::SendKeepalive() {
     if (Transport == nullptr || !Transport->IsConnected()) return;
-    const uint8_t Pad = 0;
-    Send(EMsgType::Keepalive, &Pad, 1);  // [type][pad] = 2 bytes, never a 1-byte move
+    if (StateHashFn) {
+        // v5: carry the game state hash so the peer can spot a mid-game desync (#72).
+        const uint64_t H = StateHashFn();
+        uint8_t P[8];
+        for (int i = 0; i < 8; ++i) P[i] = static_cast<uint8_t>(H >> (8 * i));
+        Send(EMsgType::Keepalive, P, sizeof(P));   // [type][8-byte hash]
+    } else {
+        const uint8_t Pad = 0;
+        Send(EMsgType::Keepalive, &Pad, 1);        // [type][pad] = 2 bytes, never a 1-byte move
+    }
+}
+
+// Force a resync: gate moves and ask the game to re-send its state. Both peers doing
+// this (each also detects the mismatch on the other's keepalive) re-exchange Sync and
+// MergeIfNewer reconciles them — self-healing a mid-game desync (#72).
+void Session::RequestResync() {
+    if (Transport == nullptr || !Ready) return;
+    if (AwaitingResync) return;                    // already resyncing; don't storm
+    AwaitingResync = true; ResyncWaitNs = 0;
+    Logf("requesting resync (re-sending state)");
+    if (ResyncHandler) ResyncHandler();
 }
 
 void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
@@ -143,7 +162,19 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     const std::size_t PayloadSize = Size - 1;
 
     if (Type == EMsgType::Hello) { OnHello(Payload, PayloadSize); return; }
-    if (Type == EMsgType::Keepalive) return;  // liveness only; already counted above
+    if (Type == EMsgType::Keepalive) {
+        // v5 keepalives carry the peer's state hash: a mismatch means our boards have
+        // diverged mid-game (a lost move on a live link) — heal it by resyncing (#72).
+        if (PayloadSize >= 8 && StateHashFn && Ready && !AwaitingResync) {
+            uint64_t Peer = 0;
+            for (int i = 0; i < 8; ++i) Peer |= static_cast<uint64_t>(Payload[i]) << (8 * i);
+            if (Peer != StateHashFn()) {
+                Logf("keepalive state mismatch — desync, requesting resync");
+                RequestResync();
+            }
+        }
+        return;  // liveness only; already counted above
+    }
 
     Logf("recv msg type=%u size=%zu", static_cast<unsigned>(Data[0]), PayloadSize);
     // The peer's link-time Sync reconciles both boards: lift the resync gate so live

@@ -30,7 +30,10 @@ enum class EMsgType : uint8_t {
 //     stats key (issue #18), independent of the BLE radio role.
 // v4: live moves are a BARE 1-byte index (no type tag); every framed message is
 //     padded to >=2 bytes, so datagram length disambiguates (issue #19/#15).
-inline constexpr uint8_t ProtocolVersion = 4;
+// v5: Keepalive carries an 8-byte game state hash so a mid-game desync (a lost move
+//     while the link stays up) is detected and auto-healed by re-exchanging Sync,
+//     instead of deadlocking with no recovery (issue #72).
+inline constexpr uint8_t ProtocolVersion = 5;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {
@@ -123,8 +126,22 @@ public:
     // Fired when the link is re-established after a drop (post-handshake). This is
     // the generic reconnect-flow shell: the engine detects the reconnect and pokes
     // the game, which resynchronises its own state (e.g. exchange move history via
-    // an EMsgType::Sync message) so both peers converge again.
+    // an EMsgType::Sync message) so both peers converge again. Also fired when a
+    // mid-game desync is detected (see RequestResync / the keepalive state hash).
     void SetResyncHandler(std::function<void()> H) { ResyncHandler = std::move(H); }
+
+    // Optional hook returning a hash of the game's authoritative state (chess: the
+    // board position). If set, it rides every Keepalive; the peer compares it to its
+    // own and, on a mismatch, triggers a resync — so a mid-game divergence (a live
+    // move that was lost while the link stayed up) self-heals instead of deadlocking
+    // (issue #72). Must be identical on both peers when they agree (game-defined).
+    void SetStateHashFn(std::function<uint64_t()> F) { StateHashFn = std::move(F); }
+
+    // Force a resync now: hold moves (IsAwaitingResync) and fire ResyncHandler so the
+    // game re-sends its state. Call when the game detects a desync (e.g. an inbound
+    // move that won't decode against the local board). Also invoked internally on a
+    // keepalive state-hash mismatch. Both peers re-exchanging Sync reconciles them.
+    void RequestResync();
 
     // Optional debug sink for handshake tracing. The app supplies a platform logger
     // (logcat / os_log); the session stays platform-free. No-op if unset.
@@ -189,10 +206,11 @@ private:
     uint64_t ResyncWaitNs       = 0;      // ns spent awaiting the peer's Sync (fallback timeout)
 
     Handler               Handlers[MaxMsgTypes];
-    Handler               MoveHandler;          // bare 1-byte live move (issue #19)
-    std::function<void()> ReadyHandler;
-    std::function<void()> ResyncHandler;
-    LogFn                 Log;
+    Handler                 MoveHandler;        // bare 1-byte live move (issue #19)
+    std::function<void()>   ReadyHandler;
+    std::function<void()>   ResyncHandler;
+    std::function<uint64_t()> StateHashFn;      // rides Keepalive for desync detection (#72)
+    LogFn                   Log;
 };
 
 } // namespace Lur::Net

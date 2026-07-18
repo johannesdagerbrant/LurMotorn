@@ -58,6 +58,18 @@ void ChessMatchState::ConcludeMatch(EGameResult R) {
     if (OnMatchEnd) OnMatchEnd();          // app persists the updated all-time stats (local)
 }
 
+std::uint64_t ChessMatchState::PositionHash() const {
+    std::uint64_t H = 14695981039346656037ull;                 // FNV-1a 64
+    auto Mix = [&H](std::uint64_t V) { H = (H ^ V) * 1099511628211ull; };
+    for (int C = 0; C < 2; ++C)
+        for (int T = 0; T < 6; ++T) Mix(Position.Pieces[C][T]);
+    Mix(static_cast<std::uint64_t>(Position.SideToMove));
+    Mix(static_cast<std::uint64_t>(Position.Castling));
+    Mix(static_cast<std::uint64_t>(Position.EnPassant));
+    Mix(static_cast<std::uint64_t>(Position.HalfmoveClock));
+    return H;
+}
+
 void ChessMatchState::RebuildBoard() {
     Position = Board::StartPosition();
     for (const Move& M : Rec.Moves) Position.MakeMove(M);

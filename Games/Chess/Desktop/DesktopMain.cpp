@@ -117,6 +117,7 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
 
     G.Session.SetReadyHandler([&G] { OnLive(G); });
     G.Session.SetResyncHandler([&G] { OnLive(G); });
+    G.Session.SetStateHashFn([&G] { return G.Match.PositionHash(); });  // desync detection (#72)
     G.Session.SetHandler(Lur::Net::EMsgType::Sync, [&G](const uint8_t* D, std::size_t N) {
         G.Recorder.Record(Lur::Core::EFlightEvent::DatagramIn, 0, D, N);  // Sync in
         if (G.View.ActiveOpponentGuid() == G.Session.GetPeerGuid()) G.Sync->OnSync(D, N);

@@ -540,6 +540,89 @@ static void TestResyncGateEnablesCleanCrossPeerPlay() {
     CHECK(Plies >= 20);    // progressed to 20 plies with no stall (the deadlock is gone)
 }
 
+// --- issue #72: mid-game desync detection + resync recovery --------------------------
+
+// A keepalive carries the sender's state hash; a mismatch means the boards diverged on a
+// live link (a lost move) -> the receiver requests a resync (gate + re-send state).
+static void TestKeepaliveHashMismatchTriggersResync() {
+    SilentTransport T; Session S;
+    uint64_t MyHash = 0xA1A1A1A1ull;
+    int ResyncFires = 0;
+    S.SetStateHashFn([&] { return MyHash; });
+    S.SetResyncHandler([&] { ++ResyncFires; });
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', true); T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+    const uint8_t Sync[2] = { static_cast<uint8_t>(EMsgType::Sync), 0 };
+    T.Deliver(Sync, sizeof(Sync));               // clear the link-time gate first
+    CHECK(!S.IsAwaitingResync());
+    ResyncFires = 0;
+
+    // Peer keepalive with a DIFFERENT hash -> mismatch -> resync requested + gated.
+    auto DeliverKA = [&](uint64_t Hash) {
+        uint8_t KA[9]; KA[0] = static_cast<uint8_t>(EMsgType::Keepalive);
+        for (int i = 0; i < 8; ++i) KA[1 + i] = static_cast<uint8_t>(Hash >> (8 * i));
+        T.Deliver(KA, sizeof(KA));
+    };
+    DeliverKA(0xB2B2B2B2ull);
+    CHECK(ResyncFires == 1);
+    CHECK(S.IsAwaitingResync());
+
+    // Reconcile (a Sync clears the gate); a MATCHING keepalive must NOT re-trigger.
+    T.Deliver(Sync, sizeof(Sync));
+    CHECK(!S.IsAwaitingResync());
+    DeliverKA(MyHash);
+    CHECK(ResyncFires == 1);                      // no spurious resync when hashes agree
+}
+
+// End to end: two synced peers, one loses a live move (never sent), so their boards
+// diverge. The keepalive hash exchange detects it and both re-send Sync until they
+// reconcile — no deadlock, no manual reconnect (issue #72).
+static void TestKeepaliveHashHealsLostMoveDesync() {
+    LoopbackTransport TA, TB; LoopbackTransport::Link(TA, TB);
+    Session SA, SB;
+    Chess::ChessMatchState MA, MB;
+    MA.SetIdentity(Guid('a'), Guid('b'));
+    MB.SetIdentity(Guid('b'), Guid('a'));
+    auto SendSync = [](Session& S, Chess::ChessMatchState& M) {
+        std::vector<uint8_t> B; M.Write(B); S.Send(EMsgType::Sync, B.data(), B.size());
+    };
+    SA.SetStateHashFn([&] { return MA.PositionHash(); });
+    SB.SetStateHashFn([&] { return MB.PositionHash(); });
+    SA.SetResyncHandler([&] { SendSync(SA, MA); });
+    SB.SetResyncHandler([&] { SendSync(SB, MB); });
+    SA.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MA.MergeIfNewer(D, N); });
+    SB.SetHandler(EMsgType::Sync, [&](const uint8_t* D, std::size_t N) { MB.MergeIfNewer(D, N); });
+    SA.Start(&TA, Guid('a'));
+    SB.Start(&TB, Guid('b'));
+    CHECK(SA.IsReady() && SB.IsReady());
+    SendSync(SA, MA); SendSync(SB, MB);          // link-time resync -> converged (both empty)
+    CHECK(SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));
+
+    // Play 3 plies in lockstep so both advance identically (index encoded on the mover's
+    // board, decoded + applied on the other — the real wire path, delivered).
+    auto PlayAndSend = [&](Chess::ChessMatchState& From, Chess::ChessMatchState& To) {
+        Chess::MoveList L; Chess::GenerateLegalMoves(From.CurrentBoard(), L);
+        Lur::Serialization::BitWriter W; Chess::EncodeMove(L.Moves[0], L, W);
+        const std::vector<uint8_t>& B = W.Finish();
+        Chess::MoveList TL; Chess::GenerateLegalMoves(To.CurrentBoard(), TL);
+        Lur::Serialization::BitReader R(B.data(), B.size());
+        const Chess::Move Mv = Chess::DecodeMove(R, TL);
+        From.ApplyMove(L.Moves[0]); To.ApplyMove(Mv);   // both apply (delivered)
+    };
+    PlayAndSend(MA, MB); PlayAndSend(MB, MA); PlayAndSend(MA, MB);
+    CHECK(SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));
+
+    // Now A makes a move that is LOST (applied locally, never delivered to B).
+    { Chess::MoveList L; Chess::GenerateLegalMoves(MA.CurrentBoard(), L); MA.ApplyMove(L.Moves[0]); }
+    CHECK(!SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));   // diverged
+
+    // Drive time: keepalives (with hashes) cross, the mismatch is detected, both resync.
+    for (int i = 0; i < 400; ++i) { SA.Tick(FrameNs); SB.Tick(FrameNs); }
+    CHECK(SamePosition(MA.CurrentBoard(), MB.CurrentBoard()));    // healed, no deadlock
+    CHECK(!SA.IsAwaitingResync() && !SB.IsAwaitingResync());
+}
+
 int main() {
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
@@ -557,6 +640,8 @@ int main() {
     TestResyncGateHoldsThenLiftsOnSync();
     TestResyncGateTimeoutFallback();
     TestResyncGateEnablesCleanCrossPeerPlay();
+    TestKeepaliveHashMismatchTriggersResync();
+    TestKeepaliveHashHealsLostMoveDesync();
 
     if (GFailures == 0) {
         std::printf("All net tests passed.\n");

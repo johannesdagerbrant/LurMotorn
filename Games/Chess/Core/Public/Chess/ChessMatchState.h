@@ -45,6 +45,11 @@ public:
     const Board&       CurrentBoard() const { return Position; }
     const ChessRecord& Record() const { return Rec; }
 
+    // A hash of the position that must match on both peers for move indices to align
+    // (pieces, side, castling, en passant, halfmove clock). Rides the Net keepalive so
+    // a mid-game desync is detected and healed via resync (issue #72). Deterministic.
+    std::uint64_t PositionHash() const;
+
     // The result of the most recently concluded match (Ongoing until the first ends).
     // Set when a terminal move auto-concludes a match; useful for a UI "you won" note.
     EGameResult LastResult() const { return Last; }
