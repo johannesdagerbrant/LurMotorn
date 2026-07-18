@@ -47,6 +47,14 @@
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
     bool _Ready;
+#if LUR_INTERNAL
+    // Dev-only autoplayer (issue #57/#58/#69), armed by a marker file so the normal
+    // .ipa stays untouched. Same-frame instrumentation mirrors AndroidMain.
+    bool _AutoEnabled;
+    uint32_t _Rng;
+    uint64_t _Frame, _PeerReplies, _SameFrame, _NewGameOpens, _DelayedReplies;
+    uint64_t _AutoCheckAccumNs, _ReportAccumNs;
+#endif
 }
 
 - (void)loadView {
@@ -132,6 +140,9 @@
         os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
     });
     _Session.Start(_Transport, _DeviceId);
+#if LUR_INTERNAL
+    _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_DeviceId.size());  // per-device autoplay seed
+#endif
 }
 
 // The renderer needs the layer's drawable size, which is only known after layout.
@@ -166,7 +177,49 @@
     const uint64_t ElapsedNs =
         _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
-    _Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
+#if LUR_INTERNAL
+    const bool WasMyTurn = _Match.IsMyTurn();
+    const uint32_t MatchesBefore = _Match.Record().TotalMatches();
+#endif
+    _Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness (applies peer move)
+#if LUR_INTERNAL
+    {
+        // Arm on first sight of Documents/autoplay (pushed via pymobiledevice3), then
+        // play a random legal move the SAME frame it becomes our turn. All tallying is
+        // behind _AutoEnabled so a normal (unarmed) build plays by hand with no overhead.
+        _AutoCheckAccumNs += ElapsedNs;
+        if (!_AutoEnabled && (_Frame == 0 || _AutoCheckAccumNs > 1000000000ull)) {
+            _AutoCheckAccumNs = 0;
+            NSString* Dir = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:[Dir stringByAppendingPathComponent:@"autoplay"]]) {
+                _AutoEnabled = true;
+                os_log(OS_LOG_DEFAULT, "OnlyChess: autoplay ENABLED (Documents/autoplay present)");
+            }
+        }
+        if (_AutoEnabled) {
+            const bool NowMyTurn = _Match.IsMyTurn();
+            const uint32_t MatchesAfter = _Match.Record().TotalMatches();
+            const bool GotPeerMove = !WasMyTurn && NowMyTurn;
+            const bool PeerEndedGame = MatchesAfter != MatchesBefore;
+            const bool Played = (_Session.IsReady() && NowMyTurn) ? _View.AutoPlayRandomLegalMove(_Rng) : false;
+            if (GotPeerMove) {
+                ++_PeerReplies;
+                if (PeerEndedGame)   ++_NewGameOpens;
+                else if (Played)     ++_SameFrame;
+                else               { ++_DelayedReplies;
+                    os_log(OS_LOG_DEFAULT, "OnlyChess: WARN our turn, no same-frame reply @%llu", (unsigned long long)_Frame); }
+            }
+            _ReportAccumNs += ElapsedNs;
+            if (_ReportAccumNs > 2000000000ull) {
+                _ReportAccumNs = 0;
+                os_log(OS_LOG_DEFAULT, "OnlyChess: AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu",
+                       MatchesAfter, (unsigned long long)_SameFrame, (unsigned long long)_PeerReplies,
+                       (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies);
+            }
+        }
+        ++_Frame;
+    }
+#endif
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));

@@ -173,15 +173,16 @@ void android_main(android_app* App) {
                     LOGI("autoplay ENABLED (debug.onlychess.autoplay=1): random legal move on our turn");
                 }
             }
-            bool Played = false;
-            if (AutoEnabled && State.Session.IsReady() && NowMyTurn)
-                Played = State.View.AutoPlayRandomLegalMove(Rng);
-            if (GotPeerMove) {
-                ++PeerReplies;
-                if (PeerEndedGame)   ++NewGameOpens;
-                else if (Played)     ++SameFrame;
-                else               { ++DelayedReplies; LOGI("WARN: our turn, no same-frame reply @frame %llu",
-                                                            (unsigned long long)Frame); }
+            if (AutoEnabled) {
+                const bool Played = (State.Session.IsReady() && NowMyTurn)
+                                        ? State.View.AutoPlayRandomLegalMove(Rng) : false;
+                if (GotPeerMove) {
+                    ++PeerReplies;
+                    if (PeerEndedGame)   ++NewGameOpens;
+                    else if (Played)     ++SameFrame;
+                    else               { ++DelayedReplies; LOGI("WARN: our turn, no same-frame reply @frame %llu",
+                                                                (unsigned long long)Frame); }
+                }
             }
             ReportAccumNs += ElapsedNs;
             if (AutoEnabled && ReportAccumNs > 2'000'000'000ull) {
