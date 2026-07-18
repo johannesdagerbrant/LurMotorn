@@ -23,6 +23,11 @@ $ctest = Join-Path (Split-Path $cmake) 'ctest.exe'
 $root  = Split-Path $MyInvocation.MyCommand.Path
 $build = Join-Path $root 'build'
 
+# Cook game content -> runtime-ready embedded headers. Incremental: a no-op (needing no
+# cook tools) unless a game's Content/ changed since the last cook. See Cook/Cook.ps1.
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'Cook\Cook.ps1')
+if ($LASTEXITCODE) { throw "cook failed ($LASTEXITCODE)" }
+
 & $cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER="$gxx"
 if ($LASTEXITCODE) { throw "configure failed ($LASTEXITCODE)" }
 & $cmake --build $build

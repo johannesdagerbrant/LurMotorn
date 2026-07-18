@@ -96,7 +96,8 @@ def preset_chess_pieces(size):
             data = resp.read()
         save(normalize(Image.open(io.BytesIO(data)), 2, "luma", size), out / f"{piece}.png", 2)
     print(f"Wrote {len(CHESS_PIECES)} 2ch PNGs to {out.relative_to(ROOT)}.")
-    print("Next: cook them with Tools/ChessPieceCook/gen-piece-masks.ps1.")
+    print("Next: the build cooks them into PieceMasks.h (Cook/Cook.ps1, driven by the")
+    print("      LUR_COOK reference in Games/Chess/View/Private/BoardView.cpp).")
 
 
 def main():

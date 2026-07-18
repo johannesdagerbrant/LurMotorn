@@ -225,3 +225,24 @@ Common actions are wrapped as `.bat` entry points in `scripts/` so the workflow 
 humans and future agents — prefer them over ad-hoc commands: `build.bat` (host core build + test),
 `clean.bat`, `setup-android.bat` (one-time CLI-only SDK/NDK/JDK/Gradle install), `android-build.bat`,
 `android-install.bat`, `logcat.bat`. See `scripts/README.md`.
+
+## Content pipeline: Tools sanitize → Cook builds
+
+Two distinct, game-agnostic stages turn source content into what the app embeds (no runtime
+image/font decoder ever ships):
+
+- **Tools** (`Tools/`) **sanitize** raw content into cook-acceptable formats — e.g.
+  `Tools/ImageConvert` normalises an arbitrary image into a 2-channel (RG8) or 4-channel
+  (RGBA8) PNG. Hand-run while authoring; never linked into the app. (`Tools/` also holds
+  debugging instruments like the BLE dev rig.)
+- **Cook** (`Cook/`) turns that content into **built data** (embedded byte-array headers). It's
+  a build-activated process (`build.ps1` runs `Cook/Cook.ps1`) — NOT a hand-run tool — and it's
+  **reference-driven**: gameplay code declares each content dependency inline with a
+  `// LUR_COOK <format> src=… out=…` marker (src paths are partial, relative to that game's
+  `Content/`), and the cook derives *what* to cook and *how* (the format) from those markers.
+  Incremental via a `// cook-source-hash:` stamp; cooked outputs are committed, so a clean build
+  with unchanged content needs no cook tools. See `Cook/README.md`.
+
+The font/shader cookers (`scripts/gen-font.ps1`, `scripts/gen-shaders.ps1`) predate this and are
+not yet folded into the reference-driven driver. Keep the split clean: sanitizing belongs in
+`Tools/`; content→data cooking belongs in `Cook/`.

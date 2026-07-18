@@ -15,6 +15,10 @@
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Lur/Text/BuiltinFonts.h"
+// Content reference the cook derives its work from (Cook/Cook.ps1): cook these piece
+// PNGs (paths relative to this game's Content/) as an R8G8 shade+coverage set into the
+// header included below. Order == Chess::EPieceType (Pawn,Knight,Bishop,Rook,Queen,King).
+// LUR_COOK rg8-shade-coverage src=Pieces/wP.png,Pieces/wN.png,Pieces/wB.png,Pieces/wR.png,Pieces/wQ.png,Pieces/wK.png out=View/Private/PieceMasks.h ns=ChessArt size=PieceMaskSize coverage=PieceCoverage shade=PieceShade
 #include "PieceMasks.h"  // cooked rhosgfx (CC0) silhouette masks, one per piece type
 
 namespace Chess {

@@ -27,6 +27,6 @@ piece colours come from those 6 masks + the material tint at draw time: the shad
 keeps the fills as tint×shade (so the form's shading survives) and flips the dark
 ink band to the tint's complement (so black pieces get white outlines) — one mask,
 two tints, no per-colour art (issue #30). See `Tools/ImageConvert/convert-image.py`
-(convert source art to the 2-channel shade+coverage PNG; `--preset chess-pieces`),
-`Tools/ChessPieceCook/gen-piece-masks.ps1` (cook to the R8G8 stream),
-`Games/Chess/View/Private/PieceMasks.h` and the `Sprite.frag` tint logic.
+(sanitise source art into the 2-channel shade+coverage PNG; `--preset chess-pieces`),
+the `// LUR_COOK` reference in `Games/Chess/View/Private/BoardView.cpp` that drives the
+cook (`Cook/`) into `PieceMasks.h`, and the `Sprite.frag` tint logic.
