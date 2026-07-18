@@ -224,6 +224,15 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
   transport but isn't production-ready cross-vendor yet — keep it behind the `ITransport` seam.
 - **CodeViewer anchors are regex** — avoid parentheses in `anchor_start`/`anchor_end` strings.
 
+## Planning & project state
+
+**GitHub issues are the source of truth** for sequencing, priority, current state, and any new
+planning — start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File
+or update an issue for new plans; don't record planning or current-state in `CLAUDE.md` (keep this file
+to durable, always-true guidance). The `Docs/Planning/*.md` files (master roadmap, the two reviews, the
+RPS-RTS spec) are **legacy artifacts** — read them for *rationale and narrative*, but where a doc
+disagrees with an issue, the issue wins.
+
 ## Documentation (CodeViewer sessions)
 
 Recipe: the create tool writes `<slug>.codeviewer` into its `directory` with `base_dir: "."`. Author

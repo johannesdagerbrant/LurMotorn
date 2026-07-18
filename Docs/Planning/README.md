@@ -1,26 +1,27 @@
 # LurMotorn Planning Docs — README & Agent Entrypoint
 
-*Produced July 16–17, 2026, against the repo at master `#38 fix: adopt a peer on reconnect too, and drive green off GetLinkState`. Written collaboratively (owner + Claude) across one extended planning session covering: BLE/Wi-Fi transport research, two full code reviews from deliberately different value systems, the design of game #2, and a master roadmap sequencing everything.*
+> **⚠️ These planning docs are LEGACY ARTIFACTS. The GitHub issues are the source of truth.**
+> Sequencing, priority, current state, and any new planning live in the **issue tracker** (start at the roadmap tracker issue #12). The files in this folder are the original July-2026 planning synthesis — kept for their *rationale and narrative* (the reviews, the RTS spec, the "why" behind decisions) — but they are **frozen** and are **not** updated as work lands. When a doc disagrees with an issue, **the issue wins**. Do not add new authoritative planning to these files; file or update an issue instead, and cite these docs for rationale only.
 
-**Suggested home:** commit this folder as `Docs/Planning/` in the LurMotorn repo, and add one line to `CLAUDE.md` — e.g. *"Planning, reviews, and roadmap live in `Docs/Planning/`; read its README before planning any work."* That makes these documents discoverable by any agent that lands in the repo, which is the point.
+*Produced July 16–17, 2026, against the repo at master `#38 fix: adopt a peer on reconnect too, and drive green off GetLinkState`. Written collaboratively (owner + Claude) across one extended planning session covering: BLE/Wi-Fi transport research, two full code reviews from deliberately different value systems, the design of game #2, and a master roadmap sequencing everything.*
 
 ---
 
 ## 1. Precedence rules (read this before anything else)
 
-When documents disagree, this is the order of authority:
+**The GitHub issues are the source of truth** for what to do and in what order. These documents are reference for *rationale*, not authority for *plan*. When they disagree, this is the order of authority:
 
-1. **`lurmotorn-master-roadmap.md` is authoritative for *sequencing and priority*.** It was written last and deliberately re-orders items from every other document. If an issue file or review says "P1" but the roadmap phases it later (or parks it), **the roadmap wins**.
+1. **The GitHub issues (and their labels/state) are authoritative for *sequencing, priority, and current state*.** The roadmap tracker #12 indexes them by phase. If a doc here says "P1" or phases something one way but an issue says otherwise, **the issue wins**. (This reverses the original ordering — the `lurmotorn-master-roadmap.md` doc is now a legacy artifact, not the authority.)
 2. **The two reviews are authoritative for *findings and rationale*** — what is wrong, where, and why. They were written against `#38`; before executing any fix, **re-verify the claim against HEAD** (the code may have moved).
-3. **`rps-rts-design-spec.md` is authoritative for *game #2's design***, including its wire format and deterministic rules.
-4. **The issue-draft files are *content* drafts, not priority lists.** Their acceptance criteria and technical detail remain good; their sequencing is superseded (see per-file status below).
-5. Where the reviews disagree with *each other*, that is intentional — Review #2 §8 contains the arbitration table, and the master roadmap encodes the resolutions.
+3. **`rps-rts-design-spec.md` is authoritative for *game #2's design rationale***, including its wire format and deterministic rules — but its *sequencing* defers to the issues.
+4. **The issue-draft files are *content* drafts, not priority lists.** Their acceptance criteria and technical detail seeded the real issues; the issues supersede them.
+5. Where the reviews disagree with *each other*, that is intentional — Review #2 §8 contains the arbitration table.
 
 ## 2. Document index
 
 | File | What it is | Status |
 |---|---|---|
-| `lurmotorn-master-roadmap.md` | Phases 0 → 5 + parked items; sequences every review item around the RTS as forcing function. Includes Phase 0.5 (Workbench: Windows platform, chess two-window, flight recorder, overlay, fuzz) and the hybrid Windows↔Android BLE rig as a parallel agent-delegable track. Ends with a complete disposition table — every review item has a phase. | **Authoritative. Start here.** |
+| `lurmotorn-master-roadmap.md` | Phases 0 → 5 + parked items; sequences every review item around the RTS as forcing function. Includes Phase 0.5 (Workbench: Windows platform, chess two-window, flight recorder, overlay, fuzz) and the hybrid Windows↔Android BLE rig as a parallel agent-delegable track. Ends with a complete disposition table — every review item has a phase. | **Legacy — read for the "why". Source of truth is the issue tracker (#12).** |
 | `lurmotorn-code-review.md` | Review #1, architecture lens. Full audit: the engine/game seam (~1,620 lines of engine code inside `Games/Chess/`), chess leaks in `Modules/Net`, two P0 correctness bugs (Android BLE threading race; `Session::Send` 64-byte cap silently breaking >61-ply resync), §3.5 shared-first doctrine (added by owner request: per-subsystem scorecard, `BleLinkController`+`IBleRadio` design), module-by-module findings, prioritized table. | Authoritative for findings. Amended in place with §3.5; its §8 priorities are superseded by the roadmap. |
 | `lurmotorn-review-2-handmade-lens.md` | Review #2, Handmade/data-oriented lens (Blow/Muratori school). Challenges review #1's abstraction-first order ("write game #2 before `IGame`"), fresh catches (zero compiler flags configured; 13 `std::function` sites; `std::string` GUIDs; `std::filesystem` set the iOS-13 floor; no on-disk format version; silent-guard error philosophy), and the iteration-loop agenda (desktop build, flight recorder, soak, fuzz, `LUR_ASSERT`). §8 = disagreement/arbitration table vs review #1. | Authoritative for findings; its roadmap (§7) is folded into the master roadmap. |
 | `rps-rts-design-spec.md` | Game #2: **Sten Sax Skog** (RPS-RTS). Open 2D field, raidable walking lumberjacks, annihilation win. Deterministic sim rules (tick phases, tie-breaks, Chebyshev movement — no sqrt, no floats), lockstep-over-BLE wire format (self-clocking watermarks; `ClockSync` stays a stub), engine-gap table, chess↔RTS overlap table (§9 — this table *is* the future `IGame` contract), build slices 0–3. | Authoritative for the RTS. |

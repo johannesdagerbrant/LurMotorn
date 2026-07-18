@@ -1,5 +1,7 @@
 # LurMotorn — Master Roadmap: Sequencing Everything Around Game #2
 
+> **⚠️ LEGACY ARTIFACT (frozen July 2026).** The **GitHub issues are the source of truth** for sequencing, priority, and current state — see the tracker at #12. This document is the original planning synthesis, kept for its rationale and narrative; it is **not** updated as work lands and must not be treated as authoritative. When it disagrees with an issue, the issue wins. Do not add new authoritative planning here — file/label an issue instead.
+
 *Synthesizes: Review #1 (architecture lens), Review #2 (Handmade lens), the RPS-RTS spec, and the earlier CoC epic. July 2026.*
 
 ---
@@ -21,7 +23,6 @@ The only true "before" items. Three are live chess bugs or direct RTS blockers; 
 | Android BLE threading race — fix **as the event-queue inbox** | Live data race in shipped chess; RTS multiplies traffic ~50×; the queue is the future `BleLinkController`'s front door, so nothing is throwaway | R1-P0 / R2 agrees |
 | `Session::Send` 64-byte cap + regression test | Live chess bug (>61-ply resync silently fails); the RTS resync payload (input history) exceeds 64 B on *any* mid-game reconnect — blocks spec §7 outright | R1-P0 |
 | `-Wall -Wextra -Werror`, exceptions/RTTI decision, `LUR_ASSERT` + warning cleanup | One day; every line of RTS sim code should be written under loud asserts and full warnings | R2 §3.5/§5 |
-| **Build configurations** — `LUR_CONFIG` = Shipping/Development/Debugging → capability macros `LUR_SHIPPING`/`LUR_INTERNAL`/`LUR_ASSERTS`/`LUR_SLOW` (in `cmake/EngineFlags.cmake`); code gates on the *capability*, not the config name | Completes the R2 §5 dev-vs-ship doctrine: dev-only tooling (soak/autoplayer, `PlayMove`) is `#if LUR_INTERNAL` compiled out of ship, and `LUR_ASSERT` decouples from `NDEBUG` so an optimized Development build still traps. Folded into the #65 issue | R2 §5 |
 | Core hardening batch (varint shift guard, `EncodeMove`/`MoveList` asserts, `TickClock` clamp, misc) | An afternoon with the assert macro in hand; the varint guard specifically protects the RTS's varint-tick-delta wire format, and the tick clamp protects its loop | R1-P3 |
 | `Session::Tick(ElapsedNs)` — real-time, not frame-denominated | The desktop build is about to run Session at arbitrary frame rates; frame-denominated keepalives break there first | R1-P2 |
 
@@ -49,13 +50,6 @@ Each item lands **because the slice forces it**, with a real client:
 
 - **Slice 0 — the sim, pure:** entity slots, tick phases, tunables table — built **POD-first** per spec §6 (review #2 §3.3 as birthright, not refactor), rendered in the already-proven desktop window, driven through the already-proven `TouchEvent` path, instrumented by the already-live overlay. First playable-vs-yourself in days, not weeks, because Phase 0.5 removed every non-sim unknown.
 - **Slice 1 — two-window loopback lockstep:** the generic tick-stamped input message forces the **minimal de-chess of `Session`** — guard/generalize `SendMove`, add the framed input path; full comment-recasting rides along cheaply *(R1-P1)*. **Desync hash**, the **RTS flight-recorder format**, RTS-specific **sim fuzz** (random button mashing across two instances), and the RTS **byte-budget tests** extend the Phase-0.5 harnesses rather than being built from scratch.
-- **Decouple the sim + transport tick from render — a measured requirement, not speculation.** On 2026-07-18 the #58 rig measured the live BLE loop end-to-end (Windows central ↔ Galaxy A14, autoplay both ends). After the connection-interval win (#68), the per-move round-trip settled at **~56 ms** (default 8 ms desktop loop), which decomposes as:
-  - **~30 ms radio** — two ~15 ms connection intervals (one per direction), already near the Windows/iOS platform floor;
-  - **~16 ms phone render-loop polling** — the engine services the transport inbox *once per rendered frame*, and the phone's frame is **vsync-locked (~60 Hz)**, so an inbound datagram waits up to a frame before it's even read;
-  - **~5 ms desktop loop** — its 8 ms per-frame sleep, averaged;
-  - **microseconds of compute** — move-gen + codec are not the cost.
-
-  So ~21 ms of the ~56 ms — over a third — is **local polling cadence, not radio and not CPU**. Proof it's cadence and not compute: dropping the desktop's per-frame sleep (`--loop-ms 0` — identical work, polled harder) lifted cadence **17.7 → 19.6 moves/s** and cut the round-trip **56 → 51 ms** (removing the ~5 ms desktop term); a busy loop cannot speed up a compute-bound path, and the phone's ~16 ms vsync term remained because its loop is still render-driven. **Therefore the RTS must run its fixed-timestep sim tick and pump the transport at a high fixed rate (≥1 kHz) *off* the render/vsync cadence**, servicing inbound datagrams in ~1 ms instead of ~16 ms — collapsing that local ~21 ms and leaving only the ~30 ms radio floor. `Modules/Sim`'s `TickClock` is the seam this hangs on; slice 0's tick loop must not be render-driven from its first line. This is **invisible to turn-based chess** (17 vs 20 moves/s is imperceptible, which is why chess never surfaced it) but is the exact responsiveness floor the reflex games' rollback builds on — rollback can only hide latency it can *tick through*, and a render-bound tick can't.
 
 Chess keeps working untouched throughout. The RTS copies chess's bootstrap **shamelessly** — that duplication is Phase 4's raw material, on purpose.
 
