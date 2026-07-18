@@ -131,6 +131,12 @@ function Shot-Android($path) {
 # network stack that needs NO root/admin - so the old `sudo remote tunneld` step is gone.
 # Install of a NEW binary is the one Apple gate (code signing) - see Install-Ios.
 function Pmd    { & python -m pymobiledevice3 @args }
+# For pmd calls whose stderr is benign progress logging (provision dump etc.): PS 5.1
+# turns native stderr into a fatal NativeCommandError under EAP=Stop (see AdbQuiet).
+function PmdQuiet {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+    try { & python -m pymobiledevice3 @args 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
+}
 # A `developer dvt` call that stands up its own userspace tunnel in-process (no admin).
 function PmdDev { & python -m pymobiledevice3 developer dvt @args --userspace }
 function Ensure-Ios {
@@ -170,14 +176,16 @@ function ClearHistory-Ios {
     [void](Launch-Ios -FreshProcess)   # process restart consumes the marker and wipes
 }
 
-# Install a NEW build of the app. Code signing is the one Apple gate that cannot be
-# automated away without handling Apple-ID credentials (which this project deliberately
-# does not do). We pick the most-headless route the caller has enabled, in order:
-#   1. -SignedIpa <path>   : already signed -> `apps install` (fully headless, no GUI).
-#   2. -ZsignP12 + -ZsignProfile : zsign the unsigned CI .ipa with a persisted free cert,
-#      then `apps install` (fully headless for the 7-day life of that cert; re-run the
-#      one-time cert setup weekly). zsign is a dev-only Tool, never linked into the app.
-#   3. otherwise           : open Sideloadly at the .ipa (ASSISTED - the one human touch).
+# Install a NEW build of the app. Code signing is the one Apple gate; since 2026-07-18
+# it is fully automated with LOCAL material (nothing Apple-ID-credential-shaped):
+#   1. -SignedIpa <path>   : already signed -> `apps install` (fully headless).
+#   2. AUTO-ZSIGN (default): zsign the unsigned CI .ipa with the free dev cert/key PEMs
+#      Sideloadly persists (%APPDATA%\Sideloadly, cert lasts ~1 year) + the NEWEST
+#      matching provisioning profile dumped from the device itself (profiles last 7
+#      days; Sideloadly's weekly renewal is picked up automatically by re-dumping).
+#      zsign is a dev-only Tool (MIT), never linked into the app.
+#   3. -ZsignP12 + -ZsignProfile : explicit signing material (overrides the auto path).
+#   4. otherwise           : open Sideloadly at the .ipa (ASSISTED - the fallback).
 # Returns $true if the install path was headless (no human needed), else $false.
 function Install-Ios {
     Ensure-Ios
@@ -188,21 +196,48 @@ function Install-Ios {
         Pmd apps install $SignedIpa | Out-Host   # Out-Host, not the pipeline, so $true is the only return value
         Say 'ios: installed'; return $true
     }
-    # (2) zsign the unsigned CI ipa with a persisted free cert, then apps install.
-    if ($ZsignP12 -and $ZsignProfile) {
-        $zsign = (Get-Command zsign -ErrorAction SilentlyContinue).Source
-        if (-not $zsign) { throw 'zsign not on PATH. Install it (dev-only Tool) or use -SignedIpa.' }
+    # (2)/(3) zsign + apps install. Explicit -ZsignP12/-ZsignProfile wins; else auto-locate.
+    $zsign = (Get-Command zsign -ErrorAction SilentlyContinue).Source
+    if (-not $zsign) { $cand = Join-Path $env:LOCALAPPDATA 'LurMotorn\tools\zsign.exe'; if (Test-Path $cand) { $zsign = $cand } }
+    $key = $ZsignP12; $cert = $null; $prov = $ZsignProfile
+    if (-not $key) {
+        $key  = Join-Path $env:APPDATA 'Sideloadly\key.pem'
+        $cert = (Get-ChildItem (Join-Path $env:APPDATA 'Sideloadly\cert-*.pem') -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+        if (-not (Test-Path $key) -or -not $cert) { $key = $null }
+    }
+    if (-not $prov -and $zsign -and $key) {
+        # Re-dump the device's profiles (picks up Sideloadly's weekly renewal) and take
+        # the newest one whose app id matches this bundle.
+        $profDir = Join-Path $env:LOCALAPPDATA 'LurMotorn\tools\profiles'
+        New-Item -ItemType Directory -Force -Path $profDir | Out-Null
+        PmdQuiet provision dump $profDir
+        $prov = & python -c @"
+import glob, plistlib, sys
+best = None
+for p in glob.glob(r'$profDir' + '/*.mobileprovision'):
+    raw = open(p, 'rb').read()
+    s = raw.find(b'<?xml'); e = raw.find(b'</plist>') + 8
+    if s < 0: continue
+    pl = plistlib.loads(raw[s:e])
+    if '$($App.IosBundleId)' not in pl.get('Entitlements', {}).get('application-identifier', ''): continue
+    exp = pl.get('ExpirationDate')
+    if best is None or exp > best[0]: best = (exp, p)
+print(best[1] if best else '')
+"@
+        if (-not $prov) { Warn 'ios: no matching provisioning profile on the device - renew via Sideloadly once, then retry.' }
+    }
+    if ($zsign -and $key -and $prov) {
         if (-not (Test-Path $Ipa)) { throw "unsigned ipa not found: $Ipa" }
-        if (-not (Test-Path $ZsignP12)) { throw "p12 not found: $ZsignP12" }
-        if (-not (Test-Path $ZsignProfile)) { throw "mobileprovision not found: $ZsignProfile" }
         $signed = Join-Path $logs 'signed.ipa'
-        Say 'ios: zsign the unsigned CI ipa with the persisted free cert'
-        & $zsign -k $ZsignP12 -p $ZsignPassword -m $ZsignProfile -o $signed -z 5 $Ipa | Out-Host
-        if ($LASTEXITCODE -ne 0) { throw 'zsign failed (cert/profile expired? re-run the weekly one-time setup).' }
+        Say 'ios: zsign the unsigned CI ipa (persisted cert + freshest device profile)'
+        if ($cert) { & $zsign -k $key -c $cert -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
+        else       { & $zsign -k $key -p $ZsignPassword -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
+        if ($LASTEXITCODE -ne 0) { throw 'zsign failed (profile expired? renew via Sideloadly once, then retry).' }
         Say 'ios: headless install (zsigned)'
         Pmd apps install $signed | Out-Host
         Say 'ios: installed'; return $true
     }
+    Warn 'ios: headless signing material incomplete (zsign / key+cert PEMs / profile) - falling back to Sideloadly.'
     # (3) Assisted Sideloadly - the honest single human touch (first run also does the
     # Apple-ID login + 2FA; thereafter the daemon auto-refreshes until the cert expires).
     if (-not (Test-Path $Sideloadly)) { throw "Sideloadly not found: $Sideloadly" }
