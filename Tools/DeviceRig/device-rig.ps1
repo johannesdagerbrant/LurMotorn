@@ -162,9 +162,14 @@ function Install-Ios {
     # Apple-ID login + 2FA; thereafter the daemon auto-refreshes until the cert expires).
     if (-not (Test-Path $Sideloadly)) { throw "Sideloadly not found: $Sideloadly" }
     if (-not (Test-Path $Ipa)) { throw "ipa not found: $Ipa" }
-    Say ('ios: opening Sideloadly for ' + (Split-Path $Ipa -Leaf) + ' - finish sign+install in its window.')
-    Start-Process $Sideloadly -ArgumentList @('-i', $Ipa)
-    Warn 'ios: install is ASSISTED (Sideloadly GUI). For headless installs pass -SignedIpa or -ZsignP12/-ZsignProfile.'
+    # DON'T pass `-i <ipa>`: when a Sideloadly instance already holds localhost:28811
+    # (always, incl. the daemon) the flag is forwarded mangled and fails with
+    # "Ipa file -i does not exist". Instead open the GUI + reveal the .ipa in Explorer so
+    # it can be dragged in (the reliable assisted path).
+    Say ('ios: assisted install of ' + (Split-Path $Ipa -Leaf) + ' - drag the revealed .ipa into Sideloadly, then Start.')
+    if (-not (Get-Process -Name 'sideloadly' -ErrorAction SilentlyContinue)) { Start-Process $Sideloadly }
+    Start-Process explorer.exe -ArgumentList ('/select,"' + $Ipa + '"')
+    Warn 'ios: install is ASSISTED (Sideloadly GUI drag-drop). For headless installs pass -SignedIpa or -ZsignP12/-ZsignProfile.'
     return $false
 }
 
