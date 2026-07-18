@@ -14,9 +14,10 @@ set's license:
 
 The only committed art is the **6 `w*.png` masks** (the white pieces, square
 grayscale+alpha, one shared resolution) — that is the whole content set. There are
-NO black-piece files and NO committed SVGs: `scripts/gen-piece-pngs.py` re-authors
-the PNGs on demand by fetching the upstream rhosgfx SVGs straight from the lichess
-URL above, so the vector source lives there, not in this repo. The cook then reads
+NO black-piece files and NO committed SVGs: `Tools/ImageConvert/convert-image.py
+--preset chess-pieces` re-authors the PNGs on demand by fetching the upstream rhosgfx
+SVGs straight from the lichess URL above, so the vector source lives there, not in
+this repo. The cook then reads
 **only** the local PNGs (never the network) and asserts they honour the convention.
 
 The app does **not** load SVG or PNG at runtime: the cook extracts two single-byte
@@ -25,6 +26,7 @@ tonal luminance) — embedded as raw bytes and uploaded as an R8G8 texture. BOTH
 piece colours come from those 6 masks + the material tint at draw time: the shader
 keeps the fills as tint×shade (so the form's shading survives) and flips the dark
 ink band to the tint's complement (so black pieces get white outlines) — one mask,
-two tints, no per-colour art (issue #30). See `scripts/gen-piece-pngs.py` (author),
-`scripts/gen-piece-masks.ps1` (cook), `Games/Chess/View/Private/PieceMasks.h` and
-the `Sprite.frag` tint logic.
+two tints, no per-colour art (issue #30). See `Tools/ImageConvert/convert-image.py`
+(convert source art to the 2-channel shade+coverage PNG; `--preset chess-pieces`),
+`Tools/ChessPieceCook/gen-piece-masks.ps1` (cook to the R8G8 stream),
+`Games/Chess/View/Private/PieceMasks.h` and the `Sprite.frag` tint logic.

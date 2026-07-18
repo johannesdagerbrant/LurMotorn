@@ -52,3 +52,7 @@ scripts/*.log
 Tools/**/*.exe
 Tools/**/*.obj
 Tools/**/*.pdb
+
+# Python bytecode caches
+__pycache__/
+*.pyc

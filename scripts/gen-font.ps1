@@ -1,6 +1,7 @@
 # Cooks an OFL font into Modules/Text/Private/Cooked/FontAtlas_<Name>.h — an MSDF
 # atlas + per-glyph metrics embedded as raw bytes, so NO font/image decoder ships in
-# the app. This is the LurMotorn text-asset "cook" step (companion to gen-piece-masks.ps1).
+# the app. This is the LurMotorn text-asset "cook" step (companion to
+# Tools/ChessPieceCook/gen-piece-masks.ps1).
 #
 # The heavy lifting (rasterise outlines -> multi-channel signed distance field) is done
 # by msdf-atlas-gen — a SANCTIONED OFFLINE BUILD TOOL (MIT). It is downloaded on demand

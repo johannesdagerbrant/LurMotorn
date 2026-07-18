@@ -11,7 +11,8 @@ instruments (Windows dev machine / CI).
 | Subfolder | What it is |
 |---|---|
 | `BleDevRig/` | The Windows↔Android BLE dev rig: a VS-free WinRT (C#) BLE central that speaks the LurMotorn GATT protocol to an unmodified Android app, so the desktop can be a real second peer for developing/debugging/optimizing the Bluetooth networking (issue #58). |
-| `ChessPieceArt/` | One-off content-authoring scripts that rasterise the chess piece art into `Games/Chess/Content/Pieces/` (`gen-piece-pngs.py`) and cook it into `PieceMasks.h` (`gen-piece-masks.ps1`). |
+| `ImageConvert/` | General image → engine-valid channel-format converter (`convert-image.py`): normalises any source image into a **2-channel** grayscale+alpha PNG (for an R8G8 cook; the shade channel is selectable — luma or a single R/G/B) or a **4-channel** RGBA PNG (for an R8G8B8A8 cook). Chess pieces are one preset. |
+| `ChessPieceCook/` | Cooks the 2-channel piece PNGs from `Games/Chess/Content/Pieces/` into `Games/Chess/View/Private/PieceMasks.h` — an embedded R8G8 (shade+coverage) byte stream, so no image decoder ships in the app (`gen-piece-masks.ps1`). |
 
 Conventions:
 - One subfolder per tool, PascalCase, with its own `README.md`.
