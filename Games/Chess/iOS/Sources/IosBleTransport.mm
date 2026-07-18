@@ -31,6 +31,7 @@
 #import <Foundation/Foundation.h>
 
 #include <cstdint>
+#include <deque>
 #include <string>
 #include <vector>
 
@@ -118,6 +119,13 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _Connecting;        // an outgoing central attempt is mid-flight
     bool _DecidedPeripheral; // we settled as peripheral; stop connecting out
 
+    // Send flow control (issue #72). CoreBluetooth drops a writeWithoutResponse /
+    // updateValue when its transmit queue is full; unpaced autoplay bursts then lost
+    // moves (and resync payloads), wedging the game. We queue datagrams and drain them
+    // only while the radio reports ready — no added network time. Everything here runs
+    // on the CB delegate queue (nil == main), same thread as sendData, so no locking.
+    std::deque<std::vector<uint8_t>> _SendQueue;
+
     ITransport::Receiver _Receiver;
 }
 
@@ -157,25 +165,39 @@ static void SaveIosPeerId(const std::string& Id) {
     // link-establishment record sync, so we must NOT buffer + replay a stale move
     // (which would decode against a since-advanced position and desync).
     if (!_Connected) return;
-    std::vector<uint8_t> Bytes(Data, Data + Size);
-    [self transmit:Bytes];
+    _SendQueue.emplace_back(Data, Data + Size);
+    [self pumpSend];
 }
 
-- (void)transmit:(const std::vector<uint8_t>&)Bytes {
-    NSData* Payload = [NSData dataWithBytes:Bytes.data() length:Bytes.size()];
-    if (_RemoteDatagram && _PeerDevice) {            // we are central -> write
-        // WithoutResponse (issue #49): drop the ATT ack round-trip per datagram. The
-        // peer now declares PROPERTY_WRITE_NO_RESPONSE; app-level keepalives cover
-        // liveness and the reverse path (notify) is unacknowledged anyway.
-        [_PeerDevice writeValue:Payload
-              forCharacteristic:_RemoteDatagram
-                           type:CBCharacteristicWriteWithoutResponse];
-    } else if (_LocalDatagram && _Subscriber) {      // we are peripheral -> notify
-        [_Peripheral updateValue:Payload
-               forCharacteristic:_LocalDatagram
-            onSubscribedCentrals:@[_Subscriber]];
+// Drain the send queue while the radio can accept datagrams. Stops (leaving the rest
+// queued) the moment CoreBluetooth's transmit queue is full; the corresponding
+// "ready" delegate callback resumes us. WithoutResponse (issue #49) is preserved —
+// this only PACES sends to the connection interval so none are dropped (issue #72).
+- (void)pumpSend {
+    while (!_SendQueue.empty()) {
+        const std::vector<uint8_t>& Bytes = _SendQueue.front();
+        NSData* Payload = [NSData dataWithBytes:Bytes.data() length:Bytes.size()];
+        if (_RemoteDatagram && _PeerDevice) {            // we are central -> write
+            if (!_PeerDevice.canSendWriteWithoutResponse) break;   // wait for ready callback
+            [_PeerDevice writeValue:Payload
+                  forCharacteristic:_RemoteDatagram
+                               type:CBCharacteristicWriteWithoutResponse];
+            _SendQueue.pop_front();
+        } else if (_LocalDatagram && _Subscriber) {      // we are peripheral -> notify
+            if (![_Peripheral updateValue:Payload
+                        forCharacteristic:_LocalDatagram
+                     onSubscribedCentrals:@[_Subscriber]]) break;  // queue full; wait for ready
+            _SendQueue.pop_front();
+        } else {
+            _SendQueue.clear();                          // no live characteristic -> drop backlog
+            break;
+        }
     }
 }
+
+// CoreBluetooth is ready for more datagrams — resume draining the send queue (#72).
+- (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral*)peripheral { [self pumpSend]; }
+- (void)peripheralManagerIsReadyToUpdateSubscribers:(CBPeripheralManager*)peripheral { [self pumpSend]; }
 
 - (void)deliverInbound:(NSData*)Data {
     if (_Receiver && Data.length > 0) {
@@ -214,6 +236,7 @@ static void SaveIosPeerId(const std::string& Id) {
     if (!_Linked) return;
     _Linked = _Connected = _Connecting = false;
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
+    _SendQueue.clear();                                           // drop stale send backlog (#72)
     _Subscriber = nil;
     _RemoteDatagram = nil;
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
