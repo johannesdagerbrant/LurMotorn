@@ -127,7 +127,7 @@ function Install-Ios {
     if ($SignedIpa) {
         if (-not (Test-Path $SignedIpa)) { throw "signed ipa not found: $SignedIpa" }
         Say ('ios: headless install (signed) ' + (Split-Path $SignedIpa -Leaf))
-        Pmd apps install $SignedIpa
+        Pmd apps install $SignedIpa | Out-Host   # Out-Host, not the pipeline, so $true is the only return value
         Say 'ios: installed'; return $true
     }
     # (2) zsign the unsigned CI ipa with a persisted free cert, then apps install.
@@ -139,10 +139,10 @@ function Install-Ios {
         if (-not (Test-Path $ZsignProfile)) { throw "mobileprovision not found: $ZsignProfile" }
         $signed = Join-Path $logs 'signed.ipa'
         Say 'ios: zsign the unsigned CI ipa with the persisted free cert'
-        & $zsign -k $ZsignP12 -p $ZsignPassword -m $ZsignProfile -o $signed -z 5 $Ipa
+        & $zsign -k $ZsignP12 -p $ZsignPassword -m $ZsignProfile -o $signed -z 5 $Ipa | Out-Host
         if ($LASTEXITCODE -ne 0) { throw 'zsign failed (cert/profile expired? re-run the weekly one-time setup).' }
         Say 'ios: headless install (zsigned)'
-        Pmd apps install $signed
+        Pmd apps install $signed | Out-Host
         Say 'ios: installed'; return $true
     }
     # (3) Assisted Sideloadly - the honest single human touch (first run also does the
