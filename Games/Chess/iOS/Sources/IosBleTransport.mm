@@ -39,6 +39,7 @@
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/BleProtocol.h"
+#include "Lur/Transport/EventInbox.h"
 
 using namespace Lur::Transport;
 
@@ -125,6 +126,17 @@ static void SaveIosPeerId(const std::string& Id) {
     // only while the radio reports ready — no added network time. Everything here runs
     // on the CB delegate queue (nil == main), same thread as sendData, so no locking.
     std::deque<std::vector<uint8_t>> _SendQueue;
+
+    // Inbound deferral (issue #40 contract): CB callbacks land between frames; the
+    // receiver must fire from Pump() inside the engine tick. Same EventInbox as
+    // Android (here single-threaded, so it's purely a deferral queue).
+    Lur::Transport::EventInbox _Inbox;
+    struct ReceiverSink : Lur::Transport::EventInbox::Sink {
+        Lur::Transport::ITransport::Receiver* R = nullptr;
+        void OnConnected() override {}
+        void OnDisconnected() override {}
+        void OnDatagram(const uint8_t* D, std::size_t N) override { if (R && *R) (*R)(D, N); }
+    } _Sink;
 
     ITransport::Receiver _Receiver;
 }
@@ -216,9 +228,19 @@ static void SaveIosPeerId(const std::string& Id) {
 - (void)peripheralManagerIsReadyToUpdateSubscribers:(CBPeripheralManager*)peripheral { [self pumpSend]; }
 
 - (void)deliverInbound:(NSData*)Data {
-    if (_Receiver && Data.length > 0) {
-        _Receiver(static_cast<const uint8_t*>(Data.bytes), (std::size_t)Data.length);
-    }
+    // Queue, don't deliver: CoreBluetooth callbacks land on the main runloop BETWEEN
+    // frames, but the ITransport contract (issue #40) is that the receiver fires from
+    // Pump() inside Session::Tick — the engine's frame window. Direct delivery made
+    // datagrams apply outside the frame's WasMyTurn/NowMyTurn window, which blinded the
+    // same-frame/RTT instrumentation on iOS (and was a contract drift from Android).
+    if (Data.length > 0) _Inbox.PushDatagram(static_cast<const uint8_t*>(Data.bytes),
+                                             (std::size_t)Data.length);
+}
+
+// Engine thread (via ITransport::Pump from Session::Tick): drain queued datagrams.
+- (void)pumpInbox {
+    _Sink.R = &_Receiver;
+    _Inbox.Drain(_Sink);
 }
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
@@ -449,6 +471,7 @@ public:
     void Send(const uint8_t* Data, std::size_t Size) override { [Driver sendData:Data size:Size]; }
     void SetReceiver(Receiver NewReceiver) override { [Driver setReceiver:std::move(NewReceiver)]; }
     bool IsConnected() const override { return Driver && [Driver isConnected]; }
+    void Pump() override { if (Driver) [Driver pumpInbox]; }  // engine-frame delivery (#40)
     void ResetLink() override { if (Driver) [Driver resetLink]; }
 
 private:

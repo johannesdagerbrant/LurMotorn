@@ -128,6 +128,15 @@
                                              selector:@selector(persistState)
                                                  name:UIApplicationDidEnterBackgroundNotification
                                                object:nil];
+    // Recreate the swapchain whenever the app (re)activates (issue #73): a DVT
+    // kill-existing relaunch can bring the window up against a stale/detached
+    // window-server surface, leaving MoltenVK presenting to nothing — the app runs
+    // but the screen stays black. Forcing NeedsRecreate on activation rebuilds the
+    // swapchain against the *live* surface. Harmless when nothing was wrong.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(recreateSwapchain)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
 
     // Wire the BLE transport into the net session. Hello exchanges the device GUIDs;
     // the shared BoardView renders + mutates _Match and ships moves via MoveCodec.
@@ -188,7 +197,9 @@
     if (!_Ready) {
         _Renderer = Lur::Render::VulkanRenderer::Create();
         _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
-        os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s", _Ready ? "ok" : "failed");
+        os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s (drawable %dx%d)",
+               _Ready ? "ok" : "failed",
+               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
         if (_Ready) {
             _View.CreateResources(_Renderer);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
@@ -277,6 +288,17 @@
 // Backgrounded: persist the in-progress match so it survives a close.
 - (void)persistState {
     if (_Sync != nullptr) _Sync->Persist();
+}
+
+// App became active: force a swapchain recreate against the now-live surface (#73).
+// Logs the drawable size so a black-screen state is diagnosable from syslog.
+- (void)recreateSwapchain {
+    if (!_Ready || _Renderer == nullptr) return;
+    CAMetalLayer* Layer = [self metalLayer];
+    os_log(OS_LOG_DEFAULT, "OnlyChess: active -> swapchain recreate (drawable %dx%d)",
+           (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
+    _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
+                      static_cast<int>(Layer.drawableSize.height));
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
