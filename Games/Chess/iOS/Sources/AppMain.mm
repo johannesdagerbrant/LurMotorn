@@ -213,9 +213,15 @@
             _ReportAccumNs += ElapsedNs;
             if (_ReportAccumNs > 2000000000ull) {
                 _ReportAccumNs = 0;
-                os_log(OS_LOG_DEFAULT, "OnlyChess: AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu",
+                // turn/ply/hash/gate: enough context to diagnose a stall from the log
+                // alone (#72) — mirrors the Android diag line.
+                os_log(OS_LOG_DEFAULT, "OnlyChess: AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
+                       "myTurn=%d ply=%zu hash=%08x gate=%d",
                        MatchesAfter, (unsigned long long)_SameFrame, (unsigned long long)_PeerReplies,
-                       (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies);
+                       (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies,
+                       _Match.IsMyTurn() ? 1 : 0, _Match.Record().Moves.size(),
+                       (unsigned)(_Match.PositionHash() & 0xFFFFFFFFu),
+                       _Session.IsAwaitingResync() ? 1 : 0);
             }
         }
         ++_Frame;

@@ -4,4 +4,5 @@
 add_library(lur_transport INTERFACE)
 target_include_directories(lur_transport INTERFACE Public)
 target_compile_features(lur_transport INTERFACE cxx_std_20)
+target_link_libraries(lur_transport INTERFACE lur::core)  # EventInbox uses LUR_ASSERT
 add_library(lur::transport ALIAS lur_transport)

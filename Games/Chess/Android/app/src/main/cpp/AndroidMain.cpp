@@ -188,9 +188,16 @@ void android_main(android_app* App) {
             ReportAccumNs += ElapsedNs;
             if (AutoEnabled && ReportAccumNs > 2'000'000'000ull) {
                 ReportAccumNs = 0;
-                LOGI("AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu",
+                // turn/ply/hash/gate: enough context to diagnose a stall from the log
+                // alone — whose move it is, how deep the game is, whether the boards
+                // agree (hash), and whether the resync gate is holding moves (#72).
+                LOGI("AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
+                     "myTurn=%d ply=%zu hash=%08x gate=%d",
                      MatchesAfter, (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
-                     (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies);
+                     (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies,
+                     State.Match.IsMyTurn() ? 1 : 0, State.Match.Record().Moves.size(),
+                     (unsigned)(State.Match.PositionHash() & 0xFFFFFFFFu),
+                     State.Session.IsAwaitingResync() ? 1 : 0);
             }
             ++Frame;
         }

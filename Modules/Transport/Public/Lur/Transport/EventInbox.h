@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <mutex>
 
+#include "Lur/Core/Assert.h"
+
 namespace Lur::Transport {
 
 // Thread-safe hand-off from a radio callback thread to the engine thread.
@@ -63,7 +65,12 @@ public:
 
 private:
     static constexpr std::size_t Capacity    = 32;
-    static constexpr std::size_t MaxDatagram = 256;  // >= max framed datagram (1 type + 254 payload)
+    // Must hold the largest datagram the radio can deliver: ATT MTU 517 - 3 = 514
+    // bytes (both backends negotiate 517). This was 256, sized to an older 254-byte
+    // frame cap — a full-history resync Sync then SILENTLY vanished here on Android's
+    // receive (the flag was sticky but nothing read it), wedging the game (#72). The
+    // Push below now also asserts, so an oversize drop is deafening, not silent.
+    static constexpr std::size_t MaxDatagram = 514;
 
     struct Event {
         EKind       Kind = EKind::Datagram;
@@ -73,7 +80,12 @@ private:
 
     void Push(EKind Kind, const uint8_t* Data, std::size_t Size) {
         std::lock_guard<std::mutex> Lock(Mutex);
-        if (Size > MaxDatagram) { DidOverflow = true; return; }  // never truncate a datagram
+        if (Size > MaxDatagram) {   // never truncate a datagram — and never drop it QUIETLY
+            LUR_ASSERT_MSG(false, "EventInbox: datagram %zu > slot %zu — raise MaxDatagram",
+                           Size, MaxDatagram);
+            DidOverflow = true;     // quiet-guard path for Shipping (asserts compiled out)
+            return;
+        }
         if (Count == Capacity) {                                 // full: drop the oldest
             Head = (Head + 1) % Capacity;
             --Count;
