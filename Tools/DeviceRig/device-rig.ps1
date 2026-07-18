@@ -35,6 +35,7 @@ param(
     [int]$Matches = 3,              # run: stop after this many completed matches (0 = until Ctrl-C)
     [int]$DurationSec = 0,          # run: hard cap in seconds (0 = none)
     [int]$SettleSec = 12,           # run: grace for the two peers to discover + link
+    [int]$LinkTimeoutSec = 35,      # run: abort LOUDLY if no peer reports READY by then
     [int]$Iterations = 1,           # cycle: repeat the loop this many times back-to-back
     [switch]$NoReset,               # run: DON'T pm-clear Android or clear logcat - arm the
                                     #   already-running/linked apps + keep the buffered
@@ -79,12 +80,33 @@ function AdbQuiet {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
     try { & $adb @args 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
 }
+# A bounded adb round-trip: `adb devices` LIES about half-dead wireless transports (the
+# cached entry stays "device" while every real command hangs forever - the silent-stall
+# class). Only an actual echo through the device proves it's alive.
+function Test-AndroidAlive([string]$Serial) {
+    $job = Start-Job -ScriptBlock { param($a, $s) & $a -s $s shell echo RT-OK 2>$null } -ArgumentList $adb, $Serial
+    $ok = (Wait-Job $job -Timeout 6) -and ((Receive-Job $job) -match 'RT-OK')
+    Stop-Job $job -ErrorAction SilentlyContinue; Remove-Job $job -Force -ErrorAction SilentlyContinue
+    return [bool]$ok
+}
 function Ensure-Android {
     if (-not $adb) { throw 'adb not found on PATH (Android platform-tools).' }
-    if ($AndroidSerial) { $env:ANDROID_SERIAL = $AndroidSerial }
-    $dev = (Adb devices) -split "`n" | Where-Object { $_ -match "`tdevice$" }
-    if (-not $dev) { throw 'no Android device (usb/wireless). Connect it and retry.' }
-    if (-not $AndroidSerial) { $script:AndroidSerial = (($dev | Select-Object -First 1) -split '\s+')[0]; $env:ANDROID_SERIAL = $script:AndroidSerial }
+    if (-not $AndroidSerial) {
+        $dev = (Adb devices) -split "`n" | Where-Object { $_ -match "`tdevice$" }
+        if ($dev) { $script:AndroidSerial = (($dev | Select-Object -First 1) -split '\s+')[0] }
+    }
+    if ($AndroidSerial -and (Test-AndroidAlive $AndroidSerial)) { $env:ANDROID_SERIAL = $AndroidSerial; return }
+    # Dead or missing: rediscover over mDNS (the wireless port CHANGES between drops).
+    Warn "android: '$AndroidSerial' not responding - rediscovering over mDNS..."
+    AdbQuiet disconnect
+    $ep = ((Adb mdns services) -split "`n" | Where-Object { $_ -match '_adb-tls-connect' } |
+           Select-Object -First 1) -replace '.*\s(\S+:\d+)\s*$', '$1'
+    if ($ep -and $ep -match ':\d+$') {
+        Say "android: reconnecting to $ep"
+        AdbQuiet connect $ep
+        if (Test-AndroidAlive $ep) { $script:AndroidSerial = $ep; $env:ANDROID_SERIAL = $ep; Say 'android: reconnected + round-trip OK'; return }
+    }
+    throw "android: UNREACHABLE - wireless debugging is off/dropped on the phone. Toggle Settings > Developer options > Wireless debugging, then retry. (adb devices lies about dead transports; this check does a real round-trip.)"
 }
 function Reset-Android {
     Say "android: reset identity + grant link permissions ($($App.AndroidPackage))"
@@ -115,6 +137,14 @@ function Launch-Android {
     Say 'android: wake + launch'
     AdbQuiet shell input keyevent KEYCODE_WAKEUP
     AdbQuiet shell monkey -p $App.AndroidPackage -c android.intent.category.LAUNCHER 1
+    # VERIFY the process actually came up - monkey fails silently (locked profile,
+    # missing app, disabled package). A dead peer must abort loudly, not idle (#75).
+    for ($i = 0; $i -lt 10; $i++) {
+        $p = (& $adb shell pidof $App.AndroidPackage 2>$null)
+        if ($p) { Say "android: app up (pid $($p.Trim()))"; return }
+        Start-Sleep -Milliseconds 500
+    }
+    throw "android: app did NOT start after launch (monkey silently failed?) - is the device unlocked and the app installed?"
 }
 function Kill-Android { Say 'android: force-stop'; AdbQuiet shell am force-stop $App.AndroidPackage }
 function Shot-Android($path) {
@@ -323,6 +353,8 @@ function Fetch-Ipa {
     }
     $dist = Join-Path $root 'dist'
     New-Item -ItemType Directory -Force -Path $dist | Out-Null
+    # gh refuses to overwrite an existing artifact file - clear the old ipa first.
+    Remove-Item (Join-Path $dist 'OnlyChess-unsigned.ipa') -ErrorAction SilentlyContinue
     Say "ios: downloading ipa from CI run $rid"
     & $gh run download $rid -n OnlyChess-unsigned-ipa -D $dist
     if ($LASTEXITCODE -ne 0) { throw "gh run download failed for run $rid." }
@@ -362,7 +394,7 @@ function Invoke-Run([bool]$Interactive) {
         # otherwise just foreground whatever is running.
         if (-not (Launch-Ios -FreshProcess:$Fresh)) {
             if ($Interactive) { Read-Host 'Press Enter once the iPhone app is foregrounded + Bluetooth allowed' }
-            else { Warn 'ios: launch failed and running non-interactively - continuing; log may be empty.' }
+            else { throw 'ios: launch FAILED (non-interactive) - aborting instead of idling with an empty log.' }
         }
         Arm-Ios
     }
@@ -387,13 +419,31 @@ function Invoke-Run([bool]$Interactive) {
     if ($doIos)     { $jobs += Start-Job -Name ios -ScriptBlock { param($t,$o) & python -m pymobiledevice3 syslog live 2>$null | Select-String -Pattern $t | ForEach-Object { $_.Line } | Out-File -FilePath $o -Encoding utf8 } -ArgumentList $App.LogTag,$iosLog }
     Say "linking... (settling ${SettleSec}s)"; Start-Sleep -Seconds $SettleSec
     $start = Get-Date
+    $linked = $false
     try {
         while ($true) {
             Start-Sleep -Seconds 3
+            $el = ((Get-Date) - $start).TotalSeconds
+            # EARLY-OUT: the peers must actually LINK (Net: READY in either engine log)
+            # within LinkTimeoutSec, or we abort LOUDLY with each side's evidence -
+            # never idle out the whole DurationSec against a dead/unlinked peer.
+            if (-not $linked) {
+                $andUp = $doAndroid -and (Test-Path $andLog) -and (Select-String -Path $andLog -Pattern 'Net: READY' -Quiet)
+                $iosUp = $doIos     -and (Test-Path $iosLog) -and (Select-String -Path $iosLog -Pattern 'Net: READY' -Quiet)
+                if ($andUp -or $iosUp) { $linked = $true; Say 'link is UP (Net: READY seen)' }
+                elseif (($SettleSec + $el) -ge $LinkTimeoutSec) {
+                    Warn "LINK FAILED: no 'Net: READY' from any peer after $([int]($SettleSec + $el))s - aborting run."
+                    foreach ($pair in @(@($andLog, 'android'), @($iosLog, 'ios'))) {
+                        $f = $pair[0]; $n = $pair[1]
+                        if (Test-Path $f) { Warn "--- $n last lines ---"; Get-Content $f -Tail 6 | ForEach-Object { Warn "  $_" } }
+                        else { Warn "--- $n captured NOTHING (log job dead? app silent?) ---" }
+                    }
+                    throw 'link never established - see the evidence above.'
+                }
+            }
             $ended = 0
             if ($doAndroid -and (Test-Path $andLog)) { $ended = [math]::Max($ended, (Get-Content $andLog | Select-String 'MATCH END').Count) }
             if ($doIos     -and (Test-Path $iosLog)) { $ended = [math]::Max($ended, (Get-Content $iosLog | Select-String 'MATCH END').Count) }
-            $el = ((Get-Date) - $start).TotalSeconds
             Say ("progress: matches ended={0} elapsed={1:N0}s" -f $ended, $el)
             if ($Matches -gt 0 -and $ended -ge $Matches) { Say "reached $Matches matches"; break }
             if ($DurationSec -gt 0 -and $el -ge $DurationSec) { Say 'duration cap reached'; break }
