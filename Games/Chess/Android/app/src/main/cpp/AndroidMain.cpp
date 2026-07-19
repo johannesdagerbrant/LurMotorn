@@ -17,6 +17,9 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
+#include "Chess/View/SfxLibrary.h"
+#include "Lur/Audio/AudioDevice.h"
+#include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -36,7 +39,15 @@ struct AppState {
     Lur::Net::Session Session;
     Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
     Lur::Save::SyncManager* Sync = nullptr;  // for persist-on-background (set in android_main)
+    Lur::Audio::Mixer Mixer;                 // wait-free SFX mixer (audio thread reads it)
+    Chess::SfxLibrary Sfx;                   // cooked move sounds, loaded into Mixer
+    Lur::Audio::IAudioDevice* Audio = nullptr;  // AAudio output stream
 };
+
+// The audio device's realtime callback: forward straight to the mixer. Wait-free.
+void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
+    static_cast<Lur::Audio::Mixer*>(User)->Render(Out, Frames);
+}
 
 void HandleCmd(android_app* App, int32_t Cmd) {
     auto* State = static_cast<AppState*>(App->userData);
@@ -48,6 +59,20 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                 LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
                 if (State->Ready) State->View.CreateResources(State->Renderer);
 
+                // Bring up audio: load the cooked SFX into the mixer, wire a move to a
+                // click, then open the low-latency stream. Order matters — Sfx.Load (which
+                // calls Mixer::Add) must finish before the device thread starts pulling.
+                if (State->Audio == nullptr) {
+                    State->Mixer.Init(Lur::Audio::Mixer::DefaultRate);
+                    State->Sfx.Load(State->Mixer);
+                    AppState* St = State;
+                    State->View.SetMovePlayed(
+                        [St] { St->Sfx.Play(St->Mixer, Chess::ESfx::Move); });
+                    State->Audio = Lur::Audio::CreateAudioDevice();
+                    const bool AudioOk = State->Audio && State->Audio->Start(MixThunk, &State->Mixer);
+                    LOGI("Audio init: %s", AudioOk ? "ok" : "failed");
+                }
+
                 // Smoke test: the shared, perft-verified C++ core runs on-device.
                 Chess::Board Board = Chess::Board::StartPosition();
                 Chess::MoveList Moves;
@@ -56,6 +81,11 @@ void HandleCmd(android_app* App, int32_t Cmd) {
             }
             break;
         case APP_CMD_TERM_WINDOW:
+            if (State->Audio != nullptr) {
+                State->Audio->Stop();
+                delete State->Audio;
+                State->Audio = nullptr;
+            }
             if (State->Renderer != nullptr) State->Renderer->Shutdown();
             State->Ready = false;
             break;

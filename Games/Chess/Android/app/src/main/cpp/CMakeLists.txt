@@ -26,7 +26,8 @@ target_include_directories(native_app_glue PUBLIC
 add_library(onlychess SHARED
     AndroidMain.cpp
     AndroidVulkanSurface.cpp
-    AndroidBleTransport.cpp)
+    AndroidBleTransport.cpp
+    AndroidAudioDevice.cpp)
 
 target_link_libraries(onlychess
     native_app_glue
@@ -38,8 +39,10 @@ target_link_libraries(onlychess
     lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math
+    lur::audio  # wait-free SFX mixer + LSF1 codec (AndroidAudioDevice.cpp is its backend)
     android   # NativeActivity / ANativeWindow
     log       # __android_log_print
+    aaudio    # low-latency audio output (NDK, API 26+)
     vulkan)   # the GPU API (Vulkan backend, task #9)
 
 # The build-config capability macros (LUR_INTERNAL etc.) are derived by

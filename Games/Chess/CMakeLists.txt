@@ -20,8 +20,9 @@ add_library(chess::core ALIAS chess_core)
 # apps. Talks only to the IRenderer interface (no Vulkan), so it builds on the
 # host too. PieceMasks.h (cooked piece silhouettes) lives in Private.
 add_library(chess_view
-    View/Private/BoardView.cpp)
+    View/Private/BoardView.cpp
+    View/Private/SfxLibrary.cpp)
 target_include_directories(chess_view PUBLIC View/Public PRIVATE View/Private)
-target_link_libraries(chess_view PUBLIC chess::core lur::render lur::net lur::hud)
+target_link_libraries(chess_view PUBLIC chess::core lur::render lur::net lur::hud lur::audio)
 target_compile_features(chess_view PUBLIC cxx_std_20)
 add_library(chess::view ALIAS chess_view)

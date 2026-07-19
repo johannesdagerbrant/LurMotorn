@@ -402,6 +402,8 @@ void BoardView::AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManage
 }
 
 void BoardView::StampMove() {
+    // A move just landed on the board: click it now (wait-free enqueue on the app side).
+    if (MovePlayed) MovePlayed();
     // Stamp the last-move time against the active opponent and persist its record, so
     // an offline move survives and syncs on the next link. Same-device (empty) has no
     // opponent record to keep.

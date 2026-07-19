@@ -25,6 +25,7 @@ $ErrorActionPreference = 'Stop'
 $Root = Split-Path -Parent $PSScriptRoot   # Cook/ -> repo root
 
 . (Join-Path $PSScriptRoot 'CookRg8ShadeCoverage.ps1')
+. (Join-Path $PSScriptRoot 'CookAudio.ps1')
 
 # Walk up from a marker's file to its owning game root (Games/<Game>) and Content/.
 # Resolve relative to the repo root, so a repo that itself sits under a "...\Games\..."
@@ -74,6 +75,10 @@ function Dispatch([string]$Format, [hashtable]$Kv, [string]$ContentRoot, [string
         'rg8-shade-coverage' {
             Invoke-CookRg8ShadeCoverage -Sources $Sources -Output $Output `
                 -Namespace $Kv['ns'] -SizeVar $Kv['size'] -CoverageVar $Kv['coverage'] -ShadeVar $Kv['shade']
+        }
+        'audio' {
+            Invoke-CookAudio -Sources $Sources -Output $Output `
+                -Namespace $Kv['ns'] -ClipsVar $Kv['clips'] -IndexVar $Kv['index']
         }
         default { throw "unknown LUR_COOK format '$Format'" }
     }

@@ -16,6 +16,9 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
+#include "Chess/View/SfxLibrary.h"
+#include "Lur/Audio/AudioDevice.h"
+#include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -32,6 +35,11 @@
 + (Class)layerClass { return [CAMetalLayer class]; }
 @end
 
+// The audio device's realtime callback: forward straight to the mixer. Wait-free.
+static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
+    static_cast<Lur::Audio::Mixer*>(User)->Render(Out, Frames);
+}
+
 @interface OnlyChessViewController : UIViewController
 @end
 
@@ -44,6 +52,9 @@
     Lur::Save::Store* _Store;                // heap: lives for the app
     Lur::Save::SyncManager* _Sync;
     std::string _DeviceId;
+    Lur::Audio::Mixer _Mixer;                // wait-free SFX mixer (audio thread reads it)
+    Chess::SfxLibrary _Sfx;                  // cooked move sounds, loaded into _Mixer
+    Lur::Audio::IAudioDevice* _Audio;        // RemoteIO output stream
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
     bool _Ready;
@@ -205,6 +216,20 @@
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
                                                        selector:@selector(renderFrame)];
             [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
+
+            // Bring up audio once the view is live: load the cooked SFX into the mixer,
+            // click on every move, then open the RemoteIO stream. Sfx.Load must finish
+            // before the audio thread starts pulling (Mixer::Add is not thread-safe).
+            if (_Audio == nullptr) {
+                _Mixer.Init(Lur::Audio::Mixer::DefaultRate);
+                _Sfx.Load(_Mixer);
+                Chess::SfxLibrary* Sfx = &_Sfx;
+                Lur::Audio::Mixer* Mixer = &_Mixer;
+                _View.SetMovePlayed([Sfx, Mixer] { Sfx->Play(*Mixer, Chess::ESfx::Move); });
+                _Audio = Lur::Audio::CreateAudioDevice();
+                const bool AudioOk = _Audio && _Audio->Start(MixThunk, &_Mixer);
+                os_log(OS_LOG_DEFAULT, "OnlyChess: Audio init: %{public}s", AudioOk ? "ok" : "failed");
+            }
         }
     } else {
         _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
@@ -288,6 +313,7 @@
 // Backgrounded: persist the in-progress match so it survives a close.
 - (void)persistState {
     if (_Sync != nullptr) _Sync->Persist();
+    if (_Audio != nullptr) _Audio->Stop();   // release the audio stream while backgrounded
 }
 
 // App became active: force a swapchain recreate against the now-live surface (#73).
@@ -299,6 +325,7 @@
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
     _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
                       static_cast<int>(Layer.drawableSize.height));
+    if (_Audio != nullptr) _Audio->Start(MixThunk, &_Mixer);  // resume audio on foreground
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
