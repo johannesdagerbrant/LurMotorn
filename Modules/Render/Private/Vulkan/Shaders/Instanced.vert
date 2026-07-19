@@ -12,6 +12,7 @@ layout(location = 4) in vec2  InPrev;      // per-instance: pixel centre, previo
 layout(location = 5) in vec2  InCur;       //               pixel centre, current tick
 layout(location = 6) in vec4  InColor;
 layout(location = 7) in float InSize;      // pixel size (quad spans Size x Size, centred)
+layout(location = 8) in vec4  InUvRect;    // atlas UV rect (u0,v0,u1,v1) for this glyph
 
 layout(push_constant) uniform Push {
     mat4 Mvp;
@@ -21,10 +22,12 @@ layout(push_constant) uniform Push {
 } P;
 
 layout(location = 0) out vec4 OutColor;
+layout(location = 1) out vec2 OutUv;
 
 void main() {
     vec2 centre = mix(InPrev, InCur, P.Shape.x);
     vec2 corner = centre + (InPosition.xy - vec2(0.5)) * InSize;
     gl_Position = P.Mvp * vec4(corner, 0.0, 1.0);
     OutColor = InColor;
+    OutUv = mix(InUvRect.xy, InUvRect.zw, InPosition.xy);
 }

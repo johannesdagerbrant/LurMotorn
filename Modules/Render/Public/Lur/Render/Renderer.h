@@ -25,8 +25,13 @@ struct Color { float R = 1.0f, G = 1.0f, B = 1.0f, A = 1.0f; };
 struct InstanceData {
     float PrevX, PrevY;   // pixel centre at the previous tick
     float CurX, CurY;     // pixel centre at the current tick
-    float R, G, B, A;     // flat tint
+    float R, G, B, A;     // tint (multiplied by the atlas shade channel)
     float Size;           // pixel size (quad spans Size x Size, centred on the lerp)
+    // Atlas UV rect (U0,V0)-(U1,V1) for this instance's glyph. With a flat/white
+    // material the default texture samples shade=coverage=1, so {0,0,1,1} + any rect
+    // still draws a plain tinted quad — untextured callers just leave this zeroed
+    // and pass a flat material.
+    float U0 = 0.0f, V0 = 0.0f, U1 = 1.0f, V1 = 1.0f;
 };
 
 // Opaque GPU resource handles (0 = none / invalid).
@@ -116,10 +121,14 @@ public:
     // per InstanceData and interpolated Prev->Cur by `Alpha` in the vertex shader. The
     // instance array is transient (rebuilt each frame in pixel space) and sub-allocated
     // from a per-frame arena, like DrawGlyphs. This is the RTS unit path: thousands of
-    // units, one draw. Default no-op so non-graphical/host backends need not implement it.
+    // units, one draw. `Material` supplies the glyph atlas (RG8 shade+coverage, sampled
+    // by each instance's UV rect): per-instance colour is the fill, coverage the cutout
+    // — the RTS silhouette-tint path. A flat material (BaseColor 0) keeps the old
+    // plain-tinted-quad behaviour. Default no-op so non-graphical/host backends need
+    // not implement it.
     virtual void DrawInstances(MeshHandle Quad, const InstanceData* Instances, uint32_t Count,
-                               float Alpha) {
-        (void)Quad; (void)Instances; (void)Count; (void)Alpha;
+                               float Alpha, MaterialHandle Material) {
+        (void)Quad; (void)Instances; (void)Count; (void)Alpha; (void)Material;
     }
 
     // Draw a batch of dynamic 2D glyph quads (MSDF text) in one call. Vertices/Indices

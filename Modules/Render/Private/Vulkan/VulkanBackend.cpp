@@ -429,14 +429,16 @@ public:
     }
 
     void DrawInstances(MeshHandle MeshId, const InstanceData* Instances, uint32_t Count,
-                       float Alpha) override {
+                       float Alpha, MaterialHandle MaterialId) override {
         if (!Recording || Count == 0) return;
         if (MeshId == 0 || MeshId > Meshes.size()) return;
+        if (MaterialId == 0 || MaterialId > Materials.size()) return;
         if (InstanceCursor + Count > MaxInstances) {
             LOGE("instance arena full (%u) — batch dropped", InstanceCursor + Count);
             return;
         }
         const Mesh& M = Meshes[MeshId - 1];
+        const Material& Mat = Materials[MaterialId - 1];
 
         std::memcpy(static_cast<InstanceData*>(InstanceMapped) + InstanceCursor,
                     Instances, static_cast<size_t>(Count) * sizeof(InstanceData));
@@ -450,6 +452,11 @@ public:
         vkCmdPushConstants(CommandBuffer, InstanceLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(Pc), &Pc);
+
+        // The glyph atlas (RG8 shade+coverage). Flat materials bind the default 1x1
+        // white texture, which keeps the plain-tinted-quad behaviour.
+        vkCmdBindDescriptorSets(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                InstanceLayout, 0, 1, &Mat.DescriptorSet, 0, nullptr);
 
         // Binding 0 = the shared quad; binding 1 = this batch's instances (bound at the
         // arena offset, so firstInstance stays 0).
@@ -679,15 +686,17 @@ private:
     }
 
     // The instanced unit pipeline: two vertex bindings (per-vertex quad + per-instance
-    // data) and a push-constant-only layout of its own (the flat shader samples no
-    // texture, so no descriptor set). Same render pass / blend / dynamic state as the
-    // others — only the vertex input and shaders differ.
+    // data). Set 0 is the same one-sampler layout the sprite pipeline uses — the glyph
+    // atlas (#85) — so a material's descriptor set binds unchanged. Same render pass /
+    // blend / dynamic state as the others — only the vertex input and shaders differ.
     bool CreateInstancePipeline() {
         VkPushConstantRange Push{};
         Push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         Push.offset = 0;
         Push.size = sizeof(PushConstants);
         VkPipelineLayoutCreateInfo LayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        LayoutInfo.setLayoutCount = 1;
+        LayoutInfo.pSetLayouts = &DescriptorSetLayout;
         LayoutInfo.pushConstantRangeCount = 1;
         LayoutInfo.pPushConstantRanges = &Push;
         if (vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &InstanceLayout) != VK_SUCCESS) {
@@ -712,17 +721,18 @@ private:
         Bindings[0] = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
         Bindings[1] = {1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_INSTANCE};
 
-        VkVertexInputAttributeDescription Attrs[5]{};
+        VkVertexInputAttributeDescription Attrs[6]{};
         Attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    offsetof(Vertex, Position)};       // quad corner
         Attrs[1] = {4, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, PrevX)};    // prev centre
         Attrs[2] = {5, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, CurX)};     // cur centre
         Attrs[3] = {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, R)};        // colour
         Attrs[4] = {7, 1, VK_FORMAT_R32_SFLOAT,          offsetof(InstanceData, Size)};     // pixel size
+        Attrs[5] = {8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, U0)};       // atlas UV rect
 
         VkPipelineVertexInputStateCreateInfo VertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         VertexInput.vertexBindingDescriptionCount = 2;
         VertexInput.pVertexBindingDescriptions = Bindings;
-        VertexInput.vertexAttributeDescriptionCount = 5;
+        VertexInput.vertexAttributeDescriptionCount = 6;
         VertexInput.pVertexAttributeDescriptions = Attrs;
 
         VkPipelineInputAssemblyStateCreateInfo InputAsm{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};

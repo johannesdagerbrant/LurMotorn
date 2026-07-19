@@ -1,12 +1,18 @@
 #version 450
 
-// Flat-tinted instance (RTS units, bring-up). Colour arrives per-instance from the
-// vertex shader; no texture sample yet — the cooked R8G8 sprite atlas + per-instance
-// Type/Team UV selection is a later pass, and slots in here without touching the
-// pipeline wiring.
+// Atlas-sampled instance (RTS units, #85): the cooked R8G8 glyph atlas supplies
+// R = shade, G = coverage; the per-instance colour is the fill tint. Silhouette-tint
+// path: colour = tint x shade, alpha = tint.a x coverage — so a white-glyph atlas
+// draws pure team-coloured alpha cutouts. A flat material binds the default 1x1
+// white texture (shade = coverage = 1), which degrades to the old plain tinted quad.
 layout(location = 0) in vec4 InColor;
+layout(location = 1) in vec2 InUv;
+
+layout(set = 0, binding = 0) uniform sampler2D BaseColor;
+
 layout(location = 0) out vec4 OutColor;
 
 void main() {
-    OutColor = InColor;
+    vec2 s = texture(BaseColor, InUv).rg;
+    OutColor = vec4(InColor.rgb * s.r, InColor.a * s.g);
 }

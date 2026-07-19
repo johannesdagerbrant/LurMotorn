@@ -48,14 +48,24 @@ private:
     Lur::Render::MaterialHandle GridLut[GridShades] = {};
     Lur::Render::MaterialHandle WhiteMat = 0;
 
-    // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
+    // The cooked glyph atlas (#85): 8 white silhouettes side by side, RG8
+    // shade+coverage. Everything on the field — units, mines, camps, HUD icons —
+    // is one of these masks under a tint (the locked "alpha-cutout silhouette" rule).
+    enum EGlyph { GlyphMiner = 0, GlyphRock, GlyphPaper, GlyphScissors,
+                  GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphCount };
+    Lur::Render::TextureHandle IconAtlas = 0;
+    Lur::Render::MaterialHandle AtlasMat = 0;        // white tint: per-instance colour is the fill
+    Lur::Render::MeshHandle GlyphMesh[GlyphCount] = {};  // unit quads with per-glyph atlas UVs
+
+    // Atlas-tinted materials for the DrawMesh path (mines / camps).
     Lur::Render::MaterialHandle CampMat[2] = {};
     Lur::Render::MaterialHandle MineMat = 0;
+    // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
     Lur::Render::MaterialHandle GoldBarFg = 0;   // mine reserve bar (#84) — gold accent
 
-    Lur::Render::Color UnitColor[4][2] = {};          // [type][team] — per-instance tint
+    Lur::Render::Color TeamTint[2] = {};              // locked team colours — the silhouette fill
     Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)
 
     Lur::Text::Font Font;

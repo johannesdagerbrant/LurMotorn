@@ -7,6 +7,13 @@
 #include "Lur/Text/BuiltinFonts.h"
 #include "Rps/Tunables.h"
 
+// The design-lock glyph set (#85, Docs/Planning/rps-hud-prototype.html): indices
+// 0..3 are EUnit order (miner, rock, paper, scissors), then gold / mine / swords /
+// camp. Sources: game-icons.net (CC BY 3.0) + Font Awesome Free (CC BY 4.0) + the
+// custom bold pick (ours) — attribution required in-app before shipping (#85).
+// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
+#include "IconMasks.h"
+
 namespace Rps {
 namespace {
 
@@ -115,20 +122,48 @@ void GameView::CreateResources(IRenderer* Renderer) {
         GridLut[I] = FlatMat(Renderer, C);
     }
 
-    CampMat[0] = FlatMat(Renderer, {0.25f, 0.66f, 0.86f, 1.0f});   // you (bottom): team blue #3FA8DC
-    CampMat[1] = FlatMat(Renderer, {0.88f, 0.29f, 0.19f, 1.0f});   // foe (top): team red #E04A31
-    MineMat = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});   // gold-bearing rock (locked palette #D9A93C)
-
-    // Per-type shade, team-tinted. Placeholder flats — real cooked R8G8 sprite art
-    // (the tint trick) is a later pass.
-    const Color T0[4] = {{0.55f, 0.75f, 0.95f, 1.0f}, {0.30f, 0.50f, 0.95f, 1.0f},
-                         {0.45f, 0.80f, 0.95f, 1.0f}, {0.40f, 0.90f, 0.80f, 1.0f}};
-    const Color T1[4] = {{0.95f, 0.70f, 0.55f, 1.0f}, {0.95f, 0.45f, 0.35f, 1.0f},
-                         {0.95f, 0.55f, 0.70f, 1.0f}, {0.95f, 0.80f, 0.40f, 1.0f}};
-    for (int Ty = 0; Ty < 4; ++Ty) {
-        UnitColor[Ty][0] = T0[Ty];
-        UnitColor[Ty][1] = T1[Ty];
+    // Upload the cooked glyph atlas (#85): GlyphCount masks side by side, RG8
+    // interleaved (R = shade, G = coverage). White sources -> shade 255, so the
+    // tint IS the fill and coverage is the cutout.
+    {
+        constexpr int S = RpsArt::IconSize;
+        static uint8_t Rg[GlyphCount * S * S * 2];  // ~256 KB scratch — static, off the stack
+        for (int G = 0; G < GlyphCount; ++G)
+            for (int Y = 0; Y < S; ++Y)
+                for (int X = 0; X < S; ++X) {
+                    const size_t Dst = 2 * (static_cast<size_t>(Y) * (GlyphCount * S) + static_cast<size_t>(G) * S + X);
+                    const size_t Src = static_cast<size_t>(Y) * S + X;
+                    Rg[Dst + 0] = RpsArt::IconShade[G][Src];
+                    Rg[Dst + 1] = RpsArt::IconCoverage[G][Src];
+                }
+        IconAtlas = Renderer->LoadTexture(Rg, GlyphCount * S, S, Lur::Render::ETextureFormat::Rg8);
     }
+    {
+        MaterialDesc D;
+        D.BaseColor = IconAtlas;
+        AtlasMat = Renderer->CreateMaterial(D);  // white tint; per-instance colour fills
+    }
+    constexpr float GC = static_cast<float>(GlyphCount);
+    for (int G = 0; G < GlyphCount; ++G) {
+        Lur::Render::Quad Q = Lur::Render::MakeQuad();
+        const float U0 = static_cast<float>(G) / GC, U1 = static_cast<float>(G + 1) / GC;
+        Q.Vertices[0].Uv = {U0, 0.0f}; Q.Vertices[1].Uv = {U1, 0.0f};
+        Q.Vertices[2].Uv = {U1, 1.0f}; Q.Vertices[3].Uv = {U0, 1.0f};
+        GlyphMesh[G] = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
+    }
+
+    // Locked team + accent tints (rps-hud-prototype.html): silhouette fill colours.
+    TeamTint[0] = {Srgb(0x3F), Srgb(0xA8), Srgb(0xDC), 1.0f};  // you (bottom)
+    TeamTint[1] = {Srgb(0xE0), Srgb(0x4A), Srgb(0x31), 1.0f};  // foe (top)
+    auto AtlasTinted = [&](Color C) {
+        MaterialDesc D;
+        D.BaseColor = IconAtlas;
+        D.Tint = C;
+        return Renderer->CreateMaterial(D);
+    };
+    CampMat[0] = AtlasTinted(TeamTint[0]);
+    CampMat[1] = AtlasTinted(TeamTint[1]);
+    MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
     GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
@@ -182,18 +217,26 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(GridLut[Li], WidthPx * 0.5f, Y, WidthPx, 1.0f);
     }
 
-    // Camps (locations, not entities) — faint 3-unit markers at each end.
-    const float CampPx = 3.0f * P;
-    Blit(CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx, CampPx);
-    Blit(CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx, CampPx);
+    // Draw a glyph-atlas quad (tinted silhouette) centred at (Cx, Cy).
+    auto BlitGlyph = [&](int Glyph, Lur::Render::MaterialHandle Mat, float Cx, float Cy, float Px) {
+        const Mat4 M = Mat4::Translation({Cx - Px * 0.5f, Cy - Px * 0.5f, 0.0f}) *
+                       Mat4::Scale({Px, Px, 1.0f});
+        Renderer->DrawMesh(GlyphMesh[Glyph], Mat, M);
+    };
+
+    // Camps render as ICONS like everything else (design lock: same tech, no bespoke
+    // geometry) — the barracks tent in the owning team's colour.
+    const float CampPx = 4.5f * P;
+    BlitGlyph(GlyphCamp, CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
+    BlitGlyph(GlyphCamp, CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
-    const float MinePx = 1.4f * P;
+    const float MinePx = 2.2f * P;
     for (int T = 0; T < NumMines; ++T) {
         if (Snap.MineGold[T] <= 0) continue;
         const float Mx = SX(FW(Snap.MineX[T])), My = SY(FW(Snap.MineY[T]));
-        Blit(MineMat, Mx, My, MinePx, MinePx);
+        BlitGlyph(GlyphMine, MineMat, Mx, My, MinePx);
         const float Frac = static_cast<float>(Snap.MineGold[T]) / static_cast<float>(MineGoldCapacity);
         const float BarW = MinePx, BarH = 2.0f, BarY = My - MinePx * 0.5f - 3.0f;
         Blit(HealthBg, Mx, BarY, BarW, BarH);
@@ -203,19 +246,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // Units — ONE instanced draw. Each instance carries prev+cur pixel centres; the
     // vertex shader lerps by Alpha, so there is no per-unit CPU interpolation (design §6).
     // We map prev/cur to pixels here (a cheap affine per unit, not a lerp).
-    const float UnitPx = 1.1f * P;
+    // Design lock: units are bare alpha-cutout SILHOUETTES tinted by team — type is
+    // the shape, ownership is the colour. Per-instance UV rect picks the glyph.
+    const float UnitPx = 1.7f * P;
     uint32_t N = 0;
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
-        const Color C = UnitColor[Ty][Tm];
+        const Color C = TeamTint[Tm];
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
         D.Size = UnitPx;
+        D.U0 = static_cast<float>(Ty) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
+        D.U1 = static_cast<float>(Ty + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
     }
-    Renderer->DrawInstances(Quad, Instances, N, Alpha);
+    Renderer->DrawInstances(Quad, Instances, N, Alpha, AtlasMat);
 
     // Health bars on top of the units (sparse: only hurt units). Kept on the per-mesh
     // path — a second instanced draw is a later refinement.
