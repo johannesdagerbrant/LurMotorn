@@ -407,6 +407,13 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: view unhosted - rebuilding "
                            "window+view+layer+renderer on scene state=%ld",
            (long)Scene.activationState);
+    // Detach the OLD window FIRST: it still holds rootViewController == self, and its
+    // later dealloc tears the root VC's view out of whatever window now hosts it —
+    // which re-unhosted the fresh view and made this reattach loop every 2 s.
+    OnlyChessAppDelegate* Delegate = (OnlyChessAppDelegate*)UIApplication.sharedApplication.delegate;
+    UIWindow* Old = Delegate.window;
+    Old.hidden = YES;
+    Old.rootViewController = nil;
     OnlyChessView* NewView = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view = NewView;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
@@ -420,7 +427,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     NewWindow.frame = Scene.coordinateSpace.bounds;
     NewWindow.rootViewController = self;
     [NewWindow makeKeyAndVisible];
-    ((OnlyChessAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
+    Delegate.window = NewWindow;
 
     _Renderer->Shutdown();  // full teardown (device, surface, everything)
     _Ready = _Renderer->Init((__bridge void*)Layer);

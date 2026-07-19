@@ -193,6 +193,13 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: view unhosted - rebuilding "
                            "window+view+layer+renderer on scene state=%ld",
            (long)Scene.activationState);
+    // Detach the OLD window FIRST: it still holds rootViewController == self, and its
+    // later dealloc tears the root VC's view out of whatever window now hosts it —
+    // which re-unhosted the fresh view and made this reattach loop every 2 s.
+    RpsAppDelegate* Delegate = (RpsAppDelegate*)UIApplication.sharedApplication.delegate;
+    UIWindow* Old = Delegate.window;
+    Old.hidden = YES;
+    Old.rootViewController = nil;
     RpsView* NewView = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view = NewView;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
@@ -206,7 +213,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     NewWindow.frame = Scene.coordinateSpace.bounds;
     NewWindow.rootViewController = self;
     [NewWindow makeKeyAndVisible];
-    ((RpsAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
+    Delegate.window = NewWindow;
 
     _Renderer->Shutdown();  // full teardown (device, surface, everything)
     _Ready = _Renderer->Init((__bridge void*)Layer);
