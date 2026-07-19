@@ -236,7 +236,8 @@ void android_main(android_app* App) {
                 // alone — whose move it is, how deep the game is, whether the boards
                 // agree (hash), and whether the resync gate is holding moves (#72).
                 LOGI("AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
-                     "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums)",
+                     "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums) "
+                     "presented=%u",  // stuck at 0 = dead swapchain (#73)
                      MatchesAfter, (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
                      (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies,
                      State.Match.IsMyTurn() ? 1 : 0, State.Match.Record().Moves.size(),
@@ -245,7 +246,8 @@ void android_main(android_app* App) {
                      (unsigned long long)RttCount,
                      (unsigned long long)(RttCount ? RttSumMs / RttCount : 0),
                      (unsigned long long)(RttCount ? RttMinMs : 0),
-                     (unsigned long long)RttMaxMs);
+                     (unsigned long long)RttMaxMs,
+                     State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
             }
             ++Frame;
         }

@@ -290,7 +290,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                 // turn/ply/hash/gate: enough context to diagnose a stall from the log
                 // alone (#72) — mirrors the Android diag line.
                 os_log(OS_LOG_DEFAULT, "OnlyChess: AUTOPLAY game=%u sameFrame=%llu/%llu opens=%llu delayed=%llu "
-                       "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums)",
+                       "myTurn=%d ply=%zu hash=%08x gate=%d rtt(n=%llu avg=%llums min=%llums max=%llums) "
+                       "presented=%u",  // stuck at 0 = dead swapchain (#73)
                        MatchesAfter, (unsigned long long)_SameFrame, (unsigned long long)_PeerReplies,
                        (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies,
                        _Match.IsMyTurn() ? 1 : 0, _Match.Record().Moves.size(),
@@ -299,7 +300,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                        (unsigned long long)_RttCount,
                        (unsigned long long)(_RttCount ? _RttSumMs / _RttCount : 0),
                        (unsigned long long)(_RttCount ? _RttMinMs : 0),
-                       (unsigned long long)_RttMaxMs);
+                       (unsigned long long)_RttMaxMs,
+                       _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u);
             }
         }
         ++_Frame;

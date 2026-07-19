@@ -272,15 +272,34 @@ public:
         Recording = false;
         if (!Ready) return;
 
-        if (NeedsRecreate) { RecreateSwapchain(); NeedsRecreate = false; }
-        if (Swapchain == VK_NULL_HANDLE) return;
+        // Self-heal (issue #73): a NULL swapchain is a recreate TRIGGER, never a
+        // terminal state. A DVT relaunch can race the window server so the first
+        // recreate fails (0-extent caps / stale surface); before this, that one
+        // failure was silent and permanent — the app ran on with a black screen.
+        // Now every dead frame retries, and a long streak escalates to rebuilding
+        // the VkSurfaceKHR itself (RecreateSwapchain below).
+        if (NeedsRecreate || Swapchain == VK_NULL_HANDLE) {
+            RecreateSwapchain();
+            NeedsRecreate = false;
+        }
+        if (Swapchain == VK_NULL_HANDLE) {
+            if (++DeadFrames == 1 || DeadFrames % 60 == 0)
+                LOGE("BeginFrame: no swapchain for %u frame(s), retrying", DeadFrames);
+            return;
+        }
 
         vkWaitForFences(Device, 1, &InFlight, VK_TRUE, UINT64_MAX);
 
         VkResult Acq = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX,
                                              ImageAvailable, VK_NULL_HANDLE, &ImageIndex);
-        if (Acq == VK_ERROR_OUT_OF_DATE_KHR) { NeedsRecreate = true; return; }
+        if (Acq == VK_ERROR_OUT_OF_DATE_KHR) {
+            NeedsRecreate = true;
+            if (++DeadFrames == 1 || DeadFrames % 60 == 0)
+                LOGE("BeginFrame: acquire OUT_OF_DATE (%u dead frame(s)), recreating", DeadFrames);
+            return;
+        }
         if (Acq != VK_SUCCESS && Acq != VK_SUBOPTIMAL_KHR) {
+            ++DeadFrames;
             LOGE("vkAcquireNextImageKHR failed (%d)", Acq);
             return;
         }
@@ -468,9 +487,27 @@ public:
         Present.pSwapchains = &Swapchain;
         Present.pImageIndices = &ImageIndex;
         VkResult Pres = vkQueuePresentKHR(GraphicsQueue, &Present);
-        if (Pres == VK_ERROR_OUT_OF_DATE_KHR || Pres == VK_SUBOPTIMAL_KHR) NeedsRecreate = true;
-        else if (Pres != VK_SUCCESS) LOGE("vkQueuePresentKHR failed (%d)", Pres);
+        if (Pres == VK_SUCCESS || Pres == VK_SUBOPTIMAL_KHR) {
+            // SUBOPTIMAL still presented — count it, but also refresh the swapchain.
+            ++FramesPresented;
+            if (FramesPresented == 1)
+                LOGI("first frame presented (%ux%u)", Extent.width, Extent.height);
+            if (DeadFrames > 0) {
+                LOGI("present recovered after %u dead frame(s) (%ux%u, recreate #%u)",
+                     DeadFrames, Extent.width, Extent.height, RecreateCount);
+                DeadFrames = 0;
+            }
+        }
+        if (Pres == VK_ERROR_OUT_OF_DATE_KHR || Pres == VK_SUBOPTIMAL_KHR) {
+            NeedsRecreate = true;
+            if (Pres == VK_ERROR_OUT_OF_DATE_KHR)
+                LOGE("present OUT_OF_DATE, recreating");
+        } else if (Pres != VK_SUCCESS) {
+            LOGE("vkQueuePresentKHR failed (%d)", Pres);
+        }
     }
+
+    uint32_t PresentedFrames() const override { return FramesPresented; }
 
 private:
     // ---- Init steps ----
@@ -1051,7 +1088,12 @@ private:
         if (Extent.width == 0xFFFFFFFFu) {  // surface lets us choose: ask the platform
             Vk::PlatformDrawableSize(Window, &Extent.width, &Extent.height);
         }
-        if (Extent.width == 0 || Extent.height == 0) return false;
+        if (Extent.width == 0 || Extent.height == 0) {
+            // Was a SILENT false (issue #73): a relaunch race can report 0x0 here, and
+            // the resulting null swapchain used to be terminal. BeginFrame now retries.
+            LOGE("CreateSwapchain: surface reports 0-extent (%ux%u)", Extent.width, Extent.height);
+            return false;
+        }
 
         uint32_t ImageCount = Caps.minImageCount + 1;
         if (Caps.maxImageCount > 0 && ImageCount > Caps.maxImageCount)
@@ -1178,7 +1220,34 @@ private:
     void RecreateSwapchain() {
         vkDeviceWaitIdle(Device);
         DestroySwapchain();
-        CreateSwapchain();
+        ++RecreateCount;
+
+        // Escalation (issue #73): a long dead streak means recreating against the
+        // CURRENT surface isn't healing — the VkSurfaceKHR itself is presumed stale
+        // (bound to a window-server surface that died in a relaunch race). Rebuild it
+        // from the stored native window/layer, then build the swapchain against the
+        // fresh one. Same platform seam as Init, so this is OS-agnostic.
+        if (DeadFrames >= SurfaceEscalateAfter || Surface == VK_NULL_HANDLE) {
+            if (DeadFrames % 30 == 0)
+                LOGE("swapchain dead for %u frames - rebuilding VkSurfaceKHR (recreate #%u)",
+                     DeadFrames, RecreateCount);
+            if (Surface != VK_NULL_HANDLE) vkDestroySurfaceKHR(Instance, Surface, nullptr);
+            Surface = VK_NULL_HANDLE;
+            if (!CreateSurface()) return;  // logged inside; retried next frame (Surface
+                                           // stays null, so this branch runs again)
+            DeadFrames = 0;                // fresh surface: restart the escalation clock
+        }
+
+        const bool Ok = CreateSwapchain();
+        // Loud on every path (issue #73): the old code recreated silently, so a failed
+        // recreate (-> null swapchain) was indistinguishable from health. Rate-limited
+        // on the dead streak so a retry loop reports ~2 lines/s, not 60.
+        if (DeadFrames == 0 || DeadFrames % 30 == 0) {
+            if (Ok)
+                LOGI("swapchain recreated #%u: %ux%u", RecreateCount, Extent.width, Extent.height);
+            else
+                LOGE("swapchain recreate #%u FAILED - will retry next frame", RecreateCount);
+        }
     }
 
     // ---- State ----
@@ -1244,6 +1313,15 @@ private:
     bool     Ready = false;
     bool     Recording = false;
     bool     NeedsRecreate = false;
+
+    // Present-health bookkeeping (issue #73). Every swapchain failure used to be
+    // silent AND terminal (a failed recreate left Swapchain null with no retry path)
+    // — the app ran on, black, with an empty log. These counters make the state loud
+    // and drive the self-heal in BeginFrame.
+    uint32_t FramesPresented = 0;   // vkQueuePresentKHR successes since Init
+    uint32_t DeadFrames = 0;        // consecutive BeginFrames with no usable swapchain
+    uint32_t RecreateCount = 0;     // swapchain recreates since Init
+    static constexpr uint32_t SurfaceEscalateAfter = 60;  // dead frames before surface rebuild
 };
 
 } // namespace

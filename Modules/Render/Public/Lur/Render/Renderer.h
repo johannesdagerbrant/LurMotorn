@@ -136,6 +136,14 @@ public:
     }
 
     virtual void EndFrame() = 0;  // submit + present
+
+    // Frames actually handed to the display since Init (i.e. vkQueuePresentKHR returned
+    // success). The one number that distinguishes "rendering but invisible" from "not
+    // presenting at all" — a black screen with this advancing is a compositor problem;
+    // stuck at 0 it's a dead swapchain (issue #73). Cheap enough to poll every frame;
+    // surfaced in the apps' periodic diag log lines. Default 0 for non-presenting
+    // backends.
+    virtual uint32_t PresentedFrames() const { return 0; }
 };
 
 } // namespace Lur::Render

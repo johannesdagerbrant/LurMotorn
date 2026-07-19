@@ -170,8 +170,12 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
         DiagAccumNs += ElapsedNs;
         if (DiagAccumNs > 2'000'000'000ull) {
             DiagAccumNs = 0;
-            os_log(OS_LOG_DEFAULT, "OnlyRps: LOCKSTEP tick=%u you=%d foe=%d desync=%d", _Lp.ExecTick(),
-                   _Lp.GetSim().AliveCount(0), _Lp.GetSim().AliveCount(1), _Lp.Desynced() ? 1 : 0);
+            // presented= distinguishes "rendering but invisible" from a dead swapchain
+            // (issue #73): black screen + advancing count = compositor problem; stuck
+            // count = the renderer itself isn't presenting.
+            os_log(OS_LOG_DEFAULT, "OnlyRps: LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u",
+                   _Lp.ExecTick(), _Lp.GetSim().AliveCount(0), _Lp.GetSim().AliveCount(1),
+                   _Lp.Desynced() ? 1 : 0, _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u);
         }
     }
 #endif

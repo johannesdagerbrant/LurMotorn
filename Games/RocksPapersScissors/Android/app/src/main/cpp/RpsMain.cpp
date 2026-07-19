@@ -189,9 +189,13 @@ void android_main(android_app* App) {
             DiagAccumNs += ElapsedNs;
             if (DiagAccumNs > 2'000'000'000ull) {
                 DiagAccumNs = 0;
-                LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d", State.Lp.ExecTick(),
+                // presented= distinguishes "rendering but invisible" from a dead
+                // swapchain (issue #73): black screen + advancing count = compositor
+                // problem; stuck count = the renderer itself isn't presenting.
+                LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u", State.Lp.ExecTick(),
                      State.Lp.GetSim().AliveCount(0), State.Lp.GetSim().AliveCount(1),
-                     State.Lp.Desynced() ? 1 : 0);
+                     State.Lp.Desynced() ? 1 : 0,
+                     State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
             }
         }
 #endif
