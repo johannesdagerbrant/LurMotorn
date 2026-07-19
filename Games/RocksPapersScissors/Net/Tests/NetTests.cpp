@@ -3,11 +3,15 @@
 // (hostile bytes never crash the decoder). Chess's fuzz_tests as the pattern.
 #include <cstdint>
 #include <cstdio>
+#include <memory>
+#include <string>
 #include <vector>
 
+#include "Lur/Net/Session.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Lur/Sim/Random.h"
+#include "Lur/Transport/Loopback.h"
 #include "Rps/EventCodec.h"
 #include "Rps/LockstepPeer.h"
 
@@ -210,6 +214,72 @@ static void TestLockstepCeilingStallAndResume() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // resumed to a bit-identical state
 }
 
+// ---- Integration: lockstep over the REAL Session (framing) + deferred Loopback ----
+// The faithful path — LockstepPeer sends via Session::Send (the framed game slots #44),
+// and Session dispatches inbound datagrams back to LockstepPeer::OnMessage. Because a
+// lockstep receiver sends from its callback (an inbound input unblocks a tick that emits
+// an anchor), this is exactly the re-entrancy the DEFERRED loopback removes: with
+// synchronous delivery it would recurse A->B->A; here the reply queues for the next
+// Pump. Proves the whole wiring end-to-end, host-side, before the two-window Vulkan main.
+struct SessPeer {
+    Lur::Transport::LoopbackTransport T;
+    Lur::Net::Session S;
+    LockstepPeer Lp;
+};
+static void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
+    static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
+}
+static void RouteToPeer(Lur::Net::Session& S, LockstepPeer& Lp) {
+    S.SetHandler(MsgInput,  [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgInput, D, N); });
+    S.SetHandler(MsgAnchor, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgAnchor, D, N); });
+}
+static void TestLockstepOverSessionLoopback() {
+    auto A = std::make_unique<SessPeer>();  // Sim inside each -> heap, not stack
+    auto B = std::make_unique<SessPeer>();
+    A->T.SetDeferred(true);
+    B->T.SetDeferred(true);
+    Lur::Transport::LoopbackTransport::Link(A->T, B->T);
+    RouteToPeer(A->S, A->Lp);
+    RouteToPeer(B->S, B->Lp);
+
+    const std::string AGuid = "guid-aaaa", BGuid = "guid-bbbb";
+    A->S.Start(&A->T, AGuid);
+    B->S.Start(&B->T, BGuid);
+    int Guard = 0;
+    while (!(A->S.IsReady() && B->S.IsReady()) && Guard++ < 200) {
+        A->S.Tick(OneTickNs);
+        B->S.Tick(OneTickNs);
+    }
+    CHECK(A->S.IsReady() && B->S.IsReady());
+
+    // Each peer derives its team from the two GUIDs identically (smaller GUID = team 0).
+    const uint8_t ATeam = AGuid < A->S.GetPeerGuid() ? 0 : 1;
+    const uint8_t BTeam = BGuid < B->S.GetPeerGuid() ? 0 : 1;
+    CHECK(ATeam != BTeam);
+    A->Lp.Init(0xABCD, ATeam, SendViaSession, &A->S);
+    B->Lp.Init(0xABCD, BTeam, SendViaSession, &B->S);
+
+    SplitMix64 Rng(0x2468);
+    for (int I = 0; I < 250; ++I) {
+        A->S.Tick(OneTickNs);   // pump transports -> deliver queued datagrams to OnMessage
+        B->S.Tick(OneTickNs);
+        A->Lp.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        B->Lp.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        A->Lp.Tick(OneTickNs);  // produce + send (enqueues to peer inbox), execute
+        B->Lp.Tick(OneTickNs);
+        CHECK(!A->Lp.Desynced() && !B->Lp.Desynced());
+    }
+    for (int I = 0; I < 8; ++I) {  // settle
+        A->S.Tick(OneTickNs);
+        B->S.Tick(OneTickNs);
+        A->Lp.Tick(OneTickNs);
+        B->Lp.Tick(OneTickNs);
+    }
+    CHECK(A->Lp.ExecTick() > 200);
+    CHECK(A->Lp.ExecTick() == B->Lp.ExecTick());
+    CHECK(A->Lp.GetSim().StateHash() == B->Lp.GetSim().StateHash());  // bit-identical over the wire
+}
+
 int main() {
     TestRoundTrip();
     TestByteBudget();
@@ -218,6 +288,7 @@ int main() {
     TestLockstepStaysInSync();
     TestLockstepDetectsDivergence();
     TestLockstepCeilingStallAndResume();
+    TestLockstepOverSessionLoopback();
 
     if (GFailures == 0) std::printf("rps_net_tests: ALL PASS\n");
     else std::printf("rps_net_tests: %d FAILURE(S)\n", GFailures);
