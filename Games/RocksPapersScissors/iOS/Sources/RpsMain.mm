@@ -20,6 +20,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
+#include "Lur/Sim/Random.h"
 #include "Lur/Transport/Ble.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
@@ -152,6 +153,26 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
         os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
     }
     if (_Started) _Lp.Tick(ElapsedNs);
+
+#if LUR_INTERNAL
+    // Dev build: auto-press random soldiers so the cross-platform match plays itself,
+    // and log the lockstep tick/desync every ~2 s so sync is observable from syslog.
+    static Lur::Sim::SplitMix64 Rng(0xA11CE);
+    static uint64_t AutoAccumNs = 0, DiagAccumNs = 0;
+    if (_Started) {
+        AutoAccumNs += ElapsedNs;
+        if (AutoAccumNs > 700'000'000ull) {
+            AutoAccumNs = 0;
+            _Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
+        }
+        DiagAccumNs += ElapsedNs;
+        if (DiagAccumNs > 2'000'000'000ull) {
+            DiagAccumNs = 0;
+            os_log(OS_LOG_DEFAULT, "OnlyRps: LOCKSTEP tick=%u you=%d foe=%d desync=%d", _Lp.ExecTick(),
+                   _Lp.GetSim().AliveCount(0), _Lp.GetSim().AliveCount(1), _Lp.Desynced() ? 1 : 0);
+        }
+    }
+#endif
 
     CAMetalLayer* Layer = [self metalLayer];
     const float W = static_cast<float>(Layer.drawableSize.width);

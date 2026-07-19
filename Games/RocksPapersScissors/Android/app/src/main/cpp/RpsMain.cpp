@@ -19,6 +19,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
+#include "Lur/Sim/Random.h"
 #include "Lur/Transport/Ble.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
@@ -156,6 +157,10 @@ void android_main(android_app* App) {
     LOGI("RPS session started (device id %zuB)", State.DeviceId.size());
 
     auto PrevTime = std::chrono::steady_clock::now();
+#if LUR_INTERNAL
+    Lur::Sim::SplitMix64 Rng(0xA11CE ^ State.DeviceId.size());
+    uint64_t AutoAccumNs = 0, DiagAccumNs = 0;
+#endif
     while (!App->destroyRequested) {
         const auto Now = std::chrono::steady_clock::now();
         const uint64_t ElapsedNs =
@@ -172,6 +177,25 @@ void android_main(android_app* App) {
             LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
         }
         if (State.Started) State.Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
+
+#if LUR_INTERNAL
+        // Dev build: auto-press random soldiers so the cross-platform match plays itself,
+        // and log the lockstep tick/desync every ~2 s so sync is observable from logcat.
+        if (State.Started) {
+            AutoAccumNs += ElapsedNs;
+            if (AutoAccumNs > 700'000'000ull) {
+                AutoAccumNs = 0;
+                State.Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
+            }
+            DiagAccumNs += ElapsedNs;
+            if (DiagAccumNs > 2'000'000'000ull) {
+                DiagAccumNs = 0;
+                LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d", State.Lp.ExecTick(),
+                     State.Lp.GetSim().AliveCount(0), State.Lp.GetSim().AliveCount(1),
+                     State.Lp.Desynced() ? 1 : 0);
+            }
+        }
+#endif
 
         int Events = 0;
         android_poll_source* Source = nullptr;

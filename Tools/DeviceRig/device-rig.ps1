@@ -40,27 +40,47 @@ param(
     [switch]$NoReset,               # run: DON'T pm-clear Android or clear logcat - arm the
                                     #   already-running/linked apps + keep the buffered
                                     #   handshake. Use when peers are already paired live.
-    [switch]$Fresh                  # run: force-stop + relaunch BOTH (fresh handshake) WITHOUT
+    [switch]$Fresh,                 # run: force-stop + relaunch BOTH (fresh handshake) WITHOUT
+    [string]$Game = 'chess'         # which game's app under test: 'chess' or 'rps'
 )                                   #   pm-clear (identity kept), and clear the log window.
                                     #   The clean-measurement mode: fresh link, no churn.
 $ErrorActionPreference = 'Stop'
 
-# --- App under test - the ONLY app-specific config. The rig body stays game-agnostic. ---
-$App = @{
-    LogTag         = 'OnlyChess'                          # engine log tag the app emits
-    AndroidPackage = 'com.lurmotorn.onlychess'
-    IosBundleId    = 'com.lurmotorn.onlychess.L5XBWVZ7N3' # sideload appends the signer suffix
-    IosBundleBase  = 'com.lurmotorn.onlychess'            # uninstall sweeps every ...<SIGNER> variant
-    AutoplayProp   = 'debug.lur.autoplay'                 # Android: engine autoplay toggle (setprop)
-    AutoplayMarker = 'autoplay'                           # iOS: Documents/<marker> engine autoplay toggle
-    RoleProp       = 'debug.lur.role'                     # Android: dev BLE role override (setprop)
-    RoleMarker     = 'role'                               # iOS: Documents/<marker> dev BLE role override
-    ClearMarker    = 'clearsave'                          # iOS: Documents/<marker> one-shot history wipe
+# --- App under test - the ONLY app-specific config. The rig body stays game-agnostic.
+#     Selected by -Game (chess|rps); the two games share the engine (and BLE UUID), so
+#     the rig serves both — the second consumer that makes this config a real switch. ---
+if ($Game -eq 'rps') {
+    $App = @{
+        LogTag         = 'OnlyRps'
+        AndroidPackage = 'com.lurmotorn.onlyrps'
+        IosBundleId    = 'com.lurmotorn.onlyrps.L5XBWVZ7N3'  # sideload appends the same signer suffix
+        IosBundleBase  = 'com.lurmotorn.onlyrps'
+        AutoplayProp   = 'debug.lur.autoplay'                # RPS dev build auto-plays already; harmless
+        AutoplayMarker = 'autoplay'
+        RoleProp       = 'debug.lur.role'
+        RoleMarker     = 'role'
+        ClearMarker    = 'clearsave'
+    }
+} else {
+    $App = @{
+        LogTag         = 'OnlyChess'                          # engine log tag the app emits
+        AndroidPackage = 'com.lurmotorn.onlychess'
+        IosBundleId    = 'com.lurmotorn.onlychess.L5XBWVZ7N3' # sideload appends the signer suffix
+        IosBundleBase  = 'com.lurmotorn.onlychess'            # uninstall sweeps every ...<SIGNER> variant
+        AutoplayProp   = 'debug.lur.autoplay'                 # Android: engine autoplay toggle (setprop)
+        AutoplayMarker = 'autoplay'                           # iOS: Documents/<marker> engine autoplay toggle
+        RoleProp       = 'debug.lur.role'                     # Android: dev BLE role override (setprop)
+        RoleMarker     = 'role'                               # iOS: Documents/<marker> dev BLE role override
+        ClearMarker    = 'clearsave'                          # iOS: Documents/<marker> one-shot history wipe
+    }
 }
 
 $root = (Resolve-Path (Join-Path (Split-Path $MyInvocation.MyCommand.Path) '..\..')).Path
 $Sideloadly = Join-Path $env:LOCALAPPDATA 'Sideloadly\sideloadly.exe'
-if (-not $Ipa) { $Ipa = Join-Path $root 'dist\OnlyChess-unsigned.ipa' }
+if (-not $Ipa) {
+    $IpaName = if ($Game -eq 'rps') { 'OnlyRps-unsigned.ipa' } else { 'OnlyChess-unsigned.ipa' }
+    $Ipa = Join-Path $root (Join-Path 'dist' $IpaName)
+}
 
 $rig  = Split-Path $MyInvocation.MyCommand.Path
 $logs = Join-Path $rig '.logs'

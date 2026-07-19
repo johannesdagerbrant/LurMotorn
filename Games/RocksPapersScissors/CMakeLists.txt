@@ -33,3 +33,14 @@ target_include_directories(rps_view PUBLIC View/Public)
 target_link_libraries(rps_view PUBLIC rps::core rps::runtime lur::render lur::hud lur::text lur::math)
 target_compile_features(rps_view PUBLIC cxx_std_20)
 add_library(rps::view ALIAS rps_view)
+
+# Net — the RPS lockstep netcode: the input event codec (one codec, three uses) and
+# the lockstep coordinator (production + ceiling + anchor/desync). Pure C++,
+# host-testable — the whole netcode is proven in two windows on one desktop before a
+# phone is in the room (#76).
+add_library(rps_net
+    Net/Private/LockstepPeer.cpp)
+target_include_directories(rps_net PUBLIC Net/Public)
+target_link_libraries(rps_net PUBLIC rps::core lur::serialization lur::net lur::sim lur::core)
+target_compile_features(rps_net PUBLIC cxx_std_20)
+add_library(rps::net ALIAS rps_net)
