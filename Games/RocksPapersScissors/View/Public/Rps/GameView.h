@@ -36,8 +36,19 @@ public:
 private:
     Lur::Render::MeshHandle Quad = 0;  // one white unit quad; materials supply colour
 
+    // Field backdrop (#85, locked palette): a unit-rect mesh with the multi-stop
+    // vertical gradient baked as vertex colours, scaled to the framebuffer each frame
+    // (SCREENSPACE: it never scrolls). VLineMesh is the same idea for the vertical
+    // grid lines (2-stop grid gradient); horizontal lines pick a flat colour from
+    // GridLut by their screen Y, so the grid's colour is screen-anchored while the
+    // lines themselves scroll with the world.
+    Lur::Render::MeshHandle FieldGradMesh = 0;
+    Lur::Render::MeshHandle VLineMesh = 0;
+    static constexpr int GridShades = 17;
+    Lur::Render::MaterialHandle GridLut[GridShades] = {};
+    Lur::Render::MaterialHandle WhiteMat = 0;
+
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
-    Lur::Render::MaterialHandle Background = 0;
     Lur::Render::MaterialHandle CampMat[2] = {};
     Lur::Render::MaterialHandle MineMat = 0;
     Lur::Render::MaterialHandle HealthBg = 0;

@@ -36,6 +36,65 @@ const char* ResultStr(uint8_t R) {
     }
 }
 
+// ---- Locked palette (#85, Docs/Planning/rps-hud-prototype.html) ----
+constexpr float Srgb(int V) { return static_cast<float>(V) / 255.0f; }
+struct GradStop { float P; Color C; };
+// Field gradient — SCREENSPACE vertical: night-blue enemy horizon (top) through
+// dark earth to the warm umber home ground (bottom). Both players see the same
+// grade because both see the enemy at the top (per-player FlipY).
+constexpr GradStop FieldStops[] = {
+    {0.000f, {Srgb(0x12), Srgb(0x22), Srgb(0x31), 1.0f}},
+    {0.179f, {Srgb(0x11), Srgb(0x1B), Srgb(0x15), 1.0f}},
+    {0.550f, {Srgb(0x10), Srgb(0x17), Srgb(0x07), 1.0f}},
+    {0.795f, {Srgb(0x16), Srgb(0x1A), Srgb(0x09), 1.0f}},
+    {1.000f, {Srgb(0x2E), Srgb(0x27), Srgb(0x0F), 1.0f}},
+};
+constexpr int NumFieldStops = 5;
+// Grid colour gradient (screenspace) — lines are world-anchored, colour is not.
+constexpr GradStop GridStops[] = {
+    {0.0f, {Srgb(0x26), Srgb(0x30), Srgb(0x3B), 1.0f}},
+    {1.0f, {Srgb(0x2E), Srgb(0x36), Srgb(0x27), 1.0f}},
+};
+constexpr float GridStepWu = 4.0f;   // line spacing, world units
+constexpr float GridAlpha = 0.55f;   // keep the lines a subtle overlay
+
+Color GradSample(const GradStop* S, int N, float T) {
+    if (T <= S[0].P) return S[0].C;
+    for (int I = 1; I < N; ++I) {
+        if (T <= S[I].P) {
+            const float Span = S[I].P - S[I - 1].P;
+            const float K = Span > 0.0f ? (T - S[I - 1].P) / Span : 1.0f;
+            const Color& A = S[I - 1].C;
+            const Color& B = S[I].C;
+            return {A.R + (B.R - A.R) * K, A.G + (B.G - A.G) * K,
+                    A.B + (B.B - A.B) * K, A.A + (B.A - A.A) * K};
+        }
+    }
+    return S[N - 1].C;
+}
+
+// A unit-rect (0,0)-(1,1) vertical strip: one vertex row per stop, the stop colour
+// baked per vertex — the GPU interpolates between stops. Same triangle-list winding
+// as MakeQuad (no fans: MoltenVK).
+Lur::Render::MeshHandle MakeGradientStrip(IRenderer* R, const GradStop* Stops, int N, float Alpha) {
+    Lur::Render::Vertex V[2 * 8];
+    uint32_t Idx[6 * 7];
+    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
+    for (int I = 0; I < N; ++I) {
+        const Color& C = Stops[I].C;
+        const Lur::Math::Vec4 VC{C.R, C.G, C.B, C.A * Alpha};
+        V[2 * I + 0] = {{0.0f, Stops[I].P, 0.0f}, Nrm, {0.0f, Stops[I].P}, VC};
+        V[2 * I + 1] = {{1.0f, Stops[I].P, 0.0f}, Nrm, {1.0f, Stops[I].P}, VC};
+    }
+    uint32_t K = 0;
+    for (int I = 0; I < N - 1; ++I) {
+        const uint32_t A = 2 * I;
+        Idx[K++] = A; Idx[K++] = A + 1; Idx[K++] = A + 3;
+        Idx[K++] = A; Idx[K++] = A + 3; Idx[K++] = A + 2;
+    }
+    return R->CreateMesh(V, static_cast<uint32_t>(2 * N), Idx, K);
+}
+
 }  // namespace
 
 float GameView::VisibleWorldHeight(float WidthPx, float HeightPx) {
@@ -46,9 +105,18 @@ void GameView::CreateResources(IRenderer* Renderer) {
     const Lur::Render::Quad Q = Lur::Render::MakeQuad();  // white; the material tints it
     Quad = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
 
-    Background = FlatMat(Renderer, {0.10f, 0.11f, 0.13f, 1.0f});
-    CampMat[0] = FlatMat(Renderer, {0.20f, 0.30f, 0.55f, 1.0f});   // you (bottom): blue
-    CampMat[1] = FlatMat(Renderer, {0.55f, 0.25f, 0.24f, 1.0f});   // foe (top): red
+    // Field backdrop + grid (#85): gradient meshes drawn under everything else.
+    WhiteMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 1.0f});
+    FieldGradMesh = MakeGradientStrip(Renderer, FieldStops, NumFieldStops, 1.0f);
+    VLineMesh = MakeGradientStrip(Renderer, GridStops, 2, GridAlpha);
+    for (int I = 0; I < GridShades; ++I) {
+        Color C = GradSample(GridStops, 2, static_cast<float>(I) / (GridShades - 1));
+        C.A *= GridAlpha;
+        GridLut[I] = FlatMat(Renderer, C);
+    }
+
+    CampMat[0] = FlatMat(Renderer, {0.25f, 0.66f, 0.86f, 1.0f});   // you (bottom): team blue #3FA8DC
+    CampMat[1] = FlatMat(Renderer, {0.88f, 0.29f, 0.19f, 1.0f});   // foe (top): team red #E04A31
     MineMat = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});   // gold-bearing rock (locked palette #D9A93C)
 
     // Per-type shade, team-tinted. Placeholder flats — real cooked R8G8 sprite art
@@ -94,7 +162,25 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
 
-    Blit(Background, WidthPx * 0.5f, HeightPx * 0.5f, WidthPx, HeightPx);
+    // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
+    Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
+
+    // World grid. The LINES are world-anchored (they scroll and X never scrolls, so
+    // vertical lines are screen-static); the COLOUR is sampled from the grid gradient
+    // in screen space (prototype rule), so the palette holds still under the scroll.
+    for (float Wx = 0.0f; Wx <= FW(WorldWidth) + 0.01f; Wx += GridStepWu) {
+        const Mat4 M = Mat4::Translation({SX(Wx) - 0.5f, 0.0f, 0.0f}) *
+                       Mat4::Scale({1.0f, HeightPx, 1.0f});
+        Renderer->DrawMesh(VLineMesh, WhiteMat, M);
+    }
+    for (float Wy = 0.0f; Wy <= WHf + 0.01f; Wy += GridStepWu) {
+        const float Y = SY(Wy);
+        if (Y < -1.0f || Y > HeightPx + 1.0f) continue;
+        int Li = static_cast<int>(Y / HeightPx * (GridShades - 1) + 0.5f);
+        if (Li < 0) Li = 0;
+        if (Li >= GridShades) Li = GridShades - 1;
+        Blit(GridLut[Li], WidthPx * 0.5f, Y, WidthPx, 1.0f);
+    }
 
     // Camps (locations, not entities) — faint 3-unit markers at each end.
     const float CampPx = 3.0f * P;
