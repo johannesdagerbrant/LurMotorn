@@ -7,8 +7,11 @@ if(LUR_DESKTOP AND WIN32)
     target_link_libraries(onlyrps_desktop PRIVATE
         rps::view
         rps::runtime
+        rps::net
         rps::core
         lur::render
+        lur::net
+        lur::transport
         lur::sim
         lur::platform
         lur::input)
