@@ -60,7 +60,7 @@ static void TestDeterminism() {
     CHECK(AllMatch);
     // The match should actually DO something over 600 ticks (units spawned/moved),
     // otherwise "deterministic" is trivially true over an empty sim.
-    CHECK(A.Count > StartLumberjacks * 2);
+    CHECK(A.Count > StartMiners * 2);
 }
 
 // A fresh sim replaying the same stream must reach the same final hash — the
@@ -116,7 +116,7 @@ static void TestGridEqualsBruteForce() {
         if (!Match) std::printf("  grid!=brute seed=%llu diverged at tick %d\n",
                                 static_cast<unsigned long long>(Seed), FirstDiverge);
         CHECK(Match);
-        CHECK(Grid.Count > StartLumberjacks * 2);  // the match did something
+        CHECK(Grid.Count > StartMiners * 2);  // the match did something
     }
 }
 
@@ -126,8 +126,8 @@ static void TestMutualAnnihilationDraw() {
     S.Init(0);
     KillTeam(S, 0);
     KillTeam(S, 1);
-    S.Teams[0].Wood = 0;
-    S.Teams[1].Wood = 0;
+    S.Teams[0].Gold = 0;
+    S.Teams[1].Gold = 0;
     S.Step(0, 0);  // win check runs at phase 7
     CHECK(S.Result == ResultDraw);
 }
@@ -136,7 +136,7 @@ static void TestWipeoutLoses() {
     static Sim S;
     S.Init(0);
     KillTeam(S, 0);
-    S.Teams[0].Wood = 0;  // no units, no queue, can't rebuy -> team 0 loses
+    S.Teams[0].Gold = 0;  // no units, no queue, can't rebuy -> team 0 loses
     S.Step(0, 0);
     CHECK(S.Result == ResultTeam1Wins);
 }
@@ -145,7 +145,7 @@ static void TestRebuyIsNotLoss() {
     static Sim S;
     S.Init(0);
     KillTeam(S, 0);
-    S.Teams[0].Wood = CheapestCost;  // zero units but can still rebuy -> NOT a loss
+    S.Teams[0].Gold = CheapestCost;  // zero units but can still rebuy -> NOT a loss
     S.Step(0, 0);
     CHECK(S.Result == ResultOngoing);
 }
@@ -154,24 +154,24 @@ static void TestRebuyIsNotLoss() {
 static void TestBrokePressIgnored() {
     static Sim S;
     S.Init(0);
-    S.Teams[0].Wood = UnitTable[UnitRock].Cost - 1;  // one short
-    const int32_t WoodBefore = S.Teams[0].Wood;
+    S.Teams[0].Gold = UnitTable[UnitRock].Cost - 1;  // one short
+    const int32_t GoldBefore = S.Teams[0].Gold;
     S.Step(1u << UnitRock, 0);
-    CHECK(S.Teams[0].QueueLen == 0);
-    CHECK(S.Teams[0].Wood == WoodBefore);  // no partial reservation
+    CHECK(S.Teams[0].QueueCount[UnitRock] == 0);
+    CHECK(S.Teams[0].Gold == GoldBefore);  // no partial reservation
 }
 
-static void TestQueueFullIgnored() {
+static void TestQueueCapIgnored() {
     static Sim S;
     S.Init(0);
-    S.Teams[0].Wood = 100000;
-    for (int K = 0; K < QueueDepth; ++K) S.Teams[0].Queue[K] = UnitScissor;
-    S.Teams[0].QueueLen = QueueDepth;
-    S.Teams[0].BuildTimer = 100;  // high, so nothing spawns/pops this tick
-    const int32_t WoodBefore = S.Teams[0].Wood;
-    S.Step(1u << UnitLumberjack, 0);
-    CHECK(S.Teams[0].QueueLen == QueueDepth);   // still full — press ignored
-    CHECK(S.Teams[0].Wood == WoodBefore);       // and nothing was spent
+    S.Teams[0].Gold = 100000;
+    S.Teams[0].QueueCount[UnitScissor] = PerTypeQueueCap;  // at the sanity cap
+    const int32_t GoldBefore = S.Teams[0].Gold;
+    S.Step(1u << UnitScissor, 0);
+    // The press is ignored (cap); production still ran — a cap-deep stack (64) beats
+    // BuildTicks (50) in one tick, so exactly one scissor spawned from the stack.
+    CHECK(S.Teams[0].QueueCount[UnitScissor] == PerTypeQueueCap - 1);
+    CHECK(S.Teams[0].Gold == GoldBefore);  // nothing was spent on the ignored press
 }
 
 // ---- Tick-phase behaviour sanity ----
@@ -180,19 +180,83 @@ static void TestProductionSpawnsAfterBuildTime() {
     S.Init(0);
     const int32_t Before = S.AliveCount(0);
     S.Step(1u << UnitScissor, 0);  // enqueue a Scissor (cost 50, build 50 ticks)
-    CHECK(S.Teams[0].QueueLen == 1);
-    // Enqueue tick already decremented the head once; BuildTicks-1 more to spawn.
-    for (int I = 0; I < UnitTable[UnitScissor].BuildTicks; ++I) S.Step(0, 0);
-    CHECK(S.AliveCount(0) == Before + 1);
-    CHECK(S.Teams[0].QueueLen == 0);
+    CHECK(S.Teams[0].QueueCount[UnitScissor] == 1);
+    // The enqueue tick already advanced progress once (count 1 => +1/tick); a solo
+    // unit therefore lands BuildTicks-1 idle ticks later — check the exact edge.
+    for (int I = 0; I < UnitTable[UnitScissor].BuildTicks - 2; ++I) S.Step(0, 0);
+    CHECK(S.AliveCount(0) == Before);        // one tick early: not yet
+    S.Step(0, 0);
+    CHECK(S.AliveCount(0) == Before + 1);    // exactly BuildTicks queue-ticks
+    CHECK(S.Teams[0].QueueCount[UnitScissor] == 0);
 }
 
-static void TestEconomyGathersWood() {
+// ---- 4. Parallel queues + stack acceleration (#84) ----
+static void TestParallelQueuesProgressIndependently() {
     static Sim S;
     S.Init(0);
-    const int32_t Before = S.Teams[0].Wood;
+    S.Teams[0].Gold = 1000;
+    const int32_t Before = S.AliveCount(0);
+    S.Step((1u << UnitRock) | (1u << UnitPaper), 0);  // both queues start the same tick
+    CHECK(S.Teams[0].QueueCount[UnitRock] == 1);
+    CHECK(S.Teams[0].QueueCount[UnitPaper] == 1);
+    for (int I = 0; I < UnitTable[UnitRock].BuildTicks; ++I) S.Step(0, 0);
+    // A single serial queue would need 2x BuildTicks; parallel queues finish together.
+    CHECK(S.AliveCount(0) == Before + 2);
+}
+
+static void TestStackAccelerationSpawnsFaster() {
+    static Sim A, B;
+    A.Init(0);
+    B.Init(0);
+    A.Teams[0].Gold = 1000;
+    B.Teams[0].Gold = 1000;
+    A.Step(1u << UnitScissor, 0);  // A stacks two scissors...
+    A.Step(1u << UnitScissor, 0);
+    B.Step(1u << UnitScissor, 0);  // ...B queues one (same elapsed ticks)
+    B.Step(0, 0);
+    const int32_t ABefore = A.AliveCount(0), BBefore = B.AliveCount(0);
+    int32_t AFirst = -1, BFirst = -1;
+    for (int I = 0; I < UnitTable[UnitScissor].BuildTicks + 2; ++I) {
+        A.Step(0, 0);
+        B.Step(0, 0);
+        if (AFirst < 0 && A.AliveCount(0) > ABefore) AFirst = I;
+        if (BFirst < 0 && B.AliveCount(0) > BBefore) BFirst = I;
+    }
+    CHECK(AFirst >= 0 && BFirst >= 0);
+    CHECK(AFirst < BFirst);  // the deeper stack builds STRICTLY faster (the pacing thesis)
+}
+
+// ---- 5. Finite mines (#84) ----
+static void TestMineDepletesAndVanishes() {
+    static Sim S;
+    S.Init(0);
+    // Leave a single near-empty mine: exactly one carry in it. Total income is then
+    // exactly that carry, and the mine must read as gone (gold 0) afterwards.
+    for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
+    S.MineGold[0] = CarryCapacity;
+    const int32_t Before0 = S.Teams[0].Gold, Before1 = S.Teams[1].Gold;
+    for (int I = 0; I < 400; ++I) S.Step(0, 0);
+    CHECK(S.MineGold[0] == 0);
+    CHECK(S.Teams[0].Gold == Before0 + CarryCapacity);  // mine 0 is team 0's safe cluster
+    CHECK(S.Teams[1].Gold == Before1);                  // the far team never got a carry
+}
+
+static void TestDepletedMinesStopEconomy() {
+    static Sim S;
+    S.Init(0);
+    for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
+    const int32_t Before = S.Teams[0].Gold;
+    for (int I = 0; I < 300; ++I) S.Step(0, 0);
+    CHECK(S.Teams[0].Gold == Before);          // no phantom income from dead mines
+    CHECK(S.Result == ResultOngoing);          // gold >= CheapestCost: still a rebuy, not a loss
+}
+
+static void TestEconomyGathersGold() {
+    static Sim S;
+    S.Init(0);
+    const int32_t Before = S.Teams[0].Gold;
     for (int I = 0; I < 300; ++I) S.Step(0, 0);  // idle: the 3 starting workers just gather
-    CHECK(S.Teams[0].Wood > Before);  // at least one full round trip deposited
+    CHECK(S.Teams[0].Gold > Before);  // at least one full round trip deposited
 }
 
 #if LUR_INTERNAL
@@ -224,9 +288,13 @@ int main() {
     TestWipeoutLoses();
     TestRebuyIsNotLoss();
     TestBrokePressIgnored();
-    TestQueueFullIgnored();
+    TestQueueCapIgnored();
     TestProductionSpawnsAfterBuildTime();
-    TestEconomyGathersWood();
+    TestParallelQueuesProgressIndependently();
+    TestStackAccelerationSpawnsFaster();
+    TestMineDepletesAndVanishes();
+    TestDepletedMinesStopEconomy();
+    TestEconomyGathersGold();
 #if LUR_INTERNAL
     TestStressTickBudget();
 #endif

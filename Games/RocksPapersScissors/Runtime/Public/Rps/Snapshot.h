@@ -30,17 +30,18 @@ struct Snapshot {
     int32_t  Hp[MaxUnits];
     uint64_t AliveBits[(MaxUnits + 63) / 64];
 
-    // Static map (constant after Init, but carried here so the view needs nothing else).
-    Fixed TreeX[NumTrees];
-    Fixed TreeY[NumTrees];
+    // Mine positions (constant after Init, carried here so the view needs nothing
+    // else) + live reserves (#84: a mine with MineGold <= 0 is gone — don't draw it).
+    Fixed   MineX[NumMines];
+    Fixed   MineY[NumMines];
+    int32_t MineGold[NumMines];
 
     // HUD / overlay counters (read via this same hand-off, never from the live Sim).
     uint32_t Tick = 0;
     uint8_t  Result = 0;              // EResult
-    int32_t  Wood[2] = {};
-    int32_t  QueueLen[2] = {};
-    uint8_t  Queue[2][QueueDepth] = {};
-    int32_t  BuildTimer[2] = {};
+    int32_t  Gold[2] = {};
+    int32_t  QueueCount[2][UnitCount] = {};     // per-type parallel queues (#84)
+    int32_t  BuildProgress[2][UnitCount] = {};  // 0..BuildTicks; rate = QueueCount x base
     int32_t  AliveCount[2] = {};
 
     // For interpolation: when this tick was published (steady clock ns) and the sim
@@ -61,15 +62,17 @@ struct Snapshot {
         std::memcpy(Team, S.Team, N);
         std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
-        std::memcpy(TreeX, S.TreeX, sizeof(Fixed) * NumTrees);
-        std::memcpy(TreeY, S.TreeY, sizeof(Fixed) * NumTrees);
+        std::memcpy(MineX, S.MineX, sizeof(Fixed) * NumMines);
+        std::memcpy(MineY, S.MineY, sizeof(Fixed) * NumMines);
+        std::memcpy(MineGold, S.MineGold, sizeof(int32_t) * NumMines);
         Tick = S.Tick;
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
-            Wood[T] = S.Teams[T].Wood;
-            QueueLen[T] = S.Teams[T].QueueLen;
-            BuildTimer[T] = S.Teams[T].BuildTimer;
-            for (int K = 0; K < QueueDepth; ++K) Queue[T][K] = S.Teams[T].Queue[K];
+            Gold[T] = S.Teams[T].Gold;
+            for (int K = 0; K < UnitCount; ++K) {
+                QueueCount[T][K] = S.Teams[T].QueueCount[K];
+                BuildProgress[T][K] = S.Teams[T].BuildProgress[K];
+            }
             AliveCount[T] = S.AliveCount(static_cast<uint8_t>(T));
         }
         PublishNs = InPublishNs;

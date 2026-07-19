@@ -113,7 +113,7 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
     S.Team[I] = Team;
     S.Target[I] = -1;
     S.Cooldown[I] = 0;
-    S.WorkerState[I] = WorkToTree;
+    S.WorkerState[I] = WorkToMine;
     S.Carry[I] = 0;
     S.WorkerTimer[I] = 0;
     SetAlive(S, I);
@@ -123,13 +123,13 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
 //     variation is free, exactly like chess derives colours from GUIDs. ---
 void BuildMap(Sim& S) {
-    // Four trees per grove, spread across the 34-wide field.
-    const Fixed Xs[TreesPerGrove] = {F(8), F(14), F(20), F(26)};
-    // Grove centre lines (portrait, §9), derived from the field height so they scale
-    // with the WorldHeight balance knob: each team's SAFE grove sits just past its camp,
-    // its CONTESTED grove nearer mid-field (shorter walk, higher risk — spec §2).
+    // Four mines per cluster, spread across the 34-wide field.
+    const Fixed Xs[MinesPerCluster] = {F(8), F(14), F(20), F(26)};
+    // Cluster centre lines (portrait, §9), derived from the field height so they scale
+    // with the WorldHeight balance knob: each team's SAFE cluster sits just past its camp,
+    // its CONTESTED cluster nearer mid-field (shorter walk, higher risk — spec §2).
     const int32_t Mid = WorldHeight.ToInt() / 2;
-    const Fixed GroveY[4] = {
+    const Fixed ClusterY[4] = {
         F(CampInset + 6),                          // t0 safe   (near the bottom camp)
         F(Mid - 6),                                // t0 contested (toward mid)
         F(WorldHeight.ToInt() - CampInset - 6),    // t1 safe   (near the top camp)
@@ -137,9 +137,10 @@ void BuildMap(Sim& S) {
     };
     int32_t Idx = 0;
     for (int G = 0; G < 4; ++G)
-        for (int K = 0; K < TreesPerGrove; ++K) {
-            S.TreeX[Idx] = Xs[K];
-            S.TreeY[Idx] = GroveY[G];
+        for (int K = 0; K < MinesPerCluster; ++K) {
+            S.MineX[Idx] = Xs[K];
+            S.MineY[Idx] = ClusterY[G];
+            S.MineGold[Idx] = MineGoldCapacity;  // finite reserve (#84)
             ++Idx;
         }
 }
@@ -148,14 +149,13 @@ void BuildMap(Sim& S) {
 void TryEnqueue(Sim& S, uint8_t Team, uint8_t Type) {
     TeamState& T = S.Teams[Team];
     const int32_t Cost = UnitTable[Type].Cost;
-    // Queue full or too poor -> the press is DETERMINISTICALLY ignored (a silent
+    // Queue at cap or too poor -> the press is DETERMINISTICALLY ignored (a silent
     // no-op is correct here, distinct from an assert-worthy error). No partial
-    // reservation: wood is spent only on a successful enqueue.
-    if (T.QueueLen >= QueueDepth) return;
-    if (T.Wood < Cost) return;
-    T.Wood -= Cost;
-    T.Queue[T.QueueLen++] = Type;
-    if (T.QueueLen == 1) T.BuildTimer = UnitTable[Type].BuildTicks;  // head starts building
+    // reservation: gold is spent only on a successful enqueue.
+    if (T.QueueCount[Type] >= PerTypeQueueCap) return;
+    if (T.Gold < Cost) return;
+    T.Gold -= Cost;
+    ++T.QueueCount[Type];
 }
 void ApplyInput(Sim& S, uint8_t Team, uint8_t Mask) {
     // Bit ty of the mask = a press of unit type ty this tick. Same-type presses
@@ -164,17 +164,24 @@ void ApplyInput(Sim& S, uint8_t Team, uint8_t Mask) {
         if (Mask & (1u << Ty)) TryEnqueue(S, Team, Ty);
 }
 
-// ---- Phase 1: production timers; completed units spawn ----
+// ---- Phase 1: production — four parallel per-type queues with stack
+// acceleration (#84). Progress is in integer "queue-ticks": a queue with N units
+// stacked advances N per tick, so effective build time = BuildTicks / N and deep
+// stacks snowball (the pacing thesis). A very deep stack can complete more than
+// one unit in a tick — the while loop spawns them all, in type order (deterministic:
+// teams 0 then 1, types 0..3, spawn ring ordered by SpawnCounter). ----
 void Production(Sim& S) {
     for (uint8_t T = 0; T < 2; ++T) {
         TeamState& Q = S.Teams[T];
-        if (Q.QueueLen == 0) continue;
-        if (Q.BuildTimer > 0) --Q.BuildTimer;
-        if (Q.BuildTimer <= 0) {
-            SpawnUnit(S, T, Q.Queue[0]);
-            for (int K = 1; K < Q.QueueLen; ++K) Q.Queue[K - 1] = Q.Queue[K];
-            --Q.QueueLen;
-            Q.BuildTimer = Q.QueueLen > 0 ? UnitTable[Q.Queue[0]].BuildTicks : 0;
+        for (uint8_t Ty = 0; Ty < UnitCount; ++Ty) {
+            if (Q.QueueCount[Ty] == 0) { Q.BuildProgress[Ty] = 0; continue; }
+            Q.BuildProgress[Ty] += Q.QueueCount[Ty];
+            while (Q.QueueCount[Ty] > 0 && Q.BuildProgress[Ty] >= UnitTable[Ty].BuildTicks) {
+                Q.BuildProgress[Ty] -= UnitTable[Ty].BuildTicks;
+                --Q.QueueCount[Ty];
+                SpawnUnit(S, T, Ty);
+            }
+            if (Q.QueueCount[Ty] == 0) Q.BuildProgress[Ty] = 0;  // no banked progress on an empty queue
         }
     }
 }
@@ -229,18 +236,19 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     }
     return BestId;
 }
-int32_t TreeOccupancy(const Sim& S, int32_t Tree) {
+int32_t MineOccupancy(const Sim& S, int32_t Mine) {
     int32_t C = 0;
     for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J) && S.Type[J] == UnitLumberjack && S.Target[J] == Tree) ++C;
+        if (S.IsAlive(J) && S.Type[J] == UnitMiner && S.Target[J] == Mine) ++C;
     return C;
 }
-int32_t NearestFreeTree(const Sim& S, int32_t I) {
+int32_t NearestFreeMine(const Sim& S, int32_t I) {
     int32_t Best = -1;
     int64_t BestD = INT64_MAX;
-    for (int32_t Tr = 0; Tr < NumTrees; ++Tr) {
-        if (TreeOccupancy(S, Tr) >= WorkersPerTree) continue;
-        const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.TreeX[Tr], S.TreeY[Tr]);
+    for (int32_t Tr = 0; Tr < NumMines; ++Tr) {
+        if (S.MineGold[Tr] <= 0) continue;  // depleted mines are gone (#84)
+        if (MineOccupancy(S, Tr) >= WorkersPerMine) continue;
+        const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.MineX[Tr], S.MineY[Tr]);
         if (D < BestD) { BestD = D; Best = Tr; }
     }
     return Best;
@@ -248,8 +256,8 @@ int32_t NearestFreeTree(const Sim& S, int32_t I) {
 void TargetAcquire(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
-        if (S.Type[I] == UnitLumberjack) {
-            if (S.Target[I] < 0) S.Target[I] = NearestFreeTree(S, I);  // trees are few — brute is fine; set in slot order
+        if (S.Type[I] == UnitMiner) {
+            if (S.Target[I] < 0) S.Target[I] = NearestFreeMine(S, I);  // mines are few — brute is fine; set in slot order
         } else {
             const int32_t T = S.Target[I];
             const bool Valid = T >= 0 && S.IsAlive(T) && S.Team[T] != S.Team[I];
@@ -279,17 +287,33 @@ bool Arrived(const Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
 }
 void WorkerSeek(Sim& S, int32_t I) {
     switch (S.WorkerState[I]) {
-        case WorkChop:
+        case WorkDig: {
+            const int32_t Mn = S.Target[I];
+            // The mine can empty under us (an earlier-slot digger took the last carry
+            // this same tick order) — abandon the dig and re-target next tick.
+            if (Mn < 0 || S.MineGold[Mn] <= 0) {
+                S.Target[I] = -1; S.WorkerState[I] = WorkToMine;
+                return;
+            }
             if (S.WorkerTimer[I] > 0) --S.WorkerTimer[I];
-            if (S.WorkerTimer[I] <= 0) { S.Carry[I] = CarryCapacity; S.WorkerState[I] = WorkToCamp; }
-            return;  // stationary while chopping
-        case WorkToTree: {
+            if (S.WorkerTimer[I] <= 0) {
+                // Finite reserve (#84): the carry comes OUT of the mine; the last
+                // trip takes whatever is left. Slot order makes ties deterministic.
+                const int32_t Take = S.MineGold[Mn] < CarryCapacity ? S.MineGold[Mn] : CarryCapacity;
+                S.MineGold[Mn] -= Take;
+                S.Carry[I] = Take;
+                S.WorkerState[I] = WorkToCamp;
+            }
+            return;  // stationary while digging
+        }
+        case WorkToMine: {
             const int32_t Tr = S.Target[I];
-            if (Tr < 0) return;  // no free tree this tick — idle
-            const Fixed Tx = S.TreeX[Tr], Ty = S.TreeY[Tr];
+            if (Tr < 0) return;  // no free mine this tick — idle
+            if (S.MineGold[Tr] <= 0) { S.Target[I] = -1; return; }  // it emptied en route — re-target
+            const Fixed Tx = S.MineX[Tr], Ty = S.MineY[Tr];
             if (Arrived(S, I, Tx, Ty)) {
                 S.PosX[I] = Tx; S.PosY[I] = Ty;
-                S.WorkerState[I] = WorkChop; S.WorkerTimer[I] = ChopTicks;
+                S.WorkerState[I] = WorkDig; S.WorkerTimer[I] = DigTicks;
                 return;
             }
             MoveToward(S, I, Tx, Ty);
@@ -300,7 +324,7 @@ void WorkerSeek(Sim& S, int32_t I) {
             if (Arrived(S, I, Tx, Ty)) {
                 S.PosX[I] = Tx; S.PosY[I] = Ty;
                 S.DepositBuf[S.Team[I]] += S.Carry[I];  // credited in Economy (phase 6)
-                S.Carry[I] = 0; S.Target[I] = -1; S.WorkerState[I] = WorkToTree;
+                S.Carry[I] = 0; S.Target[I] = -1; S.WorkerState[I] = WorkToMine;
                 return;
             }
             MoveToward(S, I, Tx, Ty);
@@ -357,7 +381,7 @@ void Movement(Sim& S, const Grid& G) {
         Fixed Sx, Sy;
         if (S.UseBruteForce) SeparationBrute(S, I, Sx, Sy);  // from Prev — before we touch Pos
         else SeparationGrid(S, G, I, Sx, Sy);
-        if (S.Type[I] == UnitLumberjack) WorkerSeek(S, I);
+        if (S.Type[I] == UnitMiner) WorkerSeek(S, I);
         else SoldierSeek(S, I);
         S.PosX[I] = ClampAxis(S.PosX[I] + Sx, WorldWidth);
         S.PosY[I] = ClampAxis(S.PosY[I] + Sy, WorldHeight);
@@ -369,7 +393,7 @@ void Attacks(Sim& S) {
     int32_t Dmg[MaxUnits];
     std::memset(Dmg, 0, sizeof(int32_t) * static_cast<size_t>(S.Count));
     for (int32_t I = 0; I < S.Count; ++I) {
-        if (!S.IsAlive(I) || S.Type[I] == UnitLumberjack) continue;  // workers ignore combat in v1 (spec §5)
+        if (!S.IsAlive(I) || S.Type[I] == UnitMiner) continue;  // workers ignore combat in v1 (spec §5)
         if (S.Cooldown[I] > 0) --S.Cooldown[I];
         if (S.Cooldown[I] > 0) continue;  // still cooling
         const int32_t T = S.Target[I];
@@ -390,16 +414,16 @@ void Deaths(Sim& S) {
         if (S.IsAlive(I) && S.Hp[I] <= 0) ClearAlive(S, I);
 }
 
-// ---- Phase 6: economy — buffered deposits credit wood ----
+// ---- Phase 6: economy — buffered deposits credit gold ----
 void Economy(Sim& S) {
-    for (int T = 0; T < 2; ++T) { S.Teams[T].Wood += S.DepositBuf[T]; S.DepositBuf[T] = 0; }
+    for (int T = 0; T < 2; ++T) { S.Teams[T].Gold += S.DepositBuf[T]; S.DepositBuf[T] = 0; }
 }
 
 // ---- Phase 7: win check (spec §6, edge-proof) ----
 void WinCheck(Sim& S) {
     bool Lose[2];
     for (uint8_t T = 0; T < 2; ++T)
-        Lose[T] = S.AliveCount(T) == 0 && S.Teams[T].QueueLen == 0 && S.Teams[T].Wood < CheapestCost;
+        Lose[T] = S.AliveCount(T) == 0 && S.QueuedTotal(T) == 0 && S.Teams[T].Gold < CheapestCost;
     if (Lose[0] && Lose[1]) S.Result = ResultDraw;  // both this tick -> draw (simultaneous damage makes it reachable)
     else if (Lose[0]) S.Result = ResultTeam1Wins;
     else if (Lose[1]) S.Result = ResultTeam0Wins;
@@ -412,8 +436,8 @@ void Sim::Init(uint64_t InSeed) {
     Seed = InSeed;
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
-        Teams[T].Wood = StartWood;
-        for (int K = 0; K < StartLumberjacks; ++K) SpawnUnit(*this, T, UnitLumberjack);
+        Teams[T].Gold = StartGold;
+        for (int K = 0; K < StartMiners; ++K) SpawnUnit(*this, T, UnitMiner);
     }
 }
 
@@ -461,7 +485,7 @@ void Sim::StressFill(int32_t PerTeam) {
             Team[I] = T;
             Target[I] = -1;
             Cooldown[I] = 0;
-            WorkerState[I] = WorkToTree;
+            WorkerState[I] = WorkToMine;
             Carry[I] = 0;
             WorkerTimer[I] = 0;
             SetAlive(*this, I);
@@ -475,6 +499,12 @@ int32_t Sim::AliveCount(uint8_t TeamId) const {
     int32_t C = 0;
     for (int32_t I = 0; I < Count; ++I)
         if (IsAlive(I) && Team[I] == TeamId) ++C;
+    return C;
+}
+
+int32_t Sim::QueuedTotal(uint8_t TeamId) const {
+    int32_t C = 0;
+    for (uint8_t Ty = 0; Ty < UnitCount; ++Ty) C += Teams[TeamId].QueueCount[Ty];
     return C;
 }
 
@@ -501,12 +531,12 @@ uint64_t Sim::StateHash() const {
     Mix(AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
     for (int T = 0; T < 2; ++T) {
         const TeamState& Q = Teams[T];
-        Mix(&Q.Wood, sizeof(int32_t));
-        Mix(Q.Queue, static_cast<size_t>(Q.QueueLen));
-        Mix(&Q.QueueLen, sizeof(int32_t));
-        Mix(&Q.BuildTimer, sizeof(int32_t));
+        Mix(&Q.Gold, sizeof(int32_t));
+        Mix(Q.QueueCount, sizeof(int32_t) * UnitCount);
+        Mix(Q.BuildProgress, sizeof(int32_t) * UnitCount);
         Mix(&Q.SpawnCounter, sizeof(int32_t));
     }
+    Mix(MineGold, sizeof(int32_t) * NumMines);  // mutable reserves (#84) — MineX/Y stay excluded (static)
     Mix(&Tick, sizeof(uint32_t));
     Mix(&Result, sizeof(uint8_t));
     return H;

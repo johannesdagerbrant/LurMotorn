@@ -143,7 +143,7 @@ static void TestRunnerPublishesSnapshots() {
     R->Stop();
 
     CHECK(Got);
-    CHECK(Snap.Count == StartLumberjacks * 2);  // 6 workers, none built yet this early
+    CHECK(Snap.Count == StartMiners * 2);  // 6 workers, none built yet this early
     CHECK(Snap.Tick >= 3);
     // Every live unit sits inside the world bounds.
     bool InBounds = true;

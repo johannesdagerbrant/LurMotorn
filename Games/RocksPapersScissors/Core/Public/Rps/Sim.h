@@ -9,15 +9,16 @@ namespace Rps {
 
 using Lur::Sim::Fixed;
 
-enum EWorkerState : uint8_t { WorkToTree = 0, WorkChop = 1, WorkToCamp = 2 };
+enum EWorkerState : uint8_t { WorkToMine = 0, WorkDig = 1, WorkToCamp = 2 };
 enum EResult : uint8_t { ResultOngoing = 0, ResultTeam0Wins = 1, ResultTeam1Wins = 2, ResultDraw = 3 };
 
-// Per-team production + economy state (spec §4).
+// Per-team production + economy state (#84: four PARALLEL per-type queues).
+// QueueCount[ty] includes the unit currently building; BuildProgress[ty] advances
+// by QueueCount[ty] per tick (stack acceleration) and spawns every BuildTicks.
 struct TeamState {
-    int32_t Wood = 0;
-    uint8_t Queue[QueueDepth] = {};
-    int32_t QueueLen = 0;
-    int32_t BuildTimer = 0;    // ticks remaining on the head unit
+    int32_t Gold = 0;
+    int32_t QueueCount[UnitCount] = {};
+    int32_t BuildProgress[UnitCount] = {};
     int32_t SpawnCounter = 0;  // drives the deterministic spawn ring (no RNG)
 };
 
@@ -36,17 +37,20 @@ struct Sim {
     int32_t  Hp[MaxUnits] = {};
     uint8_t  Type[MaxUnits] = {};         // EUnit
     uint8_t  Team[MaxUnits] = {};         // 0 or 1
-    int32_t  Target[MaxUnits] = {};       // soldier: enemy slot; worker: tree index; -1 = none
+    int32_t  Target[MaxUnits] = {};       // soldier: enemy slot; worker: mine index; -1 = none
     int32_t  Cooldown[MaxUnits] = {};     // soldier attack cooldown, ticks
     uint8_t  WorkerState[MaxUnits] = {};  // EWorkerState
-    int32_t  Carry[MaxUnits] = {};        // worker wood in hand
-    int32_t  WorkerTimer[MaxUnits] = {};  // worker chop countdown, ticks
+    int32_t  Carry[MaxUnits] = {};        // worker gold in hand
+    int32_t  WorkerTimer[MaxUnits] = {};  // worker dig countdown, ticks
     uint64_t AliveBits[(MaxUnits + 63) / 64] = {};
     int32_t  Count = 0;                   // high-water slot; iterate [0, Count) (deterministic on both peers)
 
-    // ---- Static map (derived at Init; not mutated during ticks) ----
-    Fixed TreeX[NumTrees] = {};
-    Fixed TreeY[NumTrees] = {};
+    // ---- Mine positions (derived at Init; not mutated during ticks) ----
+    Fixed MineX[NumMines] = {};
+    Fixed MineY[NumMines] = {};
+    // ---- Mine reserves (#84: MUTATED during ticks -> part of StateHash). A mine
+    //      with MineGold <= 0 is gone: never targeted, skipped by the view. ----
+    int32_t MineGold[NumMines] = {};
 
     // ---- Per-team + global ----
     TeamState Teams[2];
@@ -77,6 +81,7 @@ struct Sim {
     // ---- Read helpers (tests / view) ----
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
     int32_t AliveCount(uint8_t TeamId) const;
+    int32_t QueuedTotal(uint8_t TeamId) const;   // sum over the four per-type queues
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }
 };
 

@@ -228,7 +228,7 @@ static void TestLockstepDetectsDivergence() {
     }
     CHECK(!A.Desynced());
     // Corrupt A's state (simulate a lost input / a determinism bug on one peer).
-    const_cast<Sim&>(A.GetSim()).Teams[0].Wood += 999;
+    const_cast<Sim&>(A.GetSim()).Teams[0].Gold += 999;
 
     for (int I = 0; I < 15 && !A.Desynced(); ++I) {  // run to the next anchor
         A.Tick(OneTickNs);

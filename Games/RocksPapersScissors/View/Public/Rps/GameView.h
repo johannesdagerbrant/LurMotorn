@@ -39,9 +39,10 @@ private:
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle Background = 0;
     Lur::Render::MaterialHandle CampMat[2] = {};
-    Lur::Render::MaterialHandle TreeMat = 0;
+    Lur::Render::MaterialHandle MineMat = 0;
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
+    Lur::Render::MaterialHandle GoldBarFg = 0;   // mine reserve bar (#84) — gold accent
 
     Lur::Render::Color UnitColor[4][2] = {};          // [type][team] — per-instance tint
     Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)

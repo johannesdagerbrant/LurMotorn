@@ -9,6 +9,10 @@
 // playtest question. Nothing here is wire-visible: it's compiled into both peers
 // identically, so changing a value is a lockstep-breaking change (both sides must
 // run the same build) but NOT a wire-format change.
+//
+// Design lock 2026-07-19 (#84, Docs/Planning/rps-hud-prototype.html): the economy
+// is GOLD dug from FINITE MINES by MINERS, and production runs four parallel
+// per-type queues whose rate scales with how deep each queue is stacked.
 namespace Rps {
 
 using Lur::Sim::Fixed;
@@ -22,9 +26,9 @@ constexpr Fixed F(int32_t Num, int32_t Den) {
 }
 
 // ---- Unit types. Declaration order is load-bearing: it indexes UnitTable AND is
-// the bit position in the input mask (bit 0 = Lumberjack ... bit 3 = Scissor). ----
+// the bit position in the input mask (bit 0 = Miner ... bit 3 = Scissor). ----
 enum EUnit : uint8_t {
-    UnitLumberjack = 0,
+    UnitMiner = 0,
     UnitRock = 1,
     UnitPaper = 2,
     UnitScissor = 3,
@@ -33,7 +37,7 @@ enum EUnit : uint8_t {
 };
 
 struct UnitStats {
-    int32_t Cost;        // wood
+    int32_t Cost;        // gold
     int32_t BuildTicks;  // spec seconds x 10 (sim is 10 Hz)
     int32_t MaxHp;
     Fixed   Speed;       // world units PER TICK (spec units/s / 10)
@@ -47,21 +51,26 @@ struct UnitStats {
 // never enters the sim). Rock=ranged/slow, Scissor=fast/fragile, Paper=tanky/short.
 constexpr UnitStats UnitTable[UnitCount] = {
     // Cost Build  HP  Speed        Atk Range    CD  Beats
-    {  30,   30,  40, F(6, 10),      2, F(12, 10),  8, UnitNone   }, // Lumberjack
+    {  30,   30,  40, F(6, 10),      2, F(12, 10),  8, UnitNone   }, // Miner
     {  50,   50,  60, F(5, 10),      8, F(6),      10, UnitScissor}, // Rock thrower
     {  50,   50,  90, F(45, 100),    9, F(2),      10, UnitRock   }, // Paper wrapper
     {  50,   50,  45, F(8, 10),      7, F(12, 10),  6, UnitPaper  }, // Scissor cutter
 };
 
 constexpr int32_t CounterMultiplier = 3;   // attacker vs the type it beats
-constexpr int32_t CheapestCost = 30;       // = Lumberjack; the win-rule rebuy floor
+constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
-// ---- Economy (spec §3) ----
-constexpr int32_t WorkersPerTree = 2;      // max simultaneous choppers on one tree
-constexpr int32_t ChopTicks = 15;          // 1.5 s to fill a carry
-constexpr int32_t CarryCapacity = 15;      // wood per round trip
-constexpr int32_t StartWood = 60;
-constexpr int32_t StartLumberjacks = 3;
+// ---- Economy (spec §3, gold/miner + finite mines per #84) ----
+constexpr int32_t WorkersPerMine = 2;      // max simultaneous diggers on one mine
+constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry
+constexpr int32_t CarryCapacity = 15;      // gold per round trip
+constexpr int32_t StartGold = 60;
+constexpr int32_t StartMiners = 3;
+// A mine's total reserve. Every completed dig removes the carry from the mine; at
+// zero the mine is GONE (skipped by targeting, hidden by the view). 300 = 20 trips.
+// Total map gold now bounds the whole economy — starvation makes the lose rule
+// genuinely reachable and match length is naturally bounded.
+constexpr int32_t MineGoldCapacity = 300;
 
 // ---- Sim rate ----
 // 10 Hz (design doc §3). This is what a "tick" means in seconds: BuildTicks and
@@ -69,8 +78,12 @@ constexpr int32_t StartLumberjacks = 3;
 // sim at this rate via TickClock, decoupled from render/vsync (#69).
 constexpr uint32_t TickRateHz = 10;
 
-// ---- Production (spec §4) ----
-constexpr int32_t QueueDepth = 4;
+// ---- Production (#84: four PARALLEL per-type queues with stack acceleration) ----
+// A press appends to that type's queue (gold deducted at enqueue). Each queue's
+// build progress advances by its QUEUED COUNT per tick — i.e. rate = count x base,
+// so a deep stack snowballs: effective build time = BuildTicks / count. This is the
+// pacing thesis (games accelerate as economies grow) — protect it in balance passes.
+constexpr int32_t PerTypeQueueCap = 64;    // sanity bound, not a gameplay knob
 constexpr int32_t RingSlots = 8;           // deterministic spawn ring (SpawnCounter % RingSlots)
 
 // ---- The field (design doc §9: portrait, width fixed, height the balance knob) ----
@@ -84,7 +97,7 @@ constexpr Fixed WorldHeight = F(120);
 constexpr Fixed MaxWorldHeight = F(160);    // headroom the grid arrays size to
 
 // Camps at the two SHORT ends — team 0 bottom, team 1 top (spec §2, rotated to
-// portrait). A camp is a location (spawn point + wood drop-off), never an entity.
+// portrait). A camp is a location (spawn point + gold drop-off), never an entity.
 constexpr int32_t CampInset = 6;            // camp distance in from each short end
 constexpr Fixed CampX = F(17);              // centred on the 34-wide field
 constexpr Fixed Camp0Y = F(CampInset);
@@ -108,9 +121,9 @@ constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (desig
 // "hundreds-to-thousands"). Slot reuse (lowest free slot) bounds live memory here.
 constexpr int32_t MaxUnitsPerTeam = 2048;
 constexpr int32_t MaxUnits = MaxUnitsPerTeam * 2;
-constexpr int32_t TreesPerGrove = 4;
-constexpr int32_t GrovesPerTeam = 2;        // safe (near camp) + contested (near mid)
-constexpr int32_t TreesPerTeam = TreesPerGrove * GrovesPerTeam;
-constexpr int32_t NumTrees = TreesPerTeam * 2;
+constexpr int32_t MinesPerCluster = 4;
+constexpr int32_t ClustersPerTeam = 2;      // safe (near camp) + contested (near mid)
+constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
+constexpr int32_t NumMines = MinesPerTeam * 2;
 
 } // namespace Rps

@@ -49,7 +49,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Background = FlatMat(Renderer, {0.10f, 0.11f, 0.13f, 1.0f});
     CampMat[0] = FlatMat(Renderer, {0.20f, 0.30f, 0.55f, 1.0f});   // you (bottom): blue
     CampMat[1] = FlatMat(Renderer, {0.55f, 0.25f, 0.24f, 1.0f});   // foe (top): red
-    TreeMat = FlatMat(Renderer, {0.25f, 0.55f, 0.30f, 1.0f});
+    MineMat = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});   // gold-bearing rock (locked palette #D9A93C)
 
     // Per-type shade, team-tinted. Placeholder flats — real cooked R8G8 sprite art
     // (the tint trick) is a later pass.
@@ -63,6 +63,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
     }
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
+    GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
 
     Font.Init(Lur::Text::InterFont());
     Font.UploadAtlas(*Renderer);
@@ -100,10 +101,18 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     Blit(CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx, CampPx);
     Blit(CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx, CampPx);
 
-    // Trees.
-    const float TreePx = 0.9f * P;
-    for (int T = 0; T < NumTrees; ++T)
-        Blit(TreeMat, SX(FW(Snap.TreeX[T])), SY(FW(Snap.TreeY[T])), TreePx, TreePx);
+    // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
+    // bar above them (same visual language as unit health, gold fill).
+    const float MinePx = 1.4f * P;
+    for (int T = 0; T < NumMines; ++T) {
+        if (Snap.MineGold[T] <= 0) continue;
+        const float Mx = SX(FW(Snap.MineX[T])), My = SY(FW(Snap.MineY[T]));
+        Blit(MineMat, Mx, My, MinePx, MinePx);
+        const float Frac = static_cast<float>(Snap.MineGold[T]) / static_cast<float>(MineGoldCapacity);
+        const float BarW = MinePx, BarH = 2.0f, BarY = My - MinePx * 0.5f - 3.0f;
+        Blit(HealthBg, Mx, BarY, BarW, BarH);
+        Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
+    }
 
     // Units — ONE instanced draw. Each instance carries prev+cur pixel centres; the
     // vertex shader lerps by Alpha, so there is no per-unit CPU interpolation (design §6).
@@ -141,10 +150,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     Renderer->BeginGui();
     char L[4][64];
     std::snprintf(L[0], sizeof(L[0]), "tick %u  %s", Snap.Tick, ResultStr(Snap.Result));
-    std::snprintf(L[1], sizeof(L[1]), "YOU  wood %d  units %d  q%d", Snap.Wood[0], Snap.AliveCount[0],
-                  Snap.QueueLen[0]);
-    std::snprintf(L[2], sizeof(L[2]), "FOE  wood %d  units %d  q%d", Snap.Wood[1], Snap.AliveCount[1],
-                  Snap.QueueLen[1]);
+    const int32_t Q0 = Snap.QueueCount[0][0] + Snap.QueueCount[0][1] + Snap.QueueCount[0][2] + Snap.QueueCount[0][3];
+    const int32_t Q1 = Snap.QueueCount[1][0] + Snap.QueueCount[1][1] + Snap.QueueCount[1][2] + Snap.QueueCount[1][3];
+    std::snprintf(L[1], sizeof(L[1]), "YOU  gold %d  units %d  q%d", Snap.Gold[0], Snap.AliveCount[0], Q0);
+    std::snprintf(L[2], sizeof(L[2]), "FOE  gold %d  units %d  q%d", Snap.Gold[1], Snap.AliveCount[1], Q1);
     std::snprintf(L[3], sizeof(L[3]), "1-4 you  5-8 foe  drag: pan");
     const float Size = 15.0f, LineH = Size * 1.35f, X = 8.0f;
     const Color Shadow{0.0f, 0.0f, 0.0f, 0.85f};
