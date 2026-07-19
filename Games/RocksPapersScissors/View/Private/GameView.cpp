@@ -377,9 +377,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // instance, same endpoints, the heap glyph over the cart — still one draw.
         if (Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
             Lur::Render::InstanceData& O = Instances[N++];
-            O = D;
-            O.Size = D.Size * 1.45f;  // the load reads BIG (playtest) — scaling the cell
-                                      // also lifts the heap, which sits above centre
+            O = D;  // same size: the enlarged heap is baked into the mask, seated on the rail
             O.R = Srgb(0xD9); O.G = Srgb(0xA9); O.B = Srgb(0x3C); O.A = 1.0f;
             O.U0 = static_cast<float>(GlyphOreLoad) / static_cast<float>(GlyphCount);
             O.U1 = static_cast<float>(GlyphOreLoad + 1) / static_cast<float>(GlyphCount);

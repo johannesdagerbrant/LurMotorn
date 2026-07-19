@@ -68,6 +68,22 @@ def make_cart():
     cart.paste(0, (0, 0, SIZE, cut))
     ore = coverage.copy()
     ore.paste(0, (0, cut, SIZE, SIZE))
+    # Playtest: the load must read BIG but stay SEATED — enlarge the heap around its
+    # bottom-centre anchor (the rail line), taller than wide so it never outgrows the
+    # cart. Baked here so the runtime draws cart and load at the same instance size.
+    bb = ore.getbbox()
+    if bb:
+        x0, y0, x1, y1 = bb
+        heap = ore.crop(bb)
+        nw = int(heap.width * 1.12)
+        nh = int(heap.height * 1.55)
+        heap = heap.resize((nw, nh), Image.LANCZOS)
+        cx = (x0 + x1) // 2
+        big = Image.new("L", (SIZE, SIZE), 0)
+        px, py = cx - nw // 2, max(0, y1 - nh)
+        big.paste(heap, (px, py))
+        big.paste(0, (0, cut, SIZE, SIZE))  # never below the rail
+        ore = big
     save_gray_alpha("miner", cart)
     save_gray_alpha("oreload", ore)
 
