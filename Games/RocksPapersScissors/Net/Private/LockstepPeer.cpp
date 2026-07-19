@@ -85,8 +85,6 @@ void LockstepPeer::CrossCheck(uint32_t Tick) {
 
 // Resync chunk tags: 0/1 = the team-0/team-1 history streams; 0xFF = the frontier marker.
 namespace {
-constexpr uint8_t ResyncTagTeam0 = 0;
-constexpr uint8_t ResyncTagTeam1 = 1;
 constexpr uint8_t ResyncTagMarker = 0xFF;
 }  // namespace
 
