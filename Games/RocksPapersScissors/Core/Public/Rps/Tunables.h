@@ -49,12 +49,14 @@ struct UnitStats {
 
 // Spec §3 table, converted to tick-denominated time (design doc §3: wallclock
 // never enters the sim). Rock=ranged/slow, Scissor=fast/fragile, Paper=tanky/short.
+// Playtest 2026-07-19: all WARRIORS share one speed, slightly above the miner's —
+// the counter triangle reads through damage, not through chases nobody can win.
 constexpr UnitStats UnitTable[UnitCount] = {
     // Cost Build  HP  Speed        Atk Range    CD  Beats
     {  30,   30,  40, F(6, 10),      2, F(12, 10),  8, UnitNone   }, // Miner
-    {  50,   50,  60, F(5, 10),      8, F(6),      10, UnitScissor}, // Rock thrower
-    {  50,   50,  90, F(45, 100),    9, F(2),      10, UnitRock   }, // Paper wrapper
-    {  50,   50,  45, F(8, 10),      7, F(12, 10),  6, UnitPaper  }, // Scissor cutter
+    {  50,   50,  60, F(7, 10),      8, F(6),      10, UnitScissor}, // Rock thrower
+    {  50,   50,  90, F(7, 10),      9, F(2),      10, UnitRock   }, // Paper wrapper
+    {  50,   50,  45, F(7, 10),      7, F(12, 10),  6, UnitPaper  }, // Scissor cutter
 };
 
 constexpr int32_t CounterMultiplier = 3;   // attacker vs the type it beats
@@ -106,6 +108,11 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // ---- Movement / steering (spec §5) ----
 constexpr Fixed SeparationRadius = F(1);    // same-team push range
 constexpr Fixed SeparationStrength = F(1, 4);
+// Targeting (playtest 2026-07-19): distances quantize into bands of this width
+// (Chebyshev units); within one band, the type WE counter (3x damage) is preferred
+// over a marginally nearer neutral target - a paper picks the rock, not the
+// scissor, when both are "about equally far".
+constexpr Fixed TargetBand = F(3);
 
 // ---- Spatial grid (design §5) — cell size in whole world units. This is a PURE
 // perf knob: any value yields bit-identical results to brute force (rps_sim_tests

@@ -190,24 +190,55 @@ void Production(Sim& S) {
     }
 }
 
-// ---- Phase 2: target acquisition for units without a valid target ----
+// ---- Phase 2: target acquisition - re-scored EVERY tick (playtest 2026-07-19:
+// keep-until-death hysteresis made units run PAST enemies). The score is the
+// lexicographic tuple (distance band, counter-preference, exact distance, id):
+// closeness dominates in TargetBand-wide Chebyshev bands; within one band the type
+// WE beat (3x damage) wins; exact distance then lowest id break the remaining ties.
+// Deterministic on both peers - and identical between the brute and grid paths,
+// which rps_sim_tests' grid-equivalence run proves every build.
+struct TargetScore {
+    int64_t Band;
+    int32_t Prefer;   // 0 = a type we counter, 1 = anything else
+    int64_t Dist;     // Chebyshev, raw Q16.16
+    int32_t Id;
+    bool BetterThan(const TargetScore& O) const {
+        if (Band != O.Band) return Band < O.Band;
+        if (Prefer != O.Prefer) return Prefer < O.Prefer;
+        if (Dist != O.Dist) return Dist < O.Dist;
+        return Id < O.Id;
+    }
+};
+constexpr int64_t TargetBandRaw = TargetBand.Raw;
+int64_t ChebRaw(const Sim& S, int32_t I, int32_t J) {
+    int64_t Dx = static_cast<int64_t>(S.PosX[I].Raw) - S.PosX[J].Raw;
+    int64_t Dy = static_cast<int64_t>(S.PosY[I].Raw) - S.PosY[J].Raw;
+    if (Dx < 0) Dx = -Dx;
+    if (Dy < 0) Dy = -Dy;
+    return Dx > Dy ? Dx : Dy;
+}
+TargetScore ScoreOf(const Sim& S, int32_t I, int32_t J) {
+    const int64_t D = ChebRaw(S, I, J);
+    return {D / TargetBandRaw, UnitTable[S.Type[I]].Beats == S.Type[J] ? 0 : 1, D, J};
+}
 int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
     int32_t Best = -1;
-    int64_t BestD = INT64_MAX;
+    TargetScore BS{};
     for (int32_t J = 0; J < S.Count; ++J) {
         if (!S.IsAlive(J) || S.Team[J] == S.Team[I]) continue;
-        const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.PosX[J], S.PosY[J]);
-        if (D < BestD) { BestD = D; Best = J; }  // strict < : lowest id wins ties (ascending J)
+        const TargetScore Sc = ScoreOf(S, I, J);
+        if (Best < 0 || Sc.BetterThan(BS)) { BS = Sc; Best = J; }
     }
     return Best;
 }
 // Grid nearest-enemy: expanding Chebyshev ring search. Must reproduce the brute
-// result EXACTLY, including the lowest-id tie-break — so the compare is the (dist,id)
-// LEXICOGRAPHIC minimum, not strict-<: an equal-distance unit can sit in a farther
-// ring than a higher-id one, and the ring bound below guarantees it's still scanned.
+// result EXACTLY - same TargetScore comparator, and the early exit reasons in BANDS:
+// any unit in an unscanned ring K+1 sits at Chebyshev >= K*cellSize, so once that
+// bound's band is STRICTLY worse than the best band, nothing farther can win (an
+// equal band could still flip on counter-preference, so equality keeps scanning).
 int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
-    int64_t BestD = INT64_MAX;
+    TargetScore BS{};
     int32_t BestId = -1;
     const int32_t MaxK = GridCols + GridRows;
     for (int32_t K = 0; K <= MaxK; ++K) {
@@ -224,19 +255,16 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
                 for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P) {
                     const int32_t J = G.Order[P];
                     if (S.Team[J] == S.Team[I]) continue;  // J is alive by construction (grid holds only alive)
-                    const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.PosX[J], S.PosY[J]);
-                    if (D < BestD || (D == BestD && J < BestId)) { BestD = D; BestId = J; }
+                    const TargetScore Sc = ScoreOf(S, I, J);
+                    if (BestId < 0 || Sc.BetterThan(BS)) { BS = Sc; BestId = J; }
                 }
             }
         }
-        // After ring K, the nearest unscanned cell (ring K+1) is >= K*cellSize away.
-        // Stop only when that bound STRICTLY exceeds the best (so equal-distance ties
-        // one ring out are still visited and can win on lower id).
         if (BestId >= 0) {
-            const int64_t R = static_cast<int64_t>(K) * CellRaw;
-            if (R * R > BestD) break;
+            const int64_t MinNext = static_cast<int64_t>(K) * CellRaw;  // ring K+1 lower bound
+            if (MinNext / TargetBandRaw > BS.Band) break;
         }
-        if (K > 0 && !AnyInGrid) break;  // the whole ring is outside the grid — nothing farther can be inside
+        if (K > 0 && !AnyInGrid) break;  // the whole ring is outside the grid - nothing farther can be inside
     }
     return BestId;
 }
@@ -263,10 +291,9 @@ void TargetAcquire(Sim& S, const Grid& G) {
         if (S.Type[I] == UnitMiner) {
             if (S.Target[I] < 0) S.Target[I] = NearestFreeMine(S, I);  // mines are few — brute is fine; set in slot order
         } else {
-            const int32_t T = S.Target[I];
-            const bool Valid = T >= 0 && S.IsAlive(T) && S.Team[T] != S.Team[I];
-            if (!Valid)  // else keep target until death (hysteresis, no dithering)
-                S.Target[I] = S.UseBruteForce ? NearestEnemyBrute(S, I) : NearestEnemyGrid(S, G, I);
+            // Re-scored EVERY tick (playtest): banded closeness + counter preference,
+            // so units engage what they are passing instead of chasing a first pick.
+            S.Target[I] = S.UseBruteForce ? NearestEnemyBrute(S, I) : NearestEnemyGrid(S, G, I);
         }
     }
 }

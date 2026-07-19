@@ -28,6 +28,7 @@ struct Snapshot {
     uint8_t  Type[MaxUnits];
     uint8_t  Team[MaxUnits];
     int32_t  Hp[MaxUnits];
+    int32_t  Carry[MaxUnits];   // miner gold in hand — the view's deposit-flash edge
     uint64_t AliveBits[(MaxUnits + 63) / 64];
 
     // Mine positions (constant after Init, carried here so the view needs nothing
@@ -61,6 +62,7 @@ struct Snapshot {
         std::memcpy(Type, S.Type, N);
         std::memcpy(Team, S.Team, N);
         std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
+        std::memcpy(Carry, S.Carry, sizeof(int32_t) * N);
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
         std::memcpy(MineX, S.MineX, sizeof(Fixed) * NumMines);
         std::memcpy(MineY, S.MineY, sizeof(Fixed) * NumMines);

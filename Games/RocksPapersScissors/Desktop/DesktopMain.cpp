@@ -114,7 +114,7 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
     if (!P.CamInit) { P.Cam.Y = MinCam; P.CamInit = true; }  // camp clear of the plates on launch
     P.Cam.Update(DtSec, MaxCam, MinCam);
     P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.Cam.Y, static_cast<float>(W),
-                  static_cast<float>(H), P.Team == 1);
+                  static_cast<float>(H), P.Team == 1, DtSec);
 }
 
 void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t ElapsedNs,
@@ -291,7 +291,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
                 if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
                 Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
                 View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, static_cast<float>(W),
-                            static_cast<float>(H), /*FlipY=*/false);  // solo = team-0 view
+                            static_cast<float>(H), /*FlipY=*/false,
+                            static_cast<float>(ElapsedNs) / 1.0e9f);  // solo = team-0 view
             }
         }
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {

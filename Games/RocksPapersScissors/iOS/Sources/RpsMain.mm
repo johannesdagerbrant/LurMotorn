@@ -319,7 +319,8 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     const float MinCam = -_View.BottomHudWorldUnits(W);
     if (!_CamInit) { _Cam.Y = MinCam; _CamInit = true; }
     _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
-    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1);
+    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1,
+                 static_cast<float>(ElapsedNs) / 1.0e9f);
 }
 
 // Touch: the bottom strip is the 4 production buttons; a drag above pans the camera (§9).

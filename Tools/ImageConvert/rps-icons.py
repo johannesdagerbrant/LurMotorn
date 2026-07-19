@@ -20,10 +20,16 @@ REMOTE = {
     "mine":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/mine-wagon.svg",
     "swords":   "raw.githubusercontent.com/game-icons/icons/master/lorc/crossed-swords.svg",
     "camp":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/barracks-tent.svg",
+    "pointer":  "raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/hand-pointer.svg",
 }
 
 def save_gray_alpha(name, coverage):
-    # coverage: L-mode image, 0..255. Output: white glyph + coverage alpha.
+    # coverage: L-mode image, 0..255. Output: white glyph + coverage alpha, padded to
+    # a SIZE x SIZE square (non-square SVGs keep aspect; the cook needs uniform cells).
+    if coverage.size != (SIZE, SIZE):
+        sq = Image.new("L", (SIZE, SIZE), 0)
+        sq.paste(coverage, ((SIZE - coverage.width) // 2, (SIZE - coverage.height) // 2))
+        coverage = sq
     img = Image.merge("LA", (Image.new("L", coverage.size, 255), coverage))
     img.save(os.path.join(OUT, name + ".png"))
     print("wrote", name, coverage.size)

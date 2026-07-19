@@ -29,7 +29,7 @@ public:
     // FlipY mirrors the field vertically for the top player (team 1) so BOTH players see
     // their own camp at the bottom (§9's per-player view flip). View-only, per-device.
     void Render(Lur::Render::IRenderer* Renderer, const Snapshot& Snap, float Alpha,
-                float CameraY, float WidthPx, float HeightPx, bool FlipY);
+                float CameraY, float WidthPx, float HeightPx, bool FlipY, float DtSec);
 
     // World units visible vertically at this width — for the caller's camera clamp.
     static float VisibleWorldHeight(float WidthPx, float HeightPx);
@@ -72,7 +72,7 @@ private:
     // shade+coverage. Everything on the field — units, mines, camps, HUD icons —
     // is one of these masks under a tint (the locked "alpha-cutout silhouette" rule).
     enum EGlyph { GlyphMiner = 0, GlyphRock, GlyphPaper, GlyphScissors,
-                  GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphCount };
+                  GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphPointer, GlyphCount };
     Lur::Render::TextureHandle IconAtlas = 0;
     Lur::Render::MaterialHandle AtlasMat = 0;        // white tint: per-instance colour is the fill
     Lur::Render::MeshHandle GlyphMesh[GlyphCount] = {};  // unit quads with per-glyph atlas UVs
@@ -111,6 +111,25 @@ private:
     Lur::Render::MaterialHandle GoldIconMat = 0;      // gold glyph (costs, counter)
 
     void RefreshSelector();
+
+    // ---- View-side juice (#85 playtest feedback) — all per-device, never sim ----
+    // "+N" floats above a miner banking its carry (world-anchored, rise + fade).
+    struct GoldFloat { float Wx = 0, Wy = 0, Age = 0; int32_t Value = 0; bool Active = false; };
+    static constexpr int MaxFloats = 24;
+    GoldFloat Floats[MaxFloats];
+    int32_t LastCarry[MaxUnits] = {};     // deposit edge detection (carry >0 -> 0)
+    // Gold counter animation: the shown value rolls toward the real one and pops on gain.
+    float DisplayedGold = -1.0f;
+    float GoldPulse = 0.0f;
+    // First-scroll hint: pointing finger + up/down arrows bobbing mid-screen from the
+    // moment one of YOUR units leaves the screen until the first camera pan.
+    enum class EHint : uint8_t { Idle, Active, Fading, Done };
+    EHint Hint = EHint::Idle;
+    float HintAge = 0.0f, HintFade = 0.0f, HintCamY = 0.0f;
+    static constexpr int HintAlphaSteps = 6;   // materials are immutable: fade = LUT
+    Lur::Render::MaterialHandle HintPointer[HintAlphaSteps] = {};
+    Lur::Render::MaterialHandle HintArrow[HintAlphaSteps] = {};
+    Lur::Render::MeshHandle ArrowUp = 0, ArrowDown = 0;
 
     bool Ready = false;
 };

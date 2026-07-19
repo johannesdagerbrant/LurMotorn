@@ -221,7 +221,7 @@ void android_main(android_app* App) {
             if (!State.CamInit) { State.Cam.Y = MinCam; State.CamInit = true; }
             State.Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
             State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.Cam.Y, W, H,
-                              State.Team == 1);
+                              State.Team == 1, static_cast<float>(ElapsedNs) / 1.0e9f);
         }
     }
 

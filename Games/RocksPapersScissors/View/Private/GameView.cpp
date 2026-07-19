@@ -1,5 +1,6 @@
 #include "Rps/GameView.h"
 
+#include <cmath>
 #include <cstdio>
 
 #include "Lur/Math/Mat4.h"
@@ -11,7 +12,7 @@
 // 0..3 are EUnit order (miner, rock, paper, scissors), then gold / mine / swords /
 // camp. Sources: game-icons.net (CC BY 3.0) + Font Awesome Free (CC BY 4.0) + the
 // custom bold pick (ours) — attribution required in-app before shipping (#85).
-// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
+// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png,Icons/pointer.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
 #include "IconMasks.h"
 
 namespace Rps {
@@ -116,9 +117,11 @@ float GameView::VisibleWorldHeight(float WidthPx, float HeightPx) {
 float GameView::BottomHudWorldUnits(float WidthPx) const {
     const float HS = HudScale(WidthPx);
     const float Pad = 8.0f * HS, Gap = 6.0f * HS;
-    const float PlateW = (WidthPx - 2.0f * Pad - 3.0f * Gap) / 4.0f;
-    // nav-bar inset + plate block + a margin so the camp sits WELL above the plates
-    return (BottomInsetPx + Pad + PlateW * 1.02f + 3.0f * Pad) / Ppu(WidthPx);
+    const float GroupGap = 4.0f * Gap;
+    const float PlateW = (WidthPx - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
+    // nav-bar inset + plate block + group header + a margin so the camp sits WELL
+    // above the plates
+    return (BottomInsetPx + Pad + PlateW * 1.02f + 20.0f * HS + 3.0f * Pad) / Ppu(WidthPx);
 }
 
 float GameView::TopHudWorldUnits(float WidthPx) const {
@@ -201,6 +204,29 @@ void GameView::CreateResources(IRenderer* Renderer) {
     PlateIconMat = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f});
     PlateIconDim = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.4f});
     GoldIconMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
+    // First-scroll hint (#85 playtest): alpha-stepped materials (materials are
+    // immutable, so the fade walks a LUT) + up/down arrow triangle meshes.
+    for (int I = 0; I < HintAlphaSteps; ++I) {
+        const float A = static_cast<float>(I + 1) / HintAlphaSteps;
+        MaterialDesc DP;
+        DP.BaseColor = IconAtlas;
+        DP.Tint = {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), A};
+        HintPointer[I] = Renderer->CreateMaterial(DP);
+        HintArrow[I] = FlatMat(Renderer, {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), A});
+    }
+    {
+        const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
+        const Lur::Math::Vec4 Wc{1.0f, 1.0f, 1.0f, 1.0f};
+        const uint32_t Idx[3] = {0, 1, 2};
+        Lur::Render::Vertex Up[3] = {{{0.5f, 0.0f, 0.0f}, Nrm, {0.5f, 0.0f}, Wc},
+                                     {{1.0f, 1.0f, 0.0f}, Nrm, {1.0f, 1.0f}, Wc},
+                                     {{0.0f, 1.0f, 0.0f}, Nrm, {0.0f, 1.0f}, Wc}};
+        ArrowUp = Renderer->CreateMesh(Up, 3, Idx, 3);
+        Lur::Render::Vertex Dn[3] = {{{0.0f, 0.0f, 0.0f}, Nrm, {0.0f, 0.0f}, Wc},
+                                     {{1.0f, 0.0f, 0.0f}, Nrm, {1.0f, 0.0f}, Wc},
+                                     {{0.5f, 1.0f, 0.0f}, Nrm, {0.5f, 1.0f}, Wc}};
+        ArrowDown = Renderer->CreateMesh(Dn, 3, Idx, 3);
+    }
     ClockFont.Init(Lur::Text::Dseg7Font());
     ClockFont.UploadAtlas(*Renderer);
     ClockText.CreateResources(Renderer, &ClockFont);
@@ -246,7 +272,7 @@ int GameView::OnTap(float XPx, float YPx) {
 }
 
 void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, float CameraY,
-                      float WidthPx, float HeightPx, bool FlipY) {
+                      float WidthPx, float HeightPx, bool FlipY, float DtSec) {
     if (!Ready) return;
     const float P = Ppu(WidthPx);
     const float WHf = FW(WorldHeight);
@@ -256,6 +282,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const int My = FlipY ? 1 : 0;
     const int Foe = 1 - My;
     const float HS = HudScale(WidthPx);  // HUD metrics scale with resolution (#85 feedback)
+    if (DtSec < 0.0f) DtSec = 0.0f;
+    if (DtSec > 0.25f) DtSec = 0.25f;    // view-side animation clock (hitch-proof)
 
     // World -> screen. Pixel space is Y-DOWN (MakeOrthoCamera); world Y grows UP (your
     // camp at small Y sits at the bottom), so flip: Wy == CameraY lands at the bottom.
@@ -358,6 +386,35 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
     }
 
+    // Deposit juice (#85 playtest): "+N" floats where a miner banked its carry —
+    // world-anchored (they ride the scroll), rising and fading over a second. The
+    // carry >0 -> 0 edge only ever happens at the deposit, so it IS the event.
+    for (int32_t I = 0; I < Snap.Count; ++I) {
+        if (!Snap.IsAlive(I)) { LastCarry[I] = 0; continue; }
+        const int32_t C = Snap.Type[I] == UnitMiner ? Snap.Carry[I] : 0;
+        if (LastCarry[I] > 0 && C == 0) {
+            for (int K = 0; K < MaxFloats; ++K)
+                if (!Floats[K].Active) {
+                    Floats[K] = {FW(Snap.PosX[I]), FW(Snap.PosY[I]), 0.0f, LastCarry[I], true};
+                    break;
+                }
+        }
+        LastCarry[I] = C;
+    }
+    for (int K = 0; K < MaxFloats; ++K) {
+        GoldFloat& F = Floats[K];
+        if (!F.Active) continue;
+        F.Age += DtSec;
+        if (F.Age > 1.0f) { F.Active = false; continue; }
+        const float A = F.Age < 0.55f ? 1.0f : 1.0f - (F.Age - 0.55f) / 0.45f;
+        char FB[16];
+        std::snprintf(FB, sizeof(FB), "+%d", F.Value);
+        const float Fy = SY(F.Wy) - (14.0f + 30.0f * F.Age) * HS;
+        Text.Draw(Renderer, FB, SX(F.Wx) - 60.0f, Fy, 120.0f, 20.0f * HS, 13.0f * HS,
+                  {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), A}, Lur::Text::EHAlign::Center,
+                  Lur::Text::EVAlign::Top, false);
+    }
+
     // ---- HUD (GUI layer, pixel space) — the locked layout (#85): opponent
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
@@ -378,8 +435,21 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     Blit(PanelEdge, WidthPx * 0.5f, PanelY + PanelH, WidthPx, 1.0f * HS);
     const float Mid = PanelY + PanelH * 0.5f;
     BlitGlyph(GlyphGold, GoldIconMat, Pad + 9.0f * HS, Mid, 18.0f * HS);
-    std::snprintf(Buf, sizeof(Buf), "%d", Snap.Gold[My]);
-    Text.Draw(Renderer, Buf, Pad + 22.0f * HS, PanelY, 120.0f * HS, PanelH, 15.0f * HS, GoldC,
+    // Animated counter (#85 playtest): the shown value ROLLS toward the real one,
+    // and the type pops/brightens on a gain (pairs with the +N deposit floats).
+    const float GoldNow = static_cast<float>(Snap.Gold[My]);
+    if (DisplayedGold < 0.0f) DisplayedGold = GoldNow;
+    if (GoldNow > DisplayedGold + 0.5f) GoldPulse = 1.0f;
+    DisplayedGold += (GoldNow - DisplayedGold) * (1.0f - std::exp(-8.0f * DtSec));
+    if (std::fabs(GoldNow - DisplayedGold) < 0.6f) DisplayedGold = GoldNow;
+    GoldPulse -= DtSec * 2.5f;
+    if (GoldPulse < 0.0f) GoldPulse = 0.0f;
+    const float GoldK = 0.5f * GoldPulse;
+    const Color GoldTxt{GoldC.R + (1.0f - GoldC.R) * GoldK, GoldC.G + (1.0f - GoldC.G) * GoldK,
+                        GoldC.B + (1.0f - GoldC.B) * GoldK, 1.0f};
+    std::snprintf(Buf, sizeof(Buf), "%d", static_cast<int>(DisplayedGold + 0.5f));
+    Text.Draw(Renderer, Buf, Pad + 22.0f * HS, PanelY, 120.0f * HS, PanelH,
+              15.0f * HS * (1.0f + 0.3f * GoldPulse), GoldTxt,
               EHAlign::Left, EVAlign::Middle, false);
     BlitGlyph(GlyphMiner, PlateIconMat, WidthPx * 0.5f - 40.0f * HS, Mid, 16.0f * HS);
     std::snprintf(Buf, sizeof(Buf), "%d / %d", Workers, Soldiers);
@@ -394,16 +464,32 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // Production plates: the icon IS the unit glyph; stack tag, cost, progress bar
     // (which visibly accelerates with the stack — #84's pacing thesis on screen).
     // Anchored above the OS bottom inset (Android nav bar / iOS home indicator).
+    // Grouping (#85 playtest): the miner plate stands apart with a GOLD frame under a
+    // gold-token header — "spawns gold gatherers" — while rock/paper/scissors share a
+    // backing strip under a crossed-swords header — "spawns warriors".
     const float Gap = 6.0f * HS;
-    const float PlateW = (WidthPx - 2.0f * Pad - 3.0f * Gap) / 4.0f;
+    const float GroupGap = 4.0f * Gap;
+    const float PlateW = (WidthPx - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
     const float PlateH2 = PlateW * 1.02f;
     const float PlateY = HeightPx - BottomInsetPx - Pad - PlateH2;
+    const float HeadH = 16.0f * HS;
+    const float TrioX = Pad + PlateW + GroupGap;
+    const float TrioW = 3.0f * PlateW + 2.0f * Gap;
+    const float BackTop = PlateY - HeadH - 4.0f * HS;
+    const float BackH = PlateH2 + HeadH + 8.0f * HS;
+    Blit(PanelMat, Pad + PlateW * 0.5f, BackTop + BackH * 0.5f, PlateW + 6.0f * HS, BackH);
+    Blit(PanelMat, TrioX + TrioW * 0.5f, BackTop + BackH * 0.5f, TrioW + 6.0f * HS, BackH);
+    BlitGlyph(GlyphGold, GoldIconMat, Pad + PlateW * 0.5f, PlateY - HeadH * 0.5f - 2.0f * HS,
+              13.0f * HS);
+    BlitGlyph(GlyphSwords, PlateIconMat, TrioX + TrioW * 0.5f, PlateY - HeadH * 0.5f - 2.0f * HS,
+              13.0f * HS);
     for (int Ty = 0; Ty < 4; ++Ty) {
-        const float X = Pad + static_cast<float>(Ty) * (PlateW + Gap);
+        const float X = Ty == 0 ? Pad : TrioX + static_cast<float>(Ty - 1) * (PlateW + Gap);
         PlateRect[Ty][0] = X; PlateRect[Ty][1] = PlateY;
         PlateRect[Ty][2] = PlateW; PlateRect[Ty][3] = PlateH2;
         const bool Afford = Snap.Gold[My] >= UnitTable[Ty].Cost;
-        Blit(PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW + 2.0f, PlateH2 + 2.0f);
+        Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
+             PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
         BlitGlyph(Ty, Afford ? PlateIconMat : PlateIconDim,
                   X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
@@ -432,14 +518,51 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         }
     }
 
-    // Dev diagnostics line + match-result banner.
-    std::snprintf(Buf, sizeof(Buf), "tick %u   FOE gold %d units %d", Snap.Tick,
-                  Snap.Gold[Foe], Snap.AliveCount[Foe]);
-    Text.Draw(Renderer, Buf, Pad, PanelY + PanelH + 4.0f * HS, WidthPx, 16.0f * HS, 11.0f * HS,
-              {0.55f, 0.62f, 0.68f, 0.9f}, EHAlign::Left, EVAlign::Top, false);
+    // Match-result banner. (The tick/FOE debug line is gone - playtest feedback;
+    // the LOCKSTEP log line carries the same numbers for diagnosis.)
+    (void)Foe;
     if (Snap.Result != ResultOngoing) {
         Text.Draw(Renderer, ResultStr(Snap.Result, My), 0.0f, HeightPx * 0.42f, WidthPx,
                   40.0f * HS, 30.0f * HS, GoldC, EHAlign::Center, EVAlign::Middle, false);
+    }
+
+    // First-scroll hint (#85 playtest): from the moment one of YOUR units walks off
+    // the screen, bob a pointing finger + up/down arrows mid-screen; the first camera
+    // pan fades it out for good (per-session, view-only).
+    if (Hint == EHint::Idle) {
+        for (int32_t I = 0; I < Snap.Count; ++I) {
+            if (!Snap.IsAlive(I) || Snap.Team[I] != My) continue;
+            const float Sy = SY(FW(Snap.PosY[I]));
+            if (Sy < -2.0f * UnitPx || Sy > HeightPx + 2.0f * UnitPx) {
+                Hint = EHint::Active;
+                HintCamY = CameraY;
+                break;
+            }
+        }
+    } else if (Hint == EHint::Active) {
+        HintAge += DtSec;
+        if (std::fabs(CameraY - HintCamY) > 1.0f) { Hint = EHint::Fading; HintFade = 1.0f; }
+    } else if (Hint == EHint::Fading) {
+        HintAge += DtSec;
+        HintFade -= DtSec * 2.0f;
+        if (HintFade <= 0.0f) Hint = EHint::Done;
+    }
+    if (Hint == EHint::Active || Hint == EHint::Fading) {
+        const float A = Hint == EHint::Active ? 1.0f : HintFade;
+        int Step = static_cast<int>(A * HintAlphaSteps) - 1;
+        if (Step < 0) Step = 0;
+        if (Step >= HintAlphaSteps) Step = HintAlphaSteps - 1;
+        const float Bob = std::sin(HintAge * 4.0f) * 14.0f * HS;
+        const float Cx = WidthPx * 0.5f, Cy = HeightPx * 0.5f + Bob;
+        const float Pp = 56.0f * HS;
+        BlitGlyph(GlyphPointer, HintPointer[Step], Cx, Cy, Pp);
+        const float Aw = 22.0f * HS, Ah = 14.0f * HS;
+        const Mat4 Up = Mat4::Translation({Cx - Aw * 0.5f, Cy - Pp * 0.75f - Ah, 0.0f}) *
+                        Mat4::Scale({Aw, Ah, 1.0f});
+        Renderer->DrawMesh(ArrowUp, HintArrow[Step], Up);
+        const Mat4 Dn = Mat4::Translation({Cx - Aw * 0.5f, Cy + Pp * 0.75f, 0.0f}) *
+                        Mat4::Scale({Aw, Ah, 1.0f});
+        Renderer->DrawMesh(ArrowDown, HintArrow[Step], Dn);
     }
 
     // The opponent dropdown draws LAST so its open list overlays the panel.
