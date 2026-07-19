@@ -1,0 +1,123 @@
+#pragma once
+#include <cstdint>
+#include <cstring>
+#include <mutex>
+
+#include "Lur/Sim/Fixed.h"
+#include "Rps/Sim.h"
+#include "Rps/Tunables.h"
+
+namespace Rps {
+
+using Lur::Sim::Fixed;
+
+// The render-facing view of one sim tick — the ONLY data that crosses the
+// tick-thread -> render-thread boundary (the symmetric counterpart of #40's
+// EventInbox, which crosses radio -> engine). It carries just what the instanced
+// draw and the HUD need: the two interpolation endpoints (Prev, Pos) plus per-unit
+// draw attributes, and a few scalar counters. Interpolation happens in the vertex
+// shader (mix(prev, curr, alpha)); the CPU never touches a float per unit — the
+// only float is the single alpha, computed on the read side (AlphaAt), so floats
+// stay quarantined to the view.
+struct Snapshot {
+    int32_t  Count = 0;
+    Fixed    PrevX[MaxUnits];
+    Fixed    PrevY[MaxUnits];
+    Fixed    PosX[MaxUnits];
+    Fixed    PosY[MaxUnits];
+    uint8_t  Type[MaxUnits];
+    uint8_t  Team[MaxUnits];
+    int32_t  Hp[MaxUnits];
+    uint64_t AliveBits[(MaxUnits + 63) / 64];
+
+    // HUD / overlay counters (read via this same hand-off, never from the live Sim).
+    uint32_t Tick = 0;
+    uint8_t  Result = 0;              // EResult
+    int32_t  Wood[2] = {};
+    int32_t  QueueLen[2] = {};
+    uint8_t  Queue[2][QueueDepth] = {};
+    int32_t  BuildTimer[2] = {};
+    int32_t  AliveCount[2] = {};
+
+    // For interpolation: when this tick was published (steady clock ns) and the sim
+    // step duration. The render thread times alpha itself from these — the tick
+    // thread never exposes its accumulator.
+    uint64_t PublishNs = 0;
+    uint64_t StepNs = 0;
+
+    // Copy the render-relevant subset out of the live sim (producer side, unlocked).
+    void CaptureFrom(const Sim& S, uint64_t InPublishNs, uint64_t InStepNs) {
+        Count = S.Count;
+        const size_t N = static_cast<size_t>(S.Count);
+        std::memcpy(PrevX, S.PrevX, sizeof(Fixed) * N);
+        std::memcpy(PrevY, S.PrevY, sizeof(Fixed) * N);
+        std::memcpy(PosX, S.PosX, sizeof(Fixed) * N);
+        std::memcpy(PosY, S.PosY, sizeof(Fixed) * N);
+        std::memcpy(Type, S.Type, N);
+        std::memcpy(Team, S.Team, N);
+        std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
+        std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
+        Tick = S.Tick;
+        Result = S.Result;
+        for (int T = 0; T < 2; ++T) {
+            Wood[T] = S.Teams[T].Wood;
+            QueueLen[T] = S.Teams[T].QueueLen;
+            BuildTimer[T] = S.Teams[T].BuildTimer;
+            for (int K = 0; K < QueueDepth; ++K) Queue[T][K] = S.Teams[T].Queue[K];
+            AliveCount[T] = S.AliveCount(static_cast<uint8_t>(T));
+        }
+        PublishNs = InPublishNs;
+        StepNs = InStepNs;
+    }
+
+    bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
+
+    // Fixed-timestep interpolation factor at render time NowNs. Clamps to [0,1] — no
+    // extrapolation: if the next tick is late (sim stalled), it holds at Pos, which is
+    // exactly the "freeze gracefully" behaviour the netcode wants at the ceiling.
+    float AlphaAt(uint64_t NowNs) const {
+        if (StepNs == 0 || NowNs <= PublishNs) return 0.0f;
+        const uint64_t D = NowNs - PublishNs;
+        if (D >= StepNs) return 1.0f;
+        return static_cast<float>(D) / static_cast<float>(StepNs);
+    }
+};
+
+// Double-buffered hand-off, single-producer (tick thread) / single-consumer (render
+// thread). The producer fills the back buffer UNLOCKED (the ~90 KB CaptureFrom must
+// not block the render thread), then Publish() flips the front/back indices under a
+// short lock. The consumer copies the front buffer out under the same lock. Front and
+// back are always different, so the only thing the lock guards is the index swap and
+// the consumer's copy — the same "copy under lock, heavy work outside" shape as
+// EventInbox. A lock-free triple buffer is a drop-in upgrade if the 10 Hz publish ever
+// contends the render thread (it won't).
+class SnapshotMailbox {
+public:
+    // Producer: write here, then Publish().
+    Snapshot& Back() { return Buffers[BackIdx]; }
+
+    void Publish() {
+        std::lock_guard<std::mutex> Lock(Mutex);
+        FrontIdx = BackIdx;
+        BackIdx = 1 - BackIdx;
+        HasPublished = true;
+    }
+
+    // Consumer: copies the latest published snapshot into Out. False until the first
+    // Publish(). Copy is under the lock so Front can't flip mid-copy (2-buffer safe).
+    bool Consume(Snapshot& Out) const {
+        std::lock_guard<std::mutex> Lock(Mutex);
+        if (!HasPublished) return false;
+        Out = Buffers[FrontIdx];
+        return true;
+    }
+
+private:
+    mutable std::mutex Mutex;
+    Snapshot Buffers[2];
+    int FrontIdx = 0;
+    int BackIdx = 0;   // starts equal to Front; first Publish() moves Front onto it and flips
+    bool HasPublished = false;
+};
+
+} // namespace Rps

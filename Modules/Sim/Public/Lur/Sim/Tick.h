@@ -45,6 +45,25 @@ public:
         return Ticks;
     }
 
+    // Non-discarding advance for the LOCKSTEP SIM path. Returns up to MaxThisCall
+    // whole ticks and KEEPS the remainder — including any backlog it couldn't return
+    // this call — in the accumulator, so the sim eventually runs EVERY tick, spread
+    // across service iterations after a hitch. This is the deliberate counterpart to
+    // Advance(): Advance() DISCARDS backlog beyond MaxCatchup because it paces
+    // RENDERING (a dropped frame is fine and a burst is a stutter); the lockstep sim
+    // must never drop a tick — dropping on one peer only is a desync machine (RTS
+    // design doc §3). MaxThisCall bounds the per-call BURST (so one Advance after a
+    // long pause can't block the loop), never the total: the rest drains next call.
+    uint32_t AdvancePreserving(uint64_t ElapsedNs, uint32_t MaxThisCall) {
+        AccumulatorNs += ElapsedNs;
+        uint32_t Ticks = 0;
+        while (AccumulatorNs >= StepNs && Ticks < MaxThisCall) {
+            AccumulatorNs -= StepNs;
+            ++Ticks;
+        }
+        return Ticks;
+    }
+
     // Fraction [0,1) into the next tick — the alpha for render interpolation.
     float GetInterpolationAlpha() const {
         return static_cast<float>(AccumulatorNs) / static_cast<float>(StepNs);

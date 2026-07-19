@@ -63,6 +63,12 @@ constexpr int32_t CarryCapacity = 15;      // wood per round trip
 constexpr int32_t StartWood = 60;
 constexpr int32_t StartLumberjacks = 3;
 
+// ---- Sim rate ----
+// 10 Hz (design doc §3). This is what a "tick" means in seconds: BuildTicks and
+// every other duration above are wallclock/TickRateHz. The tick thread advances the
+// sim at this rate via TickClock, decoupled from render/vsync (#69).
+constexpr uint32_t TickRateHz = 10;
+
 // ---- Production (spec §4) ----
 constexpr int32_t QueueDepth = 4;
 constexpr int32_t RingSlots = 8;           // deterministic spawn ring (SpawnCounter % RingSlots)

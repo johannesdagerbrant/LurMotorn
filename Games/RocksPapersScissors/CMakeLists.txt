@@ -11,3 +11,15 @@ target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
 target_link_libraries(rps_core PUBLIC lur::sim lur::core)
 target_compile_features(rps_core PUBLIC cxx_std_20)
 add_library(rps::core ALIAS rps_core)
+
+# Runtime — the dedicated sim(+transport) thread (#69's loop shape) and the
+# double-buffered render snapshot (the tick-thread -> render-thread seam). Headless
+# and host-testable: no Vulkan, no window. The future Desktop/Android/iOS mains own
+# the render loop and consume snapshots from here.
+find_package(Threads REQUIRED)
+add_library(rps_runtime
+    Runtime/Private/SimRunner.cpp)
+target_include_directories(rps_runtime PUBLIC Runtime/Public)
+target_link_libraries(rps_runtime PUBLIC rps::core lur::sim lur::core Threads::Threads)
+target_compile_features(rps_runtime PUBLIC cxx_std_20)
+add_library(rps::runtime ALIAS rps_runtime)
