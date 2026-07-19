@@ -255,6 +255,18 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 }
 
 - (void)renderFrame {
+    // #73 (round 5, ported from RPS): the render loop can run with the view hosted in
+    // no window / no scene (a DVT-relaunch state; never true in health). Precise
+    // condition, retried every ~2 s until a scene exists to attach to.
+    static uint32_t FramesSinceAttach = 0;
+    if (_Ready && (self.view.window == nil || self.view.window.windowScene == nil)) {
+        if (++FramesSinceAttach >= 120) {
+            FramesSinceAttach = 0;
+            [self reattachForActivation];
+        }
+    } else {
+        FramesSinceAttach = 0;
+    }
     if (_BecameActive) {
         _BecameActive = false;
         if (_Ready && _InitWhileInactive) [self reattachForActivation];
@@ -265,6 +277,23 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
 #if LUR_INTERNAL
+    // Always-on render-health heartbeat (#73) — deliberately NOT gated on autoplay or
+    // the link: diagnosis was blinded whenever every periodic line needed a live match.
+    static uint64_t BeatAccumNs = 0;
+    BeatAccumNs += ElapsedNs;
+    if (BeatAccumNs > 2'000'000'000ull) {
+        BeatAccumNs = 0;
+        UIWindow* Win = self.view.window;
+        os_log(OS_LOG_DEFAULT,
+               "OnlyChess: HEARTBEAT presented=%u appActive=%d win=%d key=%d scene=%ld "
+               "host=%d scenes=%lu",
+               _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
+               UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
+               Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
+               (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
+               self.view.layer.superlayer != nil ? 1 : 0,
+               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+    }
     const bool WasMyTurn = _Match.IsMyTurn();
     const uint32_t MatchesBefore = _Match.Record().TotalMatches();
 #endif
@@ -359,8 +388,25 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // the whole chain against the now-live window server: fresh UIWindow + fresh
 // view/CAMetalLayer + full renderer Shutdown/Init (+ re-created view resources).
 - (void)reattachForActivation {
-    os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: renderer was born inactive - "
-                           "rebuilding window+view+layer+renderer");
+    // Scene-aware (#73 round 5): a window made with initWithFrame relies on legacy
+    // adoption into the implicit scene — exactly what the broken launch never does.
+    // Attach EXPLICITLY to a connected UIWindowScene; without one, any new window is
+    // another orphan, so skip and let the render-loop retry when a scene exists.
+    UIWindowScene* Scene = nil;
+    for (UIScene* S in UIApplication.sharedApplication.connectedScenes) {
+        if (![S isKindOfClass:UIWindowScene.class]) continue;
+        Scene = (UIWindowScene*)S;
+        if (S.activationState == UISceneActivationStateForegroundActive) break;  // best pick
+    }
+    if (Scene == nil) {
+        os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach SKIPPED: no connected UIWindowScene "
+                               "(scenes=%lu) - will retry",
+               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+        return;
+    }
+    os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: view unhosted - rebuilding "
+                           "window+view+layer+renderer on scene state=%ld",
+           (long)Scene.activationState);
     OnlyChessView* NewView = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view = NewView;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
@@ -370,7 +416,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
                                     NewView.bounds.size.height * Layer.contentsScale);
 
-    UIWindow* NewWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UIWindow* NewWindow = [[UIWindow alloc] initWithWindowScene:Scene];
+    NewWindow.frame = Scene.coordinateSpace.bounds;
     NewWindow.rootViewController = self;
     [NewWindow makeKeyAndVisible];
     ((OnlyChessAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
