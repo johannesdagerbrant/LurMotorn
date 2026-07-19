@@ -174,8 +174,25 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 // so on the first activation we rebuild the whole chain against the now-live window
 // server: fresh UIWindow + fresh view/CAMetalLayer + full renderer Shutdown/Init.
 - (void)reattachForActivation {
-    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: renderer was born inactive - "
-                           "rebuilding window+view+layer+renderer");
+    // Scene-aware (#73 round 5): a window made with initWithFrame relies on legacy
+    // adoption into the implicit scene — exactly what the broken launch never does.
+    // Attach EXPLICITLY to a connected UIWindowScene; without one, any new window is
+    // another orphan, so skip and let the render-loop retry when a scene exists.
+    UIWindowScene* Scene = nil;
+    for (UIScene* S in UIApplication.sharedApplication.connectedScenes) {
+        if (![S isKindOfClass:UIWindowScene.class]) continue;
+        Scene = (UIWindowScene*)S;
+        if (S.activationState == UISceneActivationStateForegroundActive) break;  // best pick
+    }
+    if (Scene == nil) {
+        os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach SKIPPED: no connected UIWindowScene "
+                               "(scenes=%lu) - will retry",
+               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+        return;
+    }
+    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: view unhosted - rebuilding "
+                           "window+view+layer+renderer on scene state=%ld",
+           (long)Scene.activationState);
     RpsView* NewView = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view = NewView;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
@@ -185,7 +202,8 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
                                     NewView.bounds.size.height * Layer.contentsScale);
 
-    UIWindow* NewWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    UIWindow* NewWindow = [[UIWindow alloc] initWithWindowScene:Scene];
+    NewWindow.frame = Scene.coordinateSpace.bounds;
     NewWindow.rootViewController = self;
     [NewWindow makeKeyAndVisible];
     ((RpsAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
@@ -201,16 +219,22 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 }
 
 - (void)renderFrame {
-#if LUR_INTERNAL
-    // #73, measured 2026-07-19: after a DVT kill-existing relaunch the app can look
-    // PERFECT from inside (active, thousands of successful presents) while the window
-    // server never composites its layer — no in-process condition distinguishes the
-    // state. Dev builds therefore reattach unconditionally, once, shortly after the
-    // render loop starts (frame 15 ≈ 250 ms — the flash hides in app-appear). DVT
-    // launches only exist on the dev rig; Shipping keeps the conditional path below.
-    static uint32_t FramesRun = 0;
-    if (++FramesRun == 15 && _Ready) [self reattachForActivation];
-#endif
+    // #73, measured 2026-07-19: after a DVT kill-existing relaunch the app can run
+    // its render loop with the VIEW IN NO WINDOW (view.window == nil, layer parented
+    // nowhere — HEARTBEAT win=0 host=0) while presents "succeed" into the orphan
+    // layer. On iOS 13+ a window made with initWithFrame relies on legacy adoption
+    // into the implicit UIWindowScene, and this launch path never adopts it. The
+    // condition below is precise (never true in health) and the heal is scene-aware,
+    // so it is always-on, retried until a scene exists to attach to.
+    static uint32_t FramesSinceAttach = 0;
+    if (_Ready && (self.view.window == nil || self.view.window.windowScene == nil)) {
+        if (++FramesSinceAttach >= 120) {  // retry every ~2 s, not every frame
+            FramesSinceAttach = 0;
+            [self reattachForActivation];
+        }
+    } else {
+        FramesSinceAttach = 0;
+    }
     if (_BecameActive) {
         _BecameActive = false;
         if (_Ready && _InitWhileInactive) [self reattachForActivation];
@@ -246,12 +270,14 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
         // parented into the window's layer tree.
         UIWindow* Win = self.view.window;
         os_log(OS_LOG_DEFAULT,
-               "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld host=%d",
+               "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld "
+               "host=%d scenes=%lu",
                _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
                UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
                _Started ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
                (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
-               self.view.layer.superlayer != nil ? 1 : 0);
+               self.view.layer.superlayer != nil ? 1 : 0,
+               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
     }
     if (_Started) {
         AutoAccumNs += ElapsedNs;
