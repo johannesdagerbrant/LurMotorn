@@ -86,10 +86,10 @@ static void TestMessageFramingStripsType() {
     SB.Start(&TB, Guid('b'));
 
     std::vector<uint8_t> Got;
-    SB.SetHandler(EMsgType::Move, [&](const uint8_t* D, std::size_t N) { Got.assign(D, D + N); });
+    SB.SetHandler(EMsgType::Game0, [&](const uint8_t* D, std::size_t N) { Got.assign(D, D + N); });
 
     const uint8_t Payload[] = {0xAB, 0xCD};
-    SA.Send(EMsgType::Move, Payload, sizeof(Payload));
+    SA.Send(EMsgType::Game0, Payload, sizeof(Payload));
     CHECK(Got.size() == 2);
     CHECK(Got.size() == 2 && Got[0] == 0xAB && Got[1] == 0xCD);
 }

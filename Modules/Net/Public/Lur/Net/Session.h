@@ -15,9 +15,16 @@ enum class EMsgType : uint8_t {
     Hello       = 0,  // version + nonce, exchanged on connect (see Session::Start)
     ClockPing   = 1,  // clock-sync probe (see ClockSync.h)
     ClockPong   = 2,  // clock-sync reply
-    Move        = 3,  // a game move (chess: a legal-move index, ~4-6 bits payload)
-    Resign      = 4,
-    DrawOffer   = 5,
+    // 3..5 are GENERIC game-defined framed-message slots — the engine names no game
+    // concept (a chess move, a resign, an RTS input) in its own enum; each game aliases
+    // these to its own message kinds (issue #44). Chess formerly put Move=3 / Resign=4 /
+    // DrawOffer=5 here, but chess moves are now BARE 1-byte datagrams (SendMove) and
+    // resign/draw were never wired, so 3..5 are unused by chess. The RTS aliases them to
+    // Input / Anchor / ResyncChunk (#76). Kept at their original numbers, and chess never
+    // sent them framed, so this rename is NOT a wire change — ProtocolVersion stays 5.
+    Game0       = 3,
+    Game1       = 4,
+    Game2       = 5,
     Keepalive   = 6,  // detect a silently dropped BLE link
     Sync        = 7,  // full game-state resync after a reconnect (game-defined payload)
 };
@@ -33,6 +40,8 @@ enum class EMsgType : uint8_t {
 // v5: Keepalive carries an 8-byte game state hash so a mid-game desync (a lost move
 //     while the link stays up) is detected and auto-healed by re-exchanging Sync,
 //     instead of deadlocking with no recovery (issue #72).
+// (2026-07-19: enum slots 3..5 renamed Move/Resign/DrawOffer -> generic Game0..2 for the
+//  RTS; a pure source rename with no wire-format change, so ProtocolVersion stays 5.)
 inline constexpr uint8_t ProtocolVersion = 5;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
