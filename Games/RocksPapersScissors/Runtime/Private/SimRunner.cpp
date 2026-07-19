@@ -16,10 +16,15 @@ uint64_t NowNs() {
 
 }  // namespace
 
-void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx) {
+void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t StressPerTeam) {
     Input = InInput;
     Ctx = InCtx;
     TheSim.Init(Seed);
+#if LUR_INTERNAL
+    if (StressPerTeam > 0) TheSim.StressFill(static_cast<int32_t>(StressPerTeam));
+#else
+    (void)StressPerTeam;
+#endif
 
     // Publish tick 0 immediately so the render thread has a frame before the first
     // sim step lands.

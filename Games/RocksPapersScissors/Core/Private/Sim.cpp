@@ -18,6 +18,7 @@
 #include <cstring>
 
 #include "Lur/Core/Assert.h"
+#include "Lur/Sim/Random.h"
 
 namespace Rps {
 namespace {
@@ -432,6 +433,36 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     WinCheck(*this);              // phase 7
     ++Tick;                       // phase 8 (hash) is computed on demand via StateHash()
 }
+
+#if LUR_INTERNAL
+void Sim::StressFill(int32_t PerTeam) {
+    Lur::Sim::SplitMix64 R(Seed ^ 0x57A9E55ull);
+    const int32_t Wi = WorldWidth.ToInt(), Hi = WorldHeight.ToInt();
+    for (uint8_t T = 0; T < 2; ++T) {
+        // Team 0 fills the lower half, team 1 the upper — soldiers only (types 1..3).
+        const int32_t Y0 = T == 0 ? 4 : Hi / 2;
+        for (int32_t K = 0; K < PerTeam; ++K) {
+            const int32_t I = AllocSlot(*this);
+            if (I < 0) return;  // hit the cap
+            const uint8_t Ty = static_cast<uint8_t>(1 + R.NextBounded(3));
+            PosX[I] = F(2 + static_cast<int32_t>(R.NextBounded(static_cast<uint32_t>(Wi - 4))));
+            PosY[I] = F(Y0 + static_cast<int32_t>(R.NextBounded(static_cast<uint32_t>(Hi / 2 - 4))));
+            PrevX[I] = PosX[I];
+            PrevY[I] = PosY[I];
+            Hp[I] = UnitTable[Ty].MaxHp;
+            Type[I] = Ty;
+            Team[I] = T;
+            Target[I] = -1;
+            Cooldown[I] = 0;
+            WorkerState[I] = WorkToTree;
+            Carry[I] = 0;
+            WorkerTimer[I] = 0;
+            SetAlive(*this, I);
+            if (I + 1 > Count) Count = I + 1;
+        }
+    }
+}
+#endif
 
 int32_t Sim::AliveCount(uint8_t TeamId) const {
     int32_t C = 0;

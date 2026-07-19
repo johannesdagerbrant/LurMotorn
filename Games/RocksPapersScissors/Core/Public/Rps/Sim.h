@@ -67,6 +67,13 @@ struct Sim {
     void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order
     uint64_t StateHash() const;                // FNV-1a over pinned state (design §5)
 
+#if LUR_INTERNAL
+    // Dev-only stress scene (issue #75): bulk-spawn PerTeam soldiers spread across each
+    // half of the field, to prove the tick budget (grid) + one-draw render hold at the
+    // raised cap. Deterministic (seed-derived). Compiled out of Shipping — never ships.
+    void StressFill(int32_t PerTeam);
+#endif
+
     // ---- Read helpers (tests / view) ----
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
     int32_t AliveCount(uint8_t TeamId) const;

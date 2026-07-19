@@ -6,6 +6,7 @@
 //      of a broke/full production press.
 // Same hand-rolled harness as chess's tests (CHECK macro + failure count) — there
 // is no shared framework by design.
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
@@ -194,6 +195,27 @@ static void TestEconomyGathersWood() {
     CHECK(S.Teams[0].Wood > Before);  // at least one full round trip deposited
 }
 
+#if LUR_INTERNAL
+// Stress scene (issue #75): the tick budget at the raised cap. Prints ms/tick — the
+// measurement IS the proof; no hard time assert (machine-dependent, would flake). This
+// is where the spatial grid earns its keep: at 2048 units the O(n^2) scans would be a
+// wall, the grid keeps the tick cheap.
+static void TestStressTickBudget() {
+    static Sim S;
+    S.Init(0x57A9E55);
+    S.StressFill(1024);  // per team -> ~2048 units
+    CHECK(S.Count > 1500);
+    constexpr int Ticks = 60;
+    const auto T0 = std::chrono::steady_clock::now();
+    for (int I = 0; I < Ticks; ++I) S.Step(0, 0);
+    const auto T1 = std::chrono::steady_clock::now();
+    const double Ms = std::chrono::duration<double, std::milli>(T1 - T0).count();
+    std::printf("  stress: %d units, %.3f ms/tick over %d ticks (10 Hz budget = 100 ms)\n",
+                S.Count, Ms / Ticks, Ticks);
+    CHECK(S.Count > 0);
+}
+#endif
+
 int main() {
     TestDeterminism();
     TestReplayReproducibility();
@@ -205,6 +227,9 @@ int main() {
     TestQueueFullIgnored();
     TestProductionSpawnsAfterBuildTime();
     TestEconomyGathersWood();
+#if LUR_INTERNAL
+    TestStressTickBudget();
+#endif
 
     if (GFailures == 0) std::printf("rps_sim_tests: ALL PASS\n");
     else std::printf("rps_sim_tests: %d FAILURE(S)\n", GFailures);

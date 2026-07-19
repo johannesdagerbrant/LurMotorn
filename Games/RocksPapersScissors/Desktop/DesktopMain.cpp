@@ -62,11 +62,13 @@ int main(int argc, char** argv) {
     int MaxFrames = 0;      // "--frames N" = headless smoke; 0 = until the window closes
     bool Auto = false;      // "--auto" = random soldier presses for both sides
     uint64_t Seed = 0x1234; // "--seed S"
+    int Stress = 0;         // "--stress N" = bulk-spawn N soldiers/side (the #75 stress scene)
     for (int I = 1; I < argc; ++I) {
         std::string A = argv[I];
         if (A == "--frames" && I + 1 < argc) MaxFrames = std::atoi(argv[++I]);
         else if (A == "--auto") Auto = true;
         else if (A == "--seed" && I + 1 < argc) Seed = std::strtoull(argv[++I], nullptr, 0);
+        else if (A == "--stress" && I + 1 < argc) Stress = std::atoi(argv[++I]);
     }
 
     Lur::Platform::Window Win;
@@ -85,9 +87,9 @@ int main(int argc, char** argv) {
 
     Inputs In;
     auto Runner = std::make_unique<Rps::SimRunner>();
-    Runner->Start(Seed, SampleInputs, &In);
-    Lur::Log::Info("RPS desktop up (seed 0x%llx%s)", static_cast<unsigned long long>(Seed),
-                   Auto ? ", auto" : "");
+    Runner->Start(Seed, SampleInputs, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress));
+    Lur::Log::Info("RPS desktop up (seed 0x%llx%s%s)", static_cast<unsigned long long>(Seed),
+                   Auto ? ", auto" : "", Stress > 0 ? ", stress" : "");
 
     const float Ppu = static_cast<float>(kWinW) /
                       (static_cast<float>(Rps::WorldWidth.Raw) / static_cast<float>(Rps::Fixed::One));
