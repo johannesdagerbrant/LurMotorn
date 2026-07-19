@@ -310,12 +310,30 @@ print(best[1] if best else '')
 #                  (`dvt kill`/`pkill` proved unable to kill it), which is required for
 #                  anything read at startup — the role override + clearsave markers.
 function Launch-Ios([switch]$FreshProcess) {
+    # dvt launch on iOS 26 fails every other call ("Unable to launch...") - always retry.
+    function TryLaunch([string[]]$extra) {
+        foreach ($attempt in 1..2) {
+            try { PmdDev launch @extra $App.IosBundleId 2>&1 | Out-Null; return $true } catch {}
+            Start-Sleep -Seconds 1
+        }
+        return $false
+    }
     try {
         if ($FreshProcess) {
-            PmdDev launch $App.IosBundleId 2>&1 | Out-Null
+            if (-not (TryLaunch @())) { throw 'kill-existing launch failed twice' }
             Say 'ios: fresh-launched (killed old instance; startup markers re-read)'
+            # #73 heal, proven 2026-07-19: a DVT kill-existing relaunch comes up with
+            # scene hosting the window server never composites (screen black, app
+            # perfect in-process - even win/key/scene/host all healthy). No in-process
+            # action fixes it; a real background/foreground cycle does, 3/3 on
+            # hardware. So bounce: foreground Settings, then re-foreground the app.
+            Start-Sleep -Seconds 3
+            PmdDev launch com.apple.Preferences 2>&1 | Out-Null
+            Start-Sleep -Seconds 2
+            if (-not (TryLaunch @('--no-kill-existing'))) { throw 'bounce re-foreground failed twice' }
+            Say 'ios: bounce done (Settings -> app) - scene re-hosted, rendering live (#73)'
         } else {
-            PmdDev launch --no-kill-existing $App.IosBundleId 2>&1 | Out-Null
+            if (-not (TryLaunch @('--no-kill-existing'))) { throw 'foreground launch failed twice' }
             Say 'ios: launched/foregrounded (userspace tunnel, no admin)'
         }
         return $true
