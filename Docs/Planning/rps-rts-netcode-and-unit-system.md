@@ -223,3 +223,30 @@ FIFO) with **stack acceleration**: a queue's progress advances by its queued cou
 economies grow — the pacing thesis; protect it in balance passes. `MineGold[]` joined `StateHash`;
 the team hash block is now Gold/QueueCount[4]/BuildProgress[4]/SpawnCounter. **No wire change**:
 the 4-bit press mask and event codec are untouched. Implemented in commits `7a656da`..`3d918b1`.
+
+**2026-07-19 (late) — first HUMAN playtest rounds (Android<->iPhone over BLE, ~10 ship cycles in
+one evening):** gameplay/feel decisions, all shipped and lockstep-verified on the device pair:
+
+- *Field:* `WorldHeight` 120 -> 240 (~3 screens between camps); mines 8 -> 18 per team in three
+  6-wide rows (safe / midfield / contested), positions derived from `WorldHeight`.
+- *Economy:* the miner glyph is the **ore cart** — visibly empty outbound, gold-loaded homebound
+  (the mine-wagon mask is split at the rail; the load is enlarged about its rail anchor and drawn
+  as a second gold instance). Deposits use the ore-pile icon. Carts dig from range
+  (`MineDigRange` 2.2) and live deposits repel units (`MineRepelRadius` 1.5, separation
+  strength), so carts RING a deposit; `WorkersPerMine` 2 -> 6 ("room around it" is the cap).
+- *Combat:* all warriors share `Speed` 0.7 (miners 0.6). Targets are re-scored EVERY tick by the
+  lexicographic tuple (Chebyshev distance band [`TargetBand` = 3wu], counter-preference within a
+  band, exact distance, id) — replacing keep-until-death hysteresis (units ran past enemies).
+  The spatial-grid path keeps exact brute-force equivalence via a band-aware ring cutoff
+  (proven every build by rps_sim_tests).
+- *View/UX:* HUD numbers are viewer-relative but team colours are ABSOLUTE (couch play — the two
+  screens must agree about who is blue); production plates grouped (miner apart under a gold
+  token, warriors together under crossed swords); right-edge minimap strip (camera window +
+  unit/camp/deposit dots, one instanced draw); "+N" deposit floats + rolling/popping gold
+  counter; first-scroll finger hint; DSEG7 tick-derived match clock; OS safe-area insets; the
+  camera over-scrolls past both field ends so each camp clears the HUD chrome.
+- *Ops:* phone autoplay REMOVED (phones are for humans; the desktop's `--auto` is the soak path).
+
+Open work: **#86** on-device performance (Android frame drops at scale, iPhone heat — instrument
+first, then optimize; #69 is the likely big lever), #84's balance pass, #85's in-app attribution
++ opponent enumeration.
