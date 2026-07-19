@@ -138,3 +138,58 @@ jobs:
           name: OnlyChess-unsigned-ipa
           path: OnlyChess-unsigned.ipa
           if-no-files-found: error
+
+  ios-ipa-rps:
+    name: RPS iOS unsigned .ipa (for sideloading)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
+      # Same shape as the chess ios-ipa job: a device (arm64, iphoneos) build with
+      # signing disabled; the RTS app on a physical iPhone for the Android<->iPhone test.
+      - name: Configure (device, unsigned)
+        run: |
+          cmake -S Games/RocksPapersScissors/iOS -B Games/RocksPapersScissors/iOS/build-device -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+
+      - name: Build (device, unsigned)
+        run: |
+          xcodebuild -project Games/RocksPapersScissors/iOS/build-device/OnlyRps.xcodeproj \
+            -scheme OnlyRps -configuration Debug \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned .ipa
+        run: |
+          APP=$(find Games/RocksPapersScissors/iOS/build-device -name 'OnlyRps.app' -type d | head -1)
+          echo "App bundle: $APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry OnlyRps-unsigned.ipa Payload
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnlyRps-unsigned-ipa
+          path: OnlyRps-unsigned.ipa
+          if-no-files-found: error
