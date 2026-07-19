@@ -57,6 +57,11 @@ struct Sim {
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
     int32_t DepositBuf[2] = {};           // worker deposits buffered in Movement, applied in Economy
 
+    // ---- Config (NOT hashed) — force the brute-force neighbour path instead of the
+    //      spatial grid. Grid is the default; this exists so a test can run the same
+    //      seed+inputs both ways and assert the StateHash sequences are identical. ----
+    bool UseBruteForce = false;
+
     // ---- API ----
     void Init(uint64_t Seed);
     void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order

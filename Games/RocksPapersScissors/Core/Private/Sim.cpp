@@ -43,6 +43,48 @@ Fixed ClampAxis(Fixed V, Fixed Hi) {
     return V > Hi ? Hi : V;
 }
 
+// ---- Deterministic uniform spatial grid (design §5) ------------------------
+// Counting-sort rebuild each tick into fixed arrays in slot order: zero
+// allocation, fixed bin-iteration order, ascending-id within a cell (the tie-break).
+// It buckets units by their START-OF-TICK position (Pos == Prev at build time, so it
+// serves both the nearest-enemy query on Pos and the separation query on Prev), and
+// is pure TRANSIENT scratch — never in Sim state or the hash. Cell size is a perf
+// knob only: any value gives bit-identical results to brute force.
+constexpr int32_t GridCols = (WorldWidth.ToInt() + GridCellSize - 1) / GridCellSize;
+constexpr int32_t GridRows = (MaxWorldHeight.ToInt() + GridCellSize - 1) / GridCellSize;
+constexpr int32_t GridCells = GridCols * GridRows;
+constexpr int64_t CellRaw = static_cast<int64_t>(GridCellSize) * Fixed::One;  // cell width in Q16.16 raw
+
+int32_t CellX(Fixed X) {
+    const int32_t C = X.ToInt() / GridCellSize;
+    return C < 0 ? 0 : (C >= GridCols ? GridCols - 1 : C);
+}
+int32_t CellY(Fixed Y) {
+    const int32_t C = Y.ToInt() / GridCellSize;
+    return C < 0 ? 0 : (C >= GridRows ? GridRows - 1 : C);
+}
+
+struct Grid {
+    int32_t Start[GridCells + 1];  // CSR: cell c's units are Order[Start[c] .. Start[c+1])
+    int32_t Order[MaxUnits];
+
+    void Build(const Sim& S) {
+        for (int32_t C = 0; C <= GridCells; ++C) Start[C] = 0;
+        // Count into Start[cell+1], then prefix-sum -> Start[cell] = bucket offset.
+        for (int32_t I = 0; I < S.Count; ++I)
+            if (S.IsAlive(I)) ++Start[CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]) + 1];
+        for (int32_t C = 1; C <= GridCells; ++C) Start[C] += Start[C - 1];
+        // Scatter in ascending slot order so ids stay ascending within each cell.
+        int32_t Cursor[GridCells];
+        for (int32_t C = 0; C < GridCells; ++C) Cursor[C] = Start[C];
+        for (int32_t I = 0; I < S.Count; ++I)
+            if (S.IsAlive(I)) {
+                const int32_t C = CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]);
+                Order[Cursor[C]++] = I;
+            }
+    }
+};
+
 // --- slot allocation: lowest free slot (deterministic). Reuse != compaction —
 //     live units never move, ids stay stable for a unit's whole life. ---
 int32_t AllocSlot(const Sim& S) {
@@ -130,7 +172,7 @@ void Production(Sim& S) {
 }
 
 // ---- Phase 2: target acquisition for units without a valid target ----
-int32_t NearestEnemy(const Sim& S, int32_t I) {
+int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
     int32_t Best = -1;
     int64_t BestD = INT64_MAX;
     for (int32_t J = 0; J < S.Count; ++J) {
@@ -139,6 +181,45 @@ int32_t NearestEnemy(const Sim& S, int32_t I) {
         if (D < BestD) { BestD = D; Best = J; }  // strict < : lowest id wins ties (ascending J)
     }
     return Best;
+}
+// Grid nearest-enemy: expanding Chebyshev ring search. Must reproduce the brute
+// result EXACTLY, including the lowest-id tie-break — so the compare is the (dist,id)
+// LEXICOGRAPHIC minimum, not strict-<: an equal-distance unit can sit in a farther
+// ring than a higher-id one, and the ring bound below guarantees it's still scanned.
+int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
+    const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
+    int64_t BestD = INT64_MAX;
+    int32_t BestId = -1;
+    const int32_t MaxK = GridCols + GridRows;
+    for (int32_t K = 0; K <= MaxK; ++K) {
+        bool AnyInGrid = false;
+        const int32_t X0 = Cx - K, X1 = Cx + K, Y0 = Cy - K, Y1 = Cy + K;
+        for (int32_t Gy = Y0; Gy <= Y1; ++Gy) {
+            if (Gy < 0 || Gy >= GridRows) continue;
+            const bool EdgeRow = (Gy == Y0 || Gy == Y1);
+            for (int32_t Gx = X0; Gx <= X1; ++Gx) {
+                if (Gx < 0 || Gx >= GridCols) continue;
+                if (!EdgeRow && Gx != X0 && Gx != X1) continue;  // ring K = box perimeter; interior done in earlier K
+                AnyInGrid = true;
+                const int32_t C = Gy * GridCols + Gx;
+                for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P) {
+                    const int32_t J = G.Order[P];
+                    if (S.Team[J] == S.Team[I]) continue;  // J is alive by construction (grid holds only alive)
+                    const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.PosX[J], S.PosY[J]);
+                    if (D < BestD || (D == BestD && J < BestId)) { BestD = D; BestId = J; }
+                }
+            }
+        }
+        // After ring K, the nearest unscanned cell (ring K+1) is >= K*cellSize away.
+        // Stop only when that bound STRICTLY exceeds the best (so equal-distance ties
+        // one ring out are still visited and can win on lower id).
+        if (BestId >= 0) {
+            const int64_t R = static_cast<int64_t>(K) * CellRaw;
+            if (R * R > BestD) break;
+        }
+        if (K > 0 && !AnyInGrid) break;  // the whole ring is outside the grid — nothing farther can be inside
+    }
+    return BestId;
 }
 int32_t TreeOccupancy(const Sim& S, int32_t Tree) {
     int32_t C = 0;
@@ -156,15 +237,16 @@ int32_t NearestFreeTree(const Sim& S, int32_t I) {
     }
     return Best;
 }
-void TargetAcquire(Sim& S) {
+void TargetAcquire(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         if (S.Type[I] == UnitLumberjack) {
-            if (S.Target[I] < 0) S.Target[I] = NearestFreeTree(S, I);  // set in slot order -> occupancy updates deterministically
+            if (S.Target[I] < 0) S.Target[I] = NearestFreeTree(S, I);  // trees are few — brute is fine; set in slot order
         } else {
             const int32_t T = S.Target[I];
             const bool Valid = T >= 0 && S.IsAlive(T) && S.Team[T] != S.Team[I];
-            if (!Valid) S.Target[I] = NearestEnemy(S, I);  // else keep target until death (hysteresis, no dithering)
+            if (!Valid)  // else keep target until death (hysteresis, no dithering)
+                S.Target[I] = S.UseBruteForce ? NearestEnemyBrute(S, I) : NearestEnemyGrid(S, G, I);
         }
     }
 }
@@ -228,25 +310,45 @@ void SoldierSeek(Sim& S, int32_t I) {
 }
 // Separation reads PrevX/PrevY (start-of-tick positions), so the sum is
 // order-independent regardless of iteration order — a determinism-safe reduction.
-void Separation(const Sim& S, int32_t I, Fixed& Sx, Fixed& Sy) {
+// One neighbour push, factored out so brute and grid paths add IDENTICAL terms.
+void AddSeparation(const Sim& S, int32_t I, int32_t J, int64_t R2, Fixed& Sx, Fixed& Sy) {
+    if (J == I || S.Team[J] != S.Team[I]) return;
+    const int64_t Dx = static_cast<int64_t>(S.PrevX[I].Raw) - S.PrevX[J].Raw;
+    const int64_t Dy = static_cast<int64_t>(S.PrevY[I].Raw) - S.PrevY[J].Raw;
+    const int64_t D2 = Dx * Dx + Dy * Dy;
+    if (D2 == 0 || D2 >= R2) return;  // exact overlap (skip; no det. direction) or out of range
+    // Offset is within radius, so |Dx|,|Dy| < One: reinterpreting as a Fixed Raw is safe.
+    Sx = Sx + Fixed{static_cast<int32_t>(Dx)} * SeparationStrength;
+    Sy = Sy + Fixed{static_cast<int32_t>(Dy)} * SeparationStrength;
+}
+void SeparationBrute(const Sim& S, int32_t I, Fixed& Sx, Fixed& Sy) {
     Sx = Fixed{0}; Sy = Fixed{0};
     const int64_t R2 = RangeSq(SeparationRadius);
-    for (int32_t J = 0; J < S.Count; ++J) {
-        if (J == I || !S.IsAlive(J) || S.Team[J] != S.Team[I]) continue;
-        const int64_t Dx = static_cast<int64_t>(S.PrevX[I].Raw) - S.PrevX[J].Raw;
-        const int64_t Dy = static_cast<int64_t>(S.PrevY[I].Raw) - S.PrevY[J].Raw;
-        const int64_t D2 = Dx * Dx + Dy * Dy;
-        if (D2 == 0 || D2 >= R2) continue;  // exact overlap (skip; no det. direction) or out of range
-        // Offset is within radius, so |Dx|,|Dy| < One: reinterpreting as a Fixed Raw is safe.
-        Sx = Sx + Fixed{static_cast<int32_t>(Dx)} * SeparationStrength;
-        Sy = Sy + Fixed{static_cast<int32_t>(Dy)} * SeparationStrength;
-    }
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J)) AddSeparation(S, I, J, R2, Sx, Sy);
 }
-void Movement(Sim& S) {
+// Grid separation visits only the cells the radius overlaps — a superset of the
+// in-radius neighbours, then AddSeparation re-tests R2, so the summed set (and thus
+// the sum) is identical to brute. Queried by Prev, which equals each unit's bucketed
+// build-time Pos, so the cell lookup is consistent.
+void SeparationGrid(const Sim& S, const Grid& G, int32_t I, Fixed& Sx, Fixed& Sy) {
+    Sx = Fixed{0}; Sy = Fixed{0};
+    const int64_t R2 = RangeSq(SeparationRadius);
+    const int32_t Cx0 = CellX(S.PrevX[I] - SeparationRadius), Cx1 = CellX(S.PrevX[I] + SeparationRadius);
+    const int32_t Cy0 = CellY(S.PrevY[I] - SeparationRadius), Cy1 = CellY(S.PrevY[I] + SeparationRadius);
+    for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
+        for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
+            const int32_t C = Gy * GridCols + Gx;
+            for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
+                AddSeparation(S, I, G.Order[P], R2, Sx, Sy);
+        }
+}
+void Movement(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         Fixed Sx, Sy;
-        Separation(S, I, Sx, Sy);  // from Prev — before we touch Pos
+        if (S.UseBruteForce) SeparationBrute(S, I, Sx, Sy);  // from Prev — before we touch Pos
+        else SeparationGrid(S, G, I, Sx, Sy);
         if (S.Type[I] == UnitLumberjack) WorkerSeek(S, I);
         else SoldierSeek(S, I);
         S.PosX[I] = ClampAxis(S.PosX[I] + Sx, WorldWidth);
@@ -314,9 +416,16 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
 
     ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1
     ApplyInput(*this, 1, Mask1);
-    Production(*this);            // phase 1
-    TargetAcquire(*this);         // phase 2
-    Movement(*this);              // phase 3
+    Production(*this);            // phase 1 (spawns) — grid must see the new units
+
+    // Build the spatial grid AFTER production (so spawns are bucketed) but before any
+    // movement, capturing start-of-tick positions. Both target acq (on Pos) and
+    // separation (on Prev) read it; they're consistent because Pos == Prev right now.
+    Grid G;
+    G.Build(*this);
+
+    TargetAcquire(*this, G);      // phase 2
+    Movement(*this, G);           // phase 3
     Attacks(*this);               // phase 4
     Deaths(*this);                // phase 5
     Economy(*this);               // phase 6

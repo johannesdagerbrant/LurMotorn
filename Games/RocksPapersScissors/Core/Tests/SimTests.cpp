@@ -8,6 +8,7 @@
 // is no shared framework by design.
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 #include "Lur/Sim/Random.h"
 #include "Rps/Sim.h"
@@ -81,6 +82,41 @@ static void TestReplayReproducibility() {
     Replay.Init(Seed);
     for (int I = 0; I < Ticks; ++I) Replay.Step(M0[I], M1[I]);
     CHECK(Replay.StateHash() == Final);
+}
+
+// ---- Grid vs brute-force equivalence (spatial grid, design §5) ----
+// End-to-end: the same seed + input stream, once on the grid path and once on
+// brute force, must produce a bit-identical StateHash EVERY tick. Stronger than a
+// single-state check — it exercises the grid across a whole evolving match (spawns,
+// clashing armies driving nearest-enemy ring search, dense separation).
+static void TestGridEqualsBruteForce() {
+    constexpr int Ticks = 800;
+    for (uint64_t Seed : {uint64_t(1), uint64_t(0xABCDEF), uint64_t(0xDEADBEEF)}) {
+        static uint8_t M0[Ticks], M1[Ticks];
+        SplitMix64 Rng(Seed ^ 0x9999);
+        for (int I = 0; I < Ticks; ++I) {
+            // Bias toward soldier presses (bits 1..3) so armies actually clash and
+            // the nearest-enemy grid search is genuinely exercised.
+            M0[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2;
+            M1[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4;
+        }
+        static Sim Grid, Brute;
+        Grid.Init(Seed);
+        Brute.Init(Seed);
+        Brute.UseBruteForce = true;  // after Init (Init resets the flag)
+
+        bool Match = true;
+        int FirstDiverge = -1;
+        for (int I = 0; I < Ticks; ++I) {
+            Grid.Step(M0[I], M1[I]);
+            Brute.Step(M0[I], M1[I]);
+            if (Grid.StateHash() != Brute.StateHash()) { Match = false; FirstDiverge = I; break; }
+        }
+        if (!Match) std::printf("  grid!=brute seed=%llu diverged at tick %d\n",
+                                static_cast<unsigned long long>(Seed), FirstDiverge);
+        CHECK(Match);
+        CHECK(Grid.Count > StartLumberjacks * 2);  // the match did something
+    }
 }
 
 // ---- 2. Win rule (spec §6, edge-proof) ----
@@ -161,6 +197,7 @@ static void TestEconomyGathersWood() {
 int main() {
     TestDeterminism();
     TestReplayReproducibility();
+    TestGridEqualsBruteForce();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();
