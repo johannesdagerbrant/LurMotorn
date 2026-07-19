@@ -41,6 +41,7 @@ add_subdirectory(Games/Chess)
 add_subdirectory(Games/RocksPapersScissors)
 if(LUR_DESKTOP)
     add_subdirectory(Games/Chess/Desktop)
+    add_subdirectory(Games/RocksPapersScissors/Desktop)
 endif()
 
 if(LUR_BUILD_TESTS)

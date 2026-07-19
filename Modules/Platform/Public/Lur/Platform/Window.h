@@ -36,8 +36,15 @@ public:
     // True once per F1 press — a debug toggle the game consumes (issue #54 overlay).
     bool TakeOverlayToggle() { bool T = OverlayToggle; OverlayToggle = false; return T; }
 
+    // Move out the key-DOWN edges (virtual-key codes) collected since the last call.
+    // Auto-repeat is filtered at the source, so a held key is a single press — what a
+    // discrete game action (e.g. RPS's 1-4 production buttons) wants. Casing-agnostic
+    // raw VKs; the game maps the codes it cares about.
+    std::vector<uint32_t> TakeKeys() { std::vector<uint32_t> K; K.swap(Keys); return K; }
+
     // --- Internal: driven by the Win32 WndProc. Not for game code. ---
     void PushTouch(Lur::Input::ETouchPhase Phase, float XPx, float YPx);
+    void PushKey(uint32_t Vk) { Keys.push_back(Vk); }
     void RequestClose() { ShouldClose = true; }
     void RequestOverlayToggle() { OverlayToggle = true; }
 
@@ -46,6 +53,7 @@ private:
     bool  ShouldClose = false;
     bool  OverlayToggle = false;
     std::vector<Lur::Input::TouchEvent> Touches;
+    std::vector<uint32_t> Keys;
 };
 
 } // namespace Lur::Platform

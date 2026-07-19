@@ -63,6 +63,9 @@ LRESULT CALLBACK WndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam) {
             return 0;
         case WM_KEYDOWN:
             if (WParam == VK_F1) Self->RequestOverlayToggle();
+            // Queue non-repeat key-down edges (LParam bit 30 = previous key state:
+            // set means auto-repeat). One press per physical keystroke.
+            if ((LParam & (1 << 30)) == 0) Self->PushKey(static_cast<uint32_t>(WParam));
             return 0;
         case WM_CLOSE:
             Self->RequestClose();

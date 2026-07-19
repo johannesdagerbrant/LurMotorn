@@ -30,6 +30,10 @@ struct Snapshot {
     int32_t  Hp[MaxUnits];
     uint64_t AliveBits[(MaxUnits + 63) / 64];
 
+    // Static map (constant after Init, but carried here so the view needs nothing else).
+    Fixed TreeX[NumTrees];
+    Fixed TreeY[NumTrees];
+
     // HUD / overlay counters (read via this same hand-off, never from the live Sim).
     uint32_t Tick = 0;
     uint8_t  Result = 0;              // EResult
@@ -57,6 +61,8 @@ struct Snapshot {
         std::memcpy(Team, S.Team, N);
         std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
+        std::memcpy(TreeX, S.TreeX, sizeof(Fixed) * NumTrees);
+        std::memcpy(TreeY, S.TreeY, sizeof(Fixed) * NumTrees);
         Tick = S.Tick;
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {

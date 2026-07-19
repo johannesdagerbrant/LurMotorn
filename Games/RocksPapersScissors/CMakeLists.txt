@@ -23,3 +23,13 @@ target_include_directories(rps_runtime PUBLIC Runtime/Public)
 target_link_libraries(rps_runtime PUBLIC rps::core lur::sim lur::core Threads::Threads)
 target_compile_features(rps_runtime PUBLIC cxx_std_20)
 add_library(rps::runtime ALIAS rps_runtime)
+
+# View — the RPS presentation layer. Talks only to IRenderer (no Vulkan), so it builds
+# on the host and is shared by the desktop + phone mains. Draws a Snapshot: field,
+# units (CPU-interpolated bring-up, non-instanced), and the HUD.
+add_library(rps_view
+    View/Private/GameView.cpp)
+target_include_directories(rps_view PUBLIC View/Public)
+target_link_libraries(rps_view PUBLIC rps::core rps::runtime lur::render lur::hud lur::text lur::math)
+target_compile_features(rps_view PUBLIC cxx_std_20)
+add_library(rps::view ALIAS rps_view)
