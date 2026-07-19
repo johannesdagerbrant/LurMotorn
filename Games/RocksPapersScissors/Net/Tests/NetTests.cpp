@@ -9,6 +9,7 @@
 #include "Lur/Serialization/BitWriter.h"
 #include "Lur/Sim/Random.h"
 #include "Rps/EventCodec.h"
+#include "Rps/LockstepPeer.h"
 
 using namespace Rps;
 using Lur::Serialization::BitReader;
@@ -99,11 +100,124 @@ static void TestFuzzDecode() {
     CHECK(true);  // reaching here without a crash/hang is the assertion
 }
 
+// ---- Lockstep harness: a QUEUED link (models the real deferred delivery / Pump, and
+// avoids the synchronous re-entrancy hazard a naive loopback has). ----
+struct Outbox {
+    std::vector<std::pair<Lur::Net::EMsgType, std::vector<uint8_t>>> Q;
+};
+static void Enqueue(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
+    static_cast<Outbox*>(Ctx)->Q.emplace_back(Type, std::vector<uint8_t>(Data, Data + N));
+}
+static void Deliver(Outbox& From, LockstepPeer& To) {
+    for (auto& M : From.Q) To.OnMessage(M.first, M.second.data(), M.second.size());
+    From.Q.clear();
+}
+static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
+
+// ---- Two peers, random inputs, stay bit-identical in lockstep with zero desyncs ----
+static void TestLockstepStaysInSync() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1234, 0, Enqueue, &Qa);
+    B.Init(0x1234, 1, Enqueue, &Qb);
+
+    SplitMix64 Rng(0x5151);
+    for (int I = 0; I < 300; ++I) {
+        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);  // A's inputs+anchors -> B
+        Deliver(Qb, A);  // B's inputs+anchors -> A
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    // A few settle rounds (no new input) so both drain to the same frontier.
+    for (int I = 0; I < 4; ++I) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(A.ExecTick() > 250);                 // the match actually progressed
+    CHECK(A.ExecTick() == B.ExecTick());       // both at the same tick
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical state
+}
+
+// ---- Injected divergence trips the anchor hash ----
+// (The seed is currently gameplay-inert — the v1 map is fixed + mirrored and no RNG
+// runs in the tick, per spec §2 — so we inject a genuine state divergence and prove the
+// anchor hash catches it, which is exactly what the mechanism is for.)
+static void TestLockstepDetectsDivergence() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x99, 0, Enqueue, &Qa);
+    B.Init(0x99, 1, Enqueue, &Qb);
+    for (int I = 0; I < 12; ++I) {  // warm up in sync
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced());
+    // Corrupt A's state (simulate a lost input / a determinism bug on one peer).
+    const_cast<Sim&>(A.GetSim()).Teams[0].Wood += 999;
+
+    for (int I = 0; I < 15 && !A.Desynced(); ++I) {  // run to the next anchor
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(A.Desynced());  // anchor hash mismatch caught within ~1 s
+    CHECK(B.Desynced());
+}
+
+// ---- Starve one side: the other stalls at the ceiling, then resumes cleanly ----
+static void TestLockstepCeilingStallAndResume() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x99, 0, Enqueue, &Qa);
+    B.Init(0x99, 1, Enqueue, &Qb);
+
+    for (int I = 0; I < 15; ++I) {  // warm up in sync
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    const uint32_t Before = A.ExecTick();
+
+    // Blip: A stops receiving B's messages (Qb held), both keep ticking.
+    for (int I = 0; I < 15; ++I) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);  // A -> B still flows
+    }
+    CHECK(A.Stalled());                              // A is waiting on the peer at the ceiling
+    CHECK(A.ExecTick() <= Before + InputDelayTicks + 1);  // advanced only the delay slack
+    CHECK(B.ExecTick() > A.ExecTick());              // B (which has A's input) pulled ahead
+
+    // Resume: B's held backlog is delivered in order (reliable transport) — A sprints.
+    Deliver(Qb, A);
+    for (int I = 0; I < 6; ++I) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // resumed to a bit-identical state
+}
+
 int main() {
     TestRoundTrip();
     TestByteBudget();
     TestStreamAbsoluteTicks();
     TestFuzzDecode();
+    TestLockstepStaysInSync();
+    TestLockstepDetectsDivergence();
+    TestLockstepCeilingStallAndResume();
 
     if (GFailures == 0) std::printf("rps_net_tests: ALL PASS\n");
     else std::printf("rps_net_tests: %d FAILURE(S)\n", GFailures);
