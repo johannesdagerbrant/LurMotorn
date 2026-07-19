@@ -58,6 +58,12 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 + (Class)layerClass { return [CAMetalLayer class]; }
 @end
 
+// Declared ahead of the view controller: the #73 reattach hands the delegate a fresh
+// UIWindow (the old one may be bound to a dead window-server surface).
+@interface RpsAppDelegate : UIResponder <UIApplicationDelegate>
+@property(nonatomic, strong) UIWindow* window;
+@end
+
 @interface RpsViewController : UIViewController
 @end
 
@@ -79,6 +85,13 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
     bool _Ready;
+    // #73: a DVT launch can initialise the renderer while the app is NOT active —
+    // the layer created in that state is never composited (presents "succeed" into
+    // the void; screen black). Record the state at init; on becoming active, rebuild
+    // window+view+layer+renderer from scratch (a swapchain recreate is NOT enough —
+    // proven by 898999b).
+    bool _InitWhileInactive;
+    bool _BecameActive;
 }
 
 - (void)loadView {
@@ -94,6 +107,13 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     Layer.device = MTLCreateSystemDefaultDevice();
     Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     Layer.contentsScale = UIScreen.mainScreen.scale;
+
+    // #73: note every activation; renderFrame reattaches if the renderer was born
+    // while the app wasn't active (the black-screen precondition).
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onBecameActive)
+                                                 name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
 
     NSArray<NSString*>* Dirs =
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
@@ -127,8 +147,13 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     if (!_Ready) {
         _Renderer = Lur::Render::VulkanRenderer::Create();
         _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
-        os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d)",
-               _Ready ? "ok" : "failed", (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
+        // #73 precondition check: a renderer initialised while the app is NOT active
+        // ends up presenting into a layer the window server never composites.
+        _InitWhileInactive =
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
+        os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d, appActive=%d)",
+               _Ready ? "ok" : "failed", (int)Layer.drawableSize.width,
+               (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
         if (_Ready) {
             _View.CreateResources(_Renderer);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(renderFrame)];
@@ -140,7 +165,46 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     }
 }
 
+- (void)onBecameActive { _BecameActive = true; }  // handled on the next renderFrame
+
+// #73 heal: the renderer was initialised while the app wasn't active, so its
+// CAMetalLayer is bound to a window-server surface that is never composited —
+// presents succeed, the screen stays black, and nothing errors. A swapchain (or even
+// VkSurfaceKHR) recreate against the SAME layer cannot fix that (proven by 898999b),
+// so on the first activation we rebuild the whole chain against the now-live window
+// server: fresh UIWindow + fresh view/CAMetalLayer + full renderer Shutdown/Init.
+- (void)reattachForActivation {
+    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: renderer was born inactive - "
+                           "rebuilding window+view+layer+renderer");
+    RpsView* NewView = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view = NewView;
+    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
+    Layer.device = MTLCreateSystemDefaultDevice();
+    Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    Layer.contentsScale = UIScreen.mainScreen.scale;
+    Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
+                                    NewView.bounds.size.height * Layer.contentsScale);
+
+    UIWindow* NewWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    NewWindow.rootViewController = self;
+    [NewWindow makeKeyAndVisible];
+    ((RpsAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
+
+    _Renderer->Shutdown();  // full teardown (device, surface, everything)
+    _Ready = _Renderer->Init((__bridge void*)Layer);
+    _InitWhileInactive =
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
+    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: re-init %{public}s (drawable %dx%d, appActive=%d)",
+           _Ready ? "ok" : "FAILED", (int)Layer.drawableSize.width,
+           (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
+    if (_Ready) _View.CreateResources(_Renderer);
+}
+
 - (void)renderFrame {
+    if (_BecameActive) {
+        _BecameActive = false;
+        if (_Ready && _InitWhileInactive) [self reattachForActivation];
+    }
     if (!_Ready) return;
     const double Now = CACurrentMediaTime();
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
@@ -161,6 +225,17 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     // and log the lockstep tick/desync every ~2 s so sync is observable from syslog.
     static Lur::Sim::SplitMix64 Rng(0xA11CE);
     static uint64_t AutoAccumNs = 0, DiagAccumNs = 0;
+    // Always-on render-health heartbeat (#73) — deliberately NOT gated on the link:
+    // today's diagnosis was blinded because every periodic line needed _Started.
+    static uint64_t BeatAccumNs = 0;
+    BeatAccumNs += ElapsedNs;
+    if (BeatAccumNs > 2'000'000'000ull) {
+        BeatAccumNs = 0;
+        os_log(OS_LOG_DEFAULT, "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d",
+               _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
+               UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
+               _Started ? 1 : 0);
+    }
     if (_Started) {
         AutoAccumNs += ElapsedNs;
         if (AutoAccumNs > 700'000'000ull) {
@@ -225,9 +300,6 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 }
 @end
 
-@interface RpsAppDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic, strong) UIWindow* window;
-@end
 @implementation RpsAppDelegate
 - (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];

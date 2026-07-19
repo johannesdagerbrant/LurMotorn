@@ -40,6 +40,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     static_cast<Lur::Audio::Mixer*>(User)->Render(Out, Frames);
 }
 
+// Declared ahead of the view controller: the #73 reattach hands the delegate a fresh
+// UIWindow (the old one may be bound to a dead window-server surface).
+@interface OnlyChessAppDelegate : UIResponder <UIApplicationDelegate>
+@property(nonatomic, strong) UIWindow* window;
+@end
+
 @interface OnlyChessViewController : UIViewController
 @end
 
@@ -58,6 +64,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
     bool _Ready;
+    // #73: a DVT launch can initialise the renderer while the app is NOT active — the
+    // layer created in that state is never composited (presents "succeed", screen
+    // black). Record the state at init; on becoming active, rebuild window+view+layer+
+    // renderer (a swapchain recreate is NOT enough — proven by 898999b).
+    bool _InitWhileInactive;
+    bool _BecameActive;
 #if LUR_INTERNAL
     // Dev-only autoplayer (issue #57/#58/#69), armed by a marker file so the normal
     // .ipa stays untouched. Same-frame instrumentation mirrors AndroidMain.
@@ -208,9 +220,14 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     if (!_Ready) {
         _Renderer = Lur::Render::VulkanRenderer::Create();
         _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
-        os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s (drawable %dx%d)",
+        // #73 precondition check: a renderer initialised while the app is NOT active
+        // ends up presenting into a layer the window server never composites.
+        _InitWhileInactive =
+            UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
+        os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s (drawable %dx%d, appActive=%d)",
                _Ready ? "ok" : "failed",
-               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
+               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height,
+               _InitWhileInactive ? 0 : 1);
         if (_Ready) {
             _View.CreateResources(_Renderer);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
@@ -238,6 +255,10 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 }
 
 - (void)renderFrame {
+    if (_BecameActive) {
+        _BecameActive = false;
+        if (_Ready && _InitWhileInactive) [self reattachForActivation];
+    }
     if (!_Ready) return;
     const double Now = CACurrentMediaTime();  // monotonic seconds
     const uint64_t ElapsedNs =
@@ -318,9 +339,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     if (_Audio != nullptr) _Audio->Stop();   // release the audio stream while backgrounded
 }
 
-// App became active: force a swapchain recreate against the now-live surface (#73).
-// Logs the drawable size so a black-screen state is diagnosable from syslog.
+// App became active: force a swapchain recreate against the now-live surface (#73's
+// benign half — harmless when nothing was wrong), and flag the render loop, which
+// performs the FULL reattach when the renderer was born inactive (the real heal —
+// a swapchain recreate alone was proven insufficient by 898999b).
 - (void)recreateSwapchain {
+    _BecameActive = true;  // renderFrame decides whether the full #73 reattach is due
     if (!_Ready || _Renderer == nullptr) return;
     CAMetalLayer* Layer = [self metalLayer];
     os_log(OS_LOG_DEFAULT, "OnlyChess: active -> swapchain recreate (drawable %dx%d)",
@@ -328,6 +352,37 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
                       static_cast<int>(Layer.drawableSize.height));
     if (_Audio != nullptr) _Audio->Start(MixThunk, &_Mixer);  // resume audio on foreground
+}
+
+// #73 heal: the renderer was initialised while the app wasn't active, so its
+// CAMetalLayer is bound to a window-server surface that is never composited. Rebuild
+// the whole chain against the now-live window server: fresh UIWindow + fresh
+// view/CAMetalLayer + full renderer Shutdown/Init (+ re-created view resources).
+- (void)reattachForActivation {
+    os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: renderer was born inactive - "
+                           "rebuilding window+view+layer+renderer");
+    OnlyChessView* NewView = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view = NewView;
+    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
+    Layer.device = MTLCreateSystemDefaultDevice();
+    Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
+    Layer.contentsScale = UIScreen.mainScreen.scale;
+    Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
+                                    NewView.bounds.size.height * Layer.contentsScale);
+
+    UIWindow* NewWindow = [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    NewWindow.rootViewController = self;
+    [NewWindow makeKeyAndVisible];
+    ((OnlyChessAppDelegate*)UIApplication.sharedApplication.delegate).window = NewWindow;
+
+    _Renderer->Shutdown();  // full teardown (device, surface, everything)
+    _Ready = _Renderer->Init((__bridge void*)Layer);
+    _InitWhileInactive =
+        UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
+    os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: re-init %{public}s (drawable %dx%d, appActive=%d)",
+           _Ready ? "ok" : "FAILED", (int)Layer.drawableSize.width,
+           (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
+    if (_Ready) _View.CreateResources(_Renderer);
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
@@ -341,10 +396,6 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                 static_cast<float>(Layer.drawableSize.height));
 }
 
-@end
-
-@interface OnlyChessAppDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic, strong) UIWindow* window;
 @end
 
 @implementation OnlyChessAppDelegate
