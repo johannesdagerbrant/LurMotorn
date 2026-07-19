@@ -110,6 +110,8 @@ private:
     Lur::Render::MaterialHandle PlateIconMat = 0;     // plate glyph fill (#C9D3DA)
     Lur::Render::MaterialHandle PlateIconDim = 0;     // unaffordable: dimmed
     Lur::Render::MaterialHandle GoldIconMat = 0;      // gold glyph (costs, counter)
+    Lur::Render::MaterialHandle MiniWinMat = 0;       // minimap camera window fill
+    Lur::Render::MaterialHandle MiniWinEdge = 0;      // minimap camera window edge lines
 
     void RefreshSelector();
 

@@ -18,7 +18,7 @@ REMOTE = {
     "paper":    "raw.githubusercontent.com/game-icons/icons/master/lorc/scroll-unfurled.svg",
     "scissors": "raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/scissors.svg",
     "gold":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/token.svg",
-    "mine":     "raw.githubusercontent.com/game-icons/icons/master/faithtoken/ore.svg",
+    "mine":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/stone-pile.svg",
     "swords":   "raw.githubusercontent.com/game-icons/icons/master/lorc/crossed-swords.svg",
     "camp":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/barracks-tent.svg",
     "pointer":  "raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/hand-pointer.svg",

@@ -204,6 +204,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
     PlateIconMat = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f});
     PlateIconDim = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.4f});
     GoldIconMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
+    MiniWinMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 0.12f});
+    MiniWinEdge = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.6f});
     // First-scroll hint (#85 playtest): alpha-stepped materials (materials are
     // immutable, so the fade walks a LUT) + up/down arrow triangle meshes.
     for (int I = 0; I < HintAlphaSteps; ++I) {
@@ -536,6 +538,63 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (Snap.Result != ResultOngoing) {
         Text.Draw(Renderer, ResultStr(Snap.Result, My), 0.0f, HeightPx * 0.42f, WidthPx,
                   40.0f * HS, 30.0f * HS, GoldC, EHAlign::Center, EVAlign::Middle, false);
+    }
+
+    // Minimap strip (playtest): the WHOLE field on the right edge, VS Code
+    // scrollbar-style, in the same GUI layer as the plates/panel/dropdown. Dots are
+    // units + camps (absolute team colours) and live deposits (gold); the bright
+    // window is exactly what the camera shows. One extra instanced draw.
+    {
+        const float StripW = 12.0f * HS;
+        const float StripX = WidthPx - StripW;
+        const float StripY = PanelY + PanelH + 4.0f * HS;
+        const float StripB = PlateY - HeadH - 8.0f * HS;
+        const float StripH = StripB - StripY;
+        const float WH = FW(WorldHeight);
+        Blit(PanelMat, StripX + StripW * 0.5f, StripY + StripH * 0.5f, StripW, StripH);
+        Blit(PanelEdge, StripX - 0.5f, StripY + StripH * 0.5f, 1.0f, StripH);
+        // World -> strip. CameraY (and the camera window) already live in the FLIPPED
+        // space the field renders in; world positions flip the same way, so the strip
+        // is oriented exactly like the screen: home at the bottom, enemy at the top.
+        auto MapFy = [&](float Fy) { return StripB - (Fy / WH) * StripH; };
+        auto FlipW = [&](float Wy) { return FlipY ? WH - Wy : Wy; };
+        auto MapX = [&](float Wx) {
+            return StripX + 1.5f + (Wx / FW(WorldWidth)) * (StripW - 3.0f);
+        };
+        const float VisH = HeightPx / P;
+        float WinTop = MapFy(CameraY + VisH), WinBot = MapFy(CameraY);
+        if (WinTop < StripY) WinTop = StripY;
+        if (WinBot > StripB) WinBot = StripB;
+        if (WinBot > WinTop) {
+            Blit(MiniWinMat, StripX + StripW * 0.5f, (WinTop + WinBot) * 0.5f, StripW,
+                 WinBot - WinTop);
+            Blit(MiniWinEdge, StripX + StripW * 0.5f, WinTop, StripW, 1.0f);
+            Blit(MiniWinEdge, StripX + StripW * 0.5f, WinBot, StripW, 1.0f);
+        }
+        // Dots — reuse the per-frame instance scratch (the unit batch was already
+        // uploaded by its draw call). Prev == Cur: no interpolation on the map.
+        uint32_t M = 0;
+        auto Dot = [&](float Px, float Py, float Sz, Color C) {
+            if (M >= static_cast<uint32_t>(MaxUnits)) return;
+            Lur::Render::InstanceData& D = Instances[M++];
+            D.PrevX = D.CurX = Px;
+            D.PrevY = D.CurY = Py;
+            D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
+            D.Size = Sz;
+            D.U0 = 0.0f; D.V0 = 0.0f; D.U1 = 0.0f; D.V1 = 0.0f;  // flat material: no atlas
+        };
+        const Color MiniGold{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 0.9f};
+        for (int T = 0; T < NumMines; ++T)
+            if (Snap.MineGold[T] > 0)
+                Dot(MapX(FW(Snap.MineX[T])), MapFy(FlipW(FW(Snap.MineY[T]))), 2.6f * HS, MiniGold);
+        Dot(MapX(FW(CampX)), MapFy(FlipW(FW(Camp0Y))), 3.4f * HS, TeamTint[0]);
+        Dot(MapX(FW(CampX)), MapFy(FlipW(FW(Camp1Y))), 3.4f * HS, TeamTint[1]);
+        for (int32_t I = 0; I < Snap.Count; ++I) {
+            if (!Snap.IsAlive(I)) continue;
+            Dot(MapX(FW(Snap.PosX[I])), MapFy(FlipW(FW(Snap.PosY[I]))), 2.0f * HS,
+                TeamTint[Snap.Team[I]]);
+        }
+        Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
     }
 
     // First-scroll hint (#85 playtest): from the moment one of YOUR units walks off
