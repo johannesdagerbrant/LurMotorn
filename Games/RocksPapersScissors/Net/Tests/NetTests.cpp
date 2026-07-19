@@ -344,6 +344,58 @@ static void TestLockstepOverSessionLoopback() {
     CHECK(A->Lp.GetSim().StateHash() == B->Lp.GetSim().StateHash());  // bit-identical over the wire
 }
 
+// ---- Cold rejoin: kill a peer, rebuild it from the survivor's chunked history, resume ----
+static void TestLockstepColdRejoinResync() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x55, 0, Enqueue, &Qa);
+    B.Init(0x55, 1, Enqueue, &Qb);
+
+    SplitMix64 Rng(0xBADCAB);
+    for (int I = 0; I < 40; ++I) {  // play a while
+        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    const uint32_t F = A.ExecTick();
+    const uint64_t StateAtF = A.GetSim().StateHash();
+    CHECK(F > 20);
+
+    // B is KILLED and relaunches fresh (lost everything) — a brand-new peer at tick 0.
+    Outbox Qb2;
+    LockstepPeer B2;
+    B2.Init(0x55, 1, Enqueue, &Qb2);
+
+    // Reconnect: both peers offer their history. Exchange the resync chunks + markers.
+    A.BeginResync();
+    B2.BeginResync();
+    Deliver(Qa, B2);   // A's F-tick history + marker -> B2 rebuilds
+    Deliver(Qb2, A);   // B2's 0-tick history + marker -> A ignores (it's ahead)
+
+    CHECK(!A.AwaitingResync() && !B2.AwaitingResync());
+    CHECK(B2.ExecTick() == F);
+    CHECK(B2.GetSim().StateHash() == StateAtF);   // rejoiner rebuilt to the frozen frontier
+    CHECK(A.GetSim().StateHash() == StateAtF);     // survivor unchanged (re-based, sim still at F)
+
+    // Resume LIVE lockstep A <-> B2 from the frontier — must stay bit-identical, no desync.
+    for (int I = 0; I < 60; ++I) {
+        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        B2.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        A.Tick(OneTickNs);
+        B2.Tick(OneTickNs);
+        Deliver(Qa, B2);
+        Deliver(Qb2, A);
+        CHECK(!A.Desynced() && !B2.Desynced());
+    }
+    for (int I = 0; I < 4; ++I) { A.Tick(OneTickNs); B2.Tick(OneTickNs); Deliver(Qa, B2); Deliver(Qb2, A); }
+    CHECK(A.ExecTick() > F + 40);                  // the match advanced well past the rejoin
+    CHECK(A.ExecTick() == B2.ExecTick());
+    CHECK(A.GetSim().StateHash() == B2.GetSim().StateHash());  // still bit-identical after rejoin
+}
+
 int main() {
     TestRoundTrip();
     TestByteBudget();
@@ -354,6 +406,7 @@ int main() {
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
     TestLockstepCeilingStallAndResume();
+    TestLockstepColdRejoinResync();
     TestLockstepOverSessionLoopback();
 
     if (GFailures == 0) std::printf("rps_net_tests: ALL PASS\n");

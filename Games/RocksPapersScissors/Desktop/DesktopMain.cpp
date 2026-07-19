@@ -89,6 +89,12 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
                          [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgInput, D, N); });
     P.Session.SetHandler(Rps::MsgAnchor,
                          [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgAnchor, D, N); });
+    P.Session.SetHandler(Rps::MsgResyncChunk,
+                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
+    // On a reconnect (blip or cold rejoin), offer our history so the peer that's behind
+    // rebuilds and both resume in lockstep (proven by rps_net_tests; fires on the phones
+    // over real BLE — the loopback never actually disconnects).
+    P.Session.SetResyncHandler([&P] { P.Lp.BeginResync(); });
     return true;
 }
 

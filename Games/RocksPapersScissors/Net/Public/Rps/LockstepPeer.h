@@ -53,6 +53,15 @@ public:
     // A datagram arrived (Input / Anchor / ResyncChunk), dispatched by type.
     void OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N);
 
+    // Reconnect (cold rejoin or blip): send our executed input history as chunks +
+    // a frontier marker, and re-base our own timeline to that frontier with a fresh
+    // delay pre-seed. Whichever peer is behind rebuilds from the longer history; the
+    // one ahead ignores the shorter. Both end at the same frontier, bit-identical.
+    // (Consistency over fairness: the survivor drops its <=Delay in-flight presses so
+    // both sides agree on the delay window that spans the outage.)
+    void BeginResync();
+    bool AwaitingResync() const { return Awaiting; }
+
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
     bool Desynced() const { return Desync; }
@@ -72,6 +81,8 @@ private:
     void Execute();
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);
+    void RebuildFromHistory(uint32_t Frontier);  // Incoming[0/1] -> fresh sim + timeline at Frontier
+    void ReseedFrom(uint32_t Frontier);          // truncate to Frontier + a fresh Delay pre-seed
 
     Sim TheSim;
     Lur::Sim::TickClock Clock{TickRateHz};
@@ -88,6 +99,9 @@ private:
 
     bool Recording = false;
     std::vector<uint8_t> RecM0, RecM1;  // executed masks per tick (only while Recording)
+
+    bool Awaiting = false;              // in a resync exchange: don't produce/execute yet
+    std::vector<uint8_t> Incoming[2];   // reassembled peer history streams (team0, team1)
 
     SendFn Send = nullptr;
     void* Ctx = nullptr;

@@ -22,6 +22,9 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     PeerHash.clear();
     RecM0.clear();
     RecM1.clear();
+    Awaiting = false;
+    Incoming[0].clear();
+    Incoming[1].clear();
 }
 
 void LockstepPeer::ProduceAndSend(uint8_t Mask) {
@@ -33,6 +36,7 @@ void LockstepPeer::ProduceAndSend(uint8_t Mask) {
 }
 
 void LockstepPeer::Tick(uint64_t ElapsedNs) {
+    if (Awaiting) return;  // in a resync exchange: hold production/execution until reconciled
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
         const uint8_t M = PendingLocalMask;
@@ -79,24 +83,108 @@ void LockstepPeer::CrossCheck(uint32_t Tick) {
         Desync = true;  // reliable transport + deterministic sim => a mismatch is always a bug
 }
 
+// Resync chunk tags: 0/1 = the team-0/team-1 history streams; 0xFF = the frontier marker.
+namespace {
+constexpr uint8_t ResyncTagTeam0 = 0;
+constexpr uint8_t ResyncTagTeam1 = 1;
+constexpr uint8_t ResyncTagMarker = 0xFF;
+}  // namespace
+
 void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
-    Lur::Serialization::BitReader R(Data, N);
     if (Type == MsgInput) {
+        Lur::Serialization::BitReader R(Data, N);
         uint32_t D = 0;
         uint8_t M = 0;
-        if (DecodeEvent(R, D, M)) {
+        if (!Awaiting && DecodeEvent(R, D, M)) {
             PeerMasks.push_back(M);  // live wire: each Input message is the next peer exec tick
             Execute();               // peer input may unblock the ceiling
         }
     } else if (Type == MsgAnchor) {
+        Lur::Serialization::BitReader R(Data, N);
         const uint32_t T = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
         const uint32_t H = R.ReadBits(32);
-        if (R.IsOk()) {
+        if (!Awaiting && R.IsOk()) {
             PeerHash[T] = H;
             CrossCheck(T);
         }
+    } else if (Type == MsgResyncChunk) {
+        if (N < 1) return;
+        const uint8_t Tag = Data[0];
+        if (Tag < 2) {
+            uint32_t Ft = 0;
+            DecodeResyncChunk(Data + 1, N - 1, Ft, Incoming[Tag]);  // reliable order -> append
+        } else if (Tag == ResyncTagMarker) {
+            Lur::Serialization::BitReader R(Data + 1, N - 1);
+            const uint32_t F = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+            if (R.IsOk() && F > TheSim.Tick && Incoming[0].size() >= F && Incoming[1].size() >= F)
+                RebuildFromHistory(F);  // peer is ahead -> adopt its history
+            else { Incoming[0].clear(); Incoming[1].clear(); }  // we're ahead / short -> keep ours
+            Awaiting = false;           // reconciled either way; resume live
+        }
     }
-    // MsgResyncChunk: the chunked cold-rejoin path — a later increment of #76.
+}
+
+void LockstepPeer::BeginResync() {
+    const uint32_t F = TheSim.Tick;  // our executed frontier
+    // Reconstruct the executed combined history as two team streams.
+    std::vector<uint8_t> Stream[2];
+    for (uint32_t T = 0; T < F; ++T) {
+        const uint8_t Lm = LocalMasks[T], Pm = PeerMasks[T];
+        Stream[0].push_back(MyTeam == 0 ? Lm : Pm);
+        Stream[1].push_back(MyTeam == 0 ? Pm : Lm);
+    }
+    for (uint8_t St = 0; St < 2; ++St) {
+        const std::vector<std::vector<uint8_t>> Chunks = EncodeResyncChunks(0, Stream[St]);
+        for (const std::vector<uint8_t>& C : Chunks) {
+            std::vector<uint8_t> Payload;
+            Payload.reserve(C.size() + 1);
+            Payload.push_back(St);
+            Payload.insert(Payload.end(), C.begin(), C.end());
+            if (Send) Send(Ctx, MsgResyncChunk, Payload.data(), Payload.size());
+        }
+    }
+    Lur::Serialization::BitWriter W;  // completion marker [0xFF][varint frontier]
+    Lur::Serialization::WriteVarUint(W, F);
+    const std::vector<uint8_t>& MB = W.Finish();
+    std::vector<uint8_t> Marker;
+    Marker.reserve(MB.size() + 1);
+    Marker.push_back(ResyncTagMarker);
+    Marker.insert(Marker.end(), MB.begin(), MB.end());
+    if (Send) Send(Ctx, MsgResyncChunk, Marker.data(), Marker.size());
+
+    ReseedFrom(F);  // re-base our own timeline (drops in-flight beyond F); sim already at F
+    Incoming[0].clear();
+    Incoming[1].clear();
+    Awaiting = true;  // cleared when we process the peer's marker
+}
+
+void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
+    const uint64_t S = TheSim.Seed;
+    TheSim.Init(S);  // fresh sim, same seed
+    LocalMasks.clear();
+    PeerMasks.clear();
+    for (uint32_t T = 0; T < Frontier; ++T) {
+        const uint8_t M0 = Incoming[0][T], M1 = Incoming[1][T];
+        TheSim.Step(M0, M1);  // free-run to the frontier (the replay law)
+        LocalMasks.push_back(MyTeam == 0 ? M0 : M1);
+        PeerMasks.push_back(MyTeam == 0 ? M1 : M0);
+    }
+    ReseedFrom(Frontier);  // sim now at Frontier; append the fresh Delay slack
+    Incoming[0].clear();
+    Incoming[1].clear();
+}
+
+void LockstepPeer::ReseedFrom(uint32_t Frontier) {
+    LocalMasks.resize(Frontier);  // drop anything in-flight beyond the frontier
+    PeerMasks.resize(Frontier);
+    for (uint32_t I = 0; I < Delay; ++I) {  // fresh empty delay slack, both sides agree
+        LocalMasks.push_back(0);
+        PeerMasks.push_back(0);
+    }
+    WallTicks = Frontier;
+    PendingLocalMask = 0;
+    MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
+    PeerHash.clear();
 }
 
 }  // namespace Rps
