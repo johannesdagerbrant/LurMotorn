@@ -201,6 +201,16 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 }
 
 - (void)renderFrame {
+#if LUR_INTERNAL
+    // #73, measured 2026-07-19: after a DVT kill-existing relaunch the app can look
+    // PERFECT from inside (active, thousands of successful presents) while the window
+    // server never composites its layer — no in-process condition distinguishes the
+    // state. Dev builds therefore reattach unconditionally, once, shortly after the
+    // render loop starts (frame 15 ≈ 250 ms — the flash hides in app-appear). DVT
+    // launches only exist on the dev rig; Shipping keeps the conditional path below.
+    static uint32_t FramesRun = 0;
+    if (++FramesRun == 15 && _Ready) [self reattachForActivation];
+#endif
     if (_BecameActive) {
         _BecameActive = false;
         if (_Ready && _InitWhileInactive) [self reattachForActivation];
@@ -231,10 +241,17 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     BeatAccumNs += ElapsedNs;
     if (BeatAccumNs > 2'000'000'000ull) {
         BeatAccumNs = 0;
-        os_log(OS_LOG_DEFAULT, "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d",
+        // win/key/scene/host: hunting an in-process signal for the never-composited
+        // state (#73). scene: UISceneActivationState (0=fg-active). host: root layer
+        // parented into the window's layer tree.
+        UIWindow* Win = self.view.window;
+        os_log(OS_LOG_DEFAULT,
+               "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld host=%d",
                _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
                UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
-               _Started ? 1 : 0);
+               _Started ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
+               (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
+               self.view.layer.superlayer != nil ? 1 : 0);
     }
     if (_Started) {
         AutoAccumNs += ElapsedNs;
