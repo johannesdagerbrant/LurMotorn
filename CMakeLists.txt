@@ -38,6 +38,7 @@ add_subdirectory(Modules/Platform)  # desktop window + input seam (guarded by LU
 
 # --- Games ---
 add_subdirectory(Games/Chess)
+add_subdirectory(Games/RocksPapersScissors)
 if(LUR_DESKTOP)
     add_subdirectory(Games/Chess/Desktop)
 endif()
@@ -52,4 +53,5 @@ if(LUR_BUILD_TESTS)
     add_subdirectory(Modules/Save/Tests)
     add_subdirectory(Modules/Text/Tests)
     add_subdirectory(Games/Chess/Core/Tests)
+    add_subdirectory(Games/RocksPapersScissors/Core/Tests)
 endif()

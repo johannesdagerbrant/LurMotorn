@@ -2,9 +2,10 @@
 
 *2026-07-19, from the Phase-1 kickoff design sessions. This records the **rationale** behind the
 decisions now baked into issues #75/#76; where this doc and an issue disagree, **the issue wins**
-(CLAUDE.md doctrine). It supersedes the v1 spec (`rps-rts-design-spec.md`) in three places: the §7
-wire details, the §2/§3 ~64-units/side assumption, and the entity-storage layout. Everything else
-in the v1 spec (game design, tick phases, behavior rules, win rule) still stands.*
+(CLAUDE.md doctrine). It supersedes the v1 spec (`rps-rts-design-spec.md`) in four places: the §7
+wire details, the §2/§3 ~64-units/side assumption, the entity-storage layout, and — added
+2026-07-19 — the §1/§2 field orientation + "whole battlefield on one screen" assumption (see §9).
+Everything else in the v1 spec (game design, tick phases, behavior rules, win rule) still stands.*
 
 *The game lives at `Games/RocksPapersScissors/` (namespace `Rps`); the working title
 "Sten Sax Skog" is retired.*
@@ -168,5 +169,39 @@ pump rate (one-outstanding-write GATT flow control).
 ## 8. Knobs deliberately left to slice 3 (playtest, don't debate)
 
 Shipping unit cap (the engine ceiling is not the gameplay answer) · economy/build-time rebalance to
-reach it · field size vs density · counter multiplier · input delay 2–4 · grid cell size · worker
-flee · sudden-death timer.
+reach it · **field height** vs density (width is fixed to screen — §9) · counter multiplier · input
+delay 2–4 · grid cell size · worker flee · sudden-death timer.
+
+## 9. Field is screen-width-wide, dynamically tall — the camera scrolls (view-only)
+
+*Decided 2026-07-19, superseding v1-spec §1's "whole battlefield on one screen" standing assumption
+and §2's fixed 60×34 landscape field with left/right camps.*
+
+- **Orientation flips to portrait.** The field's **short axis is width, its long axis is height**.
+  Camps move to the **two short ends (top and bottom)**; units march along the tall axis. The v1
+  "view flipped per player" still holds — now a *vertical* flip, your camp at the bottom of your
+  screen.
+- **World dimensions are fixed sim tunables, identical on both peers — never read from a device.**
+  `WorldWidth` is a constant; `WorldHeight` is the new **balancing knob** (§8). "As wide as the
+  phone" is a *projection* statement, not a sim one: the renderer maps the fixed `WorldWidth` to fill
+  the screen width, and each device's visible vertical extent simply falls out of its own aspect
+  ratio. This keeps the determinism wall intact — the same law as "positions are never sent, all
+  derived": pixels and aspect never enter the sim, so two phones of different sizes simulate
+  bit-identically while showing different *windows* of one identical world.
+- **The camera is pure view state.** A per-device `CameraY` offset (clamped to
+  `[0, WorldHeight − VisibleHeight]`) scrolls the window; it never touches sim state and never rides
+  the wire — the exact float quarantine already in §6 (interpolation lives in the shader; now camera
+  pan joins it). Both peers can look at different parts of the field with zero consistency cost.
+- **Swipe-anywhere is unambiguous because the game has no direct unit manipulation.** The only sim
+  input is the four production buttons (a HUD strip); a swipe on the field can therefore mean *only*
+  camera pan — there is no selection/order gesture to collide with. On the desktop workbench
+  (slices 0–1) a mouse-drag (or up/down keys) stands in for the swipe through the **same
+  `TouchEvent` seam**, so the bench exercises identical input semantics before a phone is in the room.
+- **Fixed-capacity sizing follows the max height.** The SoA arrays are unit-count-bound (§5) and
+  unaffected, but the deterministic spatial grid (§5) covers `WorldWidth × WorldHeight` — its bin
+  arrays size to the **maximum** `WorldHeight` tunable (still zero-allocation in the tick). Pick the
+  max-height headroom once; slice 3 tunes the actual height within it.
+- **Height is a slice-3 balance lever, not an engine question.** A taller field = longer marches = a
+  tempo/economy dial (raid timing, defender's advantage, worker exposure). The engine's only job now
+  is to carry `WorldHeight` as a compile-time tunable with headroom; the shipping value is playtested
+  in slice 3.

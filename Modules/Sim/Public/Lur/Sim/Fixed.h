@@ -41,7 +41,18 @@ struct Fixed {
                    : Fixed{static_cast<int32_t>((static_cast<int64_t>(Raw) << FracBits) / O.Raw)};
     }
     constexpr bool operator==(Fixed O) const { return Raw == O.Raw; }
+    constexpr bool operator!=(Fixed O) const { return Raw != O.Raw; }
     constexpr bool operator<(Fixed O) const { return Raw < O.Raw; }
+    constexpr bool operator<=(Fixed O) const { return Raw <= O.Raw; }
+    constexpr bool operator>(Fixed O) const { return Raw > O.Raw; }
+    constexpr bool operator>=(Fixed O) const { return Raw >= O.Raw; }
+    constexpr Fixed operator-() const { return Fixed{-Raw}; }
 };
+
+// Free helpers — grown on demand as the RPS sim's call sites need them (issue
+// #75), not speculatively. All pure integer ops on Raw, so determinism-safe.
+constexpr Fixed Abs(Fixed A) { return A.Raw < 0 ? Fixed{-A.Raw} : A; }
+constexpr Fixed Min(Fixed A, Fixed B) { return A.Raw < B.Raw ? A : B; }
+constexpr Fixed Max(Fixed A, Fixed B) { return A.Raw > B.Raw ? A : B; }
 
 } // namespace Lur::Sim
