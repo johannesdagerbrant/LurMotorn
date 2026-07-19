@@ -257,6 +257,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
         _Team = Team;  // per-player view flip
         _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
         _Started = true;
+        _View.SetLinked(true);  // opponent selector: green dot (#85)
         os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
     }
     if (_Started) _Lp.Tick(ElapsedNs);
@@ -340,12 +341,13 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+    (void)W; (void)H;
     const bool Tap = (X - _DownX) * (X - _DownX) + (Y - _DownY) * (Y - _DownY) < (24.0f * 24.0f);
-    if (Tap && Y >= H * 0.85f && _Started) {
-        int Btn = static_cast<int>(X / (W / 4.0f));
-        if (Btn < 0) Btn = 0;
-        if (Btn > 3) Btn = 3;
-        _Lp.SetLocalMask(static_cast<uint8_t>(1u << Btn));
+    if (Tap && _Started) {
+        // HUD first (#85): production plates press units; the opponent selector
+        // consumes its own taps; world taps do nothing (drag pans).
+        const int Plate = _View.OnTap(X, Y);
+        if (Plate >= 0) _Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));
     }
 }
 @end

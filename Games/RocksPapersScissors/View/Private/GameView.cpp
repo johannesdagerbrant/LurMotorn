@@ -34,13 +34,11 @@ Lur::Render::MaterialHandle FlatMat(IRenderer* R, Color C) {
     return R->CreateMaterial(D);
 }
 
-const char* ResultStr(uint8_t R) {
-    switch (R) {
-        case ResultTeam0Wins: return "YOU WIN";
-        case ResultTeam1Wins: return "YOU LOSE";
-        case ResultDraw:      return "DRAW";
-        default:              return "";
-    }
+const char* ResultStr(uint8_t R, int MyTeam) {
+    if (R == ResultDraw) return "DRAW";
+    if (R == ResultTeam0Wins) return MyTeam == 0 ? "YOU WIN" : "YOU LOSE";
+    if (R == ResultTeam1Wins) return MyTeam == 1 ? "YOU WIN" : "YOU LOSE";
+    return "";
 }
 
 // ---- Locked palette (#85, Docs/Planning/rps-hud-prototype.html) ----
@@ -171,7 +169,58 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Font.Init(Lur::Text::InterFont());
     Font.UploadAtlas(*Renderer);
     Text.CreateResources(Renderer, &Font);
+
+    // ---- HUD (#85): locked panel palette + the engine dropdown + DSEG7 clock ----
+    PanelMat = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x1F), Srgb(0x24), 0.97f});
+    PanelEdge = FlatMat(Renderer, {Srgb(0x39), Srgb(0x42), Srgb(0x4B), 1.0f});
+    PlateBg = FlatMat(Renderer, {Srgb(0x23), Srgb(0x29), Srgb(0x30), 0.97f});
+    BarBg = FlatMat(Renderer, {0.0f, 0.0f, 0.0f, 0.45f});
+    GoldFlat = FlatMat(Renderer, {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
+    PlateIconMat = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f});
+    PlateIconDim = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.4f});
+    GoldIconMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
+    ClockFont.Init(Lur::Text::Dseg7Font());
+    ClockFont.UploadAtlas(*Renderer);
+    ClockText.CreateResources(Renderer, &ClockFont);
+    Selector.CreateResources(Renderer, &Font);
+
     Ready = true;
+}
+
+void GameView::SetLinked(bool InLinked) {
+    if (Linked == InLinked) return;
+    Linked = InLinked;
+    SelectorDirty = true;
+}
+
+void GameView::RefreshSelector() {
+    // Two rows for now: the live BLE/loopback peer and the local hot-seat. Real
+    // opponent enumeration (chess's OpponentRegistry pattern) rides the RPS
+    // persistence work — #85's follow-up; the widget and layout are final.
+    Lur::Hud::DropdownItem Items[2];
+    Items[0].Label = Linked ? "Linked peer" : "Searching...";
+    Items[0].Lead = Lur::Hud::ELeadStyle::Dot;
+    Items[0].LeadFill = Linked ? Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f}
+                               : Color{Srgb(0x5B), Srgb(0x67), Srgb(0x70), 1.0f};
+    Items[1].Label = "Same device";
+    Items[1].Lead = Lur::Hud::ELeadStyle::Split;
+    Selector.SetItems(Items, 2);
+    Selector.SetSelected(0);
+    SelectorDirty = false;
+}
+
+int GameView::OnTap(float XPx, float YPx) {
+    if (!Ready) return -1;
+    if (Selector.OnTap(XPx, YPx)) {
+        Selector.TookSelection();  // selection has no target yet (#85 follow-up)
+        return -2;
+    }
+    for (int Ty = 0; Ty < 4; ++Ty) {
+        const float* Rc = PlateRect[Ty];
+        if (XPx >= Rc[0] && XPx <= Rc[0] + Rc[2] && YPx >= Rc[1] && YPx <= Rc[1] + Rc[3])
+            return Ty;
+    }
+    return -1;
 }
 
 void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, float CameraY,
@@ -179,6 +228,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (!Ready) return;
     const float P = Ppu(WidthPx);
     const float WHf = FW(WorldHeight);
+    // Everything user-facing is VIEWER-RELATIVE: "you" is whichever team this device
+    // plays (FlipY is set exactly for the top/team-1 player). Blue = you, red = foe,
+    // and the HUD reads your team's gold/queues — on both phones.
+    const int My = FlipY ? 1 : 0;
+    const int Foe = 1 - My;
 
     // World -> screen. Pixel space is Y-DOWN (MakeOrthoCamera); world Y grows UP (your
     // camp at small Y sits at the bottom), so flip: Wy == CameraY lands at the bottom.
@@ -225,10 +279,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     };
 
     // Camps render as ICONS like everything else (design lock: same tech, no bespoke
-    // geometry) — the barracks tent in the owning team's colour.
+    // geometry) — the barracks tent in the owner's viewer-relative colour.
     const float CampPx = 4.5f * P;
-    BlitGlyph(GlyphCamp, CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
-    BlitGlyph(GlyphCamp, CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
+    BlitGlyph(GlyphCamp, CampMat[0 == My ? 0 : 1], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
+    BlitGlyph(GlyphCamp, CampMat[1 == My ? 0 : 1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
@@ -250,10 +304,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // the shape, ownership is the colour. Per-instance UV rect picks the glyph.
     const float UnitPx = 1.7f * P;
     uint32_t N = 0;
+    int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
-        const Color C = TeamTint[Tm];
+        if (Tm == My) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }
+        const Color C = TeamTint[Tm == My ? 0 : 1];
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
@@ -279,25 +335,90 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
     }
 
-    // HUD (GUI layer, pixel space).
+    // ---- HUD (GUI layer, pixel space) — the locked layout (#85): opponent
+    // dropdown on top, status panel (gold | population | clock) under it, four
+    // production plates along the bottom edge. ----
     Renderer->BeginGui();
-    char L[4][64];
-    std::snprintf(L[0], sizeof(L[0]), "tick %u  %s", Snap.Tick, ResultStr(Snap.Result));
-    const int32_t Q0 = Snap.QueueCount[0][0] + Snap.QueueCount[0][1] + Snap.QueueCount[0][2] + Snap.QueueCount[0][3];
-    const int32_t Q1 = Snap.QueueCount[1][0] + Snap.QueueCount[1][1] + Snap.QueueCount[1][2] + Snap.QueueCount[1][3];
-    std::snprintf(L[1], sizeof(L[1]), "YOU  gold %d  units %d  q%d", Snap.Gold[0], Snap.AliveCount[0], Q0);
-    std::snprintf(L[2], sizeof(L[2]), "FOE  gold %d  units %d  q%d", Snap.Gold[1], Snap.AliveCount[1], Q1);
-    std::snprintf(L[3], sizeof(L[3]), "1-4 you  5-8 foe  drag: pan");
-    const float Size = 15.0f, LineH = Size * 1.35f, X = 8.0f;
-    const Color Shadow{0.0f, 0.0f, 0.0f, 0.85f};
-    const Color Ink{0.90f, 0.95f, 1.0f, 1.0f};
-    for (int I = 0; I < 4; ++I) {
-        const float Y = 6.0f + LineH * static_cast<float>(I);
-        Text.Draw(Renderer, L[I], X + 1.0f, Y + 1.0f, WidthPx, LineH, Size, Shadow,
-                  Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Top, false);
-        Text.Draw(Renderer, L[I], X, Y, WidthPx, LineH, Size, Ink, Lur::Text::EHAlign::Left,
-                  Lur::Text::EVAlign::Top, false);
+    if (SelectorDirty) RefreshSelector();
+
+    using Lur::Text::EHAlign;
+    using Lur::Text::EVAlign;
+    const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
+    const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
+    const Color BadC{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f};
+    const float Pad = 8.0f;
+    char Buf[64];
+
+    // Status panel.
+    const float PanelY = 52.0f, PanelH = 30.0f;
+    Blit(PanelMat, WidthPx * 0.5f, PanelY + PanelH * 0.5f, WidthPx, PanelH);
+    Blit(PanelEdge, WidthPx * 0.5f, PanelY + PanelH, WidthPx, 1.0f);
+    const float Mid = PanelY + PanelH * 0.5f;
+    BlitGlyph(GlyphGold, GoldIconMat, Pad + 9.0f, Mid, 18.0f);
+    std::snprintf(Buf, sizeof(Buf), "%d", Snap.Gold[My]);
+    Text.Draw(Renderer, Buf, Pad + 22.0f, PanelY, 120.0f, PanelH, 15.0f, GoldC,
+              EHAlign::Left, EVAlign::Middle, false);
+    BlitGlyph(GlyphMiner, PlateIconMat, WidthPx * 0.5f - 40.0f, Mid, 16.0f);
+    std::snprintf(Buf, sizeof(Buf), "%d / %d", Workers, Soldiers);
+    Text.Draw(Renderer, Buf, WidthPx * 0.5f - 28.0f, PanelY, 56.0f, PanelH, 14.0f, Ico,
+              EHAlign::Center, EVAlign::Middle, false);
+    BlitGlyph(GlyphSwords, PlateIconMat, WidthPx * 0.5f + 40.0f, Mid, 16.0f);
+    const uint32_t Secs = Snap.Tick / TickRateHz;  // tick-derived: identical on both peers
+    std::snprintf(Buf, sizeof(Buf), "%02u:%02u", Secs / 60u, Secs % 60u);
+    ClockText.Draw(Renderer, Buf, WidthPx - Pad - 74.0f, PanelY, 74.0f, PanelH, 13.0f, Ico,
+                   EHAlign::Right, EVAlign::Middle, false);
+
+    // Production plates: the icon IS the unit glyph; stack tag, cost, progress bar
+    // (which visibly accelerates with the stack — #84's pacing thesis on screen).
+    const float Gap = 6.0f;
+    const float PlateW = (WidthPx - 2.0f * Pad - 3.0f * Gap) / 4.0f;
+    const float PlateH2 = PlateW * 1.02f;
+    const float PlateY = HeightPx - Pad - PlateH2;
+    for (int Ty = 0; Ty < 4; ++Ty) {
+        const float X = Pad + static_cast<float>(Ty) * (PlateW + Gap);
+        PlateRect[Ty][0] = X; PlateRect[Ty][1] = PlateY;
+        PlateRect[Ty][2] = PlateW; PlateRect[Ty][3] = PlateH2;
+        const bool Afford = Snap.Gold[My] >= UnitTable[Ty].Cost;
+        Blit(PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW + 2.0f, PlateH2 + 2.0f);
+        Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
+        BlitGlyph(Ty, Afford ? PlateIconMat : PlateIconDim,
+                  X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
+        BlitGlyph(GlyphGold, GoldIconMat, X + 11.0f, PlateY + 11.0f, 11.0f);
+        std::snprintf(Buf, sizeof(Buf), "%d", UnitTable[Ty].Cost);
+        Text.Draw(Renderer, Buf, X + 18.0f, PlateY + 4.0f, 40.0f, 14.0f, 11.0f,
+                  Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
+        const int32_t QN = Snap.QueueCount[My][Ty];
+        if (QN > 0) {
+            Blit(GoldFlat, X + PlateW - 13.0f, PlateY + 9.0f, 24.0f, 15.0f);
+            std::snprintf(Buf, sizeof(Buf), "%dx", QN);
+            Text.Draw(Renderer, Buf, X + PlateW - 25.0f, PlateY + 2.0f, 24.0f, 15.0f, 11.0f,
+                      {Srgb(0x14), Srgb(0x16), Srgb(0x1A), 1.0f},
+                      EHAlign::Center, EVAlign::Middle, false);
+        }
+        const float BarW = PlateW - 12.0f;
+        Blit(BarBg, X + PlateW * 0.5f, PlateY + PlateH2 - 7.0f, BarW, 5.0f);
+        if (QN > 0) {
+            float Frac = static_cast<float>(Snap.BuildProgress[My][Ty]) /
+                         static_cast<float>(UnitTable[Ty].BuildTicks);
+            if (Frac > 1.0f) Frac = 1.0f;
+            const float Bw = BarW * Frac;
+            if (Bw > 0.5f)
+                Blit(GoldFlat, X + 6.0f + Bw * 0.5f, PlateY + PlateH2 - 7.0f, Bw, 5.0f);
+        }
     }
+
+    // Dev diagnostics line + match-result banner.
+    std::snprintf(Buf, sizeof(Buf), "tick %u   FOE gold %d units %d", Snap.Tick,
+                  Snap.Gold[Foe], Snap.AliveCount[Foe]);
+    Text.Draw(Renderer, Buf, Pad, PanelY + PanelH + 4.0f, WidthPx, 16.0f, 11.0f,
+              {0.55f, 0.62f, 0.68f, 0.9f}, EHAlign::Left, EVAlign::Top, false);
+    if (Snap.Result != ResultOngoing) {
+        Text.Draw(Renderer, ResultStr(Snap.Result, My), 0.0f, HeightPx * 0.42f, WidthPx, 40.0f,
+                  30.0f, GoldC, EHAlign::Center, EVAlign::Middle, false);
+    }
+
+    // The opponent dropdown draws LAST so its open list overlays the panel.
+    Selector.Draw(Renderer, "Opponent", Pad, 4.0f, WidthPx - 2.0f * Pad, 24.0f);
 
     Renderer->EndFrame();
 }

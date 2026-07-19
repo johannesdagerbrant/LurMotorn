@@ -42,8 +42,8 @@ uint64_t NowNs() {
             .count());
 }
 
-constexpr int kWinW = 360;
-constexpr int kWinH = 780;
+int kWinW = 360;   // --winw/--winh: fit small dev screens (portrait phone-ish default)
+int kWinH = 780;
 constexpr uint64_t kStepNs = 1'000'000'000ull / Rps::TickRateHz;  // 10 Hz
 
 float Ppu() {
@@ -121,8 +121,15 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
         if (T.Phase == Lur::Input::ETouchPhase::Began) P.Cam.Begin(T.YPx);
         else if (T.Phase == Lur::Input::ETouchPhase::Moved) P.Cam.Move(T.YPx, Ppu());
         else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                 T.Phase == Lur::Input::ETouchPhase::Cancelled)
+                 T.Phase == Lur::Input::ETouchPhase::Cancelled) {
             P.Cam.End();
+            if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                // HUD first (chess's pattern): plates press units, the selector
+                // consumes its own taps; only world taps fall through.
+                const int Plate = P.View.OnTap(T.XPx, T.YPx);
+                if (Plate >= 0) P.Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));
+            }
+        }
     }
 #if LUR_INTERNAL
     if (Auto) {
@@ -172,6 +179,8 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
             B->Team = BTeam;
             A->Lp.Init(Seed, ATeam, SendViaSession, &A->Session);
             B->Lp.Init(Seed, BTeam, SendViaSession, &B->Session);
+            A->View.SetLinked(true);
+            B->View.SetLinked(true);
             Started = true;
             Lur::Log::Info("linked - lockstep started (A=team%d B=team%d)", ATeam, BTeam);
         }
@@ -246,8 +255,13 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
             if (T.Phase == Lur::Input::ETouchPhase::Began) Cam.Begin(T.YPx);
             else if (T.Phase == Lur::Input::ETouchPhase::Moved) Cam.Move(T.YPx, Ppu());
             else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                     T.Phase == Lur::Input::ETouchPhase::Cancelled)
+                     T.Phase == Lur::Input::ETouchPhase::Cancelled) {
                 Cam.End();
+                if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                    const int Plate = View.OnTap(T.XPx, T.YPx);
+                    if (Plate >= 0) In.P0.fetch_or(static_cast<uint8_t>(1u << Plate));
+                }
+            }
         }
 #if LUR_INTERNAL
         if (Auto) {
@@ -301,6 +315,8 @@ int main(int argc, char** argv) {
         else if (A == "--solo") Solo = true;
         else if (A == "--seed" && I + 1 < argc) Seed = std::strtoull(argv[++I], nullptr, 0);
         else if (A == "--stress" && I + 1 < argc) Stress = std::atoi(argv[++I]);
+        else if (A == "--winw" && I + 1 < argc) kWinW = std::atoi(argv[++I]);
+        else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress);

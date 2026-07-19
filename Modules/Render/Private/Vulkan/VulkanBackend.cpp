@@ -1302,7 +1302,7 @@ private:
     void*          TextIBMapped = nullptr;
     uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
-    static constexpr uint32_t MaxMaterials = 32;
+    static constexpr uint32_t MaxMaterials = 96;   // RPS HUD (#85): grid LUT + panel/plate/icon materials
     VkSampler             Sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool      DescriptorPool = VK_NULL_HANDLE;

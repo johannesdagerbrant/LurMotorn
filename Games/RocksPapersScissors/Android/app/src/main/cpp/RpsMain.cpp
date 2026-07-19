@@ -92,18 +92,16 @@ void HandleCmd(android_app* App, int32_t Cmd) {
     }
 }
 
-// Touch: the bottom strip is the 4 production buttons (tap x -> unit type); a drag in
-// the play area above pans the camera (design §9). View-only camera; buttons -> the
-// lockstep input stream.
+// Touch: taps go to the HUD first (production plates + opponent selector — the view
+// owns the hit rects, #85); a drag in the play area pans the camera (design §9).
+// View-only camera; plate presses -> the lockstep input stream.
 int32_t HandleInput(android_app* App, AInputEvent* Event) {
     auto* S = static_cast<AppState*>(App->userData);
     if (S == nullptr || !S->Ready || App->window == nullptr) return 0;
     if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
     const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
-    const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
     const float X = AMotionEvent_getX(Event, 0);
     const float Y = AMotionEvent_getY(Event, 0);
-    const float StripTop = H * 0.85f;
     switch (AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK) {
         case AMOTION_EVENT_ACTION_DOWN:
             S->Cam.Begin(Y);
@@ -115,11 +113,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_UP: {
             S->Cam.End();
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
-            if (Tap && Y >= StripTop && S->Started) {
-                int Btn = static_cast<int>(X / (W / 4.0f));
-                if (Btn < 0) Btn = 0;
-                if (Btn > 3) Btn = 3;
-                S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Btn));
+            if (Tap && S->Started) {
+                const int Plate = S->View.OnTap(X, Y);
+                if (Plate >= 0) S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));
             }
             return 1;
         }
@@ -173,6 +169,7 @@ void android_main(android_app* App) {
             State.Team = Team;  // drives the per-player view flip (team 1 = top, mirror so its camp is at the bottom)
             State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Session);
             State.Started = true;
+            State.View.SetLinked(true);  // opponent selector: green dot (#85)
             LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
         }
         if (State.Started) State.Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling

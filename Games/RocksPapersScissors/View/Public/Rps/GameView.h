@@ -1,4 +1,5 @@
 #pragma once
+#include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Render/Renderer.h"
 #include "Lur/Text/Font.h"
@@ -32,6 +33,14 @@ public:
 
     // World units visible vertically at this width — for the caller's camera clamp.
     static float VisibleWorldHeight(float WidthPx, float HeightPx);
+
+    // Link status for the opponent selector's dot (view-only; call when it changes).
+    void SetLinked(bool InLinked);
+
+    // Route a tap at the HUD (call before treating it as a camera drag/tap).
+    // Returns a unit type 0..3 when a production plate was pressed, -2 when the HUD
+    // consumed the tap (the opponent selector), or -1 when the tap is the world's.
+    int OnTap(float XPx, float YPx);
 
 private:
     Lur::Render::MeshHandle Quad = 0;  // one white unit quad; materials supply colour
@@ -70,6 +79,26 @@ private:
 
     Lur::Text::Font Font;
     Lur::Hud::TextField Text;
+
+    // ---- HUD (#85, locked layout): opponent dropdown above the status panel
+    // (gold | population | clock), four production plates along the bottom. ----
+    Lur::Hud::Dropdown Selector;          // engine widget — same one chess uses
+    bool Linked = false;
+    bool SelectorDirty = true;            // rebuild items when link state changes
+    Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
+    Lur::Hud::TextField ClockText;
+    float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap
+    Lur::Render::MaterialHandle PanelMat = 0;
+    Lur::Render::MaterialHandle PanelEdge = 0;
+    Lur::Render::MaterialHandle PlateBg = 0;
+    Lur::Render::MaterialHandle BarBg = 0;
+    Lur::Render::MaterialHandle GoldFlat = 0;
+    Lur::Render::MaterialHandle PlateIconMat = 0;     // plate glyph fill (#C9D3DA)
+    Lur::Render::MaterialHandle PlateIconDim = 0;     // unaffordable: dimmed
+    Lur::Render::MaterialHandle GoldIconMat = 0;      // gold glyph (costs, counter)
+
+    void RefreshSelector();
+
     bool Ready = false;
 };
 
