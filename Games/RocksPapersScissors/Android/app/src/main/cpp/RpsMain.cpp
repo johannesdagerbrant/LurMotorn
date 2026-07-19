@@ -160,8 +160,7 @@ void android_main(android_app* App) {
 
     auto PrevTime = std::chrono::steady_clock::now();
 #if LUR_INTERNAL
-    Lur::Sim::SplitMix64 Rng(0xA11CE ^ State.DeviceId.size());
-    uint64_t AutoAccumNs = 0, DiagAccumNs = 0;
+    uint64_t DiagAccumNs = 0;
 #endif
     while (!App->destroyRequested) {
         const auto Now = std::chrono::steady_clock::now();
@@ -183,14 +182,10 @@ void android_main(android_app* App) {
         if (State.Started) State.Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
 
 #if LUR_INTERNAL
-        // Dev build: auto-press random soldiers so the cross-platform match plays itself,
-        // and log the lockstep tick/desync every ~2 s so sync is observable from logcat.
+        // Dev build: log the lockstep tick/desync every ~2 s so sync is observable
+        // from logcat. (The bring-up autoplay is gone — phones are for HUMAN
+        // playtesting now; the desktop's --auto flag covers soak needs.)
         if (State.Started) {
-            AutoAccumNs += ElapsedNs;
-            if (AutoAccumNs > 700'000'000ull) {
-                AutoAccumNs = 0;
-                State.Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
-            }
             DiagAccumNs += ElapsedNs;
             if (DiagAccumNs > 2'000'000'000ull) {
                 DiagAccumNs = 0;

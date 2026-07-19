@@ -264,10 +264,10 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     if (_Started) _Lp.Tick(ElapsedNs);
 
 #if LUR_INTERNAL
-    // Dev build: auto-press random soldiers so the cross-platform match plays itself,
-    // and log the lockstep tick/desync every ~2 s so sync is observable from syslog.
-    static Lur::Sim::SplitMix64 Rng(0xA11CE);
-    static uint64_t AutoAccumNs = 0, DiagAccumNs = 0;
+    // Dev build: log the lockstep tick/desync every ~2 s so sync is observable from
+    // syslog. (The bring-up autoplay is gone — phones are for HUMAN playtesting now;
+    // the desktop's --auto flag covers soak needs.)
+    static uint64_t DiagAccumNs = 0;
     // Always-on render-health heartbeat (#73) — deliberately NOT gated on the link:
     // today's diagnosis was blinded because every periodic line needed _Started.
     static uint64_t BeatAccumNs = 0;
@@ -289,11 +289,6 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
                (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
     }
     if (_Started) {
-        AutoAccumNs += ElapsedNs;
-        if (AutoAccumNs > 700'000'000ull) {
-            AutoAccumNs = 0;
-            _Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
-        }
         DiagAccumNs += ElapsedNs;
         if (DiagAccumNs > 2'000'000'000ull) {
             DiagAccumNs = 0;
