@@ -562,8 +562,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (Step < 0) Step = 0;
         if (Step >= HintAlphaSteps) Step = HintAlphaSteps - 1;
         const float Bob = std::sin(HintAge * 4.0f) * 14.0f * HS;
-        // Just below the top panel (playtest): nearest to where the unit walked out.
-        const float Cx = WidthPx * 0.5f, Cy = TopInsetPx + 82.0f * HS + 64.0f * HS + Bob;
+        // Just below the top panel with clear margin (playtest): the whole cluster —
+        // up arrow at its highest bob — stays under the panel edge, near where the
+        // unit walked out of view.
+        const float Cx = WidthPx * 0.5f, Cy = TopInsetPx + 168.0f * HS + Bob;
         const float Pp = 56.0f * HS;
         BlitGlyph(GlyphPointer, HintPointer[Step], Cx, Cy, Pp);
         const float Aw = 22.0f * HS, Ah = 14.0f * HS;

@@ -63,7 +63,9 @@ constexpr int32_t CounterMultiplier = 3;   // attacker vs the type it beats
 constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
-constexpr int32_t WorkersPerMine = 2;      // max simultaneous diggers on one mine
+// Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
+// "room around it" proxy; separation steering spreads the diggers into a ring.
+constexpr int32_t WorkersPerMine = 6;
 constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry
 constexpr int32_t CarryCapacity = 15;      // gold per round trip
 constexpr int32_t StartGold = 60;
