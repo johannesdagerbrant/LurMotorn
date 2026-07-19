@@ -205,3 +205,21 @@ and §2's fixed 60×34 landscape field with left/right camps.*
   tempo/economy dial (raid timing, defender's advantage, worker exposure). The engine's only job now
   is to carry `WorldHeight` as a compile-time tunable with headroom; the shipping value is playtested
   in slice 3.
+
+
+---
+
+## Changelog
+
+**2026-07-19 — economy & production redesign (#84, design lock via `rps-hud-prototype.html`):**
+the economy is **gold dug from finite mines by miners** (was wood/lumberjacks/infinite trees).
+Each mine holds `MineGoldCapacity` (300 = 20 trips); a completed dig removes the carry from the
+mine (last trip takes the remainder, slot-order deterministic); at zero the mine is gone — never
+targeted, hidden by the view (which draws a gold reserve bar over live mines). Total map gold now
+bounds the economy: starvation makes the lose rule genuinely reachable and match length is
+naturally bounded. Production is **four parallel per-type queues** (replacing the single depth-4
+FIFO) with **stack acceleration**: a queue's progress advances by its queued count per tick
+(effective build time = BuildTicks / count), so deep stacks snowball and games accelerate as
+economies grow — the pacing thesis; protect it in balance passes. `MineGold[]` joined `StateHash`;
+the team hash block is now Gold/QueueCount[4]/BuildProgress[4]/SpawnCounter. **No wire change**:
+the 4-bit press mask and event codec are untouched. Implemented in commits `7a656da`..`3d918b1`.

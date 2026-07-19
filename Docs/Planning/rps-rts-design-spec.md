@@ -4,7 +4,10 @@
 > (`Games/RocksPapersScissors/`, namespace `Rps`); §7's wire details (sparse watermarks → per-tick
 > input-or-empty, 1-byte event codec, chunked resync), the §2/§3 ~64-units/side cap (raised; spatial
 > grid pulled into Phase 1), and the §6 entity layout (AoS struct → SoA arrays + snapshot handover)
-> are replaced by **`rps-rts-netcode-and-unit-system.md`**. Game design (tick phases, behavior,
+> are replaced by **`rps-rts-netcode-and-unit-system.md`**. **Also superseded (2026-07-19, #84):**
+> §3's wood/lumberjack economy (now gold/miners), §2's infinite stations (mines are FINITE and
+> vanish at zero) and §4's single depth-4 queue (now four parallel per-type queues with stack
+> acceleration) — see the living doc's changelog and `rps-hud-prototype.html` (the visual spec). Game design (tick phases, behavior,
 > economy, win rule) still stands. Issues #75/#76 are the actionable source of truth.
 
 *Working title: **Sten Sax Skog**. Two phones, BLE, LurMotorn. Purpose-built as game #2: it must stress what chess never touched (ticks, simultaneous input, continuous space, RNG, entity arrays) while staying inside the engine's thesis — derive everything from a tiny input stream.*
