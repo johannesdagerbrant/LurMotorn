@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- BLE is the cross-platform transport (see CLAUDE.md). Android 12+ split the
+         old BLUETOOTH/BLUETOOTH_ADMIN perms into these runtime permissions. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+
+    <!-- API 26-30: the pre-Android-12 Bluetooth model. BLUETOOTH/BLUETOOTH_ADMIN are
+         install-time; scanning for BLE devices additionally required location. -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <uses-feature android:name="android.hardware.vulkan.version" android:required="true" />
+
+    <application
+        android:label="@string/app_name"
+        android:hasCode="true"
+        android:allowBackup="false">
+
+        <!-- Control passes to C++ (android_main in libonlyrps.so). We subclass
+             NativeActivity in Kotlin only so the BLE shim object is loaded and
+             reachable from native code via JNI. -->
+        <activity
+            android:name=".OnlyRpsActivity"
+            android:exported="true"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density">
+            <meta-data android:name="android.app.lib_name" android:value="onlyrps" />
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

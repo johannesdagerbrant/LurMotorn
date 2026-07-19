@@ -18,13 +18,15 @@ CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 
-# Android
-Games/Chess/Android/.gradle/
-Games/Chess/Android/.kotlin/
-Games/Chess/Android/local.properties
-Games/Chess/Android/**/*.iml
+# Android (generic: covers Games/Chess and Games/RocksPapersScissors alike)
+**/.gradle/
+**/.kotlin/
+**/local.properties
+**/*.iml
 Games/Chess/Android/captures/
 Games/Chess/Android/app/release/
+Games/RocksPapersScissors/Android/captures/
+Games/RocksPapersScissors/Android/app/release/
 .idea/
 
 # Xcode / iOS
