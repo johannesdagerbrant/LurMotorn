@@ -330,10 +330,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     };
 
     // Camps render as ICONS like everything else (design lock: same tech, no bespoke
-    // geometry) — the barracks tent in the owner's viewer-relative colour.
+    // geometry) — tinted the owner's ABSOLUTE team colour (see the unit-tint note).
     const float CampPx = 4.5f * P;
-    BlitGlyph(GlyphCamp, CampMat[0 == My ? 0 : 1], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
-    BlitGlyph(GlyphCamp, CampMat[1 == My ? 0 : 1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
+    BlitGlyph(GlyphCamp, CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
+    BlitGlyph(GlyphCamp, CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
@@ -360,12 +360,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
         if (Tm == My) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }
-        const Color C = TeamTint[Tm == My ? 0 : 1];
+        // ABSOLUTE team colours (playtest: the players sit together and compare
+        // screens — team 0 is blue and team 1 red on BOTH phones, so a unit looks
+        // the same wherever you see it). HUD numbers stay viewer-relative.
+        const Color C = TeamTint[Tm];
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
-        D.Size = UnitPx;
+        D.Size = Ty == UnitMiner ? UnitPx * 1.5f : UnitPx;  // carts read bigger (playtest)
         D.U0 = static_cast<float>(Ty) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
         D.U1 = static_cast<float>(Ty + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
         // A LOADED cart shows its ore heap in COIN gold (playtest): one extra
