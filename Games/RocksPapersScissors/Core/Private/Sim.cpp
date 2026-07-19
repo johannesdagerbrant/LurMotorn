@@ -125,9 +125,16 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
 void BuildMap(Sim& S) {
     // Four trees per grove, spread across the 34-wide field.
     const Fixed Xs[TreesPerGrove] = {F(8), F(14), F(20), F(26)};
-    // Grove centre lines (portrait, §9): team0 safe/contested near the bottom camp,
-    // team1 mirrored near the top. Contested groves sit nearer mid-field (y=30).
-    const Fixed GroveY[4] = {F(12), F(24), F(48), F(36)};  // t0-safe, t0-contested, t1-safe, t1-contested
+    // Grove centre lines (portrait, §9), derived from the field height so they scale
+    // with the WorldHeight balance knob: each team's SAFE grove sits just past its camp,
+    // its CONTESTED grove nearer mid-field (shorter walk, higher risk — spec §2).
+    const int32_t Mid = WorldHeight.ToInt() / 2;
+    const Fixed GroveY[4] = {
+        F(CampInset + 6),                          // t0 safe   (near the bottom camp)
+        F(Mid - 6),                                // t0 contested (toward mid)
+        F(WorldHeight.ToInt() - CampInset - 6),    // t1 safe   (near the top camp)
+        F(Mid + 6),                                // t1 contested (toward mid)
+    };
     int32_t Idx = 0;
     for (int G = 0; G < 4; ++G)
         for (int K = 0; K < TreesPerGrove; ++K) {

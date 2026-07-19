@@ -77,14 +77,18 @@ constexpr int32_t RingSlots = 8;           // deterministic spawn ring (SpawnCou
 // PORTRAIT: short axis = width (fills the screen), long axis = height (scrollable).
 // These are FIXED sim constants, identical on both peers — never a device readout.
 constexpr Fixed WorldWidth = F(34);
-constexpr Fixed WorldHeight = F(60);        // slice-3 balance knob (design doc §8/§9)
-constexpr Fixed MaxWorldHeight = F(120);    // headroom the (future) grid arrays size to
+// Taller than a phone screen so the camera actually scrolls (§9): a portrait phone
+// shows ~(h/w)*WorldWidth ≈ 75 world-units tall, so 120 means your camp sits at the
+// bottom and you swipe up toward the enemy. The slice-3 balance knob for tempo.
+constexpr Fixed WorldHeight = F(120);
+constexpr Fixed MaxWorldHeight = F(160);    // headroom the grid arrays size to
 
 // Camps at the two SHORT ends — team 0 bottom, team 1 top (spec §2, rotated to
 // portrait). A camp is a location (spawn point + wood drop-off), never an entity.
+constexpr int32_t CampInset = 6;            // camp distance in from each short end
 constexpr Fixed CampX = F(17);              // centred on the 34-wide field
-constexpr Fixed Camp0Y = F(6);
-constexpr Fixed Camp1Y = F(54);
+constexpr Fixed Camp0Y = F(CampInset);
+constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 
 // ---- Movement / steering (spec §5) ----
 constexpr Fixed SeparationRadius = F(1);    // same-team push range
