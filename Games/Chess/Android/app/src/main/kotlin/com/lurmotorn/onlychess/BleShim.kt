@@ -23,6 +23,8 @@ import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelUuid
 import android.util.Log
 import java.util.UUID
@@ -124,6 +126,14 @@ class BleShim(private val context: Context) {
     @Volatile private var linked = false
     @Volatile private var connecting = false   // an outgoing central attempt is mid-flight
     @Volatile private var decidedPeripheral = false  // we settled as peripheral; stop connecting out
+
+    // Discovery watchdog (#79): cached-role one-sidedness is keyed to a peer identity
+    // we have NOT verified this session — if the peer re-rolled its GUID
+    // (reset/reinstall), advertise-only leaves BOTH phones deaf forever. Any unlinked
+    // stretch longer than the watchdog drops the gates and resumes the symmetric
+    // dance; the fresh in-band tie-break then re-caches the true role.
+    private val watchdogHandler = Handler(Looper.getMainLooper())
+    private val discoveryWatchdog = Runnable { onDiscoveryWatchdog() }
 
     init {
         nativeSetShim()
@@ -246,6 +256,23 @@ class BleShim(private val context: Context) {
             startAdvertising()
             startScanning()
         }
+        armDiscoveryWatchdog()  // #79: one-sidedness may not outlive the watchdog
+    }
+
+    private fun armDiscoveryWatchdog() {
+        watchdogHandler.removeCallbacks(discoveryWatchdog)
+        if (!linked) watchdogHandler.postDelayed(discoveryWatchdog, 8000)
+    }
+
+    @Synchronized
+    private fun onDiscoveryWatchdog() {
+        if (linked) return
+        Log.i(TAG, "discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)")
+        decidedPeripheral = false
+        connecting = false
+        startAdvertising()
+        startScanning()
+        armDiscoveryWatchdog()  // keep watching until a link forms
     }
 
     private fun startAdvertising() {
@@ -295,6 +322,7 @@ class BleShim(private val context: Context) {
     private fun onLinked(asPeripheral: Boolean) {
         if (linked) return
         linked = true
+        watchdogHandler.removeCallbacks(discoveryWatchdog)  // #79: link up, stop watching
         stopScanning()
         stopAdvertising()
         nativeOnConnected(asPeripheral)
@@ -541,6 +569,7 @@ class BleShim(private val context: Context) {
                 startAdvertising()  // ensure findable even if we began in cached-central mode
                 dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer
                 Log.i(TAG, "central attempt -> we are peripheral; deferring to peer")
+                armDiscoveryWatchdog()  // #79: if the peer never comes, go symmetric again
             }
         }
 

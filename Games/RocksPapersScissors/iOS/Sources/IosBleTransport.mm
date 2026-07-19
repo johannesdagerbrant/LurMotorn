@@ -107,6 +107,14 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _HaveCachedRole;   // _PeerId known from a prior link
     bool _CachedPeripheral; // ...and our stable role for it is peripheral
 
+    // Discovery watchdog (#79): the cached role (#17 fast-path) is keyed to a peer
+    // identity we have NOT verified this session. If the peer re-rolled its GUID
+    // (reset/reinstall), one-sided gates leave BOTH devices deaf forever — we
+    // advertise-only while the peer defers to us. Any unlinked stretch longer than
+    // this drops the gates and resumes the full symmetric dance; the fresh in-band
+    // tie-break then re-caches the true role.
+    NSTimer* _DiscoveryWatchdog;
+
     // Central-side state (we connected OUT to a peer's GATT server).
     CBPeripheral*     _PeerDevice;
     CBCharacteristic* _RemoteDatagram;
@@ -244,10 +252,37 @@ static void SaveIosPeerId(const std::string& Id) {
 }
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
+    [_DiscoveryWatchdog invalidate];
+    _DiscoveryWatchdog = nil;
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
     // The net Session sends the first Hello once it sees the link up — no demo ping
     // (a bare 1-byte ping would now look like a move).
+}
+
+// #79: while unlinked, one-sided cached-role behaviour may only last one watchdog
+// period. Runs on the main runloop (same thread as every CB callback here).
+- (void)armDiscoveryWatchdog {
+    [_DiscoveryWatchdog invalidate];
+    if (_Linked) return;
+    _DiscoveryWatchdog = [NSTimer scheduledTimerWithTimeInterval:8.0
+                                                          target:self
+                                                        selector:@selector(discoveryWatchdogFired)
+                                                        userInfo:nil
+                                                         repeats:NO];
+}
+
+- (void)discoveryWatchdogFired {
+    if (_Linked) return;
+    NSLog(@"OnlyRps BLE: discovery watchdog: no link in 8s - dropping cached-role "
+          @"gates, going symmetric (#79)");
+    _HaveCachedRole = _CachedPeripheral = _DecidedPeripheral = false;
+    _Connecting = false;
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    if (_Central.state == CBManagerStatePoweredOn)
+        [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
+    [self advertiseService];
+    [self armDiscoveryWatchdog];  // keep watching until a link forms
 }
 
 - (void)advertiseService {
@@ -283,6 +318,7 @@ static void SaveIosPeerId(const std::string& Id) {
     if (_Central.state == CBManagerStatePoweredOn && [self shouldScan])
         [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
     [self advertiseService];  // gated internally by shouldAdvertise
+    [self armDiscoveryWatchdog];  // #79: one-sidedness may not outlive the watchdog
 }
 
 // ===========================================================================
@@ -296,6 +332,7 @@ static void SaveIosPeerId(const std::string& Id) {
     } else {
         NSLog(@"OnlyRps BLE: central powered on, cached PERIPHERAL role -> not scanning");
     }
+    [self armDiscoveryWatchdog];  // #79: one-sidedness may not outlive the watchdog
 }
 
 - (void)centralManager:(CBCentralManager*)central
@@ -379,6 +416,7 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
             [_Central stopScan];
             [self advertiseService];  // ensure findable even if we began in cached-central mode
             [_Central cancelPeripheralConnection:peripheral];
+            [self armDiscoveryWatchdog];  // #79: if the peer never comes, go symmetric again
         }
     } else if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.value) {
         [self deliverInbound:characteristic.value];   // peer -> us datagram
