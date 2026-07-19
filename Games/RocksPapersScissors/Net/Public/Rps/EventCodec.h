@@ -1,5 +1,7 @@
 #pragma once
+#include <cstddef>
 #include <cstdint>
+#include <vector>
 
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
@@ -41,6 +43,53 @@ inline bool DecodeEvent(Lur::Serialization::BitReader& R, uint32_t& Delta, uint8
     const uint32_t Nib = R.ReadBits(4);
     Mask = static_cast<uint8_t>(R.ReadBits(4));
     Delta = Nib < EventDeltaInline ? Nib : static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    return R.IsOk();
+}
+
+// ---- Resync: the SAME event codec, chunked for the cold-rejoin / blip path (design §4).
+// A dense input-history stream (one mask per tick from FirstTick) is framed into chunks,
+// each no larger than MaxResyncChunkBytes so nothing exceeds the transport's framed
+// payload cap (chess's #74 marathon-wedge is designed out): [varint firstTick][varint
+// count][count dense events]. Blip = one small chunk; cold rejoin = the whole history in
+// order (reliable GATT makes reassembly an append). Worst case (mask-per-tick collapse):
+// a 15-min game is ≤ 9 KB ≈ 18 chunks per stream. The rejoiner free-runs the decoded
+// stream through a fresh sim (the replay law), then snaps to the frontier.
+constexpr std::size_t MaxResyncChunkBytes = 512;
+constexpr std::size_t ResyncTicksPerChunk = 500;  // 500 x 1-byte events + a ~6-byte header < 512
+
+inline std::vector<std::vector<uint8_t>> EncodeResyncChunks(uint32_t FirstTick,
+                                                            const std::vector<uint8_t>& Masks) {
+    std::vector<std::vector<uint8_t>> Chunks;
+    std::size_t I = 0;
+    while (I < Masks.size()) {
+        const std::size_t Count =
+            (Masks.size() - I) < ResyncTicksPerChunk ? (Masks.size() - I) : ResyncTicksPerChunk;
+        Lur::Serialization::BitWriter W;
+        Lur::Serialization::WriteVarUint(W, FirstTick + static_cast<uint32_t>(I));
+        Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(Count));
+        for (std::size_t K = 0; K < Count; ++K) EncodeEvent(W, 1, Masks[I + K]);  // dense: delta 1
+        const std::vector<uint8_t>& B = W.Finish();
+        Chunks.emplace_back(B.begin(), B.end());
+        I += Count;
+    }
+    return Chunks;
+}
+
+// Decode one chunk, appending its masks to OutMasks (reliable ordered transport delivers
+// chunks in order, so reassembly is an append). Returns false on a malformed/hostile
+// chunk — total, never traps.
+inline bool DecodeResyncChunk(const uint8_t* Data, std::size_t N, uint32_t& OutFirstTick,
+                              std::vector<uint8_t>& OutMasks) {
+    Lur::Serialization::BitReader R(Data, N);
+    OutFirstTick = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    const uint32_t Count = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    if (!R.IsOk() || Count > 100000u) return false;  // sanity bound vs hostile input
+    for (uint32_t K = 0; K < Count; ++K) {
+        uint32_t D = 0;
+        uint8_t M = 0;
+        if (!DecodeEvent(R, D, M)) return false;
+        OutMasks.push_back(M);
+    }
     return R.IsOk();
 }
 

@@ -104,6 +104,44 @@ static void TestFuzzDecode() {
     CHECK(true);  // reaching here without a crash/hang is the assertion
 }
 
+// Replay a recorded/reassembled (mask0, mask1) stream into a fresh sim -> final hash.
+static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
+                           const std::vector<uint8_t>& M1) {
+    static Sim S;
+    S.Init(Seed);
+    const std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
+    for (std::size_t I = 0; I < N; ++I) S.Step(M0[I], M1[I]);
+    return S.StateHash();
+}
+
+// ---- Resync: chunk a full input history, reassemble, replay hash-identical (§4) ----
+static void TestResyncChunking() {
+    constexpr int Ticks = 9000;  // ~15 min at 10 Hz — the worst-case bound
+    std::vector<uint8_t> M0, M1;
+    SplitMix64 Rng(0x1234);
+    for (int T = 0; T < Ticks; ++T) {
+        M0.push_back(static_cast<uint8_t>(Rng.NextBounded(16)));
+        M1.push_back(static_cast<uint8_t>(Rng.NextBounded(16)));
+    }
+
+    const auto C0 = EncodeResyncChunks(0, M0);
+    const auto C1 = EncodeResyncChunks(0, M1);
+    // Byte budget: no chunk exceeds the framed cap; the whole history is a handful of them.
+    for (const auto& C : C0) CHECK(C.size() <= MaxResyncChunkBytes);
+    CHECK(C0.size() <= 20);  // 9000/500 ~ 18 chunks/stream
+
+    // Reassemble (append in order, as reliable transport delivers) and check exactness.
+    std::vector<uint8_t> D0, D1;
+    uint32_t Ft = 0;
+    for (const auto& C : C0) CHECK(DecodeResyncChunk(C.data(), C.size(), Ft, D0));
+    for (const auto& C : C1) CHECK(DecodeResyncChunk(C.data(), C.size(), Ft, D1));
+    CHECK(D0 == M0 && D1 == M1);
+
+    // Free-run the reassembled history through a fresh sim -> the frontier state, identical
+    // to a direct run (the replay law the cold-rejoin path relies on).
+    CHECK(ReplayHash(0xAA, D0, D1) == ReplayHash(0xAA, M0, M1));
+}
+
 // ---- Lockstep harness: a QUEUED link (models the real deferred delivery / Pump, and
 // avoids the synchronous re-entrancy hazard a naive loopback has). ----
 struct Outbox {
@@ -148,14 +186,6 @@ static void TestLockstepStaysInSync() {
 }
 
 // ---- Flight-recorder replay: a recorded match replays to a hash-identical state ----
-static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
-                           const std::vector<uint8_t>& M1) {
-    static Sim S;
-    S.Init(Seed);
-    const std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
-    for (std::size_t I = 0; I < N; ++I) S.Step(M0[I], M1[I]);
-    return S.StateHash();
-}
 static void TestLockstepReplayHashIdentical() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
@@ -319,6 +349,7 @@ int main() {
     TestByteBudget();
     TestStreamAbsoluteTicks();
     TestFuzzDecode();
+    TestResyncChunking();
     TestLockstepStaysInSync();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
