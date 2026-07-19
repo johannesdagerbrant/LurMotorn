@@ -147,6 +147,40 @@ static void TestLockstepStaysInSync() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical state
 }
 
+// ---- Flight-recorder replay: a recorded match replays to a hash-identical state ----
+static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
+                           const std::vector<uint8_t>& M1) {
+    static Sim S;
+    S.Init(Seed);
+    const std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
+    for (std::size_t I = 0; I < N; ++I) S.Step(M0[I], M1[I]);
+    return S.StateHash();
+}
+static void TestLockstepReplayHashIdentical() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x77, 0, Enqueue, &Qa);
+    B.Init(0x77, 1, Enqueue, &Qb);
+    A.SetRecording(true);  // record the executed stream
+
+    SplitMix64 Rng(0xF00D);
+    for (int I = 0; I < 200; ++I) {
+        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    for (int I = 0; I < 4; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+
+    CHECK(A.RecordedTeam0().size() == A.ExecTick());  // recorded every executed tick
+    // Feed the recording into a FRESH sim -> must land on the same state (the replay law).
+    const uint64_t Replayed = ReplayHash(A.Seed(), A.RecordedTeam0(), A.RecordedTeam1());
+    CHECK(Replayed == A.GetSim().StateHash());
+    CHECK(Replayed == B.GetSim().StateHash());  // both peers, one recording
+}
+
 // ---- Injected divergence trips the anchor hash ----
 // (The seed is currently gameplay-inert — the v1 map is fixed + mirrored and no RNG
 // runs in the tick, per spec §2 — so we inject a genuine state divergence and prove the
@@ -286,6 +320,7 @@ int main() {
     TestStreamAbsoluteTicks();
     TestFuzzDecode();
     TestLockstepStaysInSync();
+    TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
     TestLockstepCeilingStallAndResume();
     TestLockstepOverSessionLoopback();

@@ -20,6 +20,8 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     Desync = false;
     MyHash.clear();
     PeerHash.clear();
+    RecM0.clear();
+    RecM1.clear();
 }
 
 void LockstepPeer::ProduceAndSend(uint8_t Mask) {
@@ -53,6 +55,7 @@ void LockstepPeer::Execute() {
         const uint8_t M0 = MyTeam == 0 ? Lm : Pm;
         const uint8_t M1 = MyTeam == 0 ? Pm : Lm;
         TheSim.Step(M0, M1);
+        if (Recording) { RecM0.push_back(M0); RecM1.push_back(M1); }
         if (TheSim.Tick % 10 == 0) EmitAnchor();
     }
 }

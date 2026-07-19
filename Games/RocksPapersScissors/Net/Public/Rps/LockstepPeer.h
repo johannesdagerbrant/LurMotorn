@@ -58,6 +58,15 @@ public:
     bool Desynced() const { return Desync; }
     bool Stalled() const { return TheSim.Tick < WallTicks; }  // behind wallclock = waiting on peer
 
+    // Flight recording (opt-in, off by default so it costs nothing): capture the
+    // executed (mask0, mask1) per tick so a fresh Sim can replay the whole match to a
+    // hash-identical state — the replay law (design §1), and the post-mortem dump on a
+    // desync. Both peers execute the SAME stream, so either peer's recording replays both.
+    void SetRecording(bool On) { Recording = On; }
+    uint64_t Seed() const { return TheSim.Seed; }
+    const std::vector<uint8_t>& RecordedTeam0() const { return RecM0; }
+    const std::vector<uint8_t>& RecordedTeam1() const { return RecM1; }
+
 private:
     void ProduceAndSend(uint8_t Mask);
     void Execute();
@@ -76,6 +85,9 @@ private:
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;
+
+    bool Recording = false;
+    std::vector<uint8_t> RecM0, RecM1;  // executed masks per tick (only while Recording)
 
     SendFn Send = nullptr;
     void* Ctx = nullptr;
