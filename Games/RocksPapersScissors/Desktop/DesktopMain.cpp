@@ -26,6 +26,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Loopback.h"
+#include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/SimRunner.h"
@@ -69,9 +70,8 @@ struct Peer {
     Rps::Snapshot Snap;
     uint32_t LastTick = 0xFFFFFFFFu;
     uint64_t TickLandedNs = 0;
-    float CameraY = 0.0f;
-    bool Dragging = false;
-    float PrevTouchY = 0.0f;
+    Rps::CameraScroll Cam;
+    uint8_t Team = 0;
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
@@ -98,7 +98,7 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
     return true;
 }
 
-void RenderPeer(Peer& P, uint64_t Now) {
+void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
     int W = 0, H = 0;
     P.Win.GetSize(&W, &H);
     if (W <= 0 || H <= 0) return;
@@ -108,10 +108,9 @@ void RenderPeer(Peer& P, uint64_t Now) {
     P.Snap.CaptureFrom(P.Lp.GetSim(), P.TickLandedNs, kStepNs);
     const float VisibleH = static_cast<float>(H) / Ppu();
     const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-    if (P.CameraY < 0.0f) P.CameraY = 0.0f;
-    if (P.CameraY > MaxCam) P.CameraY = MaxCam;
-    P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.CameraY, static_cast<float>(W),
-                  static_cast<float>(H));
+    P.Cam.Update(DtSec, MaxCam);
+    P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.Cam.Y, static_cast<float>(W),
+                  static_cast<float>(H), P.Team == 1);
 }
 
 void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t ElapsedNs,
@@ -119,14 +118,11 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
     for (uint32_t Vk : P.Win.TakeKeys())
         if (Vk >= 0x31 && Vk <= 0x34) P.Lp.SetLocalMask(static_cast<uint8_t>(1u << (Vk - 0x31)));
     for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
-        if (T.Phase == Lur::Input::ETouchPhase::Began) { P.Dragging = true; P.PrevTouchY = T.YPx; }
-        else if (T.Phase == Lur::Input::ETouchPhase::Moved && P.Dragging) {
-            P.CameraY -= (T.YPx - P.PrevTouchY) / Ppu();
-            P.PrevTouchY = T.YPx;
-        } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                   T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-            P.Dragging = false;
-        }
+        if (T.Phase == Lur::Input::ETouchPhase::Began) P.Cam.Begin(T.YPx);
+        else if (T.Phase == Lur::Input::ETouchPhase::Moved) P.Cam.Move(T.YPx, Ppu());
+        else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
+                 T.Phase == Lur::Input::ETouchPhase::Cancelled)
+            P.Cam.End();
     }
 #if LUR_INTERNAL
     if (Auto) {
@@ -172,6 +168,8 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
             // Each peer derives its team from the two GUIDs identically (smaller = team 0).
             const uint8_t ATeam = A->Guid < A->Session.GetPeerGuid() ? 0 : 1;
             const uint8_t BTeam = B->Guid < B->Session.GetPeerGuid() ? 0 : 1;
+            A->Team = ATeam;
+            B->Team = BTeam;
             A->Lp.Init(Seed, ATeam, SendViaSession, &A->Session);
             B->Lp.Init(Seed, BTeam, SendViaSession, &B->Session);
             Started = true;
@@ -187,8 +185,9 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
                 Lur::Log::Error("DESYNC detected (tick A=%u B=%u)", A->Lp.ExecTick(), B->Lp.ExecTick());
         }
 
-        RenderPeer(*A, Now);
-        RenderPeer(*B, Now);
+        const float DtSec = static_cast<float>(ElapsedNs) / 1.0e9f;
+        RenderPeer(*A, Now, DtSec);
+        RenderPeer(*B, Now, DtSec);
 
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
             Lur::Log::Info("rendered %d frames headless (started=%d ticks A=%u B=%u desync=%d) - exiting",
@@ -229,9 +228,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
     auto Runner = std::make_unique<Rps::SimRunner>();
     Runner->Start(Seed, SampleSolo, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress));
 
-    float CameraY = 0.0f;
-    bool Dragging = false;
-    float PrevTouchY = 0.0f;
+    Rps::CameraScroll Cam;
     Lur::Sim::SplitMix64 Rng(Seed ^ 0xA11CE);
     uint64_t AutoAccumNs = 0, PrevNs = NowNs();
     static Rps::Snapshot Snap;
@@ -246,14 +243,11 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
             else if (Vk >= 0x35 && Vk <= 0x38) In.P1.fetch_or(static_cast<uint8_t>(1u << (Vk - 0x35)));
         }
         for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
-            if (T.Phase == Lur::Input::ETouchPhase::Began) { Dragging = true; PrevTouchY = T.YPx; }
-            else if (T.Phase == Lur::Input::ETouchPhase::Moved && Dragging) {
-                CameraY -= (T.YPx - PrevTouchY) / Ppu();
-                PrevTouchY = T.YPx;
-            } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                       T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-                Dragging = false;
-            }
+            if (T.Phase == Lur::Input::ETouchPhase::Began) Cam.Begin(T.YPx);
+            else if (T.Phase == Lur::Input::ETouchPhase::Moved) Cam.Move(T.YPx, Ppu());
+            else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
+                     T.Phase == Lur::Input::ETouchPhase::Cancelled)
+                Cam.End();
         }
 #if LUR_INTERNAL
         if (Auto) {
@@ -273,10 +267,9 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
             if (W > 0 && H > 0) {
                 const float VisibleH = static_cast<float>(H) / Ppu();
                 const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-                if (CameraY < 0.0f) CameraY = 0.0f;
-                if (CameraY > MaxCam) CameraY = MaxCam;
-                View.Render(Renderer, Snap, Snap.AlphaAt(Now), CameraY, static_cast<float>(W),
-                            static_cast<float>(H));
+                Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);
+                View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, static_cast<float>(W),
+                            static_cast<float>(H), /*FlipY=*/false);  // solo = team-0 view
             }
         }
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {

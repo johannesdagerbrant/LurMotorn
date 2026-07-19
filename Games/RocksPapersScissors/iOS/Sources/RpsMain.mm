@@ -22,6 +22,7 @@
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Ble.h"
+#include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/Snapshot.h"
@@ -72,9 +73,9 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     bool _Started;
     uint32_t _LastTick;
     uint64_t _TickLandedNs;
-    float _CameraY;
-    bool _Dragging;
-    float _DownX, _DownY, _PrevY;
+    Rps::CameraScroll _Cam;
+    float _DownX, _DownY;
+    uint8_t _Team;
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
     bool _Ready;
@@ -148,6 +149,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     _Session.Tick(ElapsedNs);  // pump the BLE inbox + handshake/liveness
     if (!_Started && _Session.IsReady()) {
         const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
+        _Team = Team;  // per-player view flip
         _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
         _Started = true;
         os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
@@ -182,9 +184,8 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     _Snap.CaptureFrom(_Lp.GetSim(), _TickLandedNs, kStepNs);
     const float VisibleH = H / Ppu(W);
     const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-    if (_CameraY < 0.0f) _CameraY = 0.0f;
-    if (_CameraY > MaxCam) _CameraY = MaxCam;
-    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _CameraY, W, H);
+    _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);  // momentum + clamp
+    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1);
 }
 
 // Touch: the bottom strip is the 4 production buttons; a drag above pans the camera (§9).
@@ -192,22 +193,19 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     if (!_Ready) return;
     const CGFloat S = [self metalLayer].contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
-    _Dragging = true;
-    _DownX = static_cast<float>(P.x * S); _DownY = static_cast<float>(P.y * S); _PrevY = _DownY;
+    _Cam.Begin(static_cast<float>(P.y * S));
+    _DownX = static_cast<float>(P.x * S); _DownY = static_cast<float>(P.y * S);
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready || !_Dragging) return;
+    if (!_Ready) return;
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat S = Layer.contentsScale;
     const float Y = static_cast<float>([touches.anyObject locationInView:self.view].y * S);
-    if (Y < Layer.drawableSize.height * 0.85f) {
-        _CameraY -= (Y - _PrevY) / Ppu(static_cast<float>(Layer.drawableSize.width));
-        _PrevY = Y;
-    }
+    _Cam.Move(Y, Ppu(static_cast<float>(Layer.drawableSize.width)));  // content-drag
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
-    _Dragging = false;
+    _Cam.End();
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat S = Layer.contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];

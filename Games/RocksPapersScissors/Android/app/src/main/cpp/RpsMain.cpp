@@ -21,6 +21,7 @@
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Ble.h"
+#include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/Snapshot.h"
@@ -62,9 +63,9 @@ struct AppState {
     Rps::Snapshot Snap;
     uint32_t LastTick = 0xFFFFFFFFu;
     uint64_t TickLandedNs = 0;
-    float CameraY = 0.0f;
-    bool Dragging = false;
-    float DownX = 0.0f, DownY = 0.0f, PrevY = 0.0f;
+    Rps::CameraScroll Cam;
+    float DownX = 0.0f, DownY = 0.0f;
+    uint8_t Team = 0;
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
@@ -105,17 +106,14 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     const float StripTop = H * 0.85f;
     switch (AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK) {
         case AMOTION_EVENT_ACTION_DOWN:
-            S->Dragging = true;
-            S->DownX = X; S->DownY = Y; S->PrevY = Y;
+            S->Cam.Begin(Y);
+            S->DownX = X; S->DownY = Y;
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
-            if (S->Dragging && Y < StripTop) {
-                S->CameraY -= (Y - S->PrevY) / Ppu(W);  // grab-the-world pan
-                S->PrevY = Y;
-            }
+            S->Cam.Move(Y, Ppu(W));  // content-drag (the CameraScroll handles the feel)
             return 1;
         case AMOTION_EVENT_ACTION_UP: {
-            S->Dragging = false;
+            S->Cam.End();
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
             if (Tap && Y >= StripTop && S->Started) {
                 int Btn = static_cast<int>(X / (W / 4.0f));
@@ -172,6 +170,7 @@ void android_main(android_app* App) {
         if (!State.Started && State.Session.IsReady()) {
             // Team from GUID order (both phones derive it identically; smaller = team 0).
             const uint8_t Team = State.DeviceId < State.Session.GetPeerGuid() ? 0 : 1;
+            State.Team = Team;  // drives the per-player view flip (team 1 = top, mirror so its camp is at the bottom)
             State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Session);
             State.Started = true;
             LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
@@ -213,9 +212,9 @@ void android_main(android_app* App) {
             State.Snap.CaptureFrom(State.Lp.GetSim(), State.TickLandedNs, kStepNs);
             const float VisibleH = H / Ppu(W);
             const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-            if (State.CameraY < 0.0f) State.CameraY = 0.0f;
-            if (State.CameraY > MaxCam) State.CameraY = MaxCam;
-            State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.CameraY, W, H);
+            State.Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);  // momentum + clamp
+            State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.Cam.Y, W, H,
+                              State.Team == 1);
         }
     }
 

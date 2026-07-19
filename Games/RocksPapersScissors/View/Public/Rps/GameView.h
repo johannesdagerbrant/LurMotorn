@@ -25,8 +25,10 @@ public:
     // Prev->Pos. Owns the full BeginFrame..EndFrame. Non-const: fills the instance
     // scratch buffer each frame (units draw as ONE instanced call, interpolated in the
     // vertex shader).
+    // FlipY mirrors the field vertically for the top player (team 1) so BOTH players see
+    // their own camp at the bottom (§9's per-player view flip). View-only, per-device.
     void Render(Lur::Render::IRenderer* Renderer, const Snapshot& Snap, float Alpha,
-                float CameraY, float WidthPx, float HeightPx);
+                float CameraY, float WidthPx, float HeightPx, bool FlipY);
 
     // World units visible vertically at this width — for the caller's camera clamp.
     static float VisibleWorldHeight(float WidthPx, float HeightPx);

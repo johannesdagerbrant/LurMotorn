@@ -71,14 +71,18 @@ void GameView::CreateResources(IRenderer* Renderer) {
 }
 
 void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, float CameraY,
-                      float WidthPx, float HeightPx) {
+                      float WidthPx, float HeightPx, bool FlipY) {
     if (!Ready) return;
     const float P = Ppu(WidthPx);
+    const float WHf = FW(WorldHeight);
 
     // World -> screen. Pixel space is Y-DOWN (MakeOrthoCamera); world Y grows UP (your
     // camp at small Y sits at the bottom), so flip: Wy == CameraY lands at the bottom.
+    // FlipY mirrors the field vertically for the TOP player (team 1) so both players see
+    // their own camp at the bottom (§9). The flip is baked here; the camera (which is in
+    // this flipped space) and the content-drag are unchanged.
     auto SX = [&](float Wx) { return Wx * P; };
-    auto SY = [&](float Wy) { return HeightPx - (Wy - CameraY) * P; };
+    auto SY = [&](float Wy) { const float Fy = FlipY ? WHf - Wy : Wy; return HeightPx - (Fy - CameraY) * P; };
 
     // Centre a Wpx x Hpx quad at screen (Cx, Cy).
     auto Blit = [&](Lur::Render::MaterialHandle Mat, float Cx, float Cy, float Wpx, float Hpx) {
