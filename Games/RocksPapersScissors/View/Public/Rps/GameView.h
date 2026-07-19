@@ -37,6 +37,17 @@ public:
     // Link status for the opponent selector's dot (view-only; call when it changes).
     void SetLinked(bool InLinked);
 
+    // OS safe-area insets in pixels: the HUD's top block (dropdown + panel) starts
+    // below TopPx (status bar / notch) and the production plates sit above BottomPx
+    // (Android navigation bar / iOS home indicator). View-only, per-device.
+    void SetInsets(float TopPx, float BottomPx) { TopInsetPx = TopPx; BottomInsetPx = BottomPx; }
+
+    // Heights in WORLD units of the HUD blocks at this width. The mains extend the
+    // camera range by these (MinCam = -Bottom, MaxCam += Top) so BOTH camps scroll
+    // clear of the chrome: yours above the plates, the enemy's below the top panel.
+    float BottomHudWorldUnits(float WidthPx) const;
+    float TopHudWorldUnits(float WidthPx) const;
+
     // Route a tap at the HUD (call before treating it as a camera drag/tap).
     // Returns a unit type 0..3 when a production plate was pressed, -2 when the HUD
     // consumed the tap (the opponent selector), or -1 when the tap is the world's.
@@ -83,6 +94,8 @@ private:
     // ---- HUD (#85, locked layout): opponent dropdown above the status panel
     // (gold | population | clock), four production plates along the bottom. ----
     Lur::Hud::Dropdown Selector;          // engine widget — same one chess uses
+    float TopInsetPx = 0.0f;              // OS safe areas (status bar / nav bar)
+    float BottomInsetPx = 0.0f;
     bool Linked = false;
     bool SelectorDirty = true;            // rebuild items when link state changes
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock

@@ -64,6 +64,7 @@ struct AppState {
     uint32_t LastTick = 0xFFFFFFFFu;
     uint64_t TickLandedNs = 0;
     Rps::CameraScroll Cam;
+    bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     float DownX = 0.0f, DownY = 0.0f;
     uint8_t Team = 0;
 };
@@ -80,7 +81,14 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                 S->Renderer = Lur::Render::VulkanRenderer::Create();
                 S->Ready = S->Renderer && S->Renderer->Init(App->window);
                 LOGI("Renderer init: %s", S->Ready ? "ok" : "failed");
-                if (S->Ready) S->View.CreateResources(S->Renderer);
+                if (S->Ready) {
+                    S->View.CreateResources(S->Renderer);
+                    // OS safe areas (#85 feedback): status bar above the HUD, nav bar
+                    // below the plates. dp values scaled by the device density — the
+                    // proper WindowInsets seam is the phase-2 window-metrics item.
+                    const float Dpx = static_cast<float>(AConfiguration_getDensity(App->config)) / 160.0f;
+                    S->View.SetInsets(28.0f * Dpx, 56.0f * Dpx);
+                }
             }
             break;
         case APP_CMD_TERM_WINDOW:
@@ -212,8 +220,11 @@ void android_main(android_app* App) {
             if (State.Lp.ExecTick() != State.LastTick) { State.LastTick = State.Lp.ExecTick(); State.TickLandedNs = NowStamp; }
             State.Snap.CaptureFrom(State.Lp.GetSim(), State.TickLandedNs, kStepNs);
             const float VisibleH = H / Ppu(W);
-            const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-            State.Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);  // momentum + clamp
+            const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
+            const float MaxCam = FieldMax + State.View.TopHudWorldUnits(W);
+            const float MinCam = -State.View.BottomHudWorldUnits(W);
+            if (!State.CamInit) { State.Cam.Y = MinCam; State.CamInit = true; }
+            State.Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
             State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.Cam.Y, W, H,
                               State.Team == 1);
         }

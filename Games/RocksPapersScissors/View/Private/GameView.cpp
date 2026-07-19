@@ -27,6 +27,13 @@ using Lur::Math::Mat4;
 float FW(Fixed F) { return static_cast<float>(F.Raw) / static_cast<float>(Fixed::One); }
 float Ppu(float WidthPx) { return WidthPx / FW(WorldWidth); }  // pixels per world unit (fill width)
 
+// HUD metrics scale with the framebuffer width (baseline = the 360 px desktop window),
+// like the prototype's viewport-relative units — a 1080-wide phone gets 3x text/icons.
+float HudScale(float WidthPx) {
+    const float S = WidthPx / 360.0f;
+    return S < 1.0f ? 1.0f : S;
+}
+
 Lur::Render::MaterialHandle FlatMat(IRenderer* R, Color C) {
     MaterialDesc D;
     D.BaseColor = 0;  // flat white
@@ -104,6 +111,21 @@ Lur::Render::MeshHandle MakeGradientStrip(IRenderer* R, const GradStop* Stops, i
 
 float GameView::VisibleWorldHeight(float WidthPx, float HeightPx) {
     return HeightPx / Ppu(WidthPx);
+}
+
+float GameView::BottomHudWorldUnits(float WidthPx) const {
+    const float HS = HudScale(WidthPx);
+    const float Pad = 8.0f * HS, Gap = 6.0f * HS;
+    const float PlateW = (WidthPx - 2.0f * Pad - 3.0f * Gap) / 4.0f;
+    // nav-bar inset + plate block + a margin so the camp sits WELL above the plates
+    return (BottomInsetPx + Pad + PlateW * 1.02f + 3.0f * Pad) / Ppu(WidthPx);
+}
+
+float GameView::TopHudWorldUnits(float WidthPx) const {
+    const float HS = HudScale(WidthPx);
+    // status-bar inset + dropdown block + status panel + a margin, mirroring the
+    // bottom: the ENEMY camp must clear the top chrome at max scroll-up.
+    return (TopInsetPx + 82.0f * HS + 24.0f * HS) / Ppu(WidthPx);
 }
 
 void GameView::CreateResources(IRenderer* Renderer) {
@@ -233,6 +255,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // and the HUD reads your team's gold/queues — on both phones.
     const int My = FlipY ? 1 : 0;
     const int Foe = 1 - My;
+    const float HS = HudScale(WidthPx);  // HUD metrics scale with resolution (#85 feedback)
 
     // World -> screen. Pixel space is Y-DOWN (MakeOrthoCamera); world Y grows UP (your
     // camp at small Y sits at the bottom), so flip: Wy == CameraY lands at the bottom.
@@ -292,7 +315,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Mx = SX(FW(Snap.MineX[T])), My = SY(FW(Snap.MineY[T]));
         BlitGlyph(GlyphMine, MineMat, Mx, My, MinePx);
         const float Frac = static_cast<float>(Snap.MineGold[T]) / static_cast<float>(MineGoldCapacity);
-        const float BarW = MinePx, BarH = 2.0f, BarY = My - MinePx * 0.5f - 3.0f;
+        const float BarW = MinePx, BarH = 2.0f * HS, BarY = My - MinePx * 0.5f - 3.0f * HS;
         Blit(HealthBg, Mx, BarY, BarW, BarH);
         Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
     }
@@ -329,8 +352,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Sx = SX(FW(Snap.PrevX[I]) + (FW(Snap.PosX[I]) - FW(Snap.PrevX[I])) * Alpha);
         const float Sy = SY(FW(Snap.PrevY[I]) + (FW(Snap.PosY[I]) - FW(Snap.PrevY[I])) * Alpha);
         const float Frac = static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp);
-        const float BarW = UnitPx, BarH = 2.0f;
-        const float BarY = Sy - UnitPx * 0.5f - 3.0f;
+        const float BarW = UnitPx, BarH = 2.0f * HS;
+        const float BarY = Sy - UnitPx * 0.5f - 3.0f * HS;
         Blit(HealthBg, Sx, BarY, BarW, BarH);
         Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
     }
@@ -346,34 +369,35 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
     const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
     const Color BadC{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f};
-    const float Pad = 8.0f;
+    const float Pad = 8.0f * HS;
     char Buf[64];
 
-    // Status panel.
-    const float PanelY = 52.0f, PanelH = 30.0f;
+    // Status panel — below the OS status bar (TopInsetPx) and the dropdown pill.
+    const float PanelY = TopInsetPx + 52.0f * HS, PanelH = 30.0f * HS;
     Blit(PanelMat, WidthPx * 0.5f, PanelY + PanelH * 0.5f, WidthPx, PanelH);
-    Blit(PanelEdge, WidthPx * 0.5f, PanelY + PanelH, WidthPx, 1.0f);
+    Blit(PanelEdge, WidthPx * 0.5f, PanelY + PanelH, WidthPx, 1.0f * HS);
     const float Mid = PanelY + PanelH * 0.5f;
-    BlitGlyph(GlyphGold, GoldIconMat, Pad + 9.0f, Mid, 18.0f);
+    BlitGlyph(GlyphGold, GoldIconMat, Pad + 9.0f * HS, Mid, 18.0f * HS);
     std::snprintf(Buf, sizeof(Buf), "%d", Snap.Gold[My]);
-    Text.Draw(Renderer, Buf, Pad + 22.0f, PanelY, 120.0f, PanelH, 15.0f, GoldC,
+    Text.Draw(Renderer, Buf, Pad + 22.0f * HS, PanelY, 120.0f * HS, PanelH, 15.0f * HS, GoldC,
               EHAlign::Left, EVAlign::Middle, false);
-    BlitGlyph(GlyphMiner, PlateIconMat, WidthPx * 0.5f - 40.0f, Mid, 16.0f);
+    BlitGlyph(GlyphMiner, PlateIconMat, WidthPx * 0.5f - 40.0f * HS, Mid, 16.0f * HS);
     std::snprintf(Buf, sizeof(Buf), "%d / %d", Workers, Soldiers);
-    Text.Draw(Renderer, Buf, WidthPx * 0.5f - 28.0f, PanelY, 56.0f, PanelH, 14.0f, Ico,
-              EHAlign::Center, EVAlign::Middle, false);
-    BlitGlyph(GlyphSwords, PlateIconMat, WidthPx * 0.5f + 40.0f, Mid, 16.0f);
+    Text.Draw(Renderer, Buf, WidthPx * 0.5f - 28.0f * HS, PanelY, 56.0f * HS, PanelH,
+              14.0f * HS, Ico, EHAlign::Center, EVAlign::Middle, false);
+    BlitGlyph(GlyphSwords, PlateIconMat, WidthPx * 0.5f + 40.0f * HS, Mid, 16.0f * HS);
     const uint32_t Secs = Snap.Tick / TickRateHz;  // tick-derived: identical on both peers
     std::snprintf(Buf, sizeof(Buf), "%02u:%02u", Secs / 60u, Secs % 60u);
-    ClockText.Draw(Renderer, Buf, WidthPx - Pad - 74.0f, PanelY, 74.0f, PanelH, 13.0f, Ico,
-                   EHAlign::Right, EVAlign::Middle, false);
+    ClockText.Draw(Renderer, Buf, WidthPx - Pad - 74.0f * HS, PanelY, 74.0f * HS, PanelH,
+                   13.0f * HS, Ico, EHAlign::Right, EVAlign::Middle, false);
 
     // Production plates: the icon IS the unit glyph; stack tag, cost, progress bar
     // (which visibly accelerates with the stack — #84's pacing thesis on screen).
-    const float Gap = 6.0f;
+    // Anchored above the OS bottom inset (Android nav bar / iOS home indicator).
+    const float Gap = 6.0f * HS;
     const float PlateW = (WidthPx - 2.0f * Pad - 3.0f * Gap) / 4.0f;
     const float PlateH2 = PlateW * 1.02f;
-    const float PlateY = HeightPx - Pad - PlateH2;
+    const float PlateY = HeightPx - BottomInsetPx - Pad - PlateH2;
     for (int Ty = 0; Ty < 4; ++Ty) {
         const float X = Pad + static_cast<float>(Ty) * (PlateW + Gap);
         PlateRect[Ty][0] = X; PlateRect[Ty][1] = PlateY;
@@ -383,42 +407,44 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
         BlitGlyph(Ty, Afford ? PlateIconMat : PlateIconDim,
                   X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
-        BlitGlyph(GlyphGold, GoldIconMat, X + 11.0f, PlateY + 11.0f, 11.0f);
+        BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
         std::snprintf(Buf, sizeof(Buf), "%d", UnitTable[Ty].Cost);
-        Text.Draw(Renderer, Buf, X + 18.0f, PlateY + 4.0f, 40.0f, 14.0f, 11.0f,
-                  Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
+        Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
+                  13.0f * HS, Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
         const int32_t QN = Snap.QueueCount[My][Ty];
         if (QN > 0) {
-            Blit(GoldFlat, X + PlateW - 13.0f, PlateY + 9.0f, 24.0f, 15.0f);
+            Blit(GoldFlat, X + PlateW - 14.0f * HS, PlateY + 9.0f * HS, 26.0f * HS, 16.0f * HS);
             std::snprintf(Buf, sizeof(Buf), "%dx", QN);
-            Text.Draw(Renderer, Buf, X + PlateW - 25.0f, PlateY + 2.0f, 24.0f, 15.0f, 11.0f,
-                      {Srgb(0x14), Srgb(0x16), Srgb(0x1A), 1.0f},
+            Text.Draw(Renderer, Buf, X + PlateW - 27.0f * HS, PlateY + 1.0f * HS, 26.0f * HS,
+                      16.0f * HS, 12.0f * HS, {Srgb(0x14), Srgb(0x16), Srgb(0x1A), 1.0f},
                       EHAlign::Center, EVAlign::Middle, false);
         }
-        const float BarW = PlateW - 12.0f;
-        Blit(BarBg, X + PlateW * 0.5f, PlateY + PlateH2 - 7.0f, BarW, 5.0f);
+        const float BarW = PlateW - 12.0f * HS;
+        Blit(BarBg, X + PlateW * 0.5f, PlateY + PlateH2 - 7.0f * HS, BarW, 5.0f * HS);
         if (QN > 0) {
             float Frac = static_cast<float>(Snap.BuildProgress[My][Ty]) /
                          static_cast<float>(UnitTable[Ty].BuildTicks);
             if (Frac > 1.0f) Frac = 1.0f;
             const float Bw = BarW * Frac;
             if (Bw > 0.5f)
-                Blit(GoldFlat, X + 6.0f + Bw * 0.5f, PlateY + PlateH2 - 7.0f, Bw, 5.0f);
+                Blit(GoldFlat, X + 6.0f * HS + Bw * 0.5f, PlateY + PlateH2 - 7.0f * HS, Bw,
+                     5.0f * HS);
         }
     }
 
     // Dev diagnostics line + match-result banner.
     std::snprintf(Buf, sizeof(Buf), "tick %u   FOE gold %d units %d", Snap.Tick,
                   Snap.Gold[Foe], Snap.AliveCount[Foe]);
-    Text.Draw(Renderer, Buf, Pad, PanelY + PanelH + 4.0f, WidthPx, 16.0f, 11.0f,
+    Text.Draw(Renderer, Buf, Pad, PanelY + PanelH + 4.0f * HS, WidthPx, 16.0f * HS, 11.0f * HS,
               {0.55f, 0.62f, 0.68f, 0.9f}, EHAlign::Left, EVAlign::Top, false);
     if (Snap.Result != ResultOngoing) {
-        Text.Draw(Renderer, ResultStr(Snap.Result, My), 0.0f, HeightPx * 0.42f, WidthPx, 40.0f,
-                  30.0f, GoldC, EHAlign::Center, EVAlign::Middle, false);
+        Text.Draw(Renderer, ResultStr(Snap.Result, My), 0.0f, HeightPx * 0.42f, WidthPx,
+                  40.0f * HS, 30.0f * HS, GoldC, EHAlign::Center, EVAlign::Middle, false);
     }
 
     // The opponent dropdown draws LAST so its open list overlays the panel.
-    Selector.Draw(Renderer, "Opponent", Pad, 4.0f, WidthPx - 2.0f * Pad, 24.0f);
+    Selector.Draw(Renderer, "Opponent", Pad, TopInsetPx + 4.0f * HS, WidthPx - 2.0f * Pad,
+                  24.0f * HS);
 
     Renderer->EndFrame();
 }

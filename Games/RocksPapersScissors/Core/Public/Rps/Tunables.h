@@ -91,10 +91,10 @@ constexpr int32_t RingSlots = 8;           // deterministic spawn ring (SpawnCou
 // These are FIXED sim constants, identical on both peers — never a device readout.
 constexpr Fixed WorldWidth = F(34);
 // Taller than a phone screen so the camera actually scrolls (§9): a portrait phone
-// shows ~(h/w)*WorldWidth ≈ 75 world-units tall, so 120 means your camp sits at the
-// bottom and you swipe up toward the enemy. The slice-3 balance knob for tempo.
-constexpr Fixed WorldHeight = F(120);
-constexpr Fixed MaxWorldHeight = F(160);    // headroom the grid arrays size to
+// shows ~(h/w)*WorldWidth ≈ 75 world-units tall. 240 (~3 screens of march between
+// camps) per the 2026-07-19 layout review. The slice-3 balance knob for tempo.
+constexpr Fixed WorldHeight = F(240);
+constexpr Fixed MaxWorldHeight = F(320);    // headroom the grid arrays size to
 
 // Camps at the two SHORT ends — team 0 bottom, team 1 top (spec §2, rotated to
 // portrait). A camp is a location (spawn point + gold drop-off), never an entity.
@@ -121,8 +121,8 @@ constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (desig
 // "hundreds-to-thousands"). Slot reuse (lowest free slot) bounds live memory here.
 constexpr int32_t MaxUnitsPerTeam = 2048;
 constexpr int32_t MaxUnits = MaxUnitsPerTeam * 2;
-constexpr int32_t MinesPerCluster = 4;
-constexpr int32_t ClustersPerTeam = 2;      // safe (near camp) + contested (near mid)
+constexpr int32_t MinesPerCluster = 6;      // denser rows per the 2026-07-19 review
+constexpr int32_t ClustersPerTeam = 3;      // safe (near camp) / midfield / contested (near mid)
 constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
 constexpr int32_t NumMines = MinesPerTeam * 2;
 

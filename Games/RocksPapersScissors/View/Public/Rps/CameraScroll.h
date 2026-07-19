@@ -32,8 +32,10 @@ struct CameraScroll {
 
     // Once per frame: while dragging, measure velocity from the frame's motion; after
     // release, coast on that velocity and dampen it exponentially (~0.3 s time constant),
-    // stopping cleanly at the field edges.
-    void Update(float DtSec, float MaxCam) {
+    // stopping cleanly at the field edges. MinCam is normally NEGATIVE (#85): the view
+    // may scroll below world-0 by the height of the bottom HUD block, so the home camp
+    // clears the production plates when fully scrolled down.
+    void Update(float DtSec, float MaxCam, float MinCam = 0.0f) {
         if (Dragging) {
             const float Inst = DtSec > 0.0f ? (Y - PrevFrameY) / DtSec : 0.0f;
             Vel = 0.5f * Vel + 0.5f * Inst;  // light smoothing so a flick reads clean
@@ -42,7 +44,7 @@ struct CameraScroll {
             Vel *= std::exp(-DtSec / 0.3f);
             if (std::fabs(Vel) < 0.01f) Vel = 0.0f;
         }
-        if (Y < 0.0f) { Y = 0.0f; Vel = 0.0f; }
+        if (Y < MinCam) { Y = MinCam; Vel = 0.0f; }
         if (Y > MaxCam) { Y = MaxCam; Vel = 0.0f; }
         PrevFrameY = Y;
     }

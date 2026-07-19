@@ -80,6 +80,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     uint32_t _LastTick;
     uint64_t _TickLandedNs;
     Rps::CameraScroll _Cam;
+    bool _CamInit;
     float _DownX, _DownY;
     uint8_t _Team;
     CADisplayLink* _DisplayLink;
@@ -313,8 +314,16 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     if (_Lp.ExecTick() != _LastTick) { _LastTick = _Lp.ExecTick(); _TickLandedNs = Stamp; }
     _Snap.CaptureFrom(_Lp.GetSim(), _TickLandedNs, kStepNs);
     const float VisibleH = H / Ppu(W);
-    const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-    _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);  // momentum + clamp
+    const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
+    // OS safe areas (#85 feedback): notch/status bar above the HUD, home indicator
+    // below the plates. Points -> pixels via the layer scale.
+    const CGFloat SaScale = [self metalLayer].contentsScale;
+    const UIEdgeInsets Sa = self.view.safeAreaInsets;
+    _View.SetInsets(static_cast<float>(Sa.top * SaScale), static_cast<float>(Sa.bottom * SaScale));
+    const float MaxCam = FieldMax + _View.TopHudWorldUnits(W);
+    const float MinCam = -_View.BottomHudWorldUnits(W);
+    if (!_CamInit) { _Cam.Y = MinCam; _CamInit = true; }
+    _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
     _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1);
 }
 

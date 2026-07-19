@@ -123,20 +123,24 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
 //     variation is free, exactly like chess derives colours from GUIDs. ---
 void BuildMap(Sim& S) {
-    // Four mines per cluster, spread across the 34-wide field.
-    const Fixed Xs[MinesPerCluster] = {F(8), F(14), F(20), F(26)};
-    // Cluster centre lines (portrait, §9), derived from the field height so they scale
-    // with the WorldHeight balance knob: each team's SAFE cluster sits just past its camp,
-    // its CONTESTED cluster nearer mid-field (shorter walk, higher risk — spec §2).
-    const int32_t Mid = WorldHeight.ToInt() / 2;
-    const Fixed ClusterY[4] = {
-        F(CampInset + 6),                          // t0 safe   (near the bottom camp)
-        F(Mid - 6),                                // t0 contested (toward mid)
-        F(WorldHeight.ToInt() - CampInset - 6),    // t1 safe   (near the top camp)
-        F(Mid + 6),                                // t1 contested (toward mid)
+    // Six mines per cluster row, spread across the 34-wide field (denser resources —
+    // 2026-07-19 layout review).
+    const Fixed Xs[MinesPerCluster] = {F(4), F(9), F(14), F(20), F(25), F(30)};
+    // Cluster rows per team — SAFE (just past the camp), MIDFIELD, CONTESTED (near the
+    // centre line) — derived from the field height so they scale with the WorldHeight
+    // balance knob. Closer to mid = shorter enemy walk = higher risk (spec §2).
+    const int32_t Hi = WorldHeight.ToInt();
+    const int32_t Mid = Hi / 2;
+    const Fixed ClusterY[ClustersPerTeam * 2] = {
+        F(CampInset + 6),        // t0 safe     (near the bottom camp)
+        F(Hi / 4),               // t0 midfield
+        F(Mid - 8),              // t0 contested (toward mid)
+        F(Hi - CampInset - 6),   // t1 safe     (near the top camp)
+        F(Hi - Hi / 4),          // t1 midfield
+        F(Mid + 8),              // t1 contested (toward mid)
     };
     int32_t Idx = 0;
-    for (int G = 0; G < 4; ++G)
+    for (int G = 0; G < ClustersPerTeam * 2; ++G)
         for (int K = 0; K < MinesPerCluster; ++K) {
             S.MineX[Idx] = Xs[K];
             S.MineY[Idx] = ClusterY[G];

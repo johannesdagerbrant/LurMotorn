@@ -71,6 +71,7 @@ struct Peer {
     uint32_t LastTick = 0xFFFFFFFFu;
     uint64_t TickLandedNs = 0;
     Rps::CameraScroll Cam;
+    bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     uint8_t Team = 0;
 };
 
@@ -107,8 +108,11 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
     if (P.Lp.ExecTick() != P.LastTick) { P.LastTick = P.Lp.ExecTick(); P.TickLandedNs = Now; }
     P.Snap.CaptureFrom(P.Lp.GetSim(), P.TickLandedNs, kStepNs);
     const float VisibleH = static_cast<float>(H) / Ppu();
-    const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-    P.Cam.Update(DtSec, MaxCam);
+    const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
+    const float MaxCam = FieldMax + P.View.TopHudWorldUnits(static_cast<float>(W));
+    const float MinCam = -P.View.BottomHudWorldUnits(static_cast<float>(W));
+    if (!P.CamInit) { P.Cam.Y = MinCam; P.CamInit = true; }  // camp clear of the plates on launch
+    P.Cam.Update(DtSec, MaxCam, MinCam);
     P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.Cam.Y, static_cast<float>(W),
                   static_cast<float>(H), P.Team == 1);
 }
@@ -238,6 +242,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
     Runner->Start(Seed, SampleSolo, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress));
 
     Rps::CameraScroll Cam;
+    bool CamInit = false;
     Lur::Sim::SplitMix64 Rng(Seed ^ 0xA11CE);
     uint64_t AutoAccumNs = 0, PrevNs = NowNs();
     static Rps::Snapshot Snap;
@@ -280,8 +285,11 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
             Win.GetSize(&W, &H);
             if (W > 0 && H > 0) {
                 const float VisibleH = static_cast<float>(H) / Ppu();
-                const float MaxCam = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-                Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam);
+                const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
+                const float MaxCam = FieldMax + View.TopHudWorldUnits(static_cast<float>(W));
+                const float MinCam = -View.BottomHudWorldUnits(static_cast<float>(W));
+                if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
+                Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
                 View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, static_cast<float>(W),
                             static_cast<float>(H), /*FlipY=*/false);  // solo = team-0 view
             }
