@@ -12,12 +12,13 @@ OUT = r"C:\Games\LurMotorn\Games\RocksPapersScissors\Content\Icons"
 os.makedirs(OUT, exist_ok=True)
 
 REMOTE = {
-    # cook order 0..3 = EUnit order (miner is custom, below), then gold/mine/swords/camp
+    # cook order 0..3 = EUnit order (the miner is the SPLIT ore cart, below), then
+    # gold/mine/swords/camp/pointer + the ore-load overlay
     "rock":     "raw.githubusercontent.com/game-icons/icons/master/lorc/rock.svg",
     "paper":    "raw.githubusercontent.com/game-icons/icons/master/lorc/scroll-unfurled.svg",
     "scissors": "raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/scissors.svg",
     "gold":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/token.svg",
-    "mine":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/mine-wagon.svg",
+    "mine":     "raw.githubusercontent.com/game-icons/icons/master/faithtoken/ore.svg",
     "swords":   "raw.githubusercontent.com/game-icons/icons/master/lorc/crossed-swords.svg",
     "camp":     "raw.githubusercontent.com/game-icons/icons/master/delapouite/barracks-tent.svg",
     "pointer":  "raw.githubusercontent.com/FortAwesome/Font-Awesome/6.x/svgs/solid/hand-pointer.svg",
@@ -51,23 +52,26 @@ def bezier_q(p0, c, p1, n=64):
         (1-t)**2*p0[0] + 2*(1-t)*t*c[0] + t**2*p1[0],
         (1-t)**2*p0[1] + 2*(1-t)*t*c[1] + t**2*p1[1]) for t in (i/(n-1) for i in range(n))]
 
-def make_bold_pick():
-    # The locked custom miner glyph: rotate(42deg) about centre of
-    #   handle: rounded rect x=234 y=64 w=44 h=400 r=22 (viewBox 512)
-    #   head:   path M48 172 Q256 8 464 172 Q256 92 48 172 Z
-    S = 8 * SIZE
-    k = S / 512.0
-    img = Image.new("L", (S, S), 0)
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle([234*k, 64*k, 278*k, 464*k], radius=22*k, fill=255)
-    top = bezier_q((48, 172), (256, 8), (464, 172))
-    bot = bezier_q((464, 172), (256, 92), (48, 172))
-    d.polygon([(x*k, y*k) for x, y in top + bot], fill=255)
-    img = img.rotate(-42, center=(S/2, S/2), resample=Image.BICUBIC)
-    img = img.resize((SIZE, SIZE), Image.LANCZOS)
-    save_gray_alpha("miner", img)
+def make_cart():
+    # Playtest 2026-07-19: the miner IS an ore cart — visibly EMPTY heading out,
+    # FULL heading home. Split delapouite/mine-wagon at the cart's top rail:
+    # below = the empty cart (miner.png), above = the ore heap (oreload.png), drawn
+    # as a second gold-tinted instance on top of loaded carts at runtime.
+    import urllib.request as rq
+    url = "https://images.weserv.nl/?url=" + urllib.parse.quote(
+        "raw.githubusercontent.com/game-icons/icons/master/delapouite/mine-wagon.svg",
+        safe="") + "&w=%d&h=%d" % (SIZE, SIZE)
+    img = Image.open(io.BytesIO(rq.urlopen(url, timeout=60).read())).convert("RGBA")
+    coverage = img.convert("L")  # black bg + white glyph -> luma is the mask
+    cut = int(SIZE * 158 / 512)  # the rail line in the 512 viewBox, scaled
+    cart = coverage.copy()
+    cart.paste(0, (0, 0, SIZE, cut))
+    ore = coverage.copy()
+    ore.paste(0, (0, cut, SIZE, SIZE))
+    save_gray_alpha("miner", cart)
+    save_gray_alpha("oreload", ore)
 
 for n, p in REMOTE.items():
     fetch(n, p)
-make_bold_pick()
+make_cart()
 print("OK")

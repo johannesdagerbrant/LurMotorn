@@ -12,7 +12,7 @@
 // 0..3 are EUnit order (miner, rock, paper, scissors), then gold / mine / swords /
 // camp. Sources: game-icons.net (CC BY 3.0) + Font Awesome Free (CC BY 4.0) + the
 // custom bold pick (ours) — attribution required in-app before shipping (#85).
-// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png,Icons/pointer.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
+// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png,Icons/pointer.png,Icons/oreload.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
 #include "IconMasks.h"
 
 namespace Rps {
@@ -368,6 +368,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         D.Size = UnitPx;
         D.U0 = static_cast<float>(Ty) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
         D.U1 = static_cast<float>(Ty + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
+        // A LOADED cart shows its ore heap in COIN gold (playtest): one extra
+        // instance, same endpoints, the heap glyph over the cart — still one draw.
+        if (Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
+            Lur::Render::InstanceData& O = Instances[N++];
+            O = D;
+            O.R = Srgb(0xD9); O.G = Srgb(0xA9); O.B = Srgb(0x3C); O.A = 1.0f;
+            O.U0 = static_cast<float>(GlyphOreLoad) / static_cast<float>(GlyphCount);
+            O.U1 = static_cast<float>(GlyphOreLoad + 1) / static_cast<float>(GlyphCount);
+        }
     }
     Renderer->DrawInstances(Quad, Instances, N, Alpha, AtlasMat);
 
@@ -553,7 +562,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (Step < 0) Step = 0;
         if (Step >= HintAlphaSteps) Step = HintAlphaSteps - 1;
         const float Bob = std::sin(HintAge * 4.0f) * 14.0f * HS;
-        const float Cx = WidthPx * 0.5f, Cy = HeightPx * 0.5f + Bob;
+        // Just below the top panel (playtest): nearest to where the unit walked out.
+        const float Cx = WidthPx * 0.5f, Cy = TopInsetPx + 82.0f * HS + 64.0f * HS + Bob;
         const float Pp = 56.0f * HS;
         BlitGlyph(GlyphPointer, HintPointer[Step], Cx, Cy, Pp);
         const float Aw = 22.0f * HS, Ah = 14.0f * HS;

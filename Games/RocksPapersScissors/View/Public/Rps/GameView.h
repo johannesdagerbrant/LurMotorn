@@ -72,7 +72,8 @@ private:
     // shade+coverage. Everything on the field — units, mines, camps, HUD icons —
     // is one of these masks under a tint (the locked "alpha-cutout silhouette" rule).
     enum EGlyph { GlyphMiner = 0, GlyphRock, GlyphPaper, GlyphScissors,
-                  GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphPointer, GlyphCount };
+                  GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphPointer,
+                  GlyphOreLoad, GlyphCount };  // OreLoad = the heap on a full cart
     Lur::Render::TextureHandle IconAtlas = 0;
     Lur::Render::MaterialHandle AtlasMat = 0;        // white tint: per-instance colour is the fill
     Lur::Render::MeshHandle GlyphMesh[GlyphCount] = {};  // unit quads with per-glyph atlas UVs
