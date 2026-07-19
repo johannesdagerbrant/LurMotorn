@@ -342,9 +342,11 @@ void WorkerSeek(Sim& S, int32_t I) {
             if (Tr < 0) return;  // no free mine this tick — idle
             if (S.MineGold[Tr] <= 0) { S.Target[I] = -1; return; }  // it emptied en route — re-target
             const Fixed Tx = S.MineX[Tr], Ty = S.MineY[Tr];
-            if (Arrived(S, I, Tx, Ty)) {
-                S.PosX[I] = Tx; S.PosY[I] = Ty;
-                S.WorkerState[I] = WorkDig; S.WorkerTimer[I] = DigTicks;
+            // Dig from range (playtest): stop WHERE THE CART STANDS once close enough —
+            // no snap onto the deposit; with the mine repulsion the carts ring it.
+            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= MineDigRange) {
+                S.WorkerState[I] = WorkDig;
+                S.WorkerTimer[I] = DigTicks;
                 return;
             }
             MoveToward(S, I, Tx, Ty);
@@ -406,12 +408,28 @@ void SeparationGrid(const Sim& S, const Grid& G, int32_t I, Fixed& Sx, Fixed& Sy
                 AddSeparation(S, I, G.Order[P], R2, Sx, Sy);
         }
 }
+// Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get
+// pushed outward, same strength as unit separation. Reads Prev (order-independent)
+// against static mine positions — identical on the brute and grid paths.
+void AddMineRepel(const Sim& S, int32_t I, Fixed& Sx, Fixed& Sy) {
+    const int64_t R2 = RangeSq(MineRepelRadius);
+    for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
+        if (S.MineGold[Mn] <= 0) continue;
+        const int64_t Dx = static_cast<int64_t>(S.PrevX[I].Raw) - S.MineX[Mn].Raw;
+        const int64_t Dy = static_cast<int64_t>(S.PrevY[I].Raw) - S.MineY[Mn].Raw;
+        const int64_t D2 = Dx * Dx + Dy * Dy;
+        if (D2 == 0 || D2 >= R2) continue;  // exact overlap: no deterministic direction
+        Sx = Sx + Fixed{static_cast<int32_t>(Dx)} * SeparationStrength;
+        Sy = Sy + Fixed{static_cast<int32_t>(Dy)} * SeparationStrength;
+    }
+}
 void Movement(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         Fixed Sx, Sy;
         if (S.UseBruteForce) SeparationBrute(S, I, Sx, Sy);  // from Prev — before we touch Pos
         else SeparationGrid(S, G, I, Sx, Sy);
+        AddMineRepel(S, I, Sx, Sy);
         if (S.Type[I] == UnitMiner) WorkerSeek(S, I);
         else SoldierSeek(S, I);
         S.PosX[I] = ClampAxis(S.PosX[I] + Sx, WorldWidth);

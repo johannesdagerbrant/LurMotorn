@@ -115,6 +115,12 @@ constexpr Fixed SeparationStrength = F(1, 4);
 // over a marginally nearer neutral target - a paper picks the rock, not the
 // scissor, when both are "about equally far".
 constexpr Fixed TargetBand = F(3);
+// Playtest 2026-07-19: carts RING a deposit instead of standing on it — a cart can
+// dig once within MineDigRange, and live deposits push units outward (soft
+// obstacles, same strength as unit separation). Repel < dig range, so diggers
+// settle in the annulus between the two.
+constexpr Fixed MineDigRange = F(22, 10);
+constexpr Fixed MineRepelRadius = F(3, 2);
 
 // ---- Spatial grid (design §5) — cell size in whole world units. This is a PURE
 // perf knob: any value yields bit-identical results to brute force (rps_sim_tests
