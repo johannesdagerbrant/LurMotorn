@@ -21,7 +21,7 @@ if (-not (Test-Path $Glslc)) {
     else { throw "glslc not found at $Glslc and none on PATH (install the Android NDK or Vulkan SDK)." }
 }
 
-foreach ($stage in 'Sprite.vert', 'Sprite.frag', 'Text.vert', 'Text.frag') {
+foreach ($stage in 'Sprite.vert', 'Sprite.frag', 'Text.vert', 'Text.frag', 'Instanced.vert', 'Instanced.frag') {
     $src = Join-Path $ShaderDir $stage
     $inc = Join-Path $ShaderDir "$stage.inc"
     & $Glslc -mfmt=num $src -o $inc

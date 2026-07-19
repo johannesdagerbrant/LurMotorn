@@ -22,9 +22,11 @@ public:
 
     // Draw the field + units + HUD for this snapshot. CameraY is the world-Y at the
     // bottom of the screen (the swipe scroll position); Alpha in [0,1] interpolates
-    // Prev->Pos. Owns the full BeginFrame..EndFrame.
+    // Prev->Pos. Owns the full BeginFrame..EndFrame. Non-const: fills the instance
+    // scratch buffer each frame (units draw as ONE instanced call, interpolated in the
+    // vertex shader).
     void Render(Lur::Render::IRenderer* Renderer, const Snapshot& Snap, float Alpha,
-                float CameraY, float WidthPx, float HeightPx) const;
+                float CameraY, float WidthPx, float HeightPx);
 
     // World units visible vertically at this width — for the caller's camera clamp.
     static float VisibleWorldHeight(float WidthPx, float HeightPx);
@@ -36,9 +38,11 @@ private:
     Lur::Render::MaterialHandle Background = 0;
     Lur::Render::MaterialHandle CampMat[2] = {};
     Lur::Render::MaterialHandle TreeMat = 0;
-    Lur::Render::MaterialHandle UnitMat[4][2] = {};   // [type][team]
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
+
+    Lur::Render::Color UnitColor[4][2] = {};          // [type][team] — per-instance tint
+    Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)
 
     Lur::Text::Font Font;
     Lur::Hud::TextField Text;

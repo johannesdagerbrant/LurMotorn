@@ -17,6 +17,18 @@ struct Vertex {
 
 struct Color { float R = 1.0f, G = 1.0f, B = 1.0f, A = 1.0f; };
 
+// Per-instance data for DrawInstances — a quad whose centre lerps Prev->Cur by the
+// alpha push constant (interpolation happens in the vertex shader, so per-instance CPU
+// cost is a memcpy, not a lerp). PIXEL SPACE: the game maps world->pixels when building
+// the array, keeping the renderer generic (mix + MVP, like sprites). Field ORDER is the
+// vertex-attribute layout the instanced pipeline binds — do not reorder.
+struct InstanceData {
+    float PrevX, PrevY;   // pixel centre at the previous tick
+    float CurX, CurY;     // pixel centre at the current tick
+    float R, G, B, A;     // flat tint
+    float Size;           // pixel size (quad spans Size x Size, centred on the lerp)
+};
+
 // Opaque GPU resource handles (0 = none / invalid).
 using MeshHandle     = uint32_t;
 using TextureHandle  = uint32_t;
@@ -99,6 +111,16 @@ public:
     virtual void BeginGui() {}
 
     virtual void DrawMesh(MeshHandle Mesh, MaterialHandle Material, const Math::Mat4& Model) = 0;
+
+    // Draw `Count` instances of `Quad` (a MakeQuad mesh) in ONE call, each transformed
+    // per InstanceData and interpolated Prev->Cur by `Alpha` in the vertex shader. The
+    // instance array is transient (rebuilt each frame in pixel space) and sub-allocated
+    // from a per-frame arena, like DrawGlyphs. This is the RTS unit path: thousands of
+    // units, one draw. Default no-op so non-graphical/host backends need not implement it.
+    virtual void DrawInstances(MeshHandle Quad, const InstanceData* Instances, uint32_t Count,
+                               float Alpha) {
+        (void)Quad; (void)Instances; (void)Count; (void)Alpha;
+    }
 
     // Draw a batch of dynamic 2D glyph quads (MSDF text) in one call. Vertices/Indices
     // are transient — the HUD text layer rebuilds them each frame in pixel space

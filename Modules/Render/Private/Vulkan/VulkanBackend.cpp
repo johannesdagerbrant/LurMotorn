@@ -39,6 +39,12 @@ static const uint32_t TextVertSpv[] = {
 static const uint32_t TextFragSpv[] = {
 #include "Shaders/Text.frag.inc"
 };
+static const uint32_t InstancedVertSpv[] = {
+#include "Shaders/Instanced.vert.inc"
+};
+static const uint32_t InstancedFragSpv[] = {
+#include "Shaders/Instanced.frag.inc"
+};
 
 namespace Lur::Render {
 namespace {
@@ -115,6 +121,7 @@ public:
         if (!CreateDescriptorResources()) return false;
         if (!CreatePipeline())         return false;
         if (!CreateTextBuffers())      return false;
+        if (!CreateInstanceBuffer())   return false;
         const uint8_t White[4] = {255, 255, 255, 255};
         DefaultTexture = LoadTexture(White, 1, 1, ETextureFormat::Rgba8);
         if (DefaultTexture == 0)       return false;
@@ -138,6 +145,10 @@ public:
             if (TextVBMem != VK_NULL_HANDLE) vkFreeMemory(Device, TextVBMem, nullptr);
             if (TextIB != VK_NULL_HANDLE)    vkDestroyBuffer(Device, TextIB, nullptr);
             if (TextIBMem != VK_NULL_HANDLE) vkFreeMemory(Device, TextIBMem, nullptr);
+            if (InstanceVB != VK_NULL_HANDLE)    vkDestroyBuffer(Device, InstanceVB, nullptr);
+            if (InstanceVBMem != VK_NULL_HANDLE) vkFreeMemory(Device, InstanceVBMem, nullptr);
+            if (InstancePipeline != VK_NULL_HANDLE) vkDestroyPipeline(Device, InstancePipeline, nullptr);
+            if (InstanceLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(Device, InstanceLayout, nullptr);
             if (TextPipeline != VK_NULL_HANDLE)   vkDestroyPipeline(Device, TextPipeline, nullptr);
             if (Pipeline != VK_NULL_HANDLE)       vkDestroyPipeline(Device, Pipeline, nullptr);
             if (PipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(Device, PipelineLayout, nullptr);
@@ -303,6 +314,7 @@ public:
         BoundPipeline = VK_NULL_HANDLE;
         TextVBCursor = 0;
         TextIBCursor = 0;
+        InstanceCursor = 0;
         Recording = true;
     }
 
@@ -395,6 +407,40 @@ public:
 
         TextVBCursor += VertexCount;
         TextIBCursor += IndexCount;
+    }
+
+    void DrawInstances(MeshHandle MeshId, const InstanceData* Instances, uint32_t Count,
+                       float Alpha) override {
+        if (!Recording || Count == 0) return;
+        if (MeshId == 0 || MeshId > Meshes.size()) return;
+        if (InstanceCursor + Count > MaxInstances) {
+            LOGE("instance arena full (%u) — batch dropped", InstanceCursor + Count);
+            return;
+        }
+        const Mesh& M = Meshes[MeshId - 1];
+
+        std::memcpy(static_cast<InstanceData*>(InstanceMapped) + InstanceCursor,
+                    Instances, static_cast<size_t>(Count) * sizeof(InstanceData));
+
+        BindPipeline(InstancePipeline);
+
+        PushConstants Pc{};
+        const Math::Mat4 Mvp = CurrentCamera.Projection * CurrentCamera.View;  // model in the instance data
+        std::memcpy(Pc.Mvp, Mvp.M, sizeof(Pc.Mvp));
+        Pc.Shape[0] = Alpha;  // the vertex shader lerps Prev->Cur by this
+        vkCmdPushConstants(CommandBuffer, InstanceLayout,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(Pc), &Pc);
+
+        // Binding 0 = the shared quad; binding 1 = this batch's instances (bound at the
+        // arena offset, so firstInstance stays 0).
+        VkBuffer VBs[2] = {M.VertexBuffer, InstanceVB};
+        VkDeviceSize Offsets[2] = {0, static_cast<VkDeviceSize>(InstanceCursor) * sizeof(InstanceData)};
+        vkCmdBindVertexBuffers(CommandBuffer, 0, 2, VBs, Offsets);
+        vkCmdBindIndexBuffer(CommandBuffer, M.IndexBuffer, 0, VK_INDEX_TYPE_UINT32);
+        vkCmdDrawIndexed(CommandBuffer, M.IndexCount, Count, 0, 0, 0);
+
+        InstanceCursor += Count;
     }
 
     void EndFrame() override {
@@ -591,7 +637,118 @@ private:
         return CreateGraphicsPipeline(SpriteVertSpv, sizeof(SpriteVertSpv),
                                       SpriteFragSpv, sizeof(SpriteFragSpv), Pipeline)
             && CreateGraphicsPipeline(TextVertSpv, sizeof(TextVertSpv),
-                                      TextFragSpv, sizeof(TextFragSpv), TextPipeline);
+                                      TextFragSpv, sizeof(TextFragSpv), TextPipeline)
+            && CreateInstancePipeline();
+    }
+
+    // The instanced unit pipeline: two vertex bindings (per-vertex quad + per-instance
+    // data) and a push-constant-only layout of its own (the flat shader samples no
+    // texture, so no descriptor set). Same render pass / blend / dynamic state as the
+    // others — only the vertex input and shaders differ.
+    bool CreateInstancePipeline() {
+        VkPushConstantRange Push{};
+        Push.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        Push.offset = 0;
+        Push.size = sizeof(PushConstants);
+        VkPipelineLayoutCreateInfo LayoutInfo{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        LayoutInfo.pushConstantRangeCount = 1;
+        LayoutInfo.pPushConstantRanges = &Push;
+        if (vkCreatePipelineLayout(Device, &LayoutInfo, nullptr, &InstanceLayout) != VK_SUCCESS) {
+            LOGE("instance pipeline layout failed");
+            return false;
+        }
+
+        VkShaderModule Vert = CreateShaderModule(InstancedVertSpv, sizeof(InstancedVertSpv));
+        VkShaderModule Frag = CreateShaderModule(InstancedFragSpv, sizeof(InstancedFragSpv));
+
+        VkPipelineShaderStageCreateInfo Stages[2]{};
+        Stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        Stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        Stages[0].module = Vert;
+        Stages[0].pName = "main";
+        Stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        Stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        Stages[1].module = Frag;
+        Stages[1].pName = "main";
+
+        VkVertexInputBindingDescription Bindings[2]{};
+        Bindings[0] = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
+        Bindings[1] = {1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_INSTANCE};
+
+        VkVertexInputAttributeDescription Attrs[5]{};
+        Attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    offsetof(Vertex, Position)};       // quad corner
+        Attrs[1] = {4, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, PrevX)};    // prev centre
+        Attrs[2] = {5, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, CurX)};     // cur centre
+        Attrs[3] = {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, R)};        // colour
+        Attrs[4] = {7, 1, VK_FORMAT_R32_SFLOAT,          offsetof(InstanceData, Size)};     // pixel size
+
+        VkPipelineVertexInputStateCreateInfo VertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VertexInput.vertexBindingDescriptionCount = 2;
+        VertexInput.pVertexBindingDescriptions = Bindings;
+        VertexInput.vertexAttributeDescriptionCount = 5;
+        VertexInput.pVertexAttributeDescriptions = Attrs;
+
+        VkPipelineInputAssemblyStateCreateInfo InputAsm{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        InputAsm.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        VkPipelineViewportStateCreateInfo Viewport{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        Viewport.viewportCount = 1;
+        Viewport.scissorCount = 1;
+
+        VkPipelineRasterizationStateCreateInfo Raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        Raster.polygonMode = VK_POLYGON_MODE_FILL;
+        Raster.cullMode = VK_CULL_MODE_NONE;
+        Raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        Raster.lineWidth = 1.0f;
+
+        VkPipelineMultisampleStateCreateInfo Multisample{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        Multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        VkPipelineColorBlendAttachmentState Blend{};
+        Blend.blendEnable = VK_TRUE;
+        Blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        Blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        Blend.colorBlendOp = VK_BLEND_OP_ADD;
+        Blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        Blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        Blend.alphaBlendOp = VK_BLEND_OP_ADD;
+        Blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+        VkPipelineColorBlendStateCreateInfo ColorBlend{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        ColorBlend.attachmentCount = 1;
+        ColorBlend.pAttachments = &Blend;
+
+        VkDynamicState Dynamics[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+        VkPipelineDynamicStateCreateInfo Dynamic{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+        Dynamic.dynamicStateCount = 2;
+        Dynamic.pDynamicStates = Dynamics;
+
+        VkGraphicsPipelineCreateInfo Info{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        Info.stageCount = 2;
+        Info.pStages = Stages;
+        Info.pVertexInputState = &VertexInput;
+        Info.pInputAssemblyState = &InputAsm;
+        Info.pViewportState = &Viewport;
+        Info.pRasterizationState = &Raster;
+        Info.pMultisampleState = &Multisample;
+        Info.pColorBlendState = &ColorBlend;
+        Info.pDynamicState = &Dynamic;
+        Info.layout = InstanceLayout;
+        Info.renderPass = RenderPass;
+        Info.subpass = 0;
+        VkResult R = vkCreateGraphicsPipelines(Device, VK_NULL_HANDLE, 1, &Info, nullptr, &InstancePipeline);
+
+        vkDestroyShaderModule(Device, Vert, nullptr);
+        vkDestroyShaderModule(Device, Frag, nullptr);
+        if (R != VK_SUCCESS) { LOGE("instance pipeline create failed (%d)", R); return false; }
+        return true;
+    }
+
+    bool CreateInstanceBuffer() {
+        const VkDeviceSize Size = static_cast<VkDeviceSize>(MaxInstances) * sizeof(InstanceData);
+        return CreateMappedBuffer(Size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, InstanceVB, InstanceVBMem,
+                                  InstanceMapped);
     }
 
     bool CreateGraphicsPipeline(const uint32_t* VertSpv, size_t VertSize,
@@ -1045,6 +1202,8 @@ private:
     VkPipelineLayout PipelineLayout = VK_NULL_HANDLE;
     VkPipeline       Pipeline = VK_NULL_HANDLE;       // sprite / quad
     VkPipeline       TextPipeline = VK_NULL_HANDLE;   // MSDF text
+    VkPipelineLayout InstanceLayout = VK_NULL_HANDLE; // push-const only (no sampler)
+    VkPipeline       InstancePipeline = VK_NULL_HANDLE;  // instanced units
     VkPipeline       BoundPipeline = VK_NULL_HANDLE;  // currently bound (lazy rebind)
 
     // Per-frame dynamic text arena (fixed capacity — ~1024 glyphs/frame).
@@ -1053,6 +1212,14 @@ private:
     VkBuffer       TextVB = VK_NULL_HANDLE, TextIB = VK_NULL_HANDLE;
     VkDeviceMemory TextVBMem = VK_NULL_HANDLE, TextIBMem = VK_NULL_HANDLE;
     void*          TextVBMapped = nullptr;
+
+    // Per-frame instance arena (host-visible, persistently mapped) — same single-buffer
+    // safety as the text arena: BeginFrame waits on the in-flight fence before reset.
+    static constexpr uint32_t MaxInstances = 8192;
+    VkBuffer       InstanceVB = VK_NULL_HANDLE;
+    VkDeviceMemory InstanceVBMem = VK_NULL_HANDLE;
+    void*          InstanceMapped = nullptr;
+    uint32_t       InstanceCursor = 0;
     void*          TextIBMapped = nullptr;
     uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
