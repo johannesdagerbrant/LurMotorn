@@ -214,7 +214,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
         DP.BaseColor = IconAtlas;
         DP.Tint = {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), A};
         HintPointer[I] = Renderer->CreateMaterial(DP);
-        HintArrow[I] = FlatMat(Renderer, {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), A});
+        HintArrow[I] = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), A});  // white, like the finger
     }
     {
         const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
