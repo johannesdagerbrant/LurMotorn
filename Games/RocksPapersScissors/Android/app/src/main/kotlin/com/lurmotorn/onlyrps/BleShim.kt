@@ -54,7 +54,9 @@ class BleShim(private val context: Context) {
         private const val TAG = "OnlyRps"
 
         // MUST match Lur::Transport::BleProtocol (Modules/.../BleProtocol.h).
-        private val SERVICE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E00-5472616E7370")
+        // Distinct per-game service UUID (...7371 vs chess's ...7370) so RPS phones only
+        // pair with each other, never a chess phone (they share the engine transport).
+        private val SERVICE_UUID = UUID.fromString("4C55524D-4F54-4F52-4E00-5472616E7371")
         private val DATAGRAM_UUID = UUID.fromString("4C55524D-4F54-4F52-4E01-446174616772")
         private val DEVICE_ID_UUID = UUID.fromString("4C55524D-4F54-4F52-4E02-4E6F6E636500")
         // Standard Client Characteristic Configuration Descriptor (enables notify).

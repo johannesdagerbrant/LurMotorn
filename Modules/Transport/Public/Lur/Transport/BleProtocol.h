@@ -22,9 +22,17 @@ namespace Lur::Transport {
 // what it carries changed from a random session nonce to the persistent device id,
 // see below — so the UUID is kept to avoid churning the wire identity.)
 
-// GATT service the peripheral exposes and the central scans for.
-inline constexpr std::string_view BleServiceUuid =
-    "4C55524D-4F54-4F52-4E00-5472616E7370";
+// GATT service the peripheral exposes and the central scans for. This is PER-GAME:
+// chess and the RTS ride the SAME engine transport, so if they advertised the same
+// service UUID they would cross-link (a chess phone connecting an RTS phone, and vice
+// versa). An app gives its game a distinct identity by defining LUR_BLE_SERVICE_UUID at
+// build time; the default is chess's original value, so chess's wire identity is
+// unchanged. Only the SERVICE UUID needs to differ — it is the advertise/scan
+// discriminator; the datagram/device-id characteristics live inside the matched service.
+#ifndef LUR_BLE_SERVICE_UUID
+#define LUR_BLE_SERVICE_UUID "4C55524D-4F54-4F52-4E00-5472616E7370"
+#endif
+inline constexpr std::string_view BleServiceUuid = LUR_BLE_SERVICE_UUID;
 
 // The single writable + notifiable characteristic that carries datagrams both
 // ways (central writes to it; peripheral notifies on it).

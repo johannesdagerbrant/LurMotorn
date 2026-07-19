@@ -54,7 +54,10 @@ target_compile_definitions(onlyrps PRIVATE
     LUR_SHIPPING=${LUR_SHIPPING}
     LUR_INTERNAL=${LUR_INTERNAL}
     LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW})
+    LUR_SLOW=${LUR_SLOW}
+    # Distinct per-game BLE service UUID (matches the Kotlin BleShim SERVICE_UUID and
+    # the iOS build) so RPS never cross-links a chess phone.
+    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")
 
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlyrps PROPERTIES
