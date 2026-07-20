@@ -10,6 +10,7 @@
 // second consumer exists.
 #include <android_native_app_glue.h>
 #include <android/log.h>
+#include <sys/system_properties.h>  // debug.lur.autoplay — dev-only stress autospam (#101)
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -169,6 +170,15 @@ void android_main(android_app* App) {
     auto PrevTime = std::chrono::steady_clock::now();
 #if LUR_INTERNAL
     uint64_t DiagAccumNs = 0;
+    // Dev-only autospam (#101 stress capture): with debug.lur.autoplay=1 (set BEFORE launch,
+    // e.g. by TraceAndroid), this peer floods its OWN team with random soldiers, so a
+    // PC-vs-phone match with BOTH ends autospamming maxes the units on the map. Off by
+    // default — phones are for human playtesting.
+    char AutoV[PROP_VALUE_MAX] = {};
+    const bool AutoPlay = (__system_property_get("debug.lur.autoplay", AutoV) > 0 && AutoV[0] == '1');
+    if (AutoPlay) LOGI("autoplay ENABLED (debug.lur.autoplay=1): auto-spamming soldiers");
+    uint64_t AutoAccumNs = 0;
+    Lur::Sim::SplitMix64 AutoRng(0x5059ull ^ State.DeviceId.size());
 #endif
     while (!App->destroyRequested) {
         const auto Now = std::chrono::steady_clock::now();
@@ -187,6 +197,15 @@ void android_main(android_app* App) {
             State.View.SetLinked(true);  // opponent selector: green dot (#85)
             LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
         }
+#if LUR_INTERNAL
+        if (State.Started && AutoPlay) {  // stress: flood our own team with random soldiers
+            AutoAccumNs += ElapsedNs;
+            if (AutoAccumNs > 200'000'000ull) {
+                AutoAccumNs = 0;
+                State.Lp.SetLocalMask(static_cast<uint8_t>(1u << AutoRng.NextBounded(4)));
+            }
+        }
+#endif
         if (State.Started) { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce + send input, execute to the ceiling (sim.step scopes nest under this)
 
 #if LUR_INTERNAL

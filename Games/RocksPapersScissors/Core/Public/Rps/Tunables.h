@@ -153,7 +153,7 @@ constexpr uint32_t AnchorBurstThreshold = 16;
 constexpr int32_t MaxUnitsPerTeam = 2048;
 constexpr int32_t MaxUnits = MaxUnitsPerTeam * 2;
 constexpr int32_t MinesPerCluster = 6;      // denser rows per the 2026-07-19 review
-constexpr int32_t ClustersPerTeam = 3;      // safe (near camp) / midfield / contested (near mid)
+constexpr int32_t ClustersPerTeam = 4;      // home (at camp) / safe / midfield / contested (near mid) — #100: denser gold near camp so the economy ramps and snowballs
 constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
 constexpr int32_t NumMines = MinesPerTeam * 2;
 

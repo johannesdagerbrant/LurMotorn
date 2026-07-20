@@ -68,6 +68,15 @@ if ($Fresh) {
         RunAdb shell pm grant $Pkg "android.permission.$p" 2>$null | Out-Null
     }
 }
+# Always force-stop first: a leftover BLE advertiser from a prior instance stays
+# registered in the phone's BT stack and makes the next launch fail with
+# "advertise failed: 3 (ALREADY_STARTED)", so the PC radio never discovers the phone.
+RunAdb shell am force-stop $Pkg 2>$null | Out-Null
+# Arm the phone's dev autospam so BOTH ends flood units (stress). Read once at startup,
+# so it must be set before launch. The PC peer autospams via --auto; this is the phone half.
+RunAdb shell setprop debug.lur.autoplay 1 | Out-Null
+Start-Sleep -Seconds 1
+
 # Launch precisely via the resolved launcher activity (am start), not monkey — monkey
 # is flaky and its result is opaque. Fall back to monkey only if resolve fails.
 $launchComp = ((RunAdb shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER $Pkg) -split "`n" |

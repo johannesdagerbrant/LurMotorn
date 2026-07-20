@@ -134,9 +134,11 @@ void BuildMap(Sim& S) {
     const int32_t Hi = WorldHeight.ToInt();
     const int32_t Mid = Hi / 2;
     const Fixed ClusterY[ClustersPerTeam * 2] = {
+        F(CampInset + 2),        // t0 home     (right at the bottom camp — fast early gold, #100)
         F(CampInset + 6),        // t0 safe     (near the bottom camp)
         F(Hi / 4),               // t0 midfield
         F(Mid - 8),              // t0 contested (toward mid)
+        F(Hi - CampInset - 2),   // t1 home     (right at the top camp)
         F(Hi - CampInset - 6),   // t1 safe     (near the top camp)
         F(Hi - Hi / 4),          // t1 midfield
         F(Mid + 8),              // t1 contested (toward mid)
