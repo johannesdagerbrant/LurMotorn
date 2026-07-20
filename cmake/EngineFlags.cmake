@@ -35,6 +35,11 @@
 set(LUR_CONFIG "Development" CACHE STRING "Build configuration: Shipping | Development | Debugging")
 set_property(CACHE LUR_CONFIG PROPERTY STRINGS Shipping Development Debugging)
 
+# LUR_FAST forces an unoptimized (-O0) build regardless of LUR_CONFIG — for the
+# host unit-test loop (build.ps1), which wants fast COMPILES, not fast code
+# (correctness, not speed). See the optimization-axis block below.
+option(LUR_FAST "Force -O0 for a fast compile loop, independent of LUR_CONFIG" OFF)
+
 if(LUR_CONFIG STREQUAL "Shipping")
     set(_lur_shipping 1)
     set(_lur_internal 0)
@@ -72,6 +77,31 @@ add_compile_definitions(
 
 message(STATUS "LurMotorn config: ${LUR_CONFIG} "
         "(SHIPPING=${_lur_shipping} INTERNAL=${_lur_internal} ASSERTS=${_lur_asserts} SLOW=${_lur_slow})")
+
+# ── Optimization axis — the ladder's "Opt" column, coupled to LUR_CONFIG ──────
+# The macros above are only HALF the ladder. The other half — real optimization
+# (-O0 vs -O2) — lives in CMAKE_BUILD_TYPE, a SEPARATE dial. Historically every
+# build driver hardcoded CMAKE_BUILD_TYPE=Debug and none set LUR_CONFIG, so the
+# documented "Development = optimized" rung was never actually produced: the phone
+# AND the desktop ran -O0 (issue #89). Bind the two here so LUR_CONFIG is the one
+# dial a human turns; a driver that wants -O0 for compile speed passes LUR_FAST.
+#
+# Single-config generators only (Ninja: host + Android, where CMAKE_BUILD_TYPE
+# governs -O). Multi-config generators (Xcode/iOS, Visual Studio) ignore it and
+# choose optimization per-build — there the app project owns the Opt column and
+# must be kept in sync with LUR_CONFIG by hand.
+get_property(_lur_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT _lur_multi_config)
+    if(LUR_FAST OR LUR_CONFIG STREQUAL "Debugging")
+        set(_lur_build_type Debug)            # -O0 -g
+    else()                                    # Development, Shipping
+        set(_lur_build_type RelWithDebInfo)   # -O2 -g (asserts stay on via LUR_ASSERTS)
+    endif()
+    set(CMAKE_BUILD_TYPE "${_lur_build_type}" CACHE STRING
+        "Native optimization, derived from LUR_CONFIG by EngineFlags (LUR_FAST=ON forces -O0)" FORCE)
+    message(STATUS "LurMotorn opt: CMAKE_BUILD_TYPE=${_lur_build_type} "
+            "(from LUR_CONFIG=${LUR_CONFIG}, LUR_FAST=${LUR_FAST})")
+endif()
 
 # ── Compiler discipline ──────────────────────────────────────────────────────
 # Applied only when LurMotorn is the TOP-LEVEL project — the host correctness loop

@@ -20,7 +20,14 @@ android {
         }
         externalNativeBuild {
             cmake {
+                // Perf #89: the everyday install must be OPTIMIZED. Pass the single
+                // LUR_CONFIG dial through; EngineFlags.cmake couples native
+                // optimization to it (Development/Shipping -> RelWithDebInfo,
+                // Debugging -> -O0 -g), overriding AGP's default Debug (-O0).
+                // Build a slow, fully-debuggable native lib with -PlurConfig=Debugging.
+                val lurConfig = (project.findProperty("lurConfig") as String?) ?: "Development"
                 arguments += "-DANDROID_STL=c++_static"
+                arguments += "-DLUR_CONFIG=$lurConfig"
             }
         }
     }

@@ -20,7 +20,10 @@ if (-not $env:VULKAN_SDK) { throw 'VULKAN_SDK not set. Install the LunarG Vulkan
 $root  = Split-Path (Split-Path $MyInvocation.MyCommand.Path)   # scripts\.. = repo root
 $build = Join-Path $root 'build-desktop'
 
-& $cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER="$gxx" `
+# No -DCMAKE_BUILD_TYPE: EngineFlags derives it from LUR_CONFIG (default
+# Development -> RelWithDebInfo / optimized), so desktop perf numbers are real.
+# Pass -DLUR_FAST=ON for a quick -O0 build, or -DLUR_CONFIG=Debugging to debug.
+& $cmake -S $root -B $build -G Ninja -DCMAKE_CXX_COMPILER="$gxx" `
          -DLUR_DESKTOP=ON -DLUR_BUILD_TESTS=OFF
 if ($LASTEXITCODE) { throw "configure failed ($LASTEXITCODE)" }
 & $cmake --build $build --target onlychess_desktop

@@ -89,11 +89,11 @@ since the players share a room, genuine disputes can be settled out-of-band, soc
 One ordinal ladder of configs (Unreal-style), each a strict **superset** of the one below, selected
 with `-DLUR_CONFIG=`:
 
-| `LUR_CONFIG` | Tooling | Asserts | Slow checks | Opt |
+| `LUR_CONFIG` | Tooling | Asserts | Slow checks | Opt (`CMAKE_BUILD_TYPE`) |
 |---|---|---|---|---|
-| `Shipping` | ✗ | ✗ (quiet guards) | ✗ | on |
-| `Development` *(default)* | ✓ | ✓ (deafening) | ✗ | on |
-| `Debugging` | ✓ | ✓ | ✓ | `-O0 -g` |
+| `Shipping` | ✗ | ✗ (quiet guards) | ✗ | `RelWithDebInfo` (-O2) |
+| `Development` *(default)* | ✓ | ✓ (deafening) | ✗ | `RelWithDebInfo` (-O2 -g) |
+| `Debugging` | ✓ | ✓ | ✓ | `Debug` (-O0 -g) |
 
 `cmake/EngineFlags.cmake` derives four **capability macros** from the config —
 `LUR_SHIPPING`, `LUR_INTERNAL` (dev-only tooling: bots, `BoardView::PlayMove`, the soak/autoplayer),
@@ -110,6 +110,16 @@ compiled out of `Shipping`, not merely a runtime toggle. Default config is `Deve
 pipeline passes `-DLUR_CONFIG=Shipping`. Out-of-tree app targets (the Android/iOS mains) can't see the
 engine tree's `add_compile_definitions`, so they re-apply the derived `LUR_*` cache vars to their own
 target — see `Games/Chess/Android/app/src/main/cpp/CMakeLists.txt`.
+
+**`LUR_CONFIG` is the single dial — it drives optimization too, not just the macros (issue #89).**
+`EngineFlags.cmake` derives `CMAKE_BUILD_TYPE` from it (the *Opt* column above), so
+`Development`/`Shipping` are **optimized** and only `Debugging` is `-O0`. Never hardcode
+`-DCMAKE_BUILD_TYPE` in a build driver (that was the old bug: every driver forced `Debug`/`-O0`, so no
+build was ever actually optimized — the phone *and* the desktop ran `-O0`). Drivers pass `LUR_CONFIG`
+and, if they want a fast **compile** loop at the cost of speed (the host unit tests), `-DLUR_FAST=ON`
+to pin `-O0` regardless. Coupling is via `CMAKE_BUILD_TYPE`, so it binds only single-config generators
+(Ninja: host + Android); multi-config (Xcode/iOS, VS) picks opt per-build — keep the Xcode scheme in
+sync with `LUR_CONFIG` by hand.
 
 ### Shared C++ core (do this for any core change)
 

@@ -35,4 +35,28 @@ gradle wrapper            # once, to create gradlew + the wrapper jar
 
 Set `ndkVersion`/`compileSdk` in `app/build.gradle.kts` to match what you install.
 
+## Build configurations (`LUR_CONFIG` is the one dial)
+
+The native library's tooling/asserts **and** its optimization are both driven by a
+single dial, `LUR_CONFIG` (Unreal-style ladder). Gradle forwards it to CMake, and
+`cmake/EngineFlags.cmake` derives everything from it — so the everyday
+`installDebug` ships **optimized** native code, not `-O0`. Select it with
+`-PlurConfig=<config>`:
+
+| `-PlurConfig=` | `LUR_INTERNAL` (bots/soak) | `LUR_ASSERTS` | `LUR_SLOW` | Native opt (`CMAKE_BUILD_TYPE`) |
+|---|---|---|---|---|
+| `Development` *(default)* | on | on | off | `RelWithDebInfo` (**-O2 -g**) |
+| `Debugging` | on | on | on | `Debug` (**-O0 -g**) |
+| `Shipping` | off | off | off | `RelWithDebInfo` (-O2) |
+
+```
+./gradlew installDebug                        # optimized Development (the default loop)
+./gradlew installDebug -PlurConfig=Debugging  # -O0 -g, slow checks, fully steppable
+```
+
+Asserts stay on in `Development` even though it's optimized — `LUR_ASSERTS` is
+decoupled from `NDEBUG` on purpose (see `cmake/EngineFlags.cmake`). The host
+unit-test loop (`build.ps1`) instead passes `-DLUR_FAST=ON` to keep `-O0` for fast
+compiles (correctness, not speed).
+
 > iOS is the sibling target (`Games/Chess/iOS`) and **requires a Mac** — see CLAUDE.md.

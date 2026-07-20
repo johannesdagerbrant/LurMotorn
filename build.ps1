@@ -28,7 +28,10 @@ $build = Join-Path $root 'build'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root 'Cook\Cook.ps1')
 if ($LASTEXITCODE) { throw "cook failed ($LASTEXITCODE)" }
 
-& $cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_CXX_COMPILER="$gxx"
+# The host unit-test loop wants fast COMPILES, not fast code: LUR_FAST pins -O0
+# (EngineFlags couples optimization to LUR_CONFIG otherwise). LUR_CONFIG stays the
+# default Development, so asserts are on.
+& $cmake -S $root -B $build -G Ninja -DLUR_FAST=ON -DCMAKE_CXX_COMPILER="$gxx"
 if ($LASTEXITCODE) { throw "configure failed ($LASTEXITCODE)" }
 & $cmake --build $build
 if ($LASTEXITCODE) { throw "build failed ($LASTEXITCODE)" }
