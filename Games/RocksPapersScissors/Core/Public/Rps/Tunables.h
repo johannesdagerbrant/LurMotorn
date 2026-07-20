@@ -127,6 +127,13 @@ constexpr Fixed MineRepelRadius = F(3, 2);
 // proves it), so it's tuned in slice 3 without touching correctness. ~ the largest
 // interaction radius per the design doc; smaller favours the dense separation query.
 constexpr int32_t GridCellSize = 3;
+// Cap the expanding-ring nearest-enemy search at this many cells (#92): two far-apart
+// armies would otherwise scan every empty cell between them (O(units x separation)).
+// Beyond the cap a soldier has "no target" and marches on the enemy camp instead (a
+// deliberate gameplay change, decision #3 — armies advance, no straggler-chasing). The
+// brute path applies the IDENTICAL Chebyshev cell-box cutoff so grid == brute holds.
+// Placeholder radius (playtest): 8 cells = 24 world units.
+constexpr int32_t TargetSearchMaxK = 8;
 
 // ---- Netcode (slice 1, NOT the core) — recorded here so the constant has one home ----
 constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (design doc §3)

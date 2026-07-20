@@ -65,6 +65,7 @@ int32_t CellY(Fixed Y) {
     const int32_t C = Y.ToInt() / GridCellSize;
     return C < 0 ? 0 : (C >= GridRows ? GridRows - 1 : C);
 }
+constexpr int32_t Abs32(int32_t V) { return V < 0 ? -V : V; }
 
 struct Grid {
     int32_t Start[GridCells + 1];  // CSR: cell c's units are Order[Start[c] .. Start[c+1])
@@ -225,8 +226,13 @@ TargetScore ScoreOf(const Sim& S, int32_t I, int32_t J) {
 int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
     int32_t Best = -1;
     TargetScore BS{};
+    // Same Chebyshev cell-box cutoff the capped grid search uses (#92), so the two
+    // paths consider the IDENTICAL set of enemies and stay bit-for-bit equivalent.
+    const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
     for (int32_t J = 0; J < S.Count; ++J) {
         if (!S.IsAlive(J) || S.Team[J] == S.Team[I]) continue;
+        if (Abs32(CellX(S.PosX[J]) - Cx) > TargetSearchMaxK ||
+            Abs32(CellY(S.PosY[J]) - Cy) > TargetSearchMaxK) continue;
         const TargetScore Sc = ScoreOf(S, I, J);
         if (Best < 0 || Sc.BetterThan(BS)) { BS = Sc; Best = J; }
     }
@@ -241,7 +247,10 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
     TargetScore BS{};
     int32_t BestId = -1;
-    const int32_t MaxK = GridCols + GridRows;
+    // Cap the ring expansion (#92): stop at TargetSearchMaxK cells even if no enemy was
+    // found, so two far-apart armies don't each scan the empty cells between them. The
+    // brute path applies the same cell-box cutoff, so grid == brute still holds.
+    const int32_t MaxK = TargetSearchMaxK;
     for (int32_t K = 0; K <= MaxK; ++K) {
         bool AnyInGrid = false;
         const int32_t X0 = Cx - K, X1 = Cx + K, Y0 = Cy - K, Y1 = Cy + K;
@@ -369,7 +378,12 @@ void WorkerSeek(Sim& S, int32_t I) {
 }
 void SoldierSeek(Sim& S, int32_t I) {
     const int32_t T = S.Target[I];
-    if (T < 0 || !S.IsAlive(T)) return;
+    if (T < 0 || !S.IsAlive(T)) {
+        // No enemy within the search cap (#92): advance on the enemy camp line so armies
+        // push forward instead of idling — targets get acquired as the fronts close.
+        MoveToward(S, I, CampX, Sim::CampY(S.Team[I] ^ 1));
+        return;
+    }
     if (Dist2(S.PosX[I], S.PosY[I], S.PosX[T], S.PosY[T]) <= RangeSq(UnitTable[S.Type[I]].Range))
         return;  // in range — hold position and fight
     MoveToward(S, I, S.PosX[T], S.PosY[T]);
