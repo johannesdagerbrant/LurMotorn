@@ -1131,13 +1131,7 @@ private:
             return false;
         }
 
-        // Present mode: prefer MAILBOX (present the NEWEST frame, no vsync queue) so a
-        // drag tracks the finger with ~1 frame less latency than FIFO — the "map lags my
-        // finger while scrolling" feel. Falls back to FIFO (always available). MAILBOX
-        // wants a spare image (>=3) to have something to replace.
-        const VkPresentModeKHR PresentMode = ChoosePresentMode();
         uint32_t ImageCount = Caps.minImageCount + 1;
-        if (PresentMode == VK_PRESENT_MODE_MAILBOX_KHR && ImageCount < 3) ImageCount = 3;
         if (Caps.maxImageCount > 0 && ImageCount > Caps.maxImageCount)
             ImageCount = Caps.maxImageCount;
 
@@ -1154,12 +1148,10 @@ private:
         Info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
         Info.preTransform = Caps.currentTransform;
         Info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-        Info.presentMode = PresentMode;
+        Info.presentMode = VK_PRESENT_MODE_FIFO_KHR;
         Info.clipped = VK_TRUE;
         VkResult R = vkCreateSwapchainKHR(Device, &Info, nullptr, &Swapchain);
         if (R != VK_SUCCESS) { LOGE("vkCreateSwapchainKHR failed (%d)", R); return false; }
-        LOGI("swapchain present mode: %s (%u images)",
-             PresentMode == VK_PRESENT_MODE_MAILBOX_KHR ? "MAILBOX (low-latency)" : "FIFO (vsync)", ImageCount);
 
         uint32_t Got = 0;
         vkGetSwapchainImagesKHR(Device, Swapchain, &Got, nullptr);
@@ -1167,18 +1159,6 @@ private:
         vkGetSwapchainImagesKHR(Device, Swapchain, &Got, SwapImages.data());
 
         return CreateImageViews() && CreateRenderPass() && CreateFramebuffers();
-    }
-
-    // Prefer MAILBOX (newest-frame, low-latency, no tearing) for tight touch-follow; FIFO
-    // is the guaranteed vsync fallback. IMMEDIATE is intentionally not used (tearing).
-    VkPresentModeKHR ChoosePresentMode() {
-        uint32_t Count = 0;
-        vkGetPhysicalDeviceSurfacePresentModesKHR(Physical, Surface, &Count, nullptr);
-        std::vector<VkPresentModeKHR> Modes(Count);
-        vkGetPhysicalDeviceSurfacePresentModesKHR(Physical, Surface, &Count, Modes.data());
-        for (VkPresentModeKHR M : Modes)
-            if (M == VK_PRESENT_MODE_MAILBOX_KHR) return M;
-        return VK_PRESENT_MODE_FIFO_KHR;  // always supported
     }
 
     VkSurfaceFormatKHR ChooseSurfaceFormat() {
