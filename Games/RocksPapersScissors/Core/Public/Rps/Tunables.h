@@ -107,9 +107,31 @@ constexpr Fixed CampX = F(17);              // centred on the 34-wide field
 constexpr Fixed Camp0Y = F(CampInset);
 constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 
-// ---- Movement / steering (spec §5) ----
-constexpr Fixed SeparationRadius = F(1);    // same-team push range
-constexpr Fixed SeparationStrength = F(1, 4);
+// ---- Movement / steering (spec §5; boids slice A, #96) ----
+// SOLDIERS flock: one neighbour gather blends separation + enemy separation + two-tier
+// cohesion into a desired step (Sim.cpp Movement). Miners keep their state machine with
+// a separation + mine-repel nudge. ALL values below are playtest PLACEHOLDERS (plan §7)
+// to be beaten into shape on the desktop stress scene — the engine is never the reason a
+// number stays small. Nothing here is wire-visible (compiled identically into both peers;
+// a change is lockstep-breaking — same build both sides — but NOT a wire-format change).
+//
+// Separation now uses the CORRECTED boids falloff: strongest at contact, zero at the
+// radius — dir_cheb × (R − cheb)/R × strength (the old form grew with distance, so
+// stacking was nearly free; that was the bundle's root cause, plan §1.3).
+constexpr Fixed SeparationRadius = F(12, 10);      // same-team push range
+constexpr Fixed SeparationStrength = F(1, 2);      // inverted falloff needs more push
+// Enemy separation (new, #96 decision #2): a smaller radius un-piles engaged fights into
+// arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
+constexpr Fixed EnemySeparationRadius = F(1);
+constexpr Fixed EnemySeparationStrength = F(1, 2);
+// Two-tier cohesion (soldiers only) — THE readability mechanism. Toward the same-type
+// centroid (tight: papers blob with papers) plus a much weaker pull toward the whole
+// army's warrior centroid (so type-blobs travel loosely together, not scattered).
+constexpr Fixed CohSameR = F(5);                   // same-type affinity radius
+constexpr Fixed WCohSame = F(1, 4);                //   weight (strong)
+constexpr Fixed CohAllR = F(7);                    // army affinity radius (> CohSameR)
+constexpr Fixed WCohAll = F(1, 12);                //   weight (≪ WCohSame) — also the GATHER radius
+constexpr Fixed WSeek = F(1);                      // goal-pursuit weight (unit direction)
 // Targeting (playtest 2026-07-19): distances quantize into bands of this width
 // (Chebyshev units); within one band, the type WE counter (3x damage) is preferred
 // over a marginally nearer neutral target - a paper picks the rock, not the

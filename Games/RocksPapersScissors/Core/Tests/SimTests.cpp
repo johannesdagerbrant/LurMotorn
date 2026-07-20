@@ -120,6 +120,45 @@ static void TestGridEqualsBruteForce() {
     }
 }
 
+// ---- Flocking (boids slice A, #96) ----
+// Cohesion POLARITY: grid≡brute can't catch a toward/away sign error (both paths would be
+// wrong identically), so assert the behaviour directly — a same-type group must CONTRACT,
+// never explode. Setup: 6 Papers on team 0 spread across X, no enemies, no mines. They
+// march up (seek's X-component is ~0 at that distance), so any X-contraction is cohesion;
+// a flipped sign would blow the group apart instead. Also a no-overflow guard (positions
+// stay finite / in-bounds — the |force sum| bound the plan §8 asks for).
+static void TestSameTypeCohesionContracts() {
+    using Lur::Sim::Min; using Lur::Sim::Max;
+    static Sim S;
+    S.Init(0);
+    for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;          // mines gone: no repel
+    for (int I = 0; I < S.Count; ++I) S.AliveBits[I >> 6] = 0;     // clear the starting miners
+    S.Count = 0;
+    const Fixed Xs[6] = {F(14), F(15), F(16), F(18), F(19), F(20)};  // spread 6, centred on 17
+    for (int K = 0; K < 6; ++K) {
+        S.PosX[K] = Xs[K]; S.PosY[K] = F(22);
+        S.PrevX[K] = S.PosX[K]; S.PrevY[K] = S.PosY[K];
+        S.Hp[K] = UnitTable[UnitPaper].MaxHp;
+        S.Type[K] = UnitPaper; S.Team[K] = 0; S.Target[K] = -1;
+        S.AliveBits[K >> 6] |= (1ull << (K & 63));
+    }
+    S.Count = 6;
+    auto XSpread = [](const Sim& St) {
+        Fixed Lo = St.PosX[0], Hi = St.PosX[0];
+        for (int I = 1; I < St.Count; ++I) { Lo = Min(Lo, St.PosX[I]); Hi = Max(Hi, St.PosX[I]); }
+        return Hi - Lo;
+    };
+    const Fixed Before = XSpread(S);
+    for (int I = 0; I < 40; ++I) S.Step(0, 0);
+    const Fixed After = XSpread(S);
+    CHECK(After < Before);                 // cohesion pulled the type together (not apart)
+    CHECK(After.Raw > 0);                  // separation kept them from collapsing to a point
+    for (int I = 0; I < S.Count; ++I) {    // no overflow: every unit stayed on the field
+        CHECK(S.PosX[I].Raw >= 0 && S.PosX[I] <= WorldWidth);
+        CHECK(S.PosY[I].Raw >= 0 && S.PosY[I] <= WorldHeight);
+    }
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -274,8 +313,13 @@ static void TestStressTickBudget() {
     for (int I = 0; I < Ticks; ++I) S.Step(0, 0);
     const auto T1 = std::chrono::steady_clock::now();
     const double Ms = std::chrono::duration<double, std::milli>(T1 - T0).count();
-    std::printf("  stress: %d units, %.3f ms/tick over %d ticks (10 Hz budget = 100 ms)\n",
-                S.Count, Ms / Ticks, Ticks);
+    // The flock GATHER is the hot phase (plan §6): each unit visits a cell box sized by
+    // the LARGEST flock radius, CohAllR. Log it — CohAllR is the knob to watch on device.
+    const int32_t CellK = (CohAllR.ToInt() + GridCellSize) / GridCellSize;  // ceil-ish half-width
+    const int32_t Box = 2 * CellK + 1;
+    std::printf("  stress: %d units, %.3f ms/tick over %d ticks (10 Hz budget = 100 ms); "
+                "flock gather = %dx%d cells/unit (CohAllR=%d, GridCellSize=%d)\n",
+                S.Count, Ms / Ticks, Ticks, Box, Box, CohAllR.ToInt(), GridCellSize);
     CHECK(S.Count > 0);
 }
 #endif
@@ -284,6 +328,7 @@ int main() {
     TestDeterminism();
     TestReplayReproducibility();
     TestGridEqualsBruteForce();
+    TestSameTypeCohesionContracts();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();

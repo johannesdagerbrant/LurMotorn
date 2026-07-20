@@ -310,7 +310,16 @@ void TargetAcquire(Sim& S, const Grid& G) {
     }
 }
 
-// ---- Phase 3: movement + separation ----
+// ---- Phase 3: movement + flocking (boids slice A, #96) ----
+// Miners keep their state machine (WorkerSeek) with a separation + mine-repel nudge;
+// SOLDIERS flock. The structure is one neighbour GATHER pass per unit — the old
+// separation walk widened to the largest flock radius (CohAllR) — accumulating every
+// neighbour force (friendly + enemy separation, two-tier cohesion) from start-of-tick
+// Prev positions, so the sums are ORDER-INDEPENDENT and identical on the brute and grid
+// paths (rps_sim_tests proves it). A separate scalar FINALIZE step blends the sums into a
+// desired vector, Chebyshev-clamps it to Speed, and integrates. No float, no sqrt, no
+// alloc; every falloff/normalize is Chebyshev so Fixed::Sqrt stays unbuilt.
+//
 // Chebyshev seek (spec §5): step = speed * (dx,dy) / max(|dx|,|dy|). Pure Fixed
 // mul/div; an EXPLICIT zero-distance guard before the divide (never relying on
 // Fixed::operator/'s silent saturate).
@@ -378,79 +387,148 @@ void WorkerSeek(Sim& S, int32_t I) {
         default: return;
     }
 }
-void SoldierSeek(Sim& S, int32_t I) {
-    const int32_t T = S.Target[I];
-    if (T < 0 || !S.IsAlive(T)) {
-        // No enemy within the search cap (#92): advance on the enemy camp line so armies
-        // push forward instead of idling — targets get acquired as the fronts close.
-        MoveToward(S, I, CampX, Sim::CampY(S.Team[I] ^ 1));
-        return;
+// Per-unit neighbour-force accumulator (Q16.16 raw; int64 so a dense stress pile can
+// never overflow the running sum). Separation/enemy are Σ(dir_cheb·falloff·strength);
+// each cohesion tier is Σ(neighbour−self) offsets + a count — the centroid (Σoffset/N)
+// is formed with ONE Fixed divide per unit in the finalize loop, keeping the gather a
+// plain associative sum (order-independent, auto-vectorizable per design-doc §5).
+struct FlockAcc {
+    int64_t SepX = 0, SepY = 0;                 // friendly separation
+    int64_t EneX = 0, EneY = 0;                 // enemy separation
+    int64_t SameX = 0, SameY = 0; int32_t SameN = 0;  // same-type cohesion sum + count
+    int64_t AllX = 0, AllY = 0;   int32_t AllN = 0;   // army (any-warrior) cohesion
+};
+
+// CORRECTED separation falloff (classic boids; the old code had it inverted): strongest
+// at contact, zero at R — dir_cheb × (R − cheb)/R × strength. Chebyshev-normalized
+// direction (one axis is ±1), no sqrt. Reads only the passed Prev positions, so the sum
+// is order-independent. Shared verbatim by unit separation AND mine repel.
+void AddRepel(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R, Fixed Strength,
+              int64_t& Ax, int64_t& Ay) {
+    const Fixed Dx = Ix - Jx, Dy = Iy - Jy;          // away from J
+    const Fixed Cheb = Max(Abs(Dx), Abs(Dy));
+    if (Cheb.Raw == 0 || Cheb >= R) return;          // exact overlap (no dir) or out of range
+    const Fixed Scale = (R - Cheb) / R * Strength;   // (R−cheb)/R · strength
+    Ax += (Dx / Cheb * Scale).Raw;                   // dir_cheb · scale
+    Ay += (Dy / Cheb * Scale).Raw;
+}
+// Cohesion gather: accumulate the offset TOWARD each in-range neighbour + a count.
+void AddCohesion(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R,
+                 int64_t& Ax, int64_t& Ay, int32_t& N) {
+    const Fixed Dx = Jx - Ix, Dy = Jy - Iy;          // toward J
+    if (Max(Abs(Dx), Abs(Dy)) >= R) return;          // out of (Chebyshev) range
+    Ax += Dx.Raw; Ay += Dy.Raw; ++N;
+}
+// One neighbour's WHOLE contribution — the single per-pair function both gather paths
+// call, so brute and grid add bit-identical terms (house rule). Reads Prev only.
+void AccumFlock(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
+    if (J == I) return;
+    const Fixed Ix = S.PrevX[I], Iy = S.PrevY[I];
+    const Fixed Jx = S.PrevX[J], Jy = S.PrevY[J];
+    if (S.Team[J] == S.Team[I]) {
+        AddRepel(Ix, Iy, Jx, Jy, SeparationRadius, SeparationStrength, A.SepX, A.SepY);
+        if (S.Type[J] != UnitMiner) {  // cohesion is a WARRIOR affinity (miners never blob)
+            AddCohesion(Ix, Iy, Jx, Jy, CohAllR, A.AllX, A.AllY, A.AllN);
+            if (S.Type[J] == S.Type[I])
+                AddCohesion(Ix, Iy, Jx, Jy, CohSameR, A.SameX, A.SameY, A.SameN);
+        }
+    } else {
+        AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, EnemySeparationStrength, A.EneX, A.EneY);
     }
-    if (Dist2(S.PosX[I], S.PosY[I], S.PosX[T], S.PosY[T]) <= RangeSq(UnitTable[S.Type[I]].Range))
-        return;  // in range — hold position and fight
-    MoveToward(S, I, S.PosX[T], S.PosY[T]);
 }
-// Separation reads PrevX/PrevY (start-of-tick positions), so the sum is
-// order-independent regardless of iteration order — a determinism-safe reduction.
-// One neighbour push, factored out so brute and grid paths add IDENTICAL terms.
-void AddSeparation(const Sim& S, int32_t I, int32_t J, int64_t R2, Fixed& Sx, Fixed& Sy) {
-    if (J == I || S.Team[J] != S.Team[I]) return;
-    const int64_t Dx = static_cast<int64_t>(S.PrevX[I].Raw) - S.PrevX[J].Raw;
-    const int64_t Dy = static_cast<int64_t>(S.PrevY[I].Raw) - S.PrevY[J].Raw;
-    const int64_t D2 = Dx * Dx + Dy * Dy;
-    if (D2 == 0 || D2 >= R2) return;  // exact overlap (skip; no det. direction) or out of range
-    // Offset is within radius, so |Dx|,|Dy| < One: reinterpreting as a Fixed Raw is safe.
-    Sx = Sx + Fixed{static_cast<int32_t>(Dx)} * SeparationStrength;
-    Sy = Sy + Fixed{static_cast<int32_t>(Dy)} * SeparationStrength;
-}
-void SeparationBrute(const Sim& S, int32_t I, Fixed& Sx, Fixed& Sy) {
-    Sx = Fixed{0}; Sy = Fixed{0};
-    const int64_t R2 = RangeSq(SeparationRadius);
+void GatherBrute(const Sim& S, int32_t I, FlockAcc& A) {
     for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J)) AddSeparation(S, I, J, R2, Sx, Sy);
+        if (S.IsAlive(J)) AccumFlock(S, I, J, A);
 }
-// Grid separation visits only the cells the radius overlaps — a superset of the
-// in-radius neighbours, then AddSeparation re-tests R2, so the summed set (and thus
-// the sum) is identical to brute. Queried by Prev, which equals each unit's bucketed
-// build-time Pos, so the cell lookup is consistent.
-void SeparationGrid(const Sim& S, const Grid& G, int32_t I, Fixed& Sx, Fixed& Sy) {
-    Sx = Fixed{0}; Sy = Fixed{0};
-    const int64_t R2 = RangeSq(SeparationRadius);
-    const int32_t Cx0 = CellX(S.PrevX[I] - SeparationRadius), Cx1 = CellX(S.PrevX[I] + SeparationRadius);
-    const int32_t Cy0 = CellY(S.PrevY[I] - SeparationRadius), Cy1 = CellY(S.PrevY[I] + SeparationRadius);
+// Grid gather widened to the LARGEST flock radius (CohAllR) so a single query feeds every
+// force; each Add re-tests its own (smaller) radius, so the summed SET — and thus the
+// sum — is identical to brute. Queried by Prev (== each unit's bucketed build-time Pos).
+void GatherGrid(const Sim& S, const Grid& G, int32_t I, FlockAcc& A) {
+    const int32_t Cx0 = CellX(S.PrevX[I] - CohAllR), Cx1 = CellX(S.PrevX[I] + CohAllR);
+    const int32_t Cy0 = CellY(S.PrevY[I] - CohAllR), Cy1 = CellY(S.PrevY[I] + CohAllR);
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
             for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
-                AddSeparation(S, I, G.Order[P], R2, Sx, Sy);
+                AccumFlock(S, I, G.Order[P], A);
         }
 }
-// Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get
-// pushed outward, same strength as unit separation. Reads Prev (order-independent)
-// against static mine positions — identical on the brute and grid paths.
-void AddMineRepel(const Sim& S, int32_t I, Fixed& Sx, Fixed& Sy) {
-    const int64_t R2 = RangeSq(MineRepelRadius);
+// Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get pushed
+// outward with the same corrected falloff as unit separation. Reads Prev against static
+// mine positions — identical on the brute and grid paths.
+void AddMineRepel(const Sim& S, int32_t I, int64_t& Ax, int64_t& Ay) {
     for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
         if (S.MineGold[Mn] <= 0) continue;
-        const int64_t Dx = static_cast<int64_t>(S.PrevX[I].Raw) - S.MineX[Mn].Raw;
-        const int64_t Dy = static_cast<int64_t>(S.PrevY[I].Raw) - S.MineY[Mn].Raw;
-        const int64_t D2 = Dx * Dx + Dy * Dy;
-        if (D2 == 0 || D2 >= R2) continue;  // exact overlap: no deterministic direction
-        Sx = Sx + Fixed{static_cast<int32_t>(Dx)} * SeparationStrength;
-        Sy = Sy + Fixed{static_cast<int32_t>(Dy)} * SeparationStrength;
+        AddRepel(S.PrevX[I], S.PrevY[I], S.MineX[Mn], S.MineY[Mn],
+                 MineRepelRadius, SeparationStrength, Ax, Ay);
     }
 }
 void Movement(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
-        Fixed Sx, Sy;
-        if (S.UseBruteForce) SeparationBrute(S, I, Sx, Sy);  // from Prev — before we touch Pos
-        else SeparationGrid(S, G, I, Sx, Sy);
-        AddMineRepel(S, I, Sx, Sy);
-        if (S.Type[I] == UnitMiner) WorkerSeek(S, I);
-        else SoldierSeek(S, I);
-        S.PosX[I] = ClampAxis(S.PosX[I] + Sx, WorldWidth);
-        S.PosY[I] = ClampAxis(S.PosY[I] + Sy, WorldHeight);
+        FlockAcc A;
+        if (S.UseBruteForce) GatherBrute(S, I, A);  // from Prev — before we touch any Pos
+        else GatherGrid(S, G, I, A);
+
+        if (S.Type[I] == UnitMiner) {
+            // Miners keep their state machine; a separation + mine-repel nudge on top
+            // (same model as before — only the falloff is the corrected one now).
+            WorkerSeek(S, I);
+            int64_t Nx = A.SepX, Ny = A.SepY;
+            AddMineRepel(S, I, Nx, Ny);
+            S.PosX[I] = ClampAxis(S.PosX[I] + Fixed{static_cast<int32_t>(Nx)}, WorldWidth);
+            S.PosY[I] = ClampAxis(S.PosY[I] + Fixed{static_cast<int32_t>(Ny)}, WorldHeight);
+            continue;
+        }
+
+        // --- Soldier: blend the neighbour sums into a desired step ---
+        // Seek goal + in-range test (targeting unchanged). No target -> march on the
+        // enemy camp line (#92) so fronts close instead of idling.
+        Fixed Tx, Ty;
+        bool InRange = false;
+        const int32_t T = S.Target[I];
+        if (T < 0 || !S.IsAlive(T)) {
+            Tx = CampX; Ty = Sim::CampY(S.Team[I] ^ 1);
+        } else {
+            Tx = S.PosX[T]; Ty = S.PosY[T];
+            InRange = Dist2(S.PosX[I], S.PosY[I], Tx, Ty) <= RangeSq(UnitTable[S.Type[I]].Range);
+        }
+
+        // Repulsion is ALWAYS on (even in range: engaged lines spread into arcs, not
+        // piles). Seek + cohesion are zeroed in range — the unit holds and fights.
+        int64_t Dx = A.SepX + A.EneX, Dy = A.SepY + A.EneY;
+        AddMineRepel(S, I, Dx, Dy);
+        if (!InRange) {
+            const Fixed Sdx = Tx - S.PosX[I], Sdy = Ty - S.PosY[I];
+            const Fixed Cheb = Max(Abs(Sdx), Abs(Sdy));
+            if (Cheb.Raw != 0) {                       // seek: unit Chebyshev dir × WSeek
+                Dx += (Sdx / Cheb * WSeek).Raw;
+                Dy += (Sdy / Cheb * WSeek).Raw;
+            }
+            if (A.SameN > 0) {                         // toward same-type centroid
+                Dx += (Fixed{static_cast<int32_t>(A.SameX / A.SameN)} * WCohSame).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.SameY / A.SameN)} * WCohSame).Raw;
+            }
+            if (A.AllN > 0) {                          // toward the army centroid (weak)
+                Dx += (Fixed{static_cast<int32_t>(A.AllX / A.AllN)} * WCohAll).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.AllY / A.AllN)} * WCohAll).Raw;
+            }
+        }
+        // Chebyshev-clamp the desired step to Speed and integrate (arrive, don't
+        // overshoot). When forces cancel the step shrinks to ~zero -> the unit rests.
+        const int64_t Absx = Dx < 0 ? -Dx : Dx, Absy = Dy < 0 ? -Dy : Dy;
+        const int64_t M = Absx > Absy ? Absx : Absy;
+        if (M != 0) {
+            const int64_t Sp = UnitTable[S.Type[I]].Speed.Raw;
+            Fixed Vx, Vy;
+            if (M <= Sp) { Vx = Fixed{static_cast<int32_t>(Dx)}; Vy = Fixed{static_cast<int32_t>(Dy)}; }
+            else {
+                Vx = Fixed{static_cast<int32_t>(Dx * Sp / M)};
+                Vy = Fixed{static_cast<int32_t>(Dy * Sp / M)};
+            }
+            S.PosX[I] = ClampAxis(S.PosX[I] + Vx, WorldWidth);
+            S.PosY[I] = ClampAxis(S.PosY[I] + Vy, WorldHeight);
+        }
     }
 }
 
