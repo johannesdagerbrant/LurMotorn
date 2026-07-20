@@ -32,6 +32,10 @@ struct InstanceData {
     // still draws a plain tinted quad — untextured callers just leave this zeroed
     // and pass a flat material.
     float U0 = 0.0f, V0 = 0.0f, U1 = 1.0f, V1 = 1.0f;
+    // Optional facing: if non-zero, the quad is rotated so the glyph's TOP edge points
+    // along this direction (pixel space). {0,0} (the default) draws upright. The caller
+    // decides what "facing" means (velocity, a target, a blend) — the shader just orients.
+    float FaceX = 0.0f, FaceY = 0.0f;
 };
 
 // Opaque GPU resource handles (0 = none / invalid).

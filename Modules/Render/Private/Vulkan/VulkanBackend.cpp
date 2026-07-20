@@ -747,18 +747,19 @@ private:
         Bindings[0] = {0, sizeof(Vertex), VK_VERTEX_INPUT_RATE_VERTEX};
         Bindings[1] = {1, sizeof(InstanceData), VK_VERTEX_INPUT_RATE_INSTANCE};
 
-        VkVertexInputAttributeDescription Attrs[6]{};
+        VkVertexInputAttributeDescription Attrs[7]{};
         Attrs[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT,    offsetof(Vertex, Position)};       // quad corner
         Attrs[1] = {4, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, PrevX)};    // prev centre
         Attrs[2] = {5, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, CurX)};     // cur centre
         Attrs[3] = {6, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, R)};        // colour
         Attrs[4] = {7, 1, VK_FORMAT_R32_SFLOAT,          offsetof(InstanceData, Size)};     // pixel size
         Attrs[5] = {8, 1, VK_FORMAT_R32G32B32A32_SFLOAT, offsetof(InstanceData, U0)};       // atlas UV rect
+        Attrs[6] = {9, 1, VK_FORMAT_R32G32_SFLOAT,       offsetof(InstanceData, FaceX)};    // facing dir (0,0=upright)
 
         VkPipelineVertexInputStateCreateInfo VertexInput{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
         VertexInput.vertexBindingDescriptionCount = 2;
         VertexInput.pVertexBindingDescriptions = Bindings;
-        VertexInput.vertexAttributeDescriptionCount = 6;
+        VertexInput.vertexAttributeDescriptionCount = 7;
         VertexInput.pVertexAttributeDescriptions = Attrs;
 
         VkPipelineInputAssemblyStateCreateInfo InputAsm{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
