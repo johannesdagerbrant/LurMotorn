@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "Lur/Core/Assert.h"
+#include "Lur/Trace/Trace.h"  // ble.toApply latency (#101-D) — observational, drain-side only
 
 namespace Lur::Transport {
 
@@ -56,7 +57,12 @@ public:
             switch (E.Kind) {
                 case EKind::Connected:    Out.OnConnected(); break;
                 case EKind::Disconnected: Out.OnDisconnected(); break;
-                case EKind::Datagram:     Out.OnDatagram(E.Data, E.Size); break;
+                case EKind::Datagram:
+                    // Radio-thread -> engine-thread hop latency for this datagram (#101-D):
+                    // how long it queued before we applied it. Observer only.
+                    LUR_TRACE_LATENCY("ble.toApply", E.EnqueueNs);
+                    Out.OnDatagram(E.Data, E.Size);
+                    break;
             }
         }
     }
@@ -75,6 +81,7 @@ private:
     struct Event {
         EKind       Kind = EKind::Datagram;
         std::size_t Size = 0;
+        uint64_t    EnqueueNs = 0;  // set on Push (radio thread) — for the ble.toApply trace
         uint8_t     Data[MaxDatagram] = {};
     };
 
@@ -94,6 +101,9 @@ private:
         Event& E = Buffer[Tail];
         E.Kind = Kind;
         E.Size = Size;
+#if LUR_TRACE_ENABLED
+        E.EnqueueNs = Lur::Trace::NowNs();  // stamp arrival so Drain can measure the hop
+#endif
         for (std::size_t i = 0; i < Size; ++i) E.Data[i] = Data[i];
         Tail = (Tail + 1) % Capacity;
         ++Count;
