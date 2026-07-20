@@ -51,12 +51,17 @@ struct UnitStats {
 // never enters the sim). Rock=ranged/slow, Scissor=fast/fragile, Paper=tanky/short.
 // Playtest 2026-07-19: all WARRIORS share one speed, slightly above the miner's —
 // the counter triangle reads through damage, not through chases nobody can win.
+// Playtest 2026-07-20: speeds LOWERED (carts 0.4, warriors 0.5) so the flocking reads
+// as a slow, viscous lava-lamp flow rather than a sprint.
+// Playtest 2026-07-20: attack RANGE is now UNIFORM across all unit types (= Paper's F(2))
+// so no type out-reaches another — engagement distance is identical, the counter triangle
+// decides fights, not reach. (Miner range is unused; carts don't fight.)
 constexpr UnitStats UnitTable[UnitCount] = {
     // Cost Build  HP  Speed        Atk Range    CD  Beats
-    {  30,   30,  40, F(6, 10),      2, F(12, 10),  8, UnitNone   }, // Miner
-    {  50,   50,  60, F(7, 10),      8, F(6),      10, UnitScissor}, // Rock thrower
-    {  50,   50,  90, F(7, 10),      9, F(2),      10, UnitRock   }, // Paper wrapper
-    {  50,   50,  45, F(7, 10),      7, F(12, 10),  6, UnitPaper  }, // Scissor cutter
+    {  30,   30,  40, F(4, 10),      2, F(2),       8, UnitNone   }, // Miner (cart)
+    {  50,   50,  60, F(5, 10),      8, F(2),      10, UnitScissor}, // Rock thrower
+    {  50,   50,  90, F(5, 10),      9, F(2),      10, UnitRock   }, // Paper wrapper
+    {  50,   50,  45, F(5, 10),      7, F(2),       6, UnitPaper  }, // Scissor cutter
 };
 
 constexpr int32_t CounterMultiplier = 3;   // attacker vs the type it beats
@@ -118,34 +123,78 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // Separation now uses the CORRECTED boids falloff: strongest at contact, zero at the
 // radius — dir_cheb × (R − cheb)/R × strength (the old form grew with distance, so
 // stacking was nearly free; that was the bundle's root cause, plan §1.3).
-constexpr Fixed SeparationRadius = F(12, 10);      // same-team push range
-constexpr Fixed SeparationStrength = F(1, 2);      // inverted falloff needs more push
-// Enemy separation (new, #96 decision #2): a smaller radius un-piles engaged fights into
-// arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
-constexpr Fixed EnemySeparationRadius = F(1);
-constexpr Fixed EnemySeparationStrength = F(1, 2);
+// Separation must WIN at short range so units stay visibly spaced (playtest 2026-07-20:
+// weak separation let cohesion compress the blob into an unreadable mush). Strong push +
+// wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
+constexpr Fixed SeparationRadius = F(24, 10);      // same-team keep-apart range (a touch wider, 2026-07-20)
+constexpr Fixed SeparationStrength = F(3, 2);      // > cohesion at contact — sets the spacing
+// Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
+// fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
+constexpr Fixed EnemySeparationRadius = F(3, 2);
+constexpr Fixed EnemySeparationStrength = F(1);
 // Two-tier cohesion (soldiers only) — THE readability mechanism. Toward the same-type
-// centroid (tight: papers blob with papers) plus a much weaker pull toward the whole
-// army's warrior centroid (so type-blobs travel loosely together, not scattered).
-constexpr Fixed CohSameR = F(5);                   // same-type affinity radius
-constexpr Fixed WCohSame = F(1, 4);                //   weight (strong)
-constexpr Fixed CohAllR = F(7);                    // army affinity radius (> CohSameR)
-constexpr Fixed WCohAll = F(1, 12);                //   weight (≪ WCohSame) — also the GATHER radius
+// centroid (tight: papers blob with papers) plus a weaker pull toward the whole army's
+// warrior centroid (so type-blobs travel loosely together, not scattered).
+//
+// LAVA-LAMP tuning pass (2026-07-20 playtest): cohesion raised well above the slice-B
+// starters so the group moves as a viscous glob — a front-runner's local centroid sits
+// BEHIND it, so cohesion pulls it back (it "waits"); a trailing unit has cohesion + seek
+// aligned, so it closes the gap. Cohesion self-limits (∝ distance-to-centroid), so a
+// tight blob still marches; it only bites hard when the blob starts to stretch.
+// GROUP-UP pass (2026-07-20 playtest): same-type cohesion reaches FAR to find teammates
+// across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
+// lone spawn drifts toward its type over distance without the group compressing to mush.
+constexpr Fixed CohSameR = F(15);                  // same-type affinity radius (wide — find distant teammates)
+constexpr Fixed WCohSame = F(1, 3);                //   weight (gentle — soft pull, not a hard clump)
+constexpr Fixed CohAllR = F(9);                    // cross-type army affinity radius (weak pull, below)
+// Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
+// pile onto each other — same-type globs are the readable unit; the whole-army pull is a
+// barely-there nudge so they don't scatter to opposite corners.
+constexpr Fixed WCohAll = F(1, 64);                //   weight (≪≪ WCohSame — barely noticeable)
 constexpr Fixed WSeek = F(1);                      // goal-pursuit weight (unit direction)
+// Predator flee (2026-07-20 playtest): a unit must NEVER steer toward the enemy type it
+// is weak against (the type that beats it). A repulsion from that predator, larger radius
+// than enemy separation, corrected falloff (strongest at contact). Chases prey, flees the
+// counter — so the RPS triangle plays out spatially, not just in the damage numbers.
+constexpr Fixed PredatorFleeR = F(7);
+constexpr Fixed WPredatorFlee = F(1, 4);           // subtle drift away (playtest 2026-07-20: nudged up a
+                                                   //   little); still < WSeek so hunting prey dominates
+// Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
+// steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
+// with a smoothstep fade; no floats, no libs). WNoise is its amplitude; NoiseTimeScale is
+// ticks→lattice (smaller = slower, smoother drift).
+constexpr Fixed NoiseTimeScale = F(1, 12);         // ~1.2 s per noise lattice cell at 10 Hz
+constexpr Fixed WNoise = F(2, 5);                  // wander amplitude (world-units-ish of pull)
 // Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
 // last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
 // Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
-constexpr Fixed AlignR = F(4);                     // same-type alignment radius (< CohAllR gather)
-constexpr Fixed WAlign = F(1, 6);                  //   weight (match neighbour heading)
-constexpr Fixed MaxAccel = F(15, 100);             // per-tick turn/accel clamp (≈0.5 s to reach Speed)
-constexpr Fixed FlockDamping = F(7, 8);            // carried-Δ decay in free flight (< 1: bleeds jitter)
+// Lava-lamp: slower turns (MaxAccel down) + more glide (Damp up) = the viscous feel.
+constexpr Fixed AlignR = F(5);                     // same-type alignment radius (< CohAllR gather)
+constexpr Fixed WAlign = F(1, 4);                  //   weight (match neighbour heading — laminar flow)
+constexpr Fixed MaxAccel = F(10, 100);             // per-tick turn/accel clamp (gloopy, ≈0.7 s to reach Speed)
+constexpr Fixed FlockDamping = F(9, 10);           // carried-Δ retention in free flight (viscous glide)
 constexpr Fixed InRangeDamping = F(1, 2);          // stronger decay when engaged — no orbiting the target
-// Targeting (playtest 2026-07-19): distances quantize into bands of this width
-// (Chebyshev units); within one band, the type WE counter (3x damage) is preferred
-// over a marginally nearer neutral target - a paper picks the rock, not the
-// scissor, when both are "about equally far".
-constexpr Fixed TargetBand = F(3);
+// Slice C (#98) — guard-lite INTERPOSE: an enemy soldier within GuardAlertR of one of MY
+// miners is a RAIDER. A defender that has BOTH a friendly cart and a flagged raider within
+// InterposeR steers to the point BETWEEN them — screening the cart (even from a predator it
+// wouldn't attack). Positioning, not targeting: it keeps raiders off the economy by body.
+constexpr Fixed GuardAlertR = F(6);                // raider = enemy soldier this close to a cart
+constexpr Fixed InterposeR = F(12);                // defender reacts to carts/raiders within this (< FlockGatherR)
+constexpr Fixed WInterpose = F(1);                 // pull toward the block point (≈ WSeek)
+// The single flock GATHER radius = the LARGEST force radius. One widened neighbour walk
+// feeds every force (each re-tests its own smaller radius), so brute≡grid holds no matter
+// which force is the widest. MUST be ≥ every radius above — derived here so raising any
+// one (e.g. CohSameR) can never silently break the grid path. Also the perf hot knob.
+constexpr Fixed FlockGatherR = Lur::Sim::Max(
+    Lur::Sim::Max(Lur::Sim::Max(SeparationRadius, EnemySeparationRadius), Lur::Sim::Max(CohSameR, CohAllR)),
+    Lur::Sim::Max(AlignR, PredatorFleeR));
+// Targeting: distances quantize into bands of this width (Chebyshev units); within one
+// band the TYPE-PREFERENCE ladder decides (prey > mirror > neutral > predator, Sim.cpp).
+// Playtest 2026-07-20: WIDENED from 3 to 12 so the whole engagement neighbourhood is one
+// band — a unit hunts the enemy type it beats even when a mirror is somewhat nearer,
+// instead of just fighting whoever's closest. Beyond the band, closeness takes over again.
+constexpr Fixed TargetBand = F(12);
 // Playtest 2026-07-19: carts RING a deposit instead of standing on it — a cart can
 // dig once within MineDigRange, and live deposits push units outward (soft
 // obstacles, same strength as unit separation). Repel < dig range, so diggers
@@ -183,9 +232,11 @@ constexpr uint32_t AnchorBurstThreshold = 16;
 // "hundreds-to-thousands"). Slot reuse (lowest free slot) bounds live memory here.
 constexpr int32_t MaxUnitsPerTeam = 2048;
 constexpr int32_t MaxUnits = MaxUnitsPerTeam * 2;
-constexpr int32_t MinesPerCluster = 6;      // denser rows per the 2026-07-19 review
-constexpr int32_t ClustersPerTeam = 4;      // home (at camp) / safe / midfield / contested (near mid) — #100: denser gold near camp so the economy ramps and snowballs
-constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
-constexpr int32_t NumMines = MinesPerTeam * 2;
+// DENSE mine field (playtest 2026-07-20): sparse mines made carts travel far, then stall
+// as local reserves emptied and the economy deflated. ~10x the mines in a grid keeps one
+// always nearby — MineCols lanes across the width × MineRows rows up the height.
+constexpr int32_t MineCols = 6;             // X lanes across the 34-wide field
+constexpr int32_t MineRows = 80;            // Y rows up the field
+constexpr int32_t NumMines = MineCols * MineRows;   // 480 (~10x the old 48)
 
 } // namespace Rps

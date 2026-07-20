@@ -125,32 +125,22 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
 //     variation is free, exactly like chess derives colours from GUIDs. ---
 void BuildMap(Sim& S) {
-    // Six mines per cluster row, spread across the 34-wide field (denser resources —
-    // 2026-07-19 layout review).
-    const Fixed Xs[MinesPerCluster] = {F(4), F(9), F(14), F(20), F(25), F(30)};
-    // Cluster rows per team — SAFE (just past the camp), MIDFIELD, CONTESTED (near the
-    // centre line) — derived from the field height so they scale with the WorldHeight
-    // balance knob. Closer to mid = shorter enemy walk = higher risk (spec §2).
-    const int32_t Hi = WorldHeight.ToInt();
-    const int32_t Mid = Hi / 2;
-    const Fixed ClusterY[ClustersPerTeam * 2] = {
-        F(CampInset + 2),        // t0 home     (right at the bottom camp — fast early gold, #100)
-        F(CampInset + 6),        // t0 safe     (near the bottom camp)
-        F(Hi / 4),               // t0 midfield
-        F(Mid - 8),              // t0 contested (toward mid)
-        F(Hi - CampInset - 2),   // t1 home     (right at the top camp)
-        F(Hi - CampInset - 6),   // t1 safe     (near the top camp)
-        F(Hi - Hi / 4),          // t1 midfield
-        F(Mid + 8),              // t1 contested (toward mid)
-    };
+    // DENSE grid (2026-07-20): MineCols lanes across the width × MineRows rows evenly up
+    // the field between the camp insets, so a cart always has a mine within a couple units
+    // and the economy never deflates from long hauls. Symmetric top/bottom by construction.
+    const Fixed Xs[MineCols] = {F(4), F(9), F(14), F(20), F(25), F(30)};
+    const int32_t Lo = CampInset;                          // just past the bottom camp
+    const int32_t Hi = WorldHeight.ToInt() - CampInset;    // just short of the top camp
     int32_t Idx = 0;
-    for (int G = 0; G < ClustersPerTeam * 2; ++G)
-        for (int K = 0; K < MinesPerCluster; ++K) {
-            S.MineX[Idx] = Xs[K];
-            S.MineY[Idx] = ClusterY[G];
+    for (int32_t R = 0; R < MineRows; ++R) {
+        const int32_t Y = Lo + (Hi - Lo) * R / (MineRows - 1);  // evenly spaced, integer-exact
+        for (int32_t C = 0; C < MineCols; ++C) {
+            S.MineX[Idx] = Xs[C];
+            S.MineY[Idx] = F(Y);
             S.MineGold[Idx] = MineGoldCapacity;  // finite reserve (#84)
             ++Idx;
         }
+    }
 }
 
 // ---- Phase 0: apply this tick's inputs (caller passes P0 then P1) ----
@@ -196,14 +186,28 @@ void Production(Sim& S) {
 
 // ---- Phase 2: target acquisition - re-scored EVERY tick (playtest 2026-07-19:
 // keep-until-death hysteresis made units run PAST enemies). The score is the
-// lexicographic tuple (distance band, counter-preference, exact distance, id):
-// closeness dominates in TargetBand-wide Chebyshev bands; within one band the type
-// WE beat (3x damage) wins; exact distance then lowest id break the remaining ties.
-// Deterministic on both peers - and identical between the brute and grid paths,
-// which rps_sim_tests' grid-equivalence run proves every build.
+// lexicographic tuple (distance band, TYPE PREFERENCE, exact distance, id): closeness
+// dominates in TargetBand-wide Chebyshev bands, but the band is WIDE (playtest
+// 2026-07-20), so within an engagement the type-preference ladder decides who to hit:
+//   0 = PREY   (the type I beat, 3x damage)      — hunt first
+//   1 = mirror (same type)                       — then the even fight
+//   2 = neutral (enemy cart, no counter either way)
+//   3 = PREDATOR (the type that beats me)        — last resort (the flee force also
+//                                                  keeps me away from it spatially)
+// exact distance then lowest id break the remaining ties. Deterministic on both peers,
+// and identical between the brute and grid paths (rps_sim_tests proves it). Band stays
+// PRIMARY so the grid's distance-ring early-exit stays valid — a wider band just scans a
+// little more before exiting.
+int32_t TargetPrefer(uint8_t Mine, uint8_t Theirs) {
+    // Prey and enemy CARTS share the top priority (playtest 2026-07-20): hunt the type you
+    // beat AND deny the economy equally, both above an even mirror; the predator is last.
+    if (Theirs == UnitMiner || UnitTable[Mine].Beats == Theirs) return 0;  // prey or enemy cart
+    if (Mine == Theirs) return 1;                                          // mirror
+    return 2;                                                              // predator — last resort
+}
 struct TargetScore {
     int64_t Band;
-    int32_t Prefer;   // 0 = a type we counter, 1 = anything else
+    int32_t Prefer;   // 0=prey-or-enemy-cart, 1=mirror, 2=predator (lower = pick first)
     int64_t Dist;     // Chebyshev, raw Q16.16
     int32_t Id;
     bool BetterThan(const TargetScore& O) const {
@@ -221,9 +225,54 @@ int64_t ChebRaw(const Sim& S, int32_t I, int32_t J) {
     if (Dy < 0) Dy = -Dy;
     return Dx > Dy ? Dx : Dy;
 }
+
+// ---- ThreatBits (guard-lite, #98): a per-tick TRANSIENT bit-set (not sim state, not
+// hashed) — one bit per unit, set iff that unit is an enemy SOLDIER within GuardAlertR of
+// a miner on the OPPOSITE team (i.e. it is raiding that team's economy). It drives the
+// INTERPOSE steering (not targeting): a defender near a flagged raider AND a friendly cart
+// moves to the point BETWEEN them, screening the cart — even from a predator it wouldn't
+// attack. Setting a bit is idempotent, so the set is order-independent — brute and grid
+// produce the identical set (rps_sim_tests' equivalence run proves it). ----
+struct ThreatSet {
+    uint64_t Bits[(MaxUnits + 63) / 64];
+    void Clear() { for (uint64_t& B : Bits) B = 0; }
+    void Set(int32_t I) { Bits[I >> 6] |= (1ull << (I & 63)); }
+    bool Get(int32_t I) const { return (Bits[I >> 6] >> (I & 63)) & 1ull; }
+};
+constexpr int64_t GuardAlertRaw = GuardAlertR.Raw;
+// One (miner M, unit J) pair: flag J if it's an ENEMY soldier within GuardAlertR of M.
+void AddThreat(const Sim& S, int32_t M, int32_t J, ThreatSet& T) {
+    if (S.Type[J] == UnitMiner || S.Team[J] == S.Team[M]) return;  // only enemy warriors raid
+    if (ChebRaw(S, M, J) <= GuardAlertRaw) T.Set(J);
+}
+void BuildThreatBrute(const Sim& S, ThreatSet& T) {
+    T.Clear();
+    for (int32_t M = 0; M < S.Count; ++M) {
+        if (!S.IsAlive(M) || S.Type[M] != UnitMiner) continue;
+        for (int32_t J = 0; J < S.Count; ++J)
+            if (S.IsAlive(J)) AddThreat(S, M, J, T);
+    }
+}
+// Grid twin: per miner, walk only the cells its GuardAlertR box overlaps; AddThreat
+// re-tests the radius, so the flagged SET is identical to brute regardless of order.
+void BuildThreatGrid(const Sim& S, const Grid& G, ThreatSet& T) {
+    T.Clear();
+    for (int32_t M = 0; M < S.Count; ++M) {
+        if (!S.IsAlive(M) || S.Type[M] != UnitMiner) continue;
+        const int32_t Cx0 = CellX(S.PosX[M] - GuardAlertR), Cx1 = CellX(S.PosX[M] + GuardAlertR);
+        const int32_t Cy0 = CellY(S.PosY[M] - GuardAlertR), Cy1 = CellY(S.PosY[M] + GuardAlertR);
+        for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
+            for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
+                const int32_t C = Gy * GridCols + Gx;
+                for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
+                    AddThreat(S, M, G.Order[P], T);
+            }
+    }
+}
+
 TargetScore ScoreOf(const Sim& S, int32_t I, int32_t J) {
     const int64_t D = ChebRaw(S, I, J);
-    return {D / TargetBandRaw, UnitTable[S.Type[I]].Beats == S.Type[J] ? 0 : 1, D, J};
+    return {D / TargetBandRaw, TargetPrefer(S.Type[I], S.Type[J]), D, J};
 }
 int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
     int32_t Best = -1;
@@ -243,8 +292,8 @@ int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
 // Grid nearest-enemy: expanding Chebyshev ring search. Must reproduce the brute
 // result EXACTLY - same TargetScore comparator, and the early exit reasons in BANDS:
 // any unit in an unscanned ring K+1 sits at Chebyshev >= K*cellSize, so once that
-// bound's band is STRICTLY worse than the best band, nothing farther can win (an
-// equal band could still flip on counter-preference, so equality keeps scanning).
+// bound's band is STRICTLY worse than the best band, nothing farther can win (an equal
+// band could still flip on counter-preference, so equality keeps scanning).
 int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
     TargetScore BS{};
@@ -280,31 +329,41 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     }
     return BestId;
 }
-int32_t MineOccupancy(const Sim& S, int32_t Mine) {
-    int32_t C = 0;
-    for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J) && S.Type[J] == UnitMiner && S.Target[J] == Mine) ++C;
-    return C;
-}
-int32_t NearestFreeMine(const Sim& S, int32_t I) {
-    int32_t Best = -1;
-    int64_t BestD = INT64_MAX;
+int32_t NearestFreeMine(const Sim& S, int32_t I, const int32_t* Occ) {
+    // Always pick the NEAREST mine (playtest 2026-07-20: carts were hauling past nearby
+    // mines). Prefer one under the digger cap; but if every gold-bearing mine is crowded,
+    // fall back to the nearest gold-bearing mine anyway — a cart NEVER idles while gold
+    // exists somewhere, so it keeps moving instead of standing still. Occupancy is the
+    // precomputed per-mine count (O(1) here) — with the dense field, a per-mine unit scan
+    // would be O(mines×units) per acquisition.
+    int32_t BestFree = -1; int64_t BestFreeD = INT64_MAX;
+    int32_t BestAny = -1;  int64_t BestAnyD = INT64_MAX;
     for (int32_t Tr = 0; Tr < NumMines; ++Tr) {
         if (S.MineGold[Tr] <= 0) continue;  // depleted mines are gone (#84)
-        if (MineOccupancy(S, Tr) >= WorkersPerMine) continue;
         const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.MineX[Tr], S.MineY[Tr]);
-        if (D < BestD) { BestD = D; Best = Tr; }
+        if (D < BestAnyD) { BestAnyD = D; BestAny = Tr; }
+        if (Occ[Tr] < WorkersPerMine && D < BestFreeD) { BestFreeD = D; BestFree = Tr; }
     }
-    return Best;
+    return BestFree >= 0 ? BestFree : BestAny;
 }
 void TargetAcquire(Sim& S, const Grid& G) {
+    // Mine occupancy computed ONCE (O(units)) then read O(1)/mine — with the dense field a
+    // per-mine unit scan per cart would be O(mines×units). Incremented as carts claim mines
+    // in slot order, preserving the deterministic first-come assignment.
+    int32_t Occ[NumMines] = {};  // ~2 KB stack scratch — NOT static (two Sims may step on separate threads)
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J) && S.Type[J] == UnitMiner && S.Target[J] >= 0) ++Occ[S.Target[J]];
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         if (S.Type[I] == UnitMiner) {
-            if (S.Target[I] < 0) S.Target[I] = NearestFreeMine(S, I);  // mines are few — brute is fine; set in slot order
+            if (S.Target[I] < 0) {
+                const int32_t M = NearestFreeMine(S, I, Occ);  // nearest gold, prefer uncrowded
+                S.Target[I] = M;
+                if (M >= 0) ++Occ[M];  // claim it so later carts this tick see the higher count
+            }
         } else {
-            // Re-scored EVERY tick (playtest): banded closeness + counter preference,
-            // so units engage what they are passing instead of chasing a first pick.
+            // Re-scored EVERY tick (playtest): banded closeness + type preference, so units
+            // engage what they are passing instead of chasing a first pick.
             S.Target[I] = S.UseBruteForce ? NearestEnemyBrute(S, I) : NearestEnemyGrid(S, G, I);
         }
     }
@@ -398,6 +457,9 @@ struct FlockAcc {
     int64_t SameX = 0, SameY = 0; int32_t SameN = 0;  // same-type cohesion sum + count
     int64_t AllX = 0, AllY = 0;   int32_t AllN = 0;   // army (any-warrior) cohesion
     int64_t AlnX = 0, AlnY = 0;   int32_t AlnN = 0;   // same-type alignment: Σ neighbour velocity Δ (#97)
+    int64_t FleeX = 0, FleeY = 0;                     // flee from PREDATORS (enemy type that beats me)
+    int64_t CartX = 0, CartY = 0; int32_t CartN = 0;  // friendly carts within InterposeR (#98 interpose)
+    int64_t RaidX = 0, RaidY = 0; int32_t RaidN = 0;  // flagged raiders within InterposeR (#98 interpose)
 };
 
 // CORRECTED separation falloff (classic boids; the old code had it inverted): strongest
@@ -433,7 +495,7 @@ void AddAlignment(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
 // call, so brute and grid add bit-identical terms (house rule). Reads Pos for spatial
 // offsets (slice B: Pos is end-of-last-tick during the gather; Prev is one tick older,
 // so it carries velocity) and Δ for alignment.
-void AccumFlock(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
+void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, FlockAcc& A) {
     if (J == I) return;
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
@@ -445,27 +507,37 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
                 AddCohesion(Ix, Iy, Jx, Jy, CohSameR, A.SameX, A.SameY, A.SameN);
                 AddAlignment(S, I, J, A);
             }
+        } else if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) < InterposeR) {
+            A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;  // a friendly cart to screen (#98)
         }
     } else {
         AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, EnemySeparationStrength, A.EneX, A.EneY);
+        // Flee your PREDATOR — the enemy type that beats me (UnitTable[Type[J]].Beats == my
+        // type): steer away, larger radius, so I never walk toward my counter.
+        if (UnitTable[S.Type[J]].Beats == S.Type[I])
+            AddRepel(Ix, Iy, Jx, Jy, PredatorFleeR, WPredatorFlee, A.FleeX, A.FleeY);
+        // A flagged RAIDER within InterposeR: note it so I can interpose (#98).
+        if (Threat.Get(J) && Max(Abs(Ix - Jx), Abs(Iy - Jy)) < InterposeR) {
+            A.RaidX += Jx.Raw; A.RaidY += Jy.Raw; ++A.RaidN;
+        }
     }
 }
-void GatherBrute(const Sim& S, int32_t I, FlockAcc& A) {
+void GatherBrute(const Sim& S, int32_t I, const ThreatSet& Threat, FlockAcc& A) {
     for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J)) AccumFlock(S, I, J, A);
+        if (S.IsAlive(J)) AccumFlock(S, I, J, Threat, A);
 }
-// Grid gather widened to the LARGEST flock radius (CohAllR) so a single query feeds every
-// force; each Add re-tests its own (smaller) radius, so the summed SET — and thus the
-// sum — is identical to brute. Queried by Pos (== each unit's bucketed build-time Pos —
-// nothing has moved yet in the gather pass, so this stays consistent with the grid).
-void GatherGrid(const Sim& S, const Grid& G, int32_t I, FlockAcc& A) {
-    const int32_t Cx0 = CellX(S.PosX[I] - CohAllR), Cx1 = CellX(S.PosX[I] + CohAllR);
-    const int32_t Cy0 = CellY(S.PosY[I] - CohAllR), Cy1 = CellY(S.PosY[I] + CohAllR);
+// Grid gather widened to the LARGEST flock radius (FlockGatherR = max of all) so a single
+// query feeds every force; each Add re-tests its own (smaller) radius, so the summed SET —
+// and thus the sum — is identical to brute. Queried by Pos (== each unit's bucketed
+// build-time Pos — nothing has moved yet in the gather pass, so this stays consistent).
+void GatherGrid(const Sim& S, const Grid& G, int32_t I, const ThreatSet& Threat, FlockAcc& A) {
+    const int32_t Cx0 = CellX(S.PosX[I] - FlockGatherR), Cx1 = CellX(S.PosX[I] + FlockGatherR);
+    const int32_t Cy0 = CellY(S.PosY[I] - FlockGatherR), Cy1 = CellY(S.PosY[I] + FlockGatherR);
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
             for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
-                AccumFlock(S, I, G.Order[P], A);
+                AccumFlock(S, I, G.Order[P], Threat, A);
         }
 }
 // Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get pushed
@@ -485,6 +557,29 @@ void ChebClamp(int64_t& X, int64_t& Y, int64_t LimitRaw) {
     const int64_t M = Ax > Ay ? Ax : Ay;
     if (M > LimitRaw) { X = X * LimitRaw / M; Y = Y * LimitRaw / M; }
 }
+// --- Deterministic fixed-point value noise: the float/sqrt-free analog of Simplex/
+// OpenSimplex (playtest 2026-07-20). Smooth per-unit wander — hash lattice points to
+// pseudo-gradients in [-1,1), smoothstep-interpolate along the tick axis. A PURE integer
+// function of (unit, lattice, axis): both peers compute the identical offset, and because
+// it's per-unit (no neighbour reads) it leaves grid≡brute untouched. ---
+uint32_t NoiseHash(uint32_t Unit, int32_t Lattice, uint32_t Axis) {
+    uint64_t H = static_cast<uint64_t>(Unit) * 0x9E3779B97F4A7C15ull;
+    H ^= (static_cast<uint64_t>(static_cast<uint32_t>(Lattice)) + 1) * 0xBF58476D1CE4E5B9ull;
+    H ^= (static_cast<uint64_t>(Axis) + 1) * 0x94D049BB133111EBull;
+    H ^= H >> 30; H *= 0xBF58476D1CE4E5B9ull; H ^= H >> 27; H *= 0x94D049BB133111EBull; H ^= H >> 31;
+    return static_cast<uint32_t>(H);
+}
+Fixed NoiseGrad(uint32_t Unit, int32_t Lattice, uint32_t Axis) {
+    return Fixed{static_cast<int32_t>(NoiseHash(Unit, Lattice, Axis) & 0x1FFFF) - Fixed::One};  // [-1,1)
+}
+Fixed ValueNoise(uint32_t Unit, Fixed T, uint32_t Axis) {
+    const int32_t I = T.ToInt();                              // T >= 0 -> floor
+    const Fixed F0 = T - Fixed::FromInt(I);                   // frac in [0,1)
+    const Fixed G0 = NoiseGrad(Unit, I, Axis);
+    const Fixed G1 = NoiseGrad(Unit, I + 1, Axis);
+    const Fixed U = F0 * F0 * (Fixed::FromInt(3) - (F0 + F0)); // smoothstep 3f²−2f³
+    return G0 + (G1 - G0) * U;                                // lerp
+}
 // Phase 3 (boids slice B, #97). TWO passes with the bulk Prev=Pos copy BETWEEN them:
 //   pass 1 GATHERs every unit's forces from end-of-last-tick Pos and velocity Δ=Pos−Prev
 //          (both still intact — no Pos has moved, Prev not yet overwritten) and computes
@@ -494,7 +589,7 @@ void ChebClamp(int64_t& X, int64_t& Y, int64_t LimitRaw) {
 //   pass 2 APPLIES the steps (miners run their state machine here — direct movement —
 //          then take the nudge). Splitting the passes is what lets the gather read a
 //          stable Pos snapshot (grid≡brute holds) while Δ still carries momentum.
-void Movement(Sim& S, const Grid& G) {
+void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
     // Transient per-unit step scratch (32 KB stack; never hashed, never heap). A stack
     // local — NOT static — so two Sims stepping on different threads (future rollback)
     // can't race. Written for every alive unit in pass 1, read for the same set in pass 2.
@@ -502,13 +597,15 @@ void Movement(Sim& S, const Grid& G) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         FlockAcc A;
-        if (S.UseBruteForce) GatherBrute(S, I, A);  // reads Pos + Δ — nothing has moved yet
-        else GatherGrid(S, G, I, A);
+        if (S.UseBruteForce) GatherBrute(S, I, Threat, A);  // reads Pos + Δ — nothing has moved yet
+        else GatherGrid(S, G, I, Threat, A);
 
         if (S.Type[I] == UnitMiner) {
-            // Miners are DIRECT (no momentum): store only the separation + mine-repel
-            // nudge; WorkerSeek runs in pass 2 (it needs the unmoved start-of-tick Pos).
-            int64_t Nx = A.SepX, Ny = A.SepY;
+            // Miners are DIRECT (no momentum) and get NO separation (playtest 2026-07-20:
+            // separation shoved carts off the tight camp deposit point, so they could never
+            // bank). Only the mine-repel ring (deposits are soft obstacles) applies here;
+            // WorkerSeek runs in pass 2 (it needs the unmoved start-of-tick Pos).
+            int64_t Nx = 0, Ny = 0;
             AddMineRepel(S, I, Nx, Ny);
             StepX[I] = Fixed{static_cast<int32_t>(Nx)};
             StepY[I] = Fixed{static_cast<int32_t>(Ny)};
@@ -529,9 +626,23 @@ void Movement(Sim& S, const Grid& G) {
         }
 
         // Repulsion is ALWAYS on (even in range: engaged lines spread into arcs, not
-        // piles). Seek + cohesion + alignment are zeroed in range — hold and fight.
-        int64_t Dx = A.SepX + A.EneX, Dy = A.SepY + A.EneY;
-        AddMineRepel(S, I, Dx, Dy);
+        // piles; and you always flee your predator). Seek + cohesion + alignment + wander
+        // are zeroed in range — hold and fight. Soldiers do NOT mine-repel: mines are
+        // economy nodes, not battlefield obstacles — armies march through the dense field.
+        int64_t Dx = A.SepX + A.EneX + A.FleeX, Dy = A.SepY + A.EneY + A.FleeY;
+        // Interpose (#98): with BOTH a friendly cart and a flagged raider nearby, steer to
+        // the point BETWEEN their centroids — screening the cart, even from a predator. On
+        // always (a defender blocks whether or not it also has an attack target).
+        if (A.CartN > 0 && A.RaidN > 0) {
+            const Fixed Mx{static_cast<int32_t>((A.CartX / A.CartN + A.RaidX / A.RaidN) / 2)};
+            const Fixed My{static_cast<int32_t>((A.CartY / A.CartN + A.RaidY / A.RaidN) / 2)};
+            const Fixed Ddx = Mx - S.PosX[I], Ddy = My - S.PosY[I];   // toward the block point
+            const Fixed Ch = Max(Abs(Ddx), Abs(Ddy));
+            if (Ch.Raw != 0) {
+                Dx += (Ddx / Ch * WInterpose).Raw;
+                Dy += (Ddy / Ch * WInterpose).Raw;
+            }
+        }
         if (!InRange) {
             const Fixed Sdx = Tx - S.PosX[I], Sdy = Ty - S.PosY[I];
             const Fixed Cheb = Max(Abs(Sdx), Abs(Sdy));
@@ -551,6 +662,12 @@ void Movement(Sim& S, const Grid& G) {
                 Dx += (Fixed{static_cast<int32_t>(A.AlnX / A.AlnN)} * WAlign).Raw;
                 Dy += (Fixed{static_cast<int32_t>(A.AlnY / A.AlnN)} * WAlign).Raw;
             }
+            // Organic wander: smooth per-unit value noise (Simplex-style). Tick masked to
+            // 15 bits so Fixed::FromInt never overflows (loops ~55 min — cosmetic).
+            const uint32_t Uu = static_cast<uint32_t>(I);
+            const Fixed Tn = Fixed::FromInt(static_cast<int32_t>(S.Tick & 0x7FFF)) * NoiseTimeScale;
+            Dx += (ValueNoise(Uu, Tn, 0) * WNoise).Raw;
+            Dy += (ValueNoise(Uu, Tn, 1) * WNoise).Raw;
         }
         // Verlet finalize: Δ is last tick's velocity (Pos−Prev, still valid pre-copy).
         // Accelerate toward the desired velocity, clamped to MaxAccel; carry damped
@@ -661,8 +778,15 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     Grid G;
     { LUR_TRACE_SCOPE("sim.grid"); G.Build(*this); }
 
-    { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(*this, G); }  // phase 2
-    { LUR_TRACE_SCOPE("sim.move"); Movement(*this, G); }       // phase 3
+    // Guard-lite (#98): flag raiders (enemy soldiers near a team's miners); Movement's
+    // interpose steering reads the bits. Transient — never in Sim state or the hash. Same
+    // brute/grid split as the neighbour queries so the two paths stay equivalent.
+    ThreatSet Threat;  // ~0.5 KB stack scratch — NOT static (two Sims may step on separate threads)
+    if (UseBruteForce) BuildThreatBrute(*this, Threat);
+    else BuildThreatGrid(*this, G, Threat);
+
+    { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(*this, G); }          // phase 2
+    { LUR_TRACE_SCOPE("sim.move"); Movement(*this, G, Threat); }       // phase 3
     { LUR_TRACE_SCOPE("sim.atk");  Attacks(*this); }           // phase 4
     Deaths(*this);                // phase 5
     Economy(*this);               // phase 6

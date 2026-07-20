@@ -179,6 +179,57 @@ static void TestDisableCombatNoDeaths() {
     CHECK(S.AliveCount(0) > 0 && S.AliveCount(1) > 0);
 }
 
+// Scenario helpers: drop a unit into a slot, and wipe a sim to an empty field.
+static void PlaceUnit(Sim& S, int I, Fixed X, Fixed Y, uint8_t Team, uint8_t Type) {
+    S.PosX[I] = X; S.PosY[I] = Y; S.PrevX[I] = X; S.PrevY[I] = Y;
+    S.Team[I] = Team; S.Type[I] = Type; S.Hp[I] = UnitTable[Type].MaxHp;
+    S.Target[I] = -1; S.Cooldown[I] = 0; S.WorkerState[I] = WorkToMine;
+    S.Carry[I] = 0; S.WorkerTimer[I] = 0;
+    S.AliveBits[I >> 6] |= (1ull << (I & 63));
+}
+static void ClearField(Sim& S) {
+    for (int I = 0; I < S.Count; ++I) S.AliveBits[I >> 6] = 0;
+    for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;  // no mines: idle carts, controlled scenario
+    S.Count = 0;
+}
+
+// Targeting (#98): an enemy CART shares the top priority with prey, so it's chosen over a
+// NEARER same-type mirror in the same band — economy denial ranks above the even fight.
+static void TestCartPriorityOverMirror() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceUnit(S, 0, F(17), F(20), 0, UnitRock);    // defender
+    PlaceUnit(S, 1, F(17), F(26), 1, UnitMiner);   // enemy CART (farther)
+    PlaceUnit(S, 2, F(17), F(24), 1, UnitRock);    // enemy mirror (nearer)
+    S.Count = 3;
+    S.Step(0, 0);
+    CHECK(S.Target[0] == 1);  // the cart beats the nearer mirror
+}
+
+// Interpose (#98): a defender with a friendly cart AND a flagged raider nearby is pulled
+// toward the point BETWEEN them (screening the cart), even while its ATTACK target is a
+// prey in the opposite direction. Differential: the same setup WITHOUT the cart has no
+// interpose, so the defender chases the prey freely — it must end up farther that way.
+static void TestInterposeScreensCart() {
+    auto Setup = [](Sim& S, bool WithCart) {
+        S.Init(0);
+        ClearField(S);
+        S.DisableCombat = true;                       // isolate movement (no deaths)
+        PlaceUnit(S, 0, F(17), F(14), 0, UnitRock);   // defender
+        PlaceUnit(S, 1, F(17), F(25), 1, UnitRock);   // raider (mirror) to the NORTH
+        PlaceUnit(S, 2, F(17), F(10), 1, UnitScissor);// prey (defender's attack target) to the SOUTH
+        int32_t N = 3;
+        if (WithCart) { PlaceUnit(S, 3, F(17), F(20), 0, UnitMiner); N = 4; }  // cart to screen (flags the raider)
+        S.Count = N;
+    };
+    static Sim A, B;
+    Setup(A, true);
+    Setup(B, false);
+    for (int I = 0; I < 25; ++I) { A.Step(0, 0); B.Step(0, 0); }
+    CHECK(A.PosY[0] > B.PosY[0]);  // interpose held the defender back (north) vs the free chase south
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -334,12 +385,12 @@ static void TestStressTickBudget() {
     const auto T1 = std::chrono::steady_clock::now();
     const double Ms = std::chrono::duration<double, std::milli>(T1 - T0).count();
     // The flock GATHER is the hot phase (plan §6): each unit visits a cell box sized by
-    // the LARGEST flock radius, CohAllR. Log it — CohAllR is the knob to watch on device.
-    const int32_t CellK = (CohAllR.ToInt() + GridCellSize) / GridCellSize;  // ceil-ish half-width
+    // FlockGatherR (the largest force radius). Log it — this is the knob to watch on device.
+    const int32_t CellK = (FlockGatherR.ToInt() + GridCellSize) / GridCellSize;  // ceil-ish half-width
     const int32_t Box = 2 * CellK + 1;
     std::printf("  stress: %d units, %.3f ms/tick over %d ticks (10 Hz budget = 100 ms); "
-                "flock gather = %dx%d cells/unit (CohAllR=%d, GridCellSize=%d)\n",
-                S.Count, Ms / Ticks, Ticks, Box, Box, CohAllR.ToInt(), GridCellSize);
+                "flock gather = %dx%d cells/unit (FlockGatherR=%d, GridCellSize=%d)\n",
+                S.Count, Ms / Ticks, Ticks, Box, Box, FlockGatherR.ToInt(), GridCellSize);
     CHECK(S.Count > 0);
 }
 #endif
@@ -350,6 +401,8 @@ int main() {
     TestGridEqualsBruteForce();
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
+    TestCartPriorityOverMirror();
+    TestInterposeScreensCart();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();
