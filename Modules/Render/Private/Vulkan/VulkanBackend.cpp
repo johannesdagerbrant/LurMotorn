@@ -280,24 +280,25 @@ public:
         return static_cast<MaterialHandle>(Materials.size());
     }
 
-    void BeginFrame(const Camera& Cam) override {
-        CurrentCamera = Cam;
-        Recording = false;
-        if (!Ready) return;
+    // Wait for the previous frame's GPU work and acquire the next image. SPLIT OUT of
+    // BeginFrame so the app loop can call it BEFORE it samples input: the ~vsync fence-wait
+    // idle then happens ahead of input, so the presented frame carries the FRESHEST input
+    // instead of input captured a whole frame earlier (scroll/touch latency). Idempotent
+    // per frame via FrameAcquired; BeginFrame calls it lazily for callers that don't.
+    void WaitForFrame() override {
+        if (!Ready || FrameAcquired) return;
 
-        // Self-heal (issue #73): a NULL swapchain is a recreate TRIGGER, never a
-        // terminal state. A DVT relaunch can race the window server so the first
-        // recreate fails (0-extent caps / stale surface); before this, that one
-        // failure was silent and permanent — the app ran on with a black screen.
-        // Now every dead frame retries, and a long streak escalates to rebuilding
-        // the VkSurfaceKHR itself (RecreateSwapchain below).
+        // Self-heal (issue #73): a NULL swapchain is a recreate TRIGGER, never terminal.
+        // A relaunch can race the window server so the first recreate fails; every dead
+        // frame retries, and a long streak escalates to rebuilding the surface. Before
+        // this, one silent failure left the app running on a black screen forever.
         if (NeedsRecreate || Swapchain == VK_NULL_HANDLE) {
             RecreateSwapchain();
             NeedsRecreate = false;
         }
         if (Swapchain == VK_NULL_HANDLE) {
             if (++DeadFrames == 1 || DeadFrames % 60 == 0)
-                LOGE("BeginFrame: no swapchain for %u frame(s), retrying", DeadFrames);
+                LOGE("WaitForFrame: no swapchain for %u frame(s), retrying", DeadFrames);
             return;
         }
 
@@ -308,7 +309,7 @@ public:
         if (Acq == VK_ERROR_OUT_OF_DATE_KHR) {
             NeedsRecreate = true;
             if (++DeadFrames == 1 || DeadFrames % 60 == 0)
-                LOGE("BeginFrame: acquire OUT_OF_DATE (%u dead frame(s)), recreating", DeadFrames);
+                LOGE("WaitForFrame: acquire OUT_OF_DATE (%u dead frame(s)), recreating", DeadFrames);
             return;
         }
         if (Acq != VK_SUCCESS && Acq != VK_SUBOPTIMAL_KHR) {
@@ -317,6 +318,16 @@ public:
             LOGE("vkAcquireNextImageKHR failed (%d)", Acq);
             return;
         }
+        FrameAcquired = true;
+    }
+
+    void BeginFrame(const Camera& Cam) override {
+        CurrentCamera = Cam;
+        Recording = false;
+        if (!Ready) return;
+        if (!FrameAcquired) WaitForFrame();  // caller didn't pre-wait (desktop/iOS) — wait now
+        if (!FrameAcquired) return;          // still no image (dead frame / recreating)
+        FrameAcquired = false;               // consume this frame's acquisition
 
         vkResetFences(Device, 1, &InFlight);
         vkResetCommandBuffer(CommandBuffer, 0);
@@ -1265,6 +1276,7 @@ private:
     void RecreateSwapchain() {
         vkDeviceWaitIdle(Device);
         DestroySwapchain();
+        FrameAcquired = false;  // any pre-acquired image index is invalid after recreate
         ++RecreateCount;
 
         // Escalation (issue #73): a long dead streak means recreating against the
@@ -1349,6 +1361,7 @@ private:
     VkSemaphore     ImageAvailable = VK_NULL_HANDLE;
     VkSemaphore     RenderFinished = VK_NULL_HANDLE;
     VkFence         InFlight = VK_NULL_HANDLE;
+    bool            FrameAcquired = false;  // WaitForFrame acquired an image this frame (consumed by BeginFrame)
 
     std::vector<Mesh>     Meshes;
     std::vector<Material> Materials;

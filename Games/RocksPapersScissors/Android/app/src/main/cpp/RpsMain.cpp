@@ -258,6 +258,14 @@ void android_main(android_app* App) {
     bool ViewLinkedApplied = false;
     auto FramePrev = std::chrono::steady_clock::now();
     while (!App->destroyRequested) {
+        // WAIT-EARLY, SAMPLE-LATE: spend the GPU fence-wait idle up front, BEFORE polling
+        // input, so the touch we render is the freshest possible for this present (cuts
+        // ~1 frame of scroll/touch latency — the wait no longer sits between input & draw).
+        if (State.Ready && State.Renderer != nullptr) {
+            LUR_TRACE_SCOPE("gpu.wait");
+            State.Renderer->WaitForFrame();
+        }
+
         int Events = 0;
         android_poll_source* Source = nullptr;
         while (ALooper_pollOnce(State.Ready ? 0 : -1, nullptr, &Events,

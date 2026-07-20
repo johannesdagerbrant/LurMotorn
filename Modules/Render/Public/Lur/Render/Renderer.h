@@ -99,6 +99,13 @@ public:
     virtual MaterialHandle CreateMaterial(const MaterialDesc& Desc) = 0;
 
     // --- Per-frame. ---
+    // Optional: wait for the previous frame's GPU work + acquire the next image, up front.
+    // Call this at the TOP of the loop, BEFORE sampling input, so the ~vsync fence-wait
+    // idle happens ahead of input rather than after it — the presented frame then carries
+    // the freshest input (cuts ~1 frame of touch/scroll latency). BeginFrame does it
+    // lazily if you don't, so callers that skip this are unaffected. Default no-op.
+    virtual void WaitForFrame() {}
+
     virtual void BeginFrame(const Camera& Camera) = 0;
 
     // Enter the GUI layer: everything drawn after this call composites ON TOP of the
