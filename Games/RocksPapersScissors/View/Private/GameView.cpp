@@ -186,6 +186,22 @@ void GameView::CreateResources(IRenderer* Renderer) {
     };
     CampMat[0] = AtlasTinted(TeamTint[0]);
     CampMat[1] = AtlasTinted(TeamTint[1]);
+    // Per-type shade of each team's hue — same colour family, four readable variants
+    // (negative = toward black, positive = toward white: keeps the hue, shifts lightness).
+    // Order matches EUnit: Miner, Rock, Paper, Scissor. Playtest 2026-07-20: cart is the
+    // LIGHTEST, then progressively DARKER left→right, with HIGH contrast between steps.
+    constexpr float TypeLight[UnitCount] = {0.62f, 0.22f, -0.22f, -0.62f};
+    auto Shade = [](Color B, float F) -> Color {
+        if (F < 0.0f) { const float K = 1.0f + F; return {B.R * K, B.G * K, B.B * K, B.A}; }
+        return {B.R + (1.0f - B.R) * F, B.G + (1.0f - B.G) * F, B.B + (1.0f - B.B) * F, B.A};
+    };
+    for (int Tm = 0; Tm < 2; ++Tm)
+        for (int Ty = 0; Ty < UnitCount; ++Ty) {
+            TeamTypeTint[Tm][Ty] = Shade(TeamTint[Tm], TypeLight[Ty]);
+            TypeTintMat[Tm][Ty] = AtlasTinted(TeamTypeTint[Tm][Ty]);
+            Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
+            TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
+        }
     MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
@@ -364,8 +380,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (Tm == My) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }
         // ABSOLUTE team colours (playtest: the players sit together and compare
         // screens — team 0 is blue and team 1 red on BOTH phones, so a unit looks
-        // the same wherever you see it). HUD numbers stay viewer-relative.
-        const Color C = TeamTint[Tm];
+        // the same wherever you see it), now a UNIQUE per-type shade of that team hue
+        // so composition reads by colour as well as glyph. HUD numbers stay viewer-relative.
+        const Color C = TeamTypeTint[Tm][Ty];
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
@@ -373,6 +390,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         D.Size = Ty == UnitMiner ? UnitPx * 1.5f : UnitPx;  // carts read bigger (playtest)
         D.U0 = static_cast<float>(Ty) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
         D.U1 = static_cast<float>(Ty + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
+        // Facing (soldiers only; carts stay upright): the glyph's TOP points along the
+        // MOVE direction. Below a low speed we DON'T update the stored heading — a nearly
+        // stopped unit holds its last angle instead of spinning on sub-pixel noise.
+        D.FaceX = 0.0f; D.FaceY = 0.0f;
+        if (Ty != UnitMiner) {
+            const float Vx = D.CurX - D.PrevX, Vy = D.CurY - D.PrevY;
+            const float Sp = std::sqrt(Vx * Vx + Vy * Vy);
+            if (Sp > 0.12f * P) { LastFaceX[I] = Vx / Sp; LastFaceY[I] = Vy / Sp; }  // fast: update
+            D.FaceX = LastFaceX[I]; D.FaceY = LastFaceY[I];                          // else hold
+        }
         // A LOADED cart shows its ore heap in COIN gold (playtest): one extra
         // instance, same endpoints, the heap glyph over the cart — still one draw.
         if (Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
@@ -505,7 +532,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
              PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
-        BlitGlyph(Ty, Afford ? PlateIconMat : PlateIconDim,
+        // Button glyph in the LOCAL team's per-type tint (playtest 2026-07-20) — the
+        // plate previews the exact colour the spawned unit will wear, not a flat white.
+        BlitGlyph(Ty, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
                   X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
         BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
         std::snprintf(Buf, sizeof(Buf), "%d", UnitTable[Ty].Cost);
@@ -582,6 +611,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
             D.Size = Sz;
             D.U0 = 0.0f; D.V0 = 0.0f; D.U1 = 0.0f; D.V1 = 0.0f;  // flat material: no atlas
+            D.FaceX = 0.0f; D.FaceY = 0.0f;                      // dots never rotate (reused scratch)
         };
         const Color MiniGold{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 0.9f};
         for (int T = 0; T < NumMines; ++T)
@@ -592,7 +622,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I)) continue;
             Dot(MapX(FW(Snap.PosX[I])), MapFy(FlipW(FW(Snap.PosY[I]))), 2.0f * HS,
-                TeamTint[Snap.Team[I]]);
+                TeamTypeTint[Snap.Team[I]][Snap.Type[I]]);  // same per-type tint as the units
         }
         Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
     }

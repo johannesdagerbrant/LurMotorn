@@ -86,7 +86,13 @@ private:
     Lur::Render::MaterialHandle HealthFg = 0;
     Lur::Render::MaterialHandle GoldBarFg = 0;   // mine reserve bar (#84) — gold accent
 
-    Lur::Render::Color TeamTint[2] = {};              // locked team colours — the silhouette fill
+    Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours
+    // Per-(team,type) tint: a unique shade of the team hue per unit type (playtest
+    // 2026-07-20) — reinforces type by colour on top of the glyph shape. The colour is
+    // the per-instance fill for units; the materials tint the HUD production buttons.
+    Lur::Render::Color TeamTypeTint[2][UnitCount] = {};
+    Lur::Render::MaterialHandle TypeTintMat[2][UnitCount] = {};      // button glyph (affordable)
+    Lur::Render::MaterialHandle TypeTintMatDim[2][UnitCount] = {};   // button glyph (unaffordable)
     Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)
 
     Lur::Text::Font Font;
@@ -121,6 +127,11 @@ private:
     static constexpr int MaxFloats = 24;
     GoldFloat Floats[MaxFloats];
     int32_t LastCarry[MaxUnits] = {};     // deposit edge detection (carry >0 -> 0)
+    // Held facing per slot: soldiers orient to their MOVE direction, but below a low
+    // speed we STOP updating (keep the last angle) so a nearly-stopped unit doesn't jitter
+    // its heading on noise. Persists across frames; 0 = upright until the unit first moves.
+    float LastFaceX[MaxUnits] = {};
+    float LastFaceY[MaxUnits] = {};
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;

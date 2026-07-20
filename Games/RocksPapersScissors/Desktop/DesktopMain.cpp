@@ -12,8 +12,8 @@
 //     yourself with keys 1-4 (you) / 5-8 (foe).
 //
 // --auto presses random soldiers for both sides; --frames N runs headless (smoke).
-// --flockdemo: --solo StressFill scene with COMBAT OFF (#97) — watch soldiers flock
-//   (momentum, type-blobs, dense-pack jitter) without killing each other. Pair with --auto.
+// --flockdemo: --solo StressFill scene for tuning the flock (#97) — combat ON by default
+//   (the clash is part of the feel). Add --nocombat for pure-motion tuning. Pair with --auto.
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -232,13 +232,15 @@ void SampleSolo(void* Ctx, uint32_t, uint8_t& M0, uint8_t& M1) {
     M1 = In->P1.exchange(0, std::memory_order_relaxed);
 }
 
-int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo) {
-    // --flockdemo (#97): a solo StressFill scene with COMBAT OFF, so mixed same-type blobs
-    // march and flock without killing each other — pure visual tuning of the flow (momentum
-    // smoothing, dense-pack jitter). Defaults to a healthy unit count if --stress wasn't set.
+int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
+            bool FoeOnly) {
+    // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
+    // ON by default (playtest: how the counters clash is part of the feel) — pass --nocombat
+    // for pure-motion tuning (mixed blobs that never kill each other). Defaults to a healthy
+    // unit count if --stress wasn't set.
     if (FlockDemo && Stress <= 0) Stress = 200;
-    Lur::Log::Info("RPS desktop: solo (SimRunner, no net)%s%s", Auto ? " (auto)" : "",
-                   FlockDemo ? " (flockdemo: combat off)" : "");
+    Lur::Log::Info("RPS desktop: solo (SimRunner, no net)%s%s%s", Auto ? " (auto)" : "",
+                   FlockDemo ? " (flockdemo)" : "", NoCombat ? " (combat off)" : "");
     Lur::Platform::Window Win;
     if (!Win.Create("RocksPapersScissors - solo", kWinW, kWinH, 200, 60)) return 1;
     Lur::Render::IRenderer* Renderer = Lur::Render::VulkanRenderer::Create();
@@ -248,7 +250,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo)
 
     SoloInputs In;
     auto Runner = std::make_unique<Rps::SimRunner>();
-    Runner->Start(Seed, SampleSolo, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress), FlockDemo);
+    Runner->Start(Seed, SampleSolo, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
 
     Rps::CameraScroll Cam;
     bool CamInit = false;
@@ -282,8 +284,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo)
             AutoAccumNs += ElapsedNs;
             if (AutoAccumNs > 200'000'000ull) {
                 AutoAccumNs = 0;
-                In.P0.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
-                In.P1.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
+                if (!FoeOnly) In.P0.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));  // you: manual if FoeOnly
+                In.P1.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));                // the opponent always mashes
             }
         }
 #else
@@ -410,7 +412,7 @@ int main(int argc, char** argv) {
     Lur::Log::Init(nullptr, "RpsDesktop");
 
     int MaxFrames = 0;
-    bool Auto = false, Solo = false, Ble = false, FlockDemo = false;
+    bool Auto = false, Solo = false, Ble = false, FlockDemo = false, NoCombat = false, FoeOnly = false;
     std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
     uint64_t Seed = 0x1234;
     int Stress = 0;
@@ -419,7 +421,9 @@ int main(int argc, char** argv) {
         if (A == "--frames" && I + 1 < argc) MaxFrames = std::atoi(argv[++I]);
         else if (A == "--auto") Auto = true;
         else if (A == "--solo") Solo = true;
-        else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat off)
+        else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
+        else if (A == "--nocombat") NoCombat = true;                     // pure-motion tuning (no kills)
+        else if (A == "--autofoe") { Solo = true; Auto = true; FoeOnly = true; }  // you play, only the foe mashes
         else if (A == "--ble") {
             Ble = true;
             if (I + 1 < argc && argv[I + 1][0] != '-') RadioExe = argv[++I];  // optional radio path
@@ -431,6 +435,6 @@ int main(int argc, char** argv) {
     }
 
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
-    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo);
+    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly);
     return RunLoopback(Auto, MaxFrames, Seed);
 }
