@@ -171,11 +171,9 @@ public:
         }
         DestroySwapchain();
         if (Device != VK_NULL_HANDLE) {
-            for (uint32_t I = 0; I < MaxFramesInFlight; ++I) {
-                if (RenderFinished[I] != VK_NULL_HANDLE) vkDestroySemaphore(Device, RenderFinished[I], nullptr);
-                if (ImageAvailable[I] != VK_NULL_HANDLE) vkDestroySemaphore(Device, ImageAvailable[I], nullptr);
-                if (InFlight[I] != VK_NULL_HANDLE)       vkDestroyFence(Device, InFlight[I], nullptr);
-            }
+            if (RenderFinished != VK_NULL_HANDLE) vkDestroySemaphore(Device, RenderFinished, nullptr);
+            if (ImageAvailable != VK_NULL_HANDLE) vkDestroySemaphore(Device, ImageAvailable, nullptr);
+            if (InFlight != VK_NULL_HANDLE)       vkDestroyFence(Device, InFlight, nullptr);
             if (CommandPool != VK_NULL_HANDLE)    vkDestroyCommandPool(Device, CommandPool, nullptr);
             vkDestroyDevice(Device, nullptr);
         }
@@ -303,10 +301,10 @@ public:
             return;
         }
 
-        vkWaitForFences(Device, 1, &InFlight[CurrentFrame], VK_TRUE, UINT64_MAX);
+        vkWaitForFences(Device, 1, &InFlight, VK_TRUE, UINT64_MAX);
 
         VkResult Acq = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX,
-                                             ImageAvailable[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
+                                             ImageAvailable, VK_NULL_HANDLE, &ImageIndex);
         if (Acq == VK_ERROR_OUT_OF_DATE_KHR) {
             NeedsRecreate = true;
             if (++DeadFrames == 1 || DeadFrames % 60 == 0)
@@ -320,14 +318,7 @@ public:
             return;
         }
 
-        // The just-acquired image may still be in flight from an earlier frame that used a
-        // different frame-slot — wait that fence before we render into it.
-        if (ImageIndex < ImagesInFlight.size() && ImagesInFlight[ImageIndex] != VK_NULL_HANDLE)
-            vkWaitForFences(Device, 1, &ImagesInFlight[ImageIndex], VK_TRUE, UINT64_MAX);
-        if (ImageIndex < ImagesInFlight.size()) ImagesInFlight[ImageIndex] = InFlight[CurrentFrame];
-
-        vkResetFences(Device, 1, &InFlight[CurrentFrame]);
-        CommandBuffer = CommandBuffers[CurrentFrame];  // draw code below uses this frame's buffer
+        vkResetFences(Device, 1, &InFlight);
         vkResetCommandBuffer(CommandBuffer, 0);
 
         VkCommandBufferBeginInfo BeginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -502,17 +493,17 @@ public:
         VkPipelineStageFlags WaitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo Submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         Submit.waitSemaphoreCount = 1;
-        Submit.pWaitSemaphores = &ImageAvailable[CurrentFrame];
+        Submit.pWaitSemaphores = &ImageAvailable;
         Submit.pWaitDstStageMask = &WaitStage;
         Submit.commandBufferCount = 1;
-        Submit.pCommandBuffers = &CommandBuffers[CurrentFrame];
+        Submit.pCommandBuffers = &CommandBuffer;
         Submit.signalSemaphoreCount = 1;
-        Submit.pSignalSemaphores = &RenderFinished[CurrentFrame];
-        VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight[CurrentFrame]));
+        Submit.pSignalSemaphores = &RenderFinished;
+        VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight));
 
         VkPresentInfoKHR Present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         Present.waitSemaphoreCount = 1;
-        Present.pWaitSemaphores = &RenderFinished[CurrentFrame];
+        Present.pWaitSemaphores = &RenderFinished;
         Present.swapchainCount = 1;
         Present.pSwapchains = &Swapchain;
         Present.pImageIndices = &ImageIndex;
@@ -536,7 +527,6 @@ public:
             if (Pres == VK_ERROR_DEVICE_LOST) LUR_ON_DEVICE_LOST("present");
             LOGE("vkQueuePresentKHR failed (%d)", Pres);
         }
-        CurrentFrame = (CurrentFrame + 1) % MaxFramesInFlight;  // rotate the frame-in-flight slot
     }
 
     uint32_t PresentedFrames() const override { return FramesPresented; }
@@ -661,20 +651,18 @@ private:
         VkCommandBufferAllocateInfo Alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         Alloc.commandPool = CommandPool;
         Alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        Alloc.commandBufferCount = MaxFramesInFlight;
-        VK_CHECK(vkAllocateCommandBuffers(Device, &Alloc, CommandBuffers));
-        return CommandPool != VK_NULL_HANDLE && CommandBuffers[0] != VK_NULL_HANDLE;
+        Alloc.commandBufferCount = 1;
+        VK_CHECK(vkAllocateCommandBuffers(Device, &Alloc, &CommandBuffer));
+        return CommandPool != VK_NULL_HANDLE && CommandBuffer != VK_NULL_HANDLE;
     }
 
     bool CreateSyncObjects() {
         VkSemaphoreCreateInfo SemInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VkFenceCreateInfo FenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        for (uint32_t I = 0; I < MaxFramesInFlight; ++I) {
-            VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable[I]));
-            VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &RenderFinished[I]));
-            VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight[I]));
-        }
+        VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable));
+        VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &RenderFinished));
+        VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight));
         return true;
     }
 
@@ -1158,7 +1146,6 @@ private:
         vkGetSwapchainImagesKHR(Device, Swapchain, &Got, nullptr);
         SwapImages.resize(Got);
         vkGetSwapchainImagesKHR(Device, Swapchain, &Got, SwapImages.data());
-        ImagesInFlight.assign(Got, VK_NULL_HANDLE);  // #94: reset per-image fence tracking
 
         return CreateImageViews() && CreateRenderPass() && CreateFramebuffers();
     }
@@ -1338,19 +1325,10 @@ private:
     TextureHandle         DefaultTexture = 0;
 
     VkCommandPool   CommandPool = VK_NULL_HANDLE;
-    // Frames in flight = 2 (#94): per-frame command buffer + acquire semaphore + fence so
-    // the CPU records frame N+1 while the GPU renders N, instead of blocking on the GPU
-    // fence every frame (which stalled the glue thread ~16 ms and delayed the next input
-    // poll — the Android-vs-iPhone scroll-responsiveness gap). ImagesInFlight tracks which
-    // frame-fence last used each swapchain image so we never render an image still in use.
-    static constexpr uint32_t MaxFramesInFlight = 2;
-    VkCommandBuffer CommandBuffers[MaxFramesInFlight] = {};
-    VkSemaphore     ImageAvailable[MaxFramesInFlight] = {};
-    VkSemaphore     RenderFinished[MaxFramesInFlight] = {};
-    VkFence         InFlight[MaxFramesInFlight] = {};
-    uint32_t        CurrentFrame = 0;
-    std::vector<VkFence> ImagesInFlight;              // per swapchain image (not owned)
-    VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;   // alias = CommandBuffers[CurrentFrame], set in BeginFrame
+    VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;
+    VkSemaphore     ImageAvailable = VK_NULL_HANDLE;
+    VkSemaphore     RenderFinished = VK_NULL_HANDLE;
+    VkFence         InFlight = VK_NULL_HANDLE;
 
     std::vector<Mesh>     Meshes;
     std::vector<Material> Materials;
