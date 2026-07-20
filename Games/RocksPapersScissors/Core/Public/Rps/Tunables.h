@@ -130,6 +130,15 @@ constexpr int32_t GridCellSize = 3;
 
 // ---- Netcode (slice 1, NOT the core) — recorded here so the constant has one home ----
 constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (design doc §3)
+// LockstepPeer::Execute drains at most this many ticks per call, so a catch-up burst
+// (post-background / thermal / -O0) can't monopolize the loop and starve input -> ANR
+// (#90; forensics 2026-07-19). Backlog drains over subsequent calls, never discarded.
+// Mirrors SimRunner::MaxTicksPerService. Scheduling never changes results (design §3).
+constexpr uint32_t MaxExecTicksPerService = 8;
+// Above this start-of-call backlog Execute is "catching up": suppress the per-10-tick
+// anchors and emit ONE at the frontier reached, so a burst can't flood the
+// 1-outstanding-write GATT queue with stale anchors (#90; seen at 21:22 in the ANR).
+constexpr uint32_t AnchorBurstThreshold = 16;
 
 // ---- Fixed capacities (no heap in the tick; sized for the raised engine target) ----
 // MaxUnitsPerTeam is the compile-time unit ceiling per side (design doc §5's

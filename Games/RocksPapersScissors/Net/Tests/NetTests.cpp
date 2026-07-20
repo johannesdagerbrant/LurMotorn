@@ -185,6 +185,33 @@ static void TestLockstepStaysInSync() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical state
 }
 
+// ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
+static void TestLockstepExecuteCapBounded() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x2468, 0, Enqueue, &Qa);
+    B.Init(0x2468, 1, Enqueue, &Qb);
+
+    // Pile up a big peer-input backlog on A WITHOUT letting it execute: A never ticks,
+    // so WallTicks=0 keeps the ceiling shut while PeerMasks accumulates.
+    const int N = 40;
+    for (int I = 0; I < N; ++I) { B.SetLocalMask(1); B.Tick(OneTickNs); }  // B produces N inputs
+    Deliver(Qb, A);
+    CHECK(A.ExecTick() == 0);
+
+    // One big local advance opens the ceiling to N at once (production caps at 64, so
+    // WallTicks jumps to N in a single Tick). WITHOUT the cap Execute would drain all N
+    // here — the ANR. WITH it, at most MaxExecTicksPerService this call.
+    A.Tick(static_cast<uint64_t>(N) * OneTickNs);
+    CHECK(A.ExecTick() <= MaxExecTicksPerService);  // the per-call cap held
+    CHECK(A.ExecTick() > 0);                         // but it made progress
+
+    // Backlog drains over subsequent calls; nothing is discarded.
+    for (int I = 0; I < 100; ++I) A.Tick(OneTickNs);
+    CHECK(A.ExecTick() >= static_cast<uint32_t>(N));  // drained past the whole backlog
+    CHECK(!A.Desynced());
+}
+
 // ---- Flight-recorder replay: a recorded match replays to a hash-identical state ----
 static void TestLockstepReplayHashIdentical() {
     Outbox Qa, Qb;
@@ -403,6 +430,7 @@ int main() {
     TestFuzzDecode();
     TestResyncChunking();
     TestLockstepStaysInSync();
+    TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
     TestLockstepCeilingStallAndResume();

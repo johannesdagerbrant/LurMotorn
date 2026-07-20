@@ -48,11 +48,22 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 }
 
 void LockstepPeer::Execute() {
-    // Run at wallclock pace (TheSim.Tick < WallTicks), gated by BOTH input timelines.
-    while (!Desync && TheSim.Tick < WallTicks &&
-           TheSim.Tick < LocalMasks.size() && TheSim.Tick < PeerMasks.size()) {
+    // Ceiling: wallclock pace, gated by BOTH input timelines (min of the three).
+    auto Ceiling = [this]() -> uint32_t {
+        uint32_t C = WallTicks;
+        if (LocalMasks.size() < C) C = static_cast<uint32_t>(LocalMasks.size());
+        if (PeerMasks.size() < C)  C = static_cast<uint32_t>(PeerMasks.size());
+        return C;
+    };
+    // Cap ticks per call (#90): a catch-up burst drains over subsequent calls instead
+    // of monopolizing this one and starving input -> ANR. Nothing is discarded — the
+    // ceiling/masks persist. Scheduling never changes results (design §3 sprint law),
+    // so the capped drain lands on the exact same state as the old uncapped loop.
+    const uint32_t Backlog = Ceiling() > TheSim.Tick ? Ceiling() - TheSim.Tick : 0;
+    const bool     Burst   = Backlog > AnchorBurstThreshold;
+    uint32_t Ran = 0;
+    while (!Desync && TheSim.Tick < Ceiling() && Ran < MaxExecTicksPerService) {
         const uint32_t T = TheSim.Tick;
-        LUR_ASSERT_MSG(T == TheSim.Tick, "lockstep: ticks must stay monotonic");
         const uint8_t Lm = LocalMasks[T], Pm = PeerMasks[T];
         // Both peers map (local, peer) -> (team0, team1) IDENTICALLY, so Step's args are
         // the same on both sides for tick T — the determinism precondition.
@@ -60,8 +71,12 @@ void LockstepPeer::Execute() {
         const uint8_t M1 = MyTeam == 0 ? Pm : Lm;
         TheSim.Step(M0, M1);
         if (Recording) { RecM0.push_back(M0); RecM1.push_back(M1); }
-        if (TheSim.Tick % 10 == 0) EmitAnchor();
+        // Normal cadence: anchor every 10th tick. During a burst, suppress these and
+        // emit a single anchor at the frontier below (avoids flooding the GATT queue).
+        if (!Burst && TheSim.Tick % 10 == 0) EmitAnchor();
+        ++Ran;
     }
+    if (Burst && Ran > 0) EmitAnchor();  // one anchor at the reached frontier
 }
 
 void LockstepPeer::EmitAnchor() {
