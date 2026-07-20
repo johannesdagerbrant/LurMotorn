@@ -292,7 +292,10 @@ void android_main(android_app* App) {
             if (!State.CamInit) { State.Cam.Y = MinCam; State.CamInit = true; }
             State.Cam.Update(DtSec, MaxCam, MinCam);  // momentum + clamp
 
-            if (State.LastConsumedTick != 0xFFFFFFFFu) {  // have a snapshot to draw
+            // Always render — before the first published snapshot, State.Snap is the
+            // default (empty) sim, which draws the field + HUD (the menu). Gating on a
+            // published tick left the pre-link screen black (a #91 regression).
+            {
                 LUR_TRACE_SCOPE("render.view");
                 State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowNs()), State.Cam.Y, W, H,
                                   State.LinkedTeam.load(std::memory_order_relaxed) == 1, DtSec);
