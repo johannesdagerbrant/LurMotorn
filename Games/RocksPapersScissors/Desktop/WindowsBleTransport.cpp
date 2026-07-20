@@ -13,8 +13,8 @@ namespace Lur::DevRig {
 //   us -> radio: 'D' datagram out
 static constexpr std::size_t kMaxFrame = 4096;  // BLE datagrams are tiny; a guard rail
 
-WindowsBleTransport::WindowsBleTransport(std::string RadioExePath)
-    : RadioExe(std::move(RadioExePath)) {}
+WindowsBleTransport::WindowsBleTransport(std::string RadioExePath, std::string ServiceUuidArg)
+    : RadioExe(std::move(RadioExePath)), ServiceUuid(std::move(ServiceUuidArg)) {}
 
 WindowsBleTransport::~WindowsBleTransport() {
     Running = false;
@@ -62,7 +62,9 @@ bool WindowsBleTransport::Start() {
     Si.hStdError  = GetStdHandle(STD_ERROR_HANDLE);  // radio logs pass through to our stderr
 
     // CreateProcess may write into the command line buffer, so it can't be const.
+    // Pass the per-game service UUID as argv[0] so the radio scans for the right game.
     std::string Cmd = "\"" + RadioExe + "\"";
+    if (!ServiceUuid.empty()) Cmd += " " + ServiceUuid;
     std::string CmdBuf = Cmd;
 
     PROCESS_INFORMATION Pi{};

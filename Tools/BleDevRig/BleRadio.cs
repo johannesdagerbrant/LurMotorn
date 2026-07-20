@@ -32,7 +32,10 @@ using Windows.Devices.Bluetooth.GenericAttributeProfile;
 using Windows.Storage.Streams;
 
 class BleRadio {
-    static readonly Guid Service   = new Guid("4C55524D-4F54-4F52-4E00-5472616E7370");
+    // Service UUID is PER-GAME (BleProtocol.h): chess = ...7370, RPS = ...7371, so a
+    // chess phone and an RPS phone never cross-link. Overridable via argv[0] so the same
+    // radio serves both games; the datagram + device-id characteristics are shared.
+    static Guid Service            = new Guid("4C55524D-4F54-4F52-4E00-5472616E7370");
     static readonly Guid DevIdChar = new Guid("4C55524D-4F54-4F52-4E02-4E6F6E636500");
     static readonly Guid DataChar  = new Guid("4C55524D-4F54-4F52-4E01-446174616772");
 
@@ -78,7 +81,13 @@ class BleRadio {
     // interval for the life of the link (issue #68); GC'ing it drops the preference.
     static object g_connReq;
 
-    static int Main() {
+    static int Main(string[] args) {
+        // Optional argv[0]: the per-game service UUID to scan for (default = chess/...7370).
+        Guid svc;
+        if (args != null && args.Length >= 1 && Guid.TryParse(args[0], out svc)) {
+            Service = svc;
+            Log("service UUID overridden -> " + Service);
+        }
         g_out = Console.OpenStandardOutput();
         Log("central radio starting (scan -> connect -> relay); Ctrl-C to stop");
 

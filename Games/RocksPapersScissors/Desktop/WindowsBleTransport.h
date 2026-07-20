@@ -33,8 +33,10 @@ namespace Lur::DevRig {
 class WindowsBleTransport : public Lur::Transport::ITransport,
                             private Lur::Transport::EventInbox::Sink {
 public:
-    // RadioExePath is the C# radio subprocess (Tools/BleDevRig/BleRadio.exe).
-    explicit WindowsBleTransport(std::string RadioExePath);
+    // RadioExePath is the C# radio subprocess (Tools/BleDevRig/BleRadio.exe). ServiceUuid
+    // (optional) is the per-game GATT service UUID to scan for — RPS and chess differ, so
+    // the radio must be told which (empty = the radio's chess default). #101-E.
+    explicit WindowsBleTransport(std::string RadioExePath, std::string ServiceUuid = "");
     ~WindowsBleTransport() override;
 
     // Spawn the radio subprocess + start the reader thread. Returns false if the
@@ -76,6 +78,7 @@ private:
     bool ReadExact(void* Buf, std::size_t N);
 
     std::string RadioExe;
+    std::string ServiceUuid;  // per-game service UUID passed to the radio as argv[0] (#101-E)
     std::function<void(const char*)> Logger;
     Lur::Transport::ITransport::Receiver ReceiverFn;
 

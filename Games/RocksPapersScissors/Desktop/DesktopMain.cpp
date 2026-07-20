@@ -140,9 +140,9 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
 #if LUR_INTERNAL
     if (Auto) {
         AutoAccumNs += ElapsedNs;
-        if (AutoAccumNs > 700'000'000ull) {
+        if (AutoAccumNs > 200'000'000ull) {
             AutoAccumNs = 0;
-            P.Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));  // random soldier
+            P.Lp.SetLocalMask(static_cast<uint8_t>(1u << Rng.NextBounded(4)));  // random soldier
         }
     }
 #else
@@ -273,10 +273,10 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
 #if LUR_INTERNAL
         if (Auto) {
             AutoAccumNs += ElapsedNs;
-            if (AutoAccumNs > 700'000'000ull) {
+            if (AutoAccumNs > 200'000'000ull) {
                 AutoAccumNs = 0;
-                In.P0.fetch_or(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
-                In.P1.fetch_or(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
+                In.P0.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
+                In.P1.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
             }
         }
 #else
@@ -317,7 +317,9 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
 // only sensible mode for an unattended opponent). Runs until MaxFrames (0 = forever).
 int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
     Lur::Log::Info("RPS desktop: BLE peer vs phone (radio=%s, auto=%d)", RadioExe, Auto ? 1 : 0);
-    Lur::DevRig::WindowsBleTransport Ble(RadioExe);
+    // RPS's per-game service UUID (…7371, distinct from chess's …7370) — the radio must
+    // scan for THIS or it never discovers the RPS phone (matches the Android CMake).
+    Lur::DevRig::WindowsBleTransport Ble(RadioExe, "4C55524D-4F54-4F52-4E00-5472616E7371");
     Ble.SetLogger([](const char* M) { Lur::Log::Info("%s", M); });
     if (!Ble.Start()) {
         Lur::Log::Error("BLE radio failed to start - build it: "
@@ -363,9 +365,9 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
 #if LUR_INTERNAL
             if (Auto) {
                 AutoAccumNs += ElapsedNs;
-                if (AutoAccumNs > 700'000'000ull) {  // ~1.4 presses/s, a random soldier type
+                if (AutoAccumNs > 200'000'000ull) {  // ~1.4 presses/s, a random soldier type
                     AutoAccumNs = 0;
-                    Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
+                    Lp.SetLocalMask(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
                 }
             }
 #endif
