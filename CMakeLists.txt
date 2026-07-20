@@ -27,6 +27,7 @@ add_subdirectory(Modules/Math)
 add_subdirectory(Modules/Save)
 add_subdirectory(Modules/Text)
 add_subdirectory(Modules/Audio)  # wait-free SFX mixer + LSF1 lossless codec (device backends in the app builds)
+add_subdirectory(Modules/Trace)  # named CPU scopes (Insights-style), issue #101 — leaf module, no deps
 
 # --- Header-only interface modules (contracts; backends live in the app builds) ---
 add_subdirectory(Modules/Transport)
@@ -55,6 +56,7 @@ if(LUR_BUILD_TESTS)
     add_subdirectory(Modules/Save/Tests)
     add_subdirectory(Modules/Text/Tests)
     add_subdirectory(Modules/Audio/Tests)
+    add_subdirectory(Modules/Trace/Tests)
     add_subdirectory(Games/Chess/Core/Tests)
     add_subdirectory(Games/RocksPapersScissors/Core/Tests)
     add_subdirectory(Games/RocksPapersScissors/Runtime/Tests)

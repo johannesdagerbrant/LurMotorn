@@ -25,6 +25,11 @@
 #                      DECOUPLED from NDEBUG on purpose, so an *optimized*
 #                      DEVELOPMENT build (the overnight soak) still traps.
 #   LUR_SLOW       1 = expensive validation welcome (full-board re-checks, audits)
+#   LUR_TRACE      1 = Lur::Trace CPU scopes compiled in (LUR_TRACE_SCOPE/_LATENCY);
+#                      on in Development/Debugging, off in Shipping. A pure observer
+#                      (never touches sim state) — issue #101. The off-ladder
+#                      "profiling = shipping + stats" build is -DLUR_CONFIG=Shipping
+#                      -DLUR_TRACE=1.
 #
 # These are defined for the whole engine (all modules + chess) via
 # add_compile_definitions below. App targets that live OUTSIDE this tree's scope
@@ -45,11 +50,13 @@ if(LUR_CONFIG STREQUAL "Shipping")
     set(_lur_internal 0)
     set(_lur_asserts 0)
     set(_lur_slow 0)
+    set(_lur_trace 0)
 elseif(LUR_CONFIG STREQUAL "Debugging")
     set(_lur_shipping 0)
     set(_lur_internal 1)
     set(_lur_asserts 1)
     set(_lur_slow 1)
+    set(_lur_trace 1)
 else()  # Development (default)
     if(NOT LUR_CONFIG STREQUAL "Development")
         message(WARNING "Unknown LUR_CONFIG='${LUR_CONFIG}', falling back to Development")
@@ -58,6 +65,13 @@ else()  # Development (default)
     set(_lur_internal 1)
     set(_lur_asserts 1)
     set(_lur_slow 0)
+    set(_lur_trace 1)
+endif()
+
+# A shipping binary can opt into tracing (the "profiling = shipping + stats" build)
+# without any other tooling: -DLUR_CONFIG=Shipping -DLUR_TRACE=1.
+if(DEFINED LUR_TRACE)
+    set(_lur_trace ${LUR_TRACE})
 endif()
 
 # Publish the derived values as cache vars so out-of-tree app targets (Android/iOS
@@ -66,6 +80,7 @@ set(LUR_SHIPPING ${_lur_shipping} CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_INTERNAL ${_lur_internal} CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_ASSERTS  ${_lur_asserts}  CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_SLOW     ${_lur_slow}     CACHE INTERNAL "derived from LUR_CONFIG")
+set(LUR_TRACE    ${_lur_trace}    CACHE INTERNAL "derived from LUR_CONFIG (issue #101)")
 
 # Apply to this scope + every target added under it (all engine modules + chess,
 # and the Desktop app — all root subdirs added after this include).
@@ -73,10 +88,12 @@ add_compile_definitions(
     LUR_SHIPPING=${_lur_shipping}
     LUR_INTERNAL=${_lur_internal}
     LUR_ASSERTS=${_lur_asserts}
-    LUR_SLOW=${_lur_slow})
+    LUR_SLOW=${_lur_slow}
+    LUR_TRACE=${_lur_trace})
 
 message(STATUS "LurMotorn config: ${LUR_CONFIG} "
-        "(SHIPPING=${_lur_shipping} INTERNAL=${_lur_internal} ASSERTS=${_lur_asserts} SLOW=${_lur_slow})")
+        "(SHIPPING=${_lur_shipping} INTERNAL=${_lur_internal} ASSERTS=${_lur_asserts} "
+        "SLOW=${_lur_slow} TRACE=${_lur_trace})")
 
 # ── Optimization axis — the ladder's "Opt" column, coupled to LUR_CONFIG ──────
 # The macros above are only HALF the ladder. The other half — real optimization
