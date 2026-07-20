@@ -397,6 +397,7 @@ struct FlockAcc {
     int64_t EneX = 0, EneY = 0;                 // enemy separation
     int64_t SameX = 0, SameY = 0; int32_t SameN = 0;  // same-type cohesion sum + count
     int64_t AllX = 0, AllY = 0;   int32_t AllN = 0;   // army (any-warrior) cohesion
+    int64_t AlnX = 0, AlnY = 0;   int32_t AlnN = 0;   // same-type alignment: Σ neighbour velocity Δ (#97)
 };
 
 // CORRECTED separation falloff (classic boids; the old code had it inverted): strongest
@@ -419,18 +420,31 @@ void AddCohesion(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R,
     if (Max(Abs(Dx), Abs(Dy)) >= R) return;          // out of (Chebyshev) range
     Ax += Dx.Raw; Ay += Dy.Raw; ++N;
 }
+// Alignment gather (#97): sum the neighbour's velocity Δ = Pos − Prev if it's within
+// AlignR (position range). Reads Δ — valid ONLY before the tick's bulk Prev=Pos copy.
+void AddAlignment(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
+    const Fixed Ox = S.PosX[I] - S.PosX[J], Oy = S.PosY[I] - S.PosY[J];
+    if (Max(Abs(Ox), Abs(Oy)) >= AlignR) return;
+    A.AlnX += static_cast<int64_t>(S.PosX[J].Raw) - S.PrevX[J].Raw;
+    A.AlnY += static_cast<int64_t>(S.PosY[J].Raw) - S.PrevY[J].Raw;
+    ++A.AlnN;
+}
 // One neighbour's WHOLE contribution — the single per-pair function both gather paths
-// call, so brute and grid add bit-identical terms (house rule). Reads Prev only.
+// call, so brute and grid add bit-identical terms (house rule). Reads Pos for spatial
+// offsets (slice B: Pos is end-of-last-tick during the gather; Prev is one tick older,
+// so it carries velocity) and Δ for alignment.
 void AccumFlock(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
     if (J == I) return;
-    const Fixed Ix = S.PrevX[I], Iy = S.PrevY[I];
-    const Fixed Jx = S.PrevX[J], Jy = S.PrevY[J];
+    const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
+    const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
     if (S.Team[J] == S.Team[I]) {
         AddRepel(Ix, Iy, Jx, Jy, SeparationRadius, SeparationStrength, A.SepX, A.SepY);
-        if (S.Type[J] != UnitMiner) {  // cohesion is a WARRIOR affinity (miners never blob)
+        if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
             AddCohesion(Ix, Iy, Jx, Jy, CohAllR, A.AllX, A.AllY, A.AllN);
-            if (S.Type[J] == S.Type[I])
+            if (S.Type[J] == S.Type[I]) {
                 AddCohesion(Ix, Iy, Jx, Jy, CohSameR, A.SameX, A.SameY, A.SameN);
+                AddAlignment(S, I, J, A);
+            }
         }
     } else {
         AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, EnemySeparationStrength, A.EneX, A.EneY);
@@ -442,10 +456,11 @@ void GatherBrute(const Sim& S, int32_t I, FlockAcc& A) {
 }
 // Grid gather widened to the LARGEST flock radius (CohAllR) so a single query feeds every
 // force; each Add re-tests its own (smaller) radius, so the summed SET — and thus the
-// sum — is identical to brute. Queried by Prev (== each unit's bucketed build-time Pos).
+// sum — is identical to brute. Queried by Pos (== each unit's bucketed build-time Pos —
+// nothing has moved yet in the gather pass, so this stays consistent with the grid).
 void GatherGrid(const Sim& S, const Grid& G, int32_t I, FlockAcc& A) {
-    const int32_t Cx0 = CellX(S.PrevX[I] - CohAllR), Cx1 = CellX(S.PrevX[I] + CohAllR);
-    const int32_t Cy0 = CellY(S.PrevY[I] - CohAllR), Cy1 = CellY(S.PrevY[I] + CohAllR);
+    const int32_t Cx0 = CellX(S.PosX[I] - CohAllR), Cx1 = CellX(S.PosX[I] + CohAllR);
+    const int32_t Cy0 = CellY(S.PosY[I] - CohAllR), Cy1 = CellY(S.PosY[I] + CohAllR);
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
@@ -454,34 +469,53 @@ void GatherGrid(const Sim& S, const Grid& G, int32_t I, FlockAcc& A) {
         }
 }
 // Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get pushed
-// outward with the same corrected falloff as unit separation. Reads Prev against static
+// outward with the same corrected falloff as unit separation. Reads Pos against static
 // mine positions — identical on the brute and grid paths.
 void AddMineRepel(const Sim& S, int32_t I, int64_t& Ax, int64_t& Ay) {
     for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
         if (S.MineGold[Mn] <= 0) continue;
-        AddRepel(S.PrevX[I], S.PrevY[I], S.MineX[Mn], S.MineY[Mn],
+        AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
                  MineRepelRadius, SeparationStrength, Ax, Ay);
     }
 }
+// Chebyshev-clamp a raw (Q16.16) vector in place to a max magnitude — the sqrt-free
+// "don't exceed" used for both the per-tick accel clamp and the final speed clamp.
+void ChebClamp(int64_t& X, int64_t& Y, int64_t LimitRaw) {
+    const int64_t Ax = X < 0 ? -X : X, Ay = Y < 0 ? -Y : Y;
+    const int64_t M = Ax > Ay ? Ax : Ay;
+    if (M > LimitRaw) { X = X * LimitRaw / M; Y = Y * LimitRaw / M; }
+}
+// Phase 3 (boids slice B, #97). TWO passes with the bulk Prev=Pos copy BETWEEN them:
+//   pass 1 GATHERs every unit's forces from end-of-last-tick Pos and velocity Δ=Pos−Prev
+//          (both still intact — no Pos has moved, Prev not yet overwritten) and computes
+//          a step per unit into StepX/StepY (transient stack scratch, never hashed);
+//   then   Prev = Pos (so Prev now = end-of-last-tick, the interpolation source + next
+//          tick's Δ base);
+//   pass 2 APPLIES the steps (miners run their state machine here — direct movement —
+//          then take the nudge). Splitting the passes is what lets the gather read a
+//          stable Pos snapshot (grid≡brute holds) while Δ still carries momentum.
 void Movement(Sim& S, const Grid& G) {
+    // Transient per-unit step scratch (32 KB stack; never hashed, never heap). A stack
+    // local — NOT static — so two Sims stepping on different threads (future rollback)
+    // can't race. Written for every alive unit in pass 1, read for the same set in pass 2.
+    Fixed StepX[MaxUnits], StepY[MaxUnits];
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         FlockAcc A;
-        if (S.UseBruteForce) GatherBrute(S, I, A);  // from Prev — before we touch any Pos
+        if (S.UseBruteForce) GatherBrute(S, I, A);  // reads Pos + Δ — nothing has moved yet
         else GatherGrid(S, G, I, A);
 
         if (S.Type[I] == UnitMiner) {
-            // Miners keep their state machine; a separation + mine-repel nudge on top
-            // (same model as before — only the falloff is the corrected one now).
-            WorkerSeek(S, I);
+            // Miners are DIRECT (no momentum): store only the separation + mine-repel
+            // nudge; WorkerSeek runs in pass 2 (it needs the unmoved start-of-tick Pos).
             int64_t Nx = A.SepX, Ny = A.SepY;
             AddMineRepel(S, I, Nx, Ny);
-            S.PosX[I] = ClampAxis(S.PosX[I] + Fixed{static_cast<int32_t>(Nx)}, WorldWidth);
-            S.PosY[I] = ClampAxis(S.PosY[I] + Fixed{static_cast<int32_t>(Ny)}, WorldHeight);
+            StepX[I] = Fixed{static_cast<int32_t>(Nx)};
+            StepY[I] = Fixed{static_cast<int32_t>(Ny)};
             continue;
         }
 
-        // --- Soldier: blend the neighbour sums into a desired step ---
+        // --- Soldier: blend the neighbour sums into a desired velocity ---
         // Seek goal + in-range test (targeting unchanged). No target -> march on the
         // enemy camp line (#92) so fronts close instead of idling.
         Fixed Tx, Ty;
@@ -495,7 +529,7 @@ void Movement(Sim& S, const Grid& G) {
         }
 
         // Repulsion is ALWAYS on (even in range: engaged lines spread into arcs, not
-        // piles). Seek + cohesion are zeroed in range — the unit holds and fights.
+        // piles). Seek + cohesion + alignment are zeroed in range — hold and fight.
         int64_t Dx = A.SepX + A.EneX, Dy = A.SepY + A.EneY;
         AddMineRepel(S, I, Dx, Dy);
         if (!InRange) {
@@ -513,27 +547,51 @@ void Movement(Sim& S, const Grid& G) {
                 Dx += (Fixed{static_cast<int32_t>(A.AllX / A.AllN)} * WCohAll).Raw;
                 Dy += (Fixed{static_cast<int32_t>(A.AllY / A.AllN)} * WCohAll).Raw;
             }
-        }
-        // Chebyshev-clamp the desired step to Speed and integrate (arrive, don't
-        // overshoot). When forces cancel the step shrinks to ~zero -> the unit rests.
-        const int64_t Absx = Dx < 0 ? -Dx : Dx, Absy = Dy < 0 ? -Dy : Dy;
-        const int64_t M = Absx > Absy ? Absx : Absy;
-        if (M != 0) {
-            const int64_t Sp = UnitTable[S.Type[I]].Speed.Raw;
-            Fixed Vx, Vy;
-            if (M <= Sp) { Vx = Fixed{static_cast<int32_t>(Dx)}; Vy = Fixed{static_cast<int32_t>(Dy)}; }
-            else {
-                Vx = Fixed{static_cast<int32_t>(Dx * Sp / M)};
-                Vy = Fixed{static_cast<int32_t>(Dy * Sp / M)};
+            if (A.AlnN > 0) {                          // match same-type neighbours' heading
+                Dx += (Fixed{static_cast<int32_t>(A.AlnX / A.AlnN)} * WAlign).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.AlnY / A.AlnN)} * WAlign).Raw;
             }
-            S.PosX[I] = ClampAxis(S.PosX[I] + Vx, WorldWidth);
-            S.PosY[I] = ClampAxis(S.PosY[I] + Vy, WorldHeight);
         }
+        // Verlet finalize: Δ is last tick's velocity (Pos−Prev, still valid pre-copy).
+        // Accelerate toward the desired velocity, clamped to MaxAccel; carry damped
+        // momentum; clamp the whole step to Speed. Momentum smooths the retarget snaps;
+        // Damp<1 (stronger when engaged) bleeds the Verlet dense-pack jitter.
+        const int64_t DeltaX = static_cast<int64_t>(S.PosX[I].Raw) - S.PrevX[I].Raw;
+        const int64_t DeltaY = static_cast<int64_t>(S.PosY[I].Raw) - S.PrevY[I].Raw;
+        int64_t Ax = Dx - DeltaX, Ay = Dy - DeltaY;
+        ChebClamp(Ax, Ay, MaxAccel.Raw);
+        const int64_t Damp = (InRange ? InRangeDamping : FlockDamping).Raw;
+        int64_t Stepx = (Damp * DeltaX >> Fixed::FracBits) + Ax;
+        int64_t Stepy = (Damp * DeltaY >> Fixed::FracBits) + Ay;
+        ChebClamp(Stepx, Stepy, UnitTable[S.Type[I]].Speed.Raw);
+        LUR_ASSERT_MSG((Stepx <= UnitTable[S.Type[I]].Speed.Raw) &&
+                       (-Stepx <= UnitTable[S.Type[I]].Speed.Raw) &&
+                       (Stepy <= UnitTable[S.Type[I]].Speed.Raw) &&
+                       (-Stepy <= UnitTable[S.Type[I]].Speed.Raw),
+                       "RPS: soldier step exceeds Speed after clamp (#97 invariant)");
+        StepX[I] = Fixed{static_cast<int32_t>(Stepx)};
+        StepY[I] = Fixed{static_cast<int32_t>(Stepy)};
+    }
+
+    // The bulk Prev=Pos copy, now AFTER the gather (slice B enabler): Δ has been read for
+    // every unit, so Prev can advance to end-of-last-tick. This is the view interpolation
+    // source and next tick's Δ base — end-of-Step Prev/Pos are unchanged vs before.
+    for (int32_t I = 0; I < S.Count; ++I) { S.PrevX[I] = S.PosX[I]; S.PrevY[I] = S.PosY[I]; }
+
+    // Pass 2: apply. Miners run their state machine (direct move) then take the nudge;
+    // soldiers integrate the precomputed step. No unit reads another's Pos here, so the
+    // apply order is irrelevant to the result (order-independent).
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I)) continue;
+        if (S.Type[I] == UnitMiner) WorkerSeek(S, I);
+        S.PosX[I] = ClampAxis(S.PosX[I] + StepX[I], WorldWidth);
+        S.PosY[I] = ClampAxis(S.PosY[I] + StepY[I], WorldHeight);
     }
 }
 
 // ---- Phase 4: attacks (damage buffered, applied SIMULTANEOUSLY) ----
 void Attacks(Sim& S) {
+    if (S.DisableCombat) return;  // LUR_INTERNAL --flockdemo (#97): watch flocking, no kills
     int32_t Dmg[MaxUnits];
     std::memset(Dmg, 0, sizeof(int32_t) * static_cast<size_t>(S.Count));
     for (int32_t I = 0; I < S.Count; ++I) {
@@ -589,15 +647,17 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
     LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
 
-    for (int32_t I = 0; I < Count; ++I) { PrevX[I] = PosX[I]; PrevY[I] = PosY[I]; }
-
+    // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
+    // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's
+    // velocity). Nothing between here and Movement reads Prev (grid + target acq read
+    // Pos), so removing it from the top is safe.
     ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1
     ApplyInput(*this, 1, Mask1);
     Production(*this);            // phase 1 (spawns) — grid must see the new units
 
     // Build the spatial grid AFTER production (so spawns are bucketed) but before any
-    // movement, capturing start-of-tick positions. Both target acq (on Pos) and
-    // separation (on Prev) read it; they're consistent because Pos == Prev right now.
+    // movement, capturing start-of-tick positions. Both target acq and the flock gather
+    // read it on Pos (nothing has moved yet), so the buckets stay consistent.
     Grid G;
     { LUR_TRACE_SCOPE("sim.grid"); G.Build(*this); }
 
@@ -655,8 +715,13 @@ int32_t Sim::QueuedTotal(uint8_t TeamId) const {
 
 uint64_t Sim::StateHash() const {
     // FNV-1a over the pinned authoritative state, in declaration order. Assumes a
-    // little-endian target (host x86, Android/iOS ARM — all LE). PrevX/PrevY and the
-    // transient DepositBuf are deliberately excluded (view copy / within-tick scratch).
+    // little-endian target (host x86, Android/iOS ARM — all LE). PrevX/PrevY ARE hashed
+    // as of slice B (#97): Δ=Pos−Prev now feeds behaviour (momentum/alignment), so Prev
+    // is authoritative — a Pos-only write or snapshot-restore that skipped it would
+    // silently diverge with the anchor alarm blind. The transient DepositBuf stays
+    // excluded (within-tick scratch). Build-LOCKED, not a wire change: the mask/event
+    // codec is untouched, so ProtocolVersion is unchanged — a mixed-build session just
+    // trips the anchor-hash alarm within a second (both peers must run the same build).
     uint64_t H = 1469598103934665603ull;
     auto Mix = [&](const void* P, size_t N) {
         const uint8_t* B = static_cast<const uint8_t*>(P);
@@ -665,6 +730,8 @@ uint64_t Sim::StateHash() const {
     const size_t N = static_cast<size_t>(Count);
     Mix(PosX, sizeof(Fixed) * N);
     Mix(PosY, sizeof(Fixed) * N);
+    Mix(PrevX, sizeof(Fixed) * N);  // #97: authoritative (feeds velocity Δ)
+    Mix(PrevY, sizeof(Fixed) * N);
     Mix(Hp, sizeof(int32_t) * N);
     Mix(Type, N);
     Mix(Team, N);

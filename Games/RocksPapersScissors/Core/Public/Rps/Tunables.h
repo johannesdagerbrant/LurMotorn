@@ -132,6 +132,15 @@ constexpr Fixed WCohSame = F(1, 4);                //   weight (strong)
 constexpr Fixed CohAllR = F(7);                    // army affinity radius (> CohSameR)
 constexpr Fixed WCohAll = F(1, 12);                //   weight (≪ WCohSame) — also the GATHER radius
 constexpr Fixed WSeek = F(1);                      // goal-pursuit weight (unit direction)
+// Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
+// last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
+// NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
+// Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
+constexpr Fixed AlignR = F(4);                     // same-type alignment radius (< CohAllR gather)
+constexpr Fixed WAlign = F(1, 6);                  //   weight (match neighbour heading)
+constexpr Fixed MaxAccel = F(15, 100);             // per-tick turn/accel clamp (≈0.5 s to reach Speed)
+constexpr Fixed FlockDamping = F(7, 8);            // carried-Δ decay in free flight (< 1: bleeds jitter)
+constexpr Fixed InRangeDamping = F(1, 2);          // stronger decay when engaged — no orbiting the target
 // Targeting (playtest 2026-07-19): distances quantize into bands of this width
 // (Chebyshev units); within one band, the type WE counter (3x damage) is preferred
 // over a marginally nearer neutral target - a paper picks the rock, not the

@@ -159,6 +159,26 @@ static void TestSameTypeCohesionContracts() {
     }
 }
 
+// DisableCombat (#97 --flockdemo): attacks are suppressed, so no unit ever dies from
+// combat — the alive count only grows (production) over a clashing match. Guards the
+// demo scene's sim behaviour without needing the GPU/window build.
+static void TestDisableCombatNoDeaths() {
+    static Sim S;
+    S.Init(0);
+    S.DisableCombat = true;
+    S.Teams[0].Gold = 100000; S.Teams[1].Gold = 100000;
+    int32_t Prev = S.AliveCount(0) + S.AliveCount(1);
+    bool NeverDropped = true;
+    for (int I = 0; I < 200; ++I) {
+        S.Step(1u << UnitRock, 1u << UnitScissor);  // both spam warriors that would counter-kill
+        const int32_t Now = S.AliveCount(0) + S.AliveCount(1);
+        if (Now < Prev) { NeverDropped = false; break; }
+        Prev = Now;
+    }
+    CHECK(NeverDropped);              // combat off => no deaths, count is monotone
+    CHECK(S.AliveCount(0) > 0 && S.AliveCount(1) > 0);
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -329,6 +349,7 @@ int main() {
     TestReplayReproducibility();
     TestGridEqualsBruteForce();
     TestSameTypeCohesionContracts();
+    TestDisableCombatNoDeaths();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();

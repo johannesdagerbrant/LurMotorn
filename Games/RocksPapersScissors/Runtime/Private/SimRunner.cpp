@@ -16,14 +16,16 @@ uint64_t NowNs() {
 
 }  // namespace
 
-void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t StressPerTeam) {
+void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t StressPerTeam,
+                      bool DisableCombat) {
     Input = InInput;
     Ctx = InCtx;
     TheSim.Init(Seed);
 #if LUR_INTERNAL
     if (StressPerTeam > 0) TheSim.StressFill(static_cast<int32_t>(StressPerTeam));
+    TheSim.DisableCombat = DisableCombat;  // --flockdemo (#97): pure flocking, no kills
 #else
-    (void)StressPerTeam;
+    (void)StressPerTeam; (void)DisableCombat;
 #endif
 
     // Publish tick 0 immediately so the render thread has a frame before the first

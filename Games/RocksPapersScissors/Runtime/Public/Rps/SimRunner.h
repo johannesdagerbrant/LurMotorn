@@ -34,7 +34,8 @@ public:
     // Spawn the sim thread. Init(Seed) runs on the caller before the thread starts.
     // StressPerTeam > 0 (LUR_INTERNAL) bulk-spawns that many soldiers per side first —
     // the #75 stress scene (tick budget + one-draw render at the raised cap).
-    void Start(uint64_t Seed, InputFn Input, void* Ctx, uint32_t StressPerTeam = 0);
+    void Start(uint64_t Seed, InputFn Input, void* Ctx, uint32_t StressPerTeam = 0,
+               bool DisableCombat = false);
 
     // Signal the thread to finish the current iteration and join. Idempotent.
     void Stop();

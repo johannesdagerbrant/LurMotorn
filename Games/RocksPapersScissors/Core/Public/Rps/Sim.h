@@ -32,8 +32,8 @@ struct Sim {
     // ---- Per-unit SoA (fixed-width / Fixed only; zero-initialised whole) ----
     Fixed    PosX[MaxUnits] = {};
     Fixed    PosY[MaxUnits] = {};
-    Fixed    PrevX[MaxUnits] = {};        // last tick's pos — interpolation source (view only)
-    Fixed    PrevY[MaxUnits] = {};        //   excluded from StateHash: it's a pure copy of last Pos
+    Fixed    PrevX[MaxUnits] = {};        // last tick's pos — interpolation source AND, since #97,
+    Fixed    PrevY[MaxUnits] = {};        //   velocity Δ=Pos−Prev (momentum). HASHED (authoritative).
     int32_t  Hp[MaxUnits] = {};
     uint8_t  Type[MaxUnits] = {};         // EUnit
     uint8_t  Team[MaxUnits] = {};         // 0 or 1
@@ -65,6 +65,11 @@ struct Sim {
     //      spatial grid. Grid is the default; this exists so a test can run the same
     //      seed+inputs both ways and assert the StateHash sequences are identical. ----
     bool UseBruteForce = false;
+
+    // ---- Config (NOT hashed) — LUR_INTERNAL --flockdemo (#97): suppress attacks so
+    //      mixed blobs march/flock without killing each other, for pure visual tuning
+    //      of the flow (momentum smoothing, dense-pack jitter). Never set in real play. ----
+    bool DisableCombat = false;
 
     // ---- API ----
     void Init(uint64_t Seed);
