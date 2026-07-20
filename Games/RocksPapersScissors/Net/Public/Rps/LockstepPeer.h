@@ -1,4 +1,5 @@
 #pragma once
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <unordered_map>
@@ -44,7 +45,9 @@ public:
     void Init(uint64_t Seed, uint8_t MyTeam, SendFn Send, void* Ctx);
 
     // OR in this frame's presses; consumed (once) by the next produced wall tick.
-    void SetLocalMask(uint8_t Mask) { PendingLocalMask |= (Mask & 0xFu); }
+    // Atomic: on Android the INPUT thread calls this while the SIM thread consumes it in
+    // Tick (#91). Relaxed is fine — it's a lossy-OR mailbox, not an ordering barrier.
+    void SetLocalMask(uint8_t Mask) { PendingLocalMask.fetch_or(Mask & 0xFu, std::memory_order_relaxed); }
 
     // Advance wallclock: produce + send local input for the new ticks, then execute as
     // far as the ceiling allows.
@@ -88,7 +91,7 @@ private:
     Lur::Sim::TickClock Clock{TickRateHz};
     uint32_t Delay = InputDelayTicks;
     uint8_t MyTeam = 0;
-    uint8_t PendingLocalMask = 0;
+    std::atomic<uint8_t> PendingLocalMask{0};  // input thread -> sim thread (#91)
 
     std::vector<uint8_t> LocalMasks;  // index = exec tick (pre-seeded empty for 0..Delay-1)
     std::vector<uint8_t> PeerMasks;

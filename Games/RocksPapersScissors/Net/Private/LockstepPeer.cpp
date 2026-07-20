@@ -16,7 +16,7 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     LocalMasks.assign(Delay, 0);  // ticks 0..Delay-1 are empty by convention on BOTH peers
     PeerMasks.assign(Delay, 0);
     WallTicks = 0;
-    PendingLocalMask = 0;
+    PendingLocalMask.store(0, std::memory_order_relaxed);
     Desync = false;
     MyHash.clear();
     PeerHash.clear();
@@ -39,8 +39,7 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     if (Awaiting) return;  // in a resync exchange: hold production/execution until reconciled
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
-        const uint8_t M = PendingLocalMask;
-        PendingLocalMask = 0;
+        const uint8_t M = PendingLocalMask.exchange(0, std::memory_order_relaxed);
         ProduceAndSend(M);
         ++WallTicks;
     }
@@ -195,7 +194,7 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
         PeerMasks.push_back(0);
     }
     WallTicks = Frontier;
-    PendingLocalMask = 0;
+    PendingLocalMask.store(0, std::memory_order_relaxed);
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();
 }
