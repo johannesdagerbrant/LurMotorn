@@ -231,21 +231,24 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
 
 ## Planning & project state
 
-Planning lives in two homes, split by *kind*:
+Two homes, split by whether the content **moves**:
 
-- **GitHub issues own WORK** — tasks, bugs, epics, the roadmap, sequencing, priority, and current
-  state. Start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File or
-  update an issue for new plans; don't record planning or current-state in `CLAUDE.md` (keep this file
-  to durable, always-true guidance).
-- **`Docs/Planning/*.md` owns DESIGN** — design docs and feature specs (rationale, architecture, wire
-  formats, the "why"). These come in two states, marked in `Docs/Planning/README.md`'s index:
-  **LIVING** docs are amended in place (dated changelog note) whenever a design decision changes —
-  rationale must not rot in issue threads; **LEGACY** docs (the original July-2026 synthesis: master
-  roadmap, the two reviews) are frozen narrative.
+- **GitHub issues own everything living** — WORK (tasks, bugs, epics, roadmap, sequencing, priority,
+  current state) *and* the design rationale that evolves with the code (specs, wire formats, the
+  "why"). Start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File or
+  update an issue for any plan or decision that must stay current; don't record planning or
+  current-state in `CLAUDE.md` (keep this file to durable, always-true guidance).
+- **`Docs/Journal/<YYYY-MM-DD>/` holds frozen snapshots** — every `.md`/`.html` under `Docs/` is a
+  timestamped artifact capturing the thinking against the repo *at that date* (a design synthesis, a
+  review, an execution plan, a decision sheet). A batch is **never amended in place**: new thinking
+  lands as a new dated batch, or as an issue update — so a snapshot always reads as what was true when
+  it was written. A batch may carry its own `README.md` manifest; there is no evergreen top-level
+  index (that would rot). No file under `Docs/` is durable.
 
-Precedence: where any doc disagrees with an issue on *sequencing/priority/state*, **the issue wins**;
-when a *design* changes, update the living doc and cross-link it from the issue. State never goes in
-docs (it rots); design never goes only in issues (it gets buried).
+Precedence: a snapshot is history, so **the issue always wins** on anything current — sequencing,
+priority, state, *or* design. Read a journal batch for rationale and context; act from the issues. And
+re-verify every code claim in an old snapshot against HEAD before acting on it (paths and symbols
+drift).
 
 ## Documentation (CodeViewer sessions)
 

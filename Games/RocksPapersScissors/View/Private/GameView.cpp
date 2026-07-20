@@ -8,7 +8,7 @@
 #include "Lur/Text/BuiltinFonts.h"
 #include "Rps/Tunables.h"
 
-// The design-lock glyph set (#85, Docs/Planning/rps-hud-prototype.html): indices
+// The design-lock glyph set (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html): indices
 // 0..3 are EUnit order (miner, rock, paper, scissors), then gold / mine / swords /
 // camp. Sources: game-icons.net (CC BY 3.0) + Font Awesome Free (CC BY 4.0) + the
 // custom bold pick (ours) — attribution required in-app before shipping (#85).
@@ -49,7 +49,7 @@ const char* ResultStr(uint8_t R, int MyTeam) {
     return "";
 }
 
-// ---- Locked palette (#85, Docs/Planning/rps-hud-prototype.html) ----
+// ---- Locked palette (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html) ----
 constexpr float Srgb(int V) { return static_cast<float>(V) / 255.0f; }
 struct GradStop { float P; Color C; };
 // Field gradient — SCREENSPACE vertical: night-blue enemy horizon (top) through

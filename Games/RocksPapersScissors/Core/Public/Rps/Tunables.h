@@ -10,7 +10,7 @@
 // identically, so changing a value is a lockstep-breaking change (both sides must
 // run the same build) but NOT a wire-format change.
 //
-// Design lock 2026-07-19 (#84, Docs/Planning/rps-hud-prototype.html): the economy
+// Design lock 2026-07-19 (#84, Docs/Journal/2026-07-19/rps-hud-prototype.html): the economy
 // is GOLD dug from FINITE MINES by MINERS, and production runs four parallel
 // per-type queues whose rate scales with how deep each queue is stacked.
 namespace Rps {
