@@ -69,6 +69,19 @@ void LogF(bool Error, const char* Fmt, ...) {
             LOGE("Vulkan call failed (%d) at %s:%d", Result_, __FILE__, __LINE__);  \
     } while (0)
 
+// Swapchain / device-loss policy (#93, decision #4): mobile GPUs hit transient losses
+// on thermal spikes / rotation, so in Development (and Shipping) we HEAL + loud-log
+// (the #73 self-healer recreates the swapchain; a genuine device-loss just logs and the
+// next frames retry). Only the dedicated Debugging build (LUR_SLOW) TRAPS on a real
+// VK_ERROR_DEVICE_LOST, for maximum signal when someone is actively debugging it.
+#if defined(LUR_SLOW) && LUR_SLOW
+    #define LUR_ON_DEVICE_LOST(Where) \
+        do { LOGE("VK_ERROR_DEVICE_LOST at %s — trapping (Debugging)", Where); __builtin_trap(); } while (0)
+#else
+    #define LUR_ON_DEVICE_LOST(Where) \
+        do { LOGE("VK_ERROR_DEVICE_LOST at %s — healing (Development)", Where); } while (0)
+#endif
+
 // Pushed per draw. mat4 (64) + 3x vec4 (48) = 112 bytes, under the 128-byte portable
 // minimum. One layout is shared by both pipelines: the sprite shader reads Tint +
 // Outline + Shape.xyz (ink band + gamma); the MSDF text shader reads Tint and the
@@ -299,6 +312,7 @@ public:
             return;
         }
         if (Acq != VK_SUCCESS && Acq != VK_SUBOPTIMAL_KHR) {
+            if (Acq == VK_ERROR_DEVICE_LOST) LUR_ON_DEVICE_LOST("acquire");
             ++DeadFrames;
             LOGE("vkAcquireNextImageKHR failed (%d)", Acq);
             return;
@@ -510,6 +524,7 @@ public:
             if (Pres == VK_ERROR_OUT_OF_DATE_KHR)
                 LOGE("present OUT_OF_DATE, recreating");
         } else if (Pres != VK_SUCCESS) {
+            if (Pres == VK_ERROR_DEVICE_LOST) LUR_ON_DEVICE_LOST("present");
             LOGE("vkQueuePresentKHR failed (%d)", Pres);
         }
     }

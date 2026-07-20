@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
 
 #include "Lur/Net/Session.h"
@@ -136,7 +137,13 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
 }  // namespace
 
 void android_main(android_app* App) {
-    AppState State;
+    // Heap-allocate AppState (#94): Sim-in-Lp + Snapshot + GameView instances stack to
+    // ~hundreds of KB on the ~1 MB glue thread — fine today, one cap-raise from a stack
+    // overflow. Heap-owned + a budget assert keeps that growth visible instead of silent.
+    static_assert(sizeof(AppState) < 4u * 1024u * 1024u, "AppState exceeds its size budget");
+    auto StateOwned = std::make_unique<AppState>();
+    AppState& State = *StateOwned;
+    LOGI("AppState heap-allocated: %zu bytes", sizeof(AppState));
     App->userData = &State;
     App->onAppCmd = HandleCmd;
     App->onInputEvent = HandleInput;

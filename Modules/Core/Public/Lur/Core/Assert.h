@@ -10,6 +10,12 @@
 //
 // So: LUR_ASSERT for our own invariants; ordinary if-guards + logging for wire input.
 //
+// Renderer exception (#93, decision #4): the Vulkan backend does NOT LUR_ASSERT on
+// swapchain / VK_ERROR_DEVICE_LOST. Mobile GPUs lose the device on thermal spikes /
+// rotation, so those paths HEAL + loud-log in Development (the #73 self-healer), and
+// only the dedicated Debugging build (LUR_SLOW) traps on a genuine device-loss for
+// maximum signal. See LUR_ON_DEVICE_LOST in VulkanBackend.cpp.
+//
 // Toggle: define LUR_ASSERTS_ENABLED=1 to force on, =0 to force off. Otherwise it
 // follows the build-configuration macro LUR_ASSERTS (set by cmake/EngineFlags.cmake
 // from LUR_CONFIG): on in DEVELOPMENT/DEBUGGING, off in SHIPPING. This is DECOUPLED
