@@ -19,6 +19,7 @@
 
 #include "Lur/Core/Assert.h"
 #include "Lur/Sim/Random.h"
+#include "Lur/Trace/Trace.h"  // LUR_TRACE_SCOPE — observational only (compiles out in Shipping)
 
 namespace Rps {
 namespace {
@@ -492,6 +493,7 @@ void Sim::Init(uint64_t InSeed) {
 
 void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
+    LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
 
     for (int32_t I = 0; I < Count; ++I) { PrevX[I] = PosX[I]; PrevY[I] = PosY[I]; }
 
@@ -503,11 +505,11 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     // movement, capturing start-of-tick positions. Both target acq (on Pos) and
     // separation (on Prev) read it; they're consistent because Pos == Prev right now.
     Grid G;
-    G.Build(*this);
+    { LUR_TRACE_SCOPE("sim.grid"); G.Build(*this); }
 
-    TargetAcquire(*this, G);      // phase 2
-    Movement(*this, G);           // phase 3
-    Attacks(*this);               // phase 4
+    { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(*this, G); }  // phase 2
+    { LUR_TRACE_SCOPE("sim.move"); Movement(*this, G); }       // phase 3
+    { LUR_TRACE_SCOPE("sim.atk");  Attacks(*this); }           // phase 4
     Deaths(*this);                // phase 5
     Economy(*this);               // phase 6
     WinCheck(*this);              // phase 7

@@ -20,6 +20,7 @@
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
+#include "Lur/Trace/Trace.h"
 #include "Lur/Transport/Ble.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
@@ -179,7 +180,7 @@ void android_main(android_app* App) {
             State.View.SetLinked(true);  // opponent selector: green dot (#85)
             LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
         }
-        if (State.Started) State.Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
+        if (State.Started) { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce + send input, execute to the ceiling (sim.step scopes nest under this)
 
 #if LUR_INTERNAL
         // Dev build: log the lockstep tick/desync every ~2 s so sync is observable
@@ -196,6 +197,10 @@ void android_main(android_app* App) {
                      State.Lp.GetSim().AliveCount(0), State.Lp.GetSim().AliveCount(1),
                      State.Lp.Desynced() ? 1 : 0,
                      State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
+                // Per-scope CPU timings aggregated over this window (#101); TraceAndroid greps "TRACE ".
+                char TraceLine[512];
+                if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+                    LOGI("TRACE %s", TraceLine);
             }
         }
 #endif
@@ -209,19 +214,21 @@ void android_main(android_app* App) {
         }
 
         if (State.Ready && App->window != nullptr) {
+            LUR_TRACE_SCOPE("frame.render");
             const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
             const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
             const uint64_t NowStamp = NowNs();
             if (State.Lp.ExecTick() != State.LastTick) { State.LastTick = State.Lp.ExecTick(); State.TickLandedNs = NowStamp; }
-            State.Snap.CaptureFrom(State.Lp.GetSim(), State.TickLandedNs, kStepNs);
+            { LUR_TRACE_SCOPE("render.capture"); State.Snap.CaptureFrom(State.Lp.GetSim(), State.TickLandedNs, kStepNs); }
             const float VisibleH = H / Ppu(W);
             const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
             const float MaxCam = FieldMax + State.View.TopHudWorldUnits(W);
             const float MinCam = -State.View.BottomHudWorldUnits(W);
             if (!State.CamInit) { State.Cam.Y = MinCam; State.CamInit = true; }
             State.Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
-            State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.Cam.Y, W, H,
-                              State.Team == 1, static_cast<float>(ElapsedNs) / 1.0e9f);
+            { LUR_TRACE_SCOPE("render.view");
+              State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowStamp), State.Cam.Y, W, H,
+                                State.Team == 1, static_cast<float>(ElapsedNs) / 1.0e9f); }
         }
     }
 

@@ -7,8 +7,9 @@ add_library(rps_core
     Core/Private/Sim.cpp)
 
 target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
-# lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT.
-target_link_libraries(rps_core PUBLIC lur::sim lur::core)
+# lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT;
+# lur::trace for LUR_TRACE_SCOPE (observational CPU scopes, #101 — no-op in Shipping).
+target_link_libraries(rps_core PUBLIC lur::sim lur::core lur::trace)
 target_compile_features(rps_core PUBLIC cxx_std_20)
 add_library(rps::core ALIAS rps_core)
 
