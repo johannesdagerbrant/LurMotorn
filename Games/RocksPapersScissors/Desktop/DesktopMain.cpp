@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <thread>
 
 #include "Lur/Core/Log.h"
 #include "Lur/Net/Session.h"
@@ -32,6 +33,7 @@
 #include "Rps/SimRunner.h"
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
+#include "WindowsBleTransport.h"  // #101-E: PC becomes a real BLE opponent to the phone
 
 namespace {
 
@@ -307,6 +309,91 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress) {
     return 0;
 }
 
+// ------------------------------------------------------------------ BLE peer vs the phone (#101-E)
+
+// One RPS lockstep peer, headless (no window/renderer — the PC is just the OPPONENT),
+// driven over real BLE via WindowsBleTransport so TraceAndroid can capture from the
+// phone during a live PC-vs-phone match. --auto presses a random soldier ~1.4/s (the
+// only sensible mode for an unattended opponent). Runs until MaxFrames (0 = forever).
+int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
+    Lur::Log::Info("RPS desktop: BLE peer vs phone (radio=%s, auto=%d)", RadioExe, Auto ? 1 : 0);
+    Lur::DevRig::WindowsBleTransport Ble(RadioExe);
+    Ble.SetLogger([](const char* M) { Lur::Log::Info("%s", M); });
+    if (!Ble.Start()) {
+        Lur::Log::Error("BLE radio failed to start - build it: "
+                        "powershell -File Tools\\BleDevRig\\build.ps1 -Source BleRadio.cs");
+        return 1;
+    }
+
+    Lur::Net::Session Session;
+    Rps::LockstepPeer Lp;
+    const std::string Guid = "rps-pc-ble-peer";  // stable; the phone's GUID orders the teams
+    Session.SetHandler(Rps::MsgInput,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgInput, D, N); });
+    Session.SetHandler(Rps::MsgAnchor,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgAnchor, D, N); });
+    Session.SetHandler(Rps::MsgResyncChunk,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
+    Session.SetResyncHandler([&Lp] { Lp.BeginResync(); });
+    Session.Start(&Ble, Guid);
+    Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", Guid.c_str());
+
+    bool Started = false;
+    Lur::Sim::SplitMix64 Rng(Seed ^ 0xB1E);
+    uint64_t AutoAccumNs = 0, QualAccumNs = 0;
+    int Frame = 0;
+    auto PrevTime = std::chrono::steady_clock::now();
+    for (;;) {
+        const auto Now = std::chrono::steady_clock::now();
+        const uint64_t ElapsedNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
+        PrevTime = Now;
+
+        Session.Tick(ElapsedNs);  // pump the radio inbox + handshake/liveness
+
+        if (!Started && Session.IsReady()) {
+            const uint8_t Team = Guid < Session.GetPeerGuid() ? 0 : 1;
+            Lp.Init(Seed, Team, SendViaSession, &Session);
+            Started = true;
+            Lur::Log::Info("linked - lockstep started (team %d, peer %.8s)", Team,
+                           Session.GetPeerGuid().c_str());
+        }
+        if (Started) {
+            (void)Auto; (void)Rng;
+#if LUR_INTERNAL
+            if (Auto) {
+                AutoAccumNs += ElapsedNs;
+                if (AutoAccumNs > 700'000'000ull) {  // ~1.4 presses/s, a random soldier type
+                    AutoAccumNs = 0;
+                    Lp.SetLocalMask(static_cast<uint8_t>(1u << (1 + Rng.NextBounded(3))));
+                }
+            }
+#endif
+            Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
+            if (Lp.Desynced()) Lur::Log::Error("DESYNC (tick %u)", Lp.ExecTick());
+        }
+
+        QualAccumNs += ElapsedNs;
+        if (Started && QualAccumNs > 2'000'000'000ull) {  // ~0.5 Hz liveness line
+            QualAccumNs = 0;
+            Lur::Log::Info("BLE tick=%u you=%d foe=%d desync=%d txB=%llu rxB=%llu",
+                           Lp.ExecTick(), Lp.GetSim().AliveCount(0), Lp.GetSim().AliveCount(1),
+                           Lp.Desynced() ? 1 : 0, (unsigned long long)Ble.GetBytesOut(),
+                           (unsigned long long)Ble.GetBytesIn());
+        }
+
+        ++Frame;
+        if (MaxFrames > 0 && Frame >= MaxFrames) {
+            Lur::Log::Info("ran %d frames (linked=%d tick=%u) - exiting", Frame, Started ? 1 : 0,
+                           Lp.ExecTick());
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));  // ~250 Hz service, don't busy-spin
+    }
+    Lur::Log::Info("clean exit");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -314,7 +401,8 @@ int main(int argc, char** argv) {
     Lur::Log::Init(nullptr, "RpsDesktop");
 
     int MaxFrames = 0;
-    bool Auto = false, Solo = false;
+    bool Auto = false, Solo = false, Ble = false;
+    std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
     uint64_t Seed = 0x1234;
     int Stress = 0;
     for (int I = 1; I < argc; ++I) {
@@ -322,12 +410,17 @@ int main(int argc, char** argv) {
         if (A == "--frames" && I + 1 < argc) MaxFrames = std::atoi(argv[++I]);
         else if (A == "--auto") Auto = true;
         else if (A == "--solo") Solo = true;
+        else if (A == "--ble") {
+            Ble = true;
+            if (I + 1 < argc && argv[I + 1][0] != '-') RadioExe = argv[++I];  // optional radio path
+        }
         else if (A == "--seed" && I + 1 < argc) Seed = std::strtoull(argv[++I], nullptr, 0);
         else if (A == "--stress" && I + 1 < argc) Stress = std::atoi(argv[++I]);
         else if (A == "--winw" && I + 1 < argc) kWinW = std::atoi(argv[++I]);
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
+    if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress);
     return RunLoopback(Auto, MaxFrames, Seed);
 }

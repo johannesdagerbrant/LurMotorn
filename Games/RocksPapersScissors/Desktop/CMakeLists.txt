@@ -3,7 +3,9 @@
 # surface — the fast iteration loop, and the first thing that runs on screen. Built
 # only for the desktop Workbench configuration.
 if(LUR_DESKTOP AND WIN32)
-    add_executable(onlyrps_desktop DesktopMain.cpp)
+    # WindowsBleTransport (copy-pasted dev glue from Games/Chess/Desktop, #101-E) makes
+    # the PC a real BLE opponent to the phone so TraceAndroid captures a live match.
+    add_executable(onlyrps_desktop DesktopMain.cpp WindowsBleTransport.cpp)
     target_link_libraries(onlyrps_desktop PRIVATE
         rps::view
         rps::runtime
