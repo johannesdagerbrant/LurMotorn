@@ -124,8 +124,14 @@ static void TestCVarOverrideDeterminism() {
 // brute force, must produce a bit-identical StateHash EVERY tick. Stronger than a
 // single-state check — it exercises the grid across a whole evolving match (spawns,
 // clashing armies driving nearest-enemy ring search, dense separation).
+//
+// The brute path is O(n^2)/tick, so the deep-match tail dominates the CI gate (~16s of
+// rps_sim_tests at -O0). Any grid/brute divergence surfaces within the first ~100 ticks
+// once armies clash and dense separation kicks in, so the everyday (Development) gate runs
+// a lean 250-tick sweep across the 3 seeds; the exhaustive 800-tick audit runs under
+// LUR_SLOW (the Debugging build) where expensive validation belongs (CLAUDE.md ladder).
 static void TestGridEqualsBruteForce() {
-    constexpr int Ticks = 800;
+    constexpr int Ticks = LUR_SLOW ? 800 : 250;
     for (uint64_t Seed : {uint64_t(1), uint64_t(0xABCDEF), uint64_t(0xDEADBEEF)}) {
         static uint8_t M0[Ticks], M1[Ticks];
         SplitMix64 Rng(Seed ^ 0x9999);
