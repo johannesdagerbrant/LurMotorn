@@ -106,10 +106,12 @@ static void TestFuzzDecode() {
 
 // Replay a recorded/reassembled (mask0, mask1) stream into a fresh sim -> final hash.
 static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
-                           const std::vector<uint8_t>& M1) {
+                           const std::vector<uint8_t>& M1,
+                           std::size_t MaxTicks = static_cast<std::size_t>(-1)) {
     static Sim S;
     S.Init(Seed);
-    const std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
+    std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
+    if (N > MaxTicks) N = MaxTicks;
     for (std::size_t I = 0; I < N; ++I) S.Step(M0[I], M1[I]);
     return S.StateHash();
 }
@@ -137,9 +139,15 @@ static void TestResyncChunking() {
     for (const auto& C : C1) CHECK(DecodeResyncChunk(C.data(), C.size(), Ft, D1));
     CHECK(D0 == M0 && D1 == M1);
 
-    // Free-run the reassembled history through a fresh sim -> the frontier state, identical
-    // to a direct run (the replay law the cold-rejoin path relies on).
-    CHECK(ReplayHash(0xAA, D0, D1) == ReplayHash(0xAA, M0, M1));
+    // Smoke-check that the reassembled bytes actually DRIVE the sim identically to the
+    // original. The reassembly is already byte-exact (D0==M0 above), and the replay law
+    // (same inputs -> same hash over a full match) is covered by TestLockstepReplayHash-
+    // Identical + rps_sim_tests — so a short prefix suffices here. Replaying the WHOLE
+    // 9000-tick history twice added ~18k flock-heavy Steps that dominated the CI gate for
+    // zero extra coverage; the 9000-tick CHUNKING/byte-budget checks above are the point of
+    // this test and stay intact.
+    constexpr std::size_t ReplaySmoke = 400;
+    CHECK(ReplayHash(0xAA, D0, D1, ReplaySmoke) == ReplayHash(0xAA, M0, M1, ReplaySmoke));
 }
 
 // ---- Lockstep harness: a QUEUED link (models the real deferred delivery / Pump, and
