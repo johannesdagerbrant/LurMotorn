@@ -85,6 +85,10 @@ struct AppState {
     Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
     float DownX = 0.0f, DownY = 0.0f;
+    uint64_t TwoDownNs = 0;                        // two-finger triple-tap recognizer (glue)
+    uint64_t LastTwoTapNs = 0;
+    int TwoTapCount = 0;
+    bool TwoFingerActive = false;
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
 };
 
@@ -144,26 +148,50 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
     const float X = AMotionEvent_getX(Event, 0);
     const float Y = AMotionEvent_getY(Event, 0);
-    switch (AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK) {
+    const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
+    const size_t Count = AMotionEvent_getPointerCount(Event);
+    switch (Action) {
         case AMOTION_EVENT_ACTION_DOWN:
             S->Cam.Begin(Y);
             S->DownX = X; S->DownY = Y;
+            S->TwoFingerActive = false;
+            return 1;
+        case AMOTION_EVENT_ACTION_POINTER_DOWN:  // a second finger landed
+            if (Count == 2) { S->TwoFingerActive = true; S->TwoDownNs = NowNs(); }
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
-            S->Cam.Move(Y, Ppu(W));  // content-drag (the CameraScroll handles the feel)
+            if (Count == 1) S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
             return 1;
+        case AMOTION_EVENT_ACTION_POINTER_UP:
+            return 1;  // the whole gesture is decided at ACTION_UP (last finger up)
         case AMOTION_EVENT_ACTION_UP: {
             S->Cam.End();
-            const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
-            if (Tap) {
 #if !LUR_SHIPPING
-                S->View.DevTap(X, Y);  // dev CVar-browser tap (always on; no-op off a row)
+            // Two-finger TRIPLE-tap opens the CVar view (dev-only; won't fire during normal
+            // one-finger play). The in-panel top-left X closes it. Each quick two-finger tap
+            // within the window increments the count; the 3rd opens.
+            if (S->TwoFingerActive && (NowNs() - S->TwoDownNs) < 350'000'000ull) {
+                S->TwoTapCount = (NowNs() - S->LastTwoTapNs < 600'000'000ull) ? S->TwoTapCount + 1 : 1;
+                S->LastTwoTapNs = NowNs();
+                if (S->TwoTapCount >= 3) {
+                    S->View.SetDevOverlayOpen(true);
+                    S->TwoTapCount = 0;
+                }
+                S->TwoFingerActive = false;
+                return 1;
+            }
+#endif
+            const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
+            if (Tap && !S->TwoFingerActive) {
+#if !LUR_SHIPPING
+                S->View.DevTap(X, Y);  // dev CVar-browser tap (no-op when hidden / off a row)
 #endif
                 if (S->Linked.load(std::memory_order_acquire)) {
                     const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
                     if (Plate >= 0) S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
                 }
             }
+            S->TwoFingerActive = false;
             return 1;
         }
         default:

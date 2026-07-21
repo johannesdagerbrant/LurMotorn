@@ -66,9 +66,15 @@ public:
     // selection highlight; DevSelectMove moves it (-1 up / +1 down); DevAdjustSelected
     // edits the selected gameplay CVar (+1 double, -1 halve, 0 reset). Desktop is
     // single-threaded (keys + Render on one thread), so these act directly.
-    void SetTuneMode(bool On) { TuneMode_ = On; }
+    void SetTuneMode(bool On) { TuneMode_ = On; if (On) DevOverlayOpen_ = true; }
     void DevSelectMove(int Delta);
     void DevAdjustSelected(int Dir);
+
+    // Show/hide the CVar view. Default hidden (the game is unobstructed). Opened by the
+    // phone's two-finger TRIPLE-tap (or desktop --tune); closed by the in-panel top-left
+    // X button. Closing also dismisses the numpad.
+    void SetDevOverlayOpen(bool On) { DevOverlayOpen_ = On; if (!On) NumpadOpen_ = false; }
+    bool DevOverlayOpen() const { return DevOverlayOpen_; }
 
     // Called after a gameplay CVar is committed via the numpad/keyboard (the global value
     // is already set). The app persists (cvars.cfg) and, on a phone in a live match, routes
@@ -115,6 +121,7 @@ private:
     std::atomic<float> DevTapX_{-1.0e9f};          // input-thread tap -> render-thread nudge
     std::atomic<float> DevTapY_{-1.0e9f};
     std::atomic<bool>  DevTapPending_{false};
+    bool               DevOverlayOpen_ = false;     // CVar view shown? (two-finger triple-tap / --tune)
     bool               TuneMode_ = false;          // #115 desktop --tune: keyboard editing on
     int                SelectedRow_ = 0;            //   selected gameplay-CVar row (registry order)
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)

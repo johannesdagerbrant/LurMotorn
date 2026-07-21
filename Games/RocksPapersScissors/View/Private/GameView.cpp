@@ -742,8 +742,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // hardware. Deliberately temporary + game-side: the shipping build compiles none of it
     // (BeginDevGuiLayer is a no-op, this block is #if'd out). The engine-owned, host-driven
     // Modules/DevGui (own mono font, widgets, input) replaces it — this is just first pixels.
-    Lur::Render::BeginDevGuiLayer(Renderer);
-    {
+    if (DevOverlayOpen_) {
+        Lur::Render::BeginDevGuiLayer(Renderer);
         // Live CVar browser (bring-up): every AffectsGameplay CVar + its current value,
         // read straight from the registry (ValueString is guard-free and the global value
         // is only mutated by the console, never the sim thread — so this render-thread read
@@ -760,10 +760,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.30f;
         Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
         Blit(DevAccentMat, X0 + PW * 0.5f, Y0 + TitleH, PW, 2.0f * HS);
+        // Top-left X (close) button; the title starts to its right.
+        const float XbtnS = TitleH;
+        Blit(DevKeyMat, X0 + XbtnS * 0.5f, Y0 + XbtnS * 0.5f, XbtnS, XbtnS);
+        Text.Draw(Renderer, "X", X0, Y0, XbtnS, XbtnS, 16.0f * HS, Accent,
+                  Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
         char T[96];
         std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
-        Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - 20.0f * HS, TitleH,
-                  14.0f * HS, Accent);
+        Text.Draw(Renderer, T, X0 + XbtnS + 8.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
+                  TitleH, 14.0f * HS, Accent);
         // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test
         // + edits don't race the ValueString reads. Numpad first (if open), then rows.
         const bool TapPending = DevTapPending_.load(std::memory_order_acquire);
@@ -771,13 +776,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
 
-        // Numpad toaster geometry (drawn below the rows, hit-tested first). Bottom of the
-        // screen so all CVar rows — including the selected one showing the typed value —
-        // stay visible above it.
+        // Top-left X closes the view.
+        if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + TitleH && TapY >= Y0 &&
+            TapY <= Y0 + TitleH) {
+            DevOverlayOpen_ = false;
+            NumpadOpen_ = false;
+            TapUsed = true;
+        }
+
+        // Numpad geometry — strictly BELOW the CVar panel so it never overlaps a row (esp.
+        // the highlighted/selected one, whose typed value must stay visible). Fills the space
+        // down toward the bottom (over the plates while open — fine in dev).
         const float NumW = WidthPx * 0.62f;
-        const float NumH = NumW;
         const float NumX = (WidthPx - NumW) * 0.5f;
-        const float NumY = HeightPx - NumH - 90.0f * HS;
+        const float NumY = Y0 + PH + 12.0f * HS;
+        float NumH = HeightPx - NumY - 60.0f * HS;
+        if (NumH > NumW) NumH = NumW;
         const float NumGap = 6.0f * HS;
 
         if (TapPending && !TapUsed && NumpadOpen_ &&
@@ -837,6 +851,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 }
         }
         if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
+    } else {
+        DevTapPending_.store(false, std::memory_order_relaxed);  // discard taps while hidden
     }
 #endif
 
