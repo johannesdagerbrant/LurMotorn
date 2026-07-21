@@ -183,14 +183,17 @@ static void TestCVarConfig() {
     std::remove(Path);
 
     CvTestInt.Set(55);
+    CvTestInt.SetEditWallMs(123456);  // C.4: the edit-timestamp column must round-trip
     CHECK(CvTestBool.SetFromString("true"));
     CHECK(Lur::Core::SaveCVarConfig(Path));
 
     // Wipe in memory, then reload from disk.
     CvTestInt.Reset();
+    CvTestInt.SetEditWallMs(0);
     CHECK(CvTestBool.SetFromString("false"));
     CHECK(Lur::Core::LoadCVarConfig(Path) == 2);
     CHECK(CvTestInt.Get() == 55 && CvTestBool.Get() == true);
+    CHECK(CvTestInt.EditWallMs() == 123456);  // timestamp survived the round-trip
 
     // A stale/unknown name (renamed or removed CVar) is warned + skipped, not fatal.
     { std::ofstream A(Path, std::ios::app); A << "no.such.cvar = 3\n"; }

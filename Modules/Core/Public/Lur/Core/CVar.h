@@ -60,6 +60,10 @@ public:
     virtual bool        Overridden() const = 0;
     virtual std::string ValueString() const = 0;           // current value, console/persist syntax
     virtual std::string DefaultString() const = 0;
+    // Wall-clock (ms) of the last edit — the last-writer-wins resolver key (Addendum C.2)
+    // and the cvars.cfg timestamp column (C.4). 0 = never stamped (loses any real edit).
+    virtual uint64_t    EditWallMs() const = 0;
+    virtual void        SetEditWallMs(uint64_t Ms) = 0;
 
     ICVar* NextRegistered_ = nullptr;  // intrusive singly-linked registry list
 
@@ -150,6 +154,8 @@ public:
     bool        Overridden() const override { return !(Value_ == Default_); }
     std::string ValueString() const override { return ToString(Value_); }
     std::string DefaultString() const override { return ToString(Default_); }
+    uint64_t    EditWallMs() const override { return EditWallMs_; }
+    void        SetEditWallMs(uint64_t Ms) override { EditWallMs_ = Ms; }
 
     // Typed accessors for code that holds the concrete CVar (not through ICVar).
     T    Default() const { return Default_; }
@@ -164,6 +170,7 @@ private:
     const char* Category_;
     uint32_t    Flags_;
     ECVarOrigin Origin_;
+    uint64_t    EditWallMs_ = 0;
 #endif
 };
 
