@@ -85,6 +85,40 @@ static void TestReplayReproducibility() {
     CHECK(Replay.StateHash() == Final);
 }
 
+// ---- #112: a latched AffectsGameplay CVar override changes the sim deterministically ----
+// Exercises both halves of the CVar-determinism design: the per-tick latch (Sim::Step's
+// Cv = LatchCvs()) means an override applied between runs takes effect, and folding Cv
+// into StateHash means two runs with the same override hash identically while a different
+// override diverges. This is the sim-side proof under which the Addendum-C peer sync sits.
+static void TestCVarOverrideDeterminism() {
+    constexpr int Ticks = 400;
+    constexpr uint64_t Seed = 0x112C0DEull;
+    static uint8_t M0[Ticks], M1[Ticks];
+    SplitMix64 Rng(0x112);
+    for (int I = 0; I < Ticks; ++I) {
+        M0[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2;  // bias to soldiers so WSeek bites
+        M1[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4;
+    }
+    auto Run = [&]() {
+        static Sim S;  // static: keep the ~200 KB off the stack
+        S.Init(Seed);
+        for (int I = 0; I < Ticks; ++I) S.Step(M0[I], M1[I]);
+        return S.StateHash();
+    };
+
+    CvWSeek.Reset();
+    const uint64_t Base = Run();
+    CHECK(CvWSeek.SetFromString("3.0"));  // shove the goal-seek weight far from its default
+    const uint64_t Over1 = Run();
+    const uint64_t Over2 = Run();
+    CvWSeek.Reset();
+    const uint64_t BaseAgain = Run();
+
+    CHECK(Over1 != Base);      // the gameplay knob genuinely alters the simulation...
+    CHECK(Over1 == Over2);     // ...deterministically (same override -> identical hash)
+    CHECK(BaseAgain == Base);  // and Reset() restores the exact baseline
+}
+
 // ---- Grid vs brute-force equivalence (spatial grid, design §5) ----
 // End-to-end: the same seed + input stream, once on the grid path and once on
 // brute force, must produce a bit-identical StateHash EVERY tick. Stronger than a
@@ -398,6 +432,7 @@ static void TestStressTickBudget() {
 int main() {
     TestDeterminism();
     TestReplayReproducibility();
+    TestCVarOverrideDeterminism();
     TestGridEqualsBruteForce();
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();

@@ -58,6 +58,12 @@ struct Sim {
     uint8_t   Result = ResultOngoing;     // EResult
     uint64_t  Seed = 0;
 
+    // ---- #112: gameplay-CVar snapshot, latched at the top of each Step, HASHED ----
+    // Frozen for the whole tick so both peers read identical values even if an override
+    // is applied between ticks (timing-safety, spec §1). Folding it into StateHash turns
+    // a mis-latch into an immediate desync alarm. POD -> Sim stays trivially copyable.
+    CvSnapshot Cv{};
+
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
     int32_t DepositBuf[2] = {};           // worker deposits buffered in Movement, applied in Economy
 

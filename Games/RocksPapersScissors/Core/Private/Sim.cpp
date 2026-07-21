@@ -500,7 +500,7 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
     if (S.Team[J] == S.Team[I]) {
-        AddRepel(Ix, Iy, Jx, Jy, SeparationRadius, SeparationStrength, A.SepX, A.SepY);
+        AddRepel(Ix, Iy, Jx, Jy, SeparationRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
         if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
             AddCohesion(Ix, Iy, Jx, Jy, CohAllR, A.AllX, A.AllY, A.AllN);
             if (S.Type[J] == S.Type[I]) {
@@ -511,11 +511,11 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;  // a friendly cart to screen (#98)
         }
     } else {
-        AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, EnemySeparationStrength, A.EneX, A.EneY);
+        AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
         // Flee your PREDATOR — the enemy type that beats me (UnitTable[Type[J]].Beats == my
         // type): steer away, larger radius, so I never walk toward my counter.
         if (UnitTable[S.Type[J]].Beats == S.Type[I])
-            AddRepel(Ix, Iy, Jx, Jy, PredatorFleeR, WPredatorFlee, A.FleeX, A.FleeY);
+            AddRepel(Ix, Iy, Jx, Jy, PredatorFleeR, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
         // A flagged RAIDER within InterposeR: note it so I can interpose (#98).
         if (Threat.Get(J) && Max(Abs(Ix - Jx), Abs(Iy - Jy)) < InterposeR) {
             A.RaidX += Jx.Raw; A.RaidY += Jy.Raw; ++A.RaidN;
@@ -547,7 +547,7 @@ void AddMineRepel(const Sim& S, int32_t I, int64_t& Ax, int64_t& Ay) {
     for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
         if (S.MineGold[Mn] <= 0) continue;
         AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
-                 MineRepelRadius, SeparationStrength, Ax, Ay);
+                 MineRepelRadius, S.Cv.SeparationStrength, Ax, Ay);
     }
 }
 // Chebyshev-clamp a raw (Q16.16) vector in place to a max magnitude — the sqrt-free
@@ -639,35 +639,35 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
             const Fixed Ddx = Mx - S.PosX[I], Ddy = My - S.PosY[I];   // toward the block point
             const Fixed Ch = Max(Abs(Ddx), Abs(Ddy));
             if (Ch.Raw != 0) {
-                Dx += (Ddx / Ch * WInterpose).Raw;
-                Dy += (Ddy / Ch * WInterpose).Raw;
+                Dx += (Ddx / Ch * S.Cv.WInterpose).Raw;
+                Dy += (Ddy / Ch * S.Cv.WInterpose).Raw;
             }
         }
         if (!InRange) {
             const Fixed Sdx = Tx - S.PosX[I], Sdy = Ty - S.PosY[I];
             const Fixed Cheb = Max(Abs(Sdx), Abs(Sdy));
             if (Cheb.Raw != 0) {                       // seek: unit Chebyshev dir × WSeek
-                Dx += (Sdx / Cheb * WSeek).Raw;
-                Dy += (Sdy / Cheb * WSeek).Raw;
+                Dx += (Sdx / Cheb * S.Cv.WSeek).Raw;
+                Dy += (Sdy / Cheb * S.Cv.WSeek).Raw;
             }
             if (A.SameN > 0) {                         // toward same-type centroid
-                Dx += (Fixed{static_cast<int32_t>(A.SameX / A.SameN)} * WCohSame).Raw;
-                Dy += (Fixed{static_cast<int32_t>(A.SameY / A.SameN)} * WCohSame).Raw;
+                Dx += (Fixed{static_cast<int32_t>(A.SameX / A.SameN)} * S.Cv.WCohSame).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.SameY / A.SameN)} * S.Cv.WCohSame).Raw;
             }
             if (A.AllN > 0) {                          // toward the army centroid (weak)
-                Dx += (Fixed{static_cast<int32_t>(A.AllX / A.AllN)} * WCohAll).Raw;
-                Dy += (Fixed{static_cast<int32_t>(A.AllY / A.AllN)} * WCohAll).Raw;
+                Dx += (Fixed{static_cast<int32_t>(A.AllX / A.AllN)} * S.Cv.WCohAll).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.AllY / A.AllN)} * S.Cv.WCohAll).Raw;
             }
             if (A.AlnN > 0) {                          // match same-type neighbours' heading
-                Dx += (Fixed{static_cast<int32_t>(A.AlnX / A.AlnN)} * WAlign).Raw;
-                Dy += (Fixed{static_cast<int32_t>(A.AlnY / A.AlnN)} * WAlign).Raw;
+                Dx += (Fixed{static_cast<int32_t>(A.AlnX / A.AlnN)} * S.Cv.WAlign).Raw;
+                Dy += (Fixed{static_cast<int32_t>(A.AlnY / A.AlnN)} * S.Cv.WAlign).Raw;
             }
             // Organic wander: smooth per-unit value noise (Simplex-style). Tick masked to
             // 15 bits so Fixed::FromInt never overflows (loops ~55 min — cosmetic).
             const uint32_t Uu = static_cast<uint32_t>(I);
-            const Fixed Tn = Fixed::FromInt(static_cast<int32_t>(S.Tick & 0x7FFF)) * NoiseTimeScale;
-            Dx += (ValueNoise(Uu, Tn, 0) * WNoise).Raw;
-            Dy += (ValueNoise(Uu, Tn, 1) * WNoise).Raw;
+            const Fixed Tn = Fixed::FromInt(static_cast<int32_t>(S.Tick & 0x7FFF)) * S.Cv.NoiseTimeScale;
+            Dx += (ValueNoise(Uu, Tn, 0) * S.Cv.WNoise).Raw;
+            Dy += (ValueNoise(Uu, Tn, 1) * S.Cv.WNoise).Raw;
         }
         // Verlet finalize: Δ is last tick's velocity (Pos−Prev, still valid pre-copy).
         // Accelerate toward the desired velocity, clamped to MaxAccel; carry damped
@@ -676,8 +676,8 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
         const int64_t DeltaX = static_cast<int64_t>(S.PosX[I].Raw) - S.PrevX[I].Raw;
         const int64_t DeltaY = static_cast<int64_t>(S.PosY[I].Raw) - S.PrevY[I].Raw;
         int64_t Ax = Dx - DeltaX, Ay = Dy - DeltaY;
-        ChebClamp(Ax, Ay, MaxAccel.Raw);
-        const int64_t Damp = (InRange ? InRangeDamping : FlockDamping).Raw;
+        ChebClamp(Ax, Ay, S.Cv.MaxAccel.Raw);
+        const int64_t Damp = (InRange ? S.Cv.InRangeDamping : S.Cv.FlockDamping).Raw;
         int64_t Stepx = (Damp * DeltaX >> Fixed::FracBits) + Ax;
         int64_t Stepy = (Damp * DeltaY >> Fixed::FracBits) + Ay;
         ChebClamp(Stepx, Stepy, UnitTable[S.Type[I]].Speed.Raw);
@@ -719,7 +719,7 @@ void Attacks(Sim& S) {
         if (T < 0 || !S.IsAlive(T)) continue;
         if (Dist2(S.PosX[I], S.PosY[I], S.PosX[T], S.PosY[T]) > RangeSq(UnitTable[S.Type[I]].Range)) continue;
         int32_t D = UnitTable[S.Type[I]].Attack;
-        if (UnitTable[S.Type[I]].Beats == S.Type[T]) D *= CounterMultiplier;
+        if (UnitTable[S.Type[I]].Beats == S.Type[T]) D *= S.Cv.CounterMultiplier;
         Dmg[T] += D;
         S.Cooldown[I] = UnitTable[S.Type[I]].Cooldown;
     }
@@ -751,6 +751,9 @@ void WinCheck(Sim& S) {
 }  // namespace
 
 void Sim::Init(uint64_t InSeed) {
+#if !LUR_SHIPPING
+    Lur::Core::CVarEnterMain();  // Init always runs post-main; arm the no-read-before-main guard (dev-only)
+#endif
     *this = Sim{};  // value-init: zeroes every array/field (Init-time, not the hot path)
     Seed = InSeed;
     BuildMap(*this);
@@ -763,6 +766,7 @@ void Sim::Init(uint64_t InSeed) {
 void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
     LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
+    Cv = LatchCvs();  // #112: freeze the AffectsGameplay CVars for this whole tick (identical on both peers)
 
     // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
     // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's
@@ -873,6 +877,7 @@ uint64_t Sim::StateHash() const {
         Mix(&Q.SpawnCounter, sizeof(int32_t));
     }
     Mix(MineGold, sizeof(int32_t) * NumMines);  // mutable reserves (#84) — MineX/Y stay excluded (static)
+    Mix(&Cv, sizeof(Cv));  // #112: latched gameplay-CVar snapshot — a mis-latch surfaces as a desync
     Mix(&Tick, sizeof(uint32_t));
     Mix(&Result, sizeof(uint8_t));
     return H;
