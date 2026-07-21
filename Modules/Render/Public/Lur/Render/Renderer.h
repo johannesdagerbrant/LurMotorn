@@ -126,6 +126,13 @@ public:
     // over the scene. Default no-op so non-graphical backends need not implement it.
     virtual void BeginGui() {}
 
+    // Enter the DEV-GUI layer: a THIRD pass after the game's GUI (#113, spec Addendum A),
+    // same engine ortho, depth off — the console + dev panels always paint over everything.
+    // Default no-op (like BeginGui), and its call site is compiled out in shipping via
+    // Lur/Render/DevGuiLayer.h's BeginDevGuiLayer wrapper, so the pass never occurs in a
+    // shipped build. Declared unconditionally to keep the vtable identical across configs.
+    virtual void BeginDevGui() {}
+
     virtual void DrawMesh(MeshHandle Mesh, MaterialHandle Material, const Math::Mat4& Model) = 0;
 
     // Draw `Count` instances of `Quad` (a MakeQuad mesh) in ONE call, each transformed
