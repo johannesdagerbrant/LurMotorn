@@ -138,9 +138,14 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_UP: {
             S->Cam.End();
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
-            if (Tap && S->Linked.load(std::memory_order_acquire)) {
-                const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
-                if (Plate >= 0) S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
+            if (Tap) {
+#if !LUR_SHIPPING
+                S->View.DevTap(X, Y);  // dev CVar-browser tap (always on; no-op off a row)
+#endif
+                if (S->Linked.load(std::memory_order_acquire)) {
+                    const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
+                    if (Plate >= 0) S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
+                }
             }
             return 1;
         }

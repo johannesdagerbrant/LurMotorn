@@ -1,4 +1,6 @@
 #pragma once
+#include <atomic>
+
 #include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Render/Renderer.h"
@@ -52,6 +54,13 @@ public:
     // Returns a unit type 0..3 when a production plate was pressed, -2 when the HUD
     // consumed the tap (the opponent selector), or -1 when the tap is the world's.
     int OnTap(float XPx, float YPx);
+#if !LUR_SHIPPING
+    // #113 dev overlay: a tap (input thread) is stashed and consumed on the render thread,
+    // where the CVar-row rects are known — so hit-test + the CVar nudge are race-free with
+    // the ValueString read. Tapping a row cycles that gameplay CVar (double, wrap to
+    // default) LOCALLY; single-device it just updates the browser (no live match to react).
+    void DevTap(float XPx, float YPx);
+#endif
 
 private:
     Lur::Render::MeshHandle Quad = 0;  // one white unit quad; materials supply colour
@@ -88,6 +97,9 @@ private:
 #if !LUR_SHIPPING
     Lur::Render::MaterialHandle DevPanelMat = 0;   // #113 dev overlay: charcoal translucent
     Lur::Render::MaterialHandle DevAccentMat = 0;  //   + cyan accent (DevTheme, bring-up)
+    std::atomic<float> DevTapX_{-1.0e9f};          // input-thread tap -> render-thread nudge
+    std::atomic<float> DevTapY_{-1.0e9f};
+    std::atomic<bool>  DevTapPending_{false};
 #endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours

@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 #include "Lur/Math/Mat4.h"
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
@@ -279,6 +280,14 @@ void GameView::RefreshSelector() {
     Selector.SetSelected(0);
     SelectorDirty = false;
 }
+
+#if !LUR_SHIPPING
+void GameView::DevTap(float XPx, float YPx) {
+    DevTapX_.store(XPx, std::memory_order_relaxed);
+    DevTapY_.store(YPx, std::memory_order_relaxed);
+    DevTapPending_.store(true, std::memory_order_release);  // consumed on the render thread
+}
+#endif
 
 int GameView::OnTap(float XPx, float YPx) {
     if (!Ready) return -1;
@@ -706,14 +715,34 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
         Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - 20.0f * HS, TitleH,
                   14.0f * HS, Accent);
+        // Consume a pending tap (from the input thread) on THIS thread, where the row rects
+        // are laid out — so the hit-test + nudge don't race the ValueString reads.
+        const bool TapPending = DevTapPending_.load(std::memory_order_acquire);
+        const float TapX = DevTapX_.load(std::memory_order_relaxed);
+        const float TapY = DevTapY_.load(std::memory_order_relaxed);
+        bool TapUsed = false;
         float Ly = Y0 + TitleH + 5.0f * HS;
         Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
             if (!C->AffectsGameplay()) return;
+            // Tap on this row -> cycle the value (double, wrapping back to default past ~4x).
+            // LOCAL only (updates the browser); a live match would route through the sync.
+            if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW && TapY >= Ly &&
+                TapY <= Ly + LineH) {
+                const double Cur = std::strtod(C->ValueString().c_str(), nullptr);
+                const double Def = std::strtod(C->DefaultString().c_str(), nullptr);
+                double Nv = (Cur != 0.0) ? Cur * 2.0 : (Def != 0.0 ? Def : 1.0);
+                if (Def != 0.0 && Cur >= Def * 3.9) Nv = Def;  // wrap
+                char B[40];
+                std::snprintf(B, sizeof(B), "%g", Nv);
+                C->SetFromString(B);
+                TapUsed = true;
+            }
             char L[128];
             std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
             Text.Draw(Renderer, L, X0 + 12.0f * HS, Ly, PW - 24.0f * HS, LineH, 12.5f * HS, Ink);
             Ly += LineH;
         });
+        if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
     }
 #endif
 
