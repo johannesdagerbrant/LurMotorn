@@ -231,6 +231,49 @@ static void TestLockstepCvarSyncStaysIdentical() {
     const uint64_t Baseline = RunMatch(false);
     CHECK(Tweaked != Baseline);  // the synced knob genuinely altered the simulation
 }
+
+// ---- #112: match-start MsgCvarSync merges both peers' pre-match override sets with the
+// last-writer-wall-clock resolver (timestamp collision -> compile-time default). ----
+static void TestCvarSyncMatchStartMerge() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x5EED, 0, Enqueue, &Qa);
+    B.Init(0x5EED, 1, Enqueue, &Qb);
+
+    // A: WSeek=3 @t=200 (newer). B: WSeek=1 @t=100 (older, loses) + WCohSame=0.5 @t=50
+    // (only B has it, survives). Plus a COLLISION on WAlign: same t=70, different values
+    // -> must revert to the compile-time default on both peers.
+    A.SeedGameplayCvar(CvIdWSeek,    Fixed::FromInt(3).Raw,  200);
+    A.SeedGameplayCvar(CvIdWAlign,   Fixed::FromInt(2).Raw,  70);
+    B.SeedGameplayCvar(CvIdWSeek,    Fixed::FromInt(1).Raw,  100);
+    B.SeedGameplayCvar(CvIdWCohSame, Fixed{Fixed::One / 2}.Raw, 50);
+    B.SeedGameplayCvar(CvIdWAlign,   Fixed::FromInt(5).Raw,  70);   // collides with A's WAlign@70
+
+    A.SendCvarSync();
+    B.SendCvarSync();
+    Deliver(Qa, B);   // A's set -> B merges
+    Deliver(Qb, A);   // B's set -> A merges
+    // Both converged to the identical resolved set BEFORE tick 0.
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    CHECK(A.GetSim().Cv.WSeek == Fixed::FromInt(3));            // newer edit won
+    CHECK(A.GetSim().Cv.WCohSame == Fixed{Fixed::One / 2});     // only-one-side override survives
+    CHECK(A.GetSim().Cv.WAlign == CvWAlign.Get());             // collision -> compile-time default
+    CHECK(B.GetSim().Cv.WSeek == A.GetSim().Cv.WSeek);
+    CHECK(B.GetSim().Cv.WAlign == A.GetSim().Cv.WAlign);
+
+    // And they stay bit-identical once the match runs on the merged set.
+    SplitMix64 Rng(0x7);
+    for (int I = 0; I < 120; ++I) {
+        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2);
+        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
 #endif
 
 // ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
@@ -480,6 +523,7 @@ int main() {
     TestLockstepStaysInSync();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
+    TestCvarSyncMatchStartMerge();
 #endif
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();

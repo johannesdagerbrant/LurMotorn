@@ -106,6 +106,7 @@ void LockstepPeer::SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_
     // peers apply the identical override at the identical exec tick.
     const uint32_t ApplyTick = WallTicks + Delay;
     StorePendingCvar(ApplyTick, GameplayId, RawValue, EditWallClockMs);
+    MergeCvar(GameplayId, RawValue, EditWallClockMs);  // keep the current-override set current
     Lur::Serialization::BitWriter W;
     Lur::Serialization::WriteVarUint(W, ApplyTick);
     W.WriteBits(GameplayId, 8);
@@ -114,6 +115,40 @@ void LockstepPeer::SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_
     W.WriteBits(static_cast<uint32_t>(RawValue), 32);
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgCvar, B.data(), B.size());
+}
+
+void LockstepPeer::MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs) {
+    // Last-writer-wins by wall clock; an exact timestamp collision with a DIFFERENT value
+    // reverts to the compile-time default (drop the override) — the one value both peers
+    // unambiguously agree on (C.2). Commutative, so both peers reach the same merged set.
+    const auto It = ActiveCvars.find(Id);
+    if (It == ActiveCvars.end()) { ActiveCvars[Id] = {Raw, WallMs}; return; }
+    if (WallMs > It->second.WallMs)                          It->second = {Raw, WallMs};
+    else if (WallMs == It->second.WallMs && Raw != It->second.Raw) ActiveCvars.erase(It);
+    // else: incoming is older, or identical -> keep existing.
+}
+
+void LockstepPeer::ApplyActiveCvars() {
+    TheSim.Cv = LatchCvs();  // reset to the compile-time defaults...
+    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(TheSim.Cv, Id, V.Raw);  // ...then overlay
+}
+
+void LockstepPeer::SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs) {
+    MergeCvar(GameplayId, RawValue, EditWallClockMs);
+    ApplyActiveCvars();  // reflect locally now; the match-start sync re-merges across peers
+}
+
+void LockstepPeer::SendCvarSync() {
+    Lur::Serialization::BitWriter W;
+    Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(ActiveCvars.size()));
+    for (const auto& [Id, V] : ActiveCvars) {
+        W.WriteBits(Id, 8);
+        W.WriteBits(static_cast<uint32_t>(V.WallMs >> 32), 32);
+        W.WriteBits(static_cast<uint32_t>(V.WallMs & 0xFFFFFFFFu), 32);
+        W.WriteBits(static_cast<uint32_t>(V.Raw), 32);
+    }
+    const std::vector<uint8_t>& B = W.Finish();
+    if (Send) Send(Ctx, MsgCvarSync, B.data(), B.size());
 }
 #endif  // LUR_INTERNAL
 
@@ -181,11 +216,25 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         const uint32_t Hi  = R.ReadBits(32);
         const uint32_t Lo  = R.ReadBits(32);
         const int32_t  Raw = static_cast<int32_t>(R.ReadBits(32));
-        if (!Awaiting && R.IsOk())
+        if (!Awaiting && R.IsOk()) {
             StorePendingCvar(ApplyTick, Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
+            MergeCvar(Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
+        }
         // No Execute() kick: overrides don't gate the ceiling (only inputs do); the override
         // lands when tick ApplyTick runs. Reliable+ordered transport + the Delay horizon put
         // it in hand before either peer reaches that tick.
+    }
+    else if (Type == MsgCvarSync) {
+        Lur::Serialization::BitReader R(Data, N);
+        const uint32_t Count = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+        for (uint32_t I = 0; I < Count && R.IsOk(); ++I) {
+            const uint8_t  Id  = static_cast<uint8_t>(R.ReadBits(8));
+            const uint32_t Hi  = R.ReadBits(32);
+            const uint32_t Lo  = R.ReadBits(32);
+            const int32_t  Raw = static_cast<int32_t>(R.ReadBits(32));
+            if (R.IsOk()) MergeCvar(Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
+        }
+        if (R.IsOk()) ApplyActiveCvars();  // both peers now hold the identical merged set (pre-tick-0)
     }
 #endif
 }

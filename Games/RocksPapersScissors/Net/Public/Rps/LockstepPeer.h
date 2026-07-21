@@ -23,6 +23,7 @@ constexpr Lur::Net::EMsgType MsgResyncChunk = Lur::Net::EMsgType::Game2;
 // so the tweak reaches the peer deterministically mid-match. Never compiled into shipping
 // (the opcode is neither sent nor accepted there; the sim's CVars are constexpr).
 constexpr Lur::Net::EMsgType MsgCvar        = Lur::Net::EMsgType::Game3;
+constexpr Lur::Net::EMsgType MsgCvarSync    = Lur::Net::EMsgType::Game4;
 #endif
 
 // Lockstep coordinator for ONE peer (design doc §1-§4). Drives a Sim in lockstep with
@@ -69,6 +70,14 @@ public:
     // per-Sim Cv — a deterministic mid-match balance tweak. Dev-only (the console/panel/
     // desktop --tune caller). EditWallClockMs is the last-writer-wins resolver key.
     void SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
+
+    // Match-start sync (Addendum C.3): seed this peer's pre-match overrides (typically the
+    // persisted cvars.cfg set), then SendCvarSync() before tick 0. Both peers exchange
+    // their full sets, merge with the last-writer-wall-clock resolver (timestamp collision
+    // -> compile-time default), and apply the identical merged set before simulating — so
+    // one designer's tuning propagates to the peer, deterministically.
+    void SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
+    void SendCvarSync();
 #endif
 
     // Reconnect (cold rejoin or blip): send our executed input history as chunks +
@@ -105,6 +114,14 @@ private:
     std::unordered_map<uint32_t, std::vector<PendingCvar>> PendingCvars;
     void StorePendingCvar(uint32_t Tick, uint8_t Id, int32_t Raw, uint64_t WallMs);
     void ApplyCvarsForTick(uint32_t T);
+
+    // This peer's current override set (id -> value + edit wall-clock), relative to the
+    // compile-time defaults. Seeded pre-match and updated by live tweaks; exchanged +
+    // merged at match start (MsgCvarSync). Reverting an id to default = erasing it here.
+    struct CvarVal { int32_t Raw; uint64_t WallMs; };
+    std::unordered_map<uint8_t, CvarVal> ActiveCvars;
+    void MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs);  // resolver: last-writer; tie -> default
+    void ApplyActiveCvars();  // TheSim.Cv = defaults, then overlay ActiveCvars (pre-tick-0)
 #endif
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);
