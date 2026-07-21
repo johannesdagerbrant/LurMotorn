@@ -766,6 +766,11 @@ void Sim::Init(uint64_t InSeed) {
 #endif
     *this = Sim{};  // value-init: zeroes every array/field (Init-time, not the hot path)
     Seed = InSeed;
+    // #112: latch the AffectsGameplay CVars into per-Sim state ONCE, at match start, from
+    // the current (default, or solo-console) global values. Thereafter Cv is authoritative
+    // Sim state — constant within a tick and mutated ONLY at tick boundaries by synced
+    // overrides (LockstepPeer), so two peers in one process hold independent Cv. Hashed.
+    Cv = LatchCvs();
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
         Teams[T].Gold = StartGold;
@@ -776,7 +781,8 @@ void Sim::Init(uint64_t InSeed) {
 void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
     LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
-    Cv = LatchCvs();  // #112: freeze the AffectsGameplay CVars for this whole tick (identical on both peers)
+    // NB: Cv is NOT re-latched here — it is per-Sim state set at Init and mutated only at
+    // tick boundaries by synced overrides (#112), so it stays constant across this tick.
 
     // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
     // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's

@@ -58,10 +58,13 @@ struct Sim {
     uint8_t   Result = ResultOngoing;     // EResult
     uint64_t  Seed = 0;
 
-    // ---- #112: gameplay-CVar snapshot, latched at the top of each Step, HASHED ----
-    // Frozen for the whole tick so both peers read identical values even if an override
-    // is applied between ticks (timing-safety, spec §1). Folding it into StateHash turns
-    // a mis-latch into an immediate desync alarm. POD -> Sim stays trivially copyable.
+    // ---- #112: authoritative gameplay-CVar values, per-Sim state, HASHED ----
+    // Latched from the global CVars ONCE at Init, then owned by the Sim: constant within a
+    // tick and mutated only at tick boundaries by synced overrides (LockstepPeer applies a
+    // resolved MsgCvar at its stamped tick on both peers). Because it lives in the Sim, two
+    // peers in one process (loopback / two-window --tune) hold INDEPENDENT overrides that
+    // the sync converges — the workbench-faithful model. Folded into StateHash so a
+    // mis-apply/mis-sync is an immediate desync alarm. POD -> Sim stays trivially copyable.
     CvSnapshot Cv{};
 
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
