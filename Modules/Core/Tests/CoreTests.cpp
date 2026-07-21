@@ -5,7 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "Lur/Core/CVar.h"
 #include "Lur/Core/FlightRecorder.h"
+#include "Lur/Core/FromString.h"
 #include "Lur/Core/Hash.h"
 #include "Lur/Core/Log.h"
 
@@ -97,11 +99,91 @@ static void TestFlightRecorderRingBounded() {
     CHECK(Rec.Events().back().Data[0] == 9);
 }
 
+// ---- FromString / ToString (the generic bool/int/float/enum codec) ----
+enum class ETestMode : uint8_t { Off = 0, On = 1, Auto = 2 };
+
+static void TestFromStringGeneric() {
+    using Lur::Core::FromString;
+    using Lur::Core::ToString;
+
+    bool B = false;
+    CHECK(FromString("true", B) && B);
+    CHECK(FromString(" yes ", B) && B);        // trimmed
+    CHECK(FromString("0", B) && !B);
+    CHECK(!FromString("maybe", B));            // malformed -> false, B untouched
+
+    int32_t I = 0;
+    CHECK(FromString("42", I) && I == 42);
+    CHECK(FromString("  -7 ", I) && I == -7);
+    CHECK(!FromString("3x", I));               // trailing junk
+    CHECK(!FromString("", I));                 // empty
+    CHECK(ToString(I) == "-7");
+
+    int8_t Small = 0;
+    CHECK(FromString("120", Small) && Small == 120);
+    CHECK(!FromString("200", Small));          // out of int8 range
+
+    float F = 0.0f;
+    CHECK(FromString("1.5", F) && F == 1.5f);
+    CHECK(!FromString("abc", F));
+
+    ETestMode M = ETestMode::Off;
+    CHECK(FromString("2", M) && M == ETestMode::Auto);   // enum by ordinal
+    CHECK(ToString(ETestMode::On) == "1");
+}
+
+// ---- CVar<T>: default/get/set/reset/overridden + registry (dev shape) ----
+LUR_CVAR(CvTestInt, "test.int", 7, ::Lur::Core::CVarFlagNone, "Test");
+LUR_CVAR(CvTestBool, "test.bool", false, ::Lur::Core::CVarFlagNone, "Test");
+LUR_CVAR(CvTestMode, "test.mode", ETestMode::Auto, ::Lur::Core::CVarFlagAffectsGameplay, "Test");
+
+static void TestCVarMechanism() {
+    CHECK(CvTestInt.Get() == 7);
+    CHECK(int(CvTestInt) == 7);                // operator T
+    CHECK(!CvTestInt.Overridden());
+
+    CHECK(CvTestInt.SetFromString("10"));
+    CHECK(CvTestInt.Get() == 10 && CvTestInt.Overridden());
+    CHECK(CvTestInt.ValueString() == "10" && CvTestInt.DefaultString() == "7");
+
+    CHECK(!CvTestInt.SetFromString("garbage"));  // parse fail leaves value intact
+    CHECK(CvTestInt.Get() == 10);
+    CvTestInt.Reset();
+    CHECK(CvTestInt.Get() == 7 && !CvTestInt.Overridden());
+
+    // Flags: an enum CVar tagged AffectsGameplay reports it; a plain one does not.
+    CHECK(CvTestMode.AffectsGameplay());
+    CHECK(!CvTestBool.AffectsGameplay());
+    CHECK(CvTestMode.Get() == ETestMode::Auto);
+}
+
+static void TestCVarRegistry() {
+    using Lur::Core::CVarRegistry;
+    Lur::Core::ICVar* Found = CVarRegistry::Find("test.int");
+    CHECK(Found != nullptr);
+    CHECK(Found && Found->SetFromString("99"));
+    CHECK(CvTestInt.Get() == 99);              // registry set reaches the typed CVar
+    CvTestInt.Reset();
+    CHECK(CVarRegistry::Find("does.not.exist") == nullptr);
+
+    // Every one of our three test CVars is enumerable.
+    int Seen = 0;
+    CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
+        if (std::strncmp(C->Name(), "test.", 5) == 0) ++Seen;
+    });
+    CHECK(Seen == 3);
+}
+
 int main() {
+    Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
+
     TestLogRoutesToSink();
     TestHashDeterministicAndSensitive();
     TestFlightRecorderRoundtrip();
     TestFlightRecorderRingBounded();
+    TestFromStringGeneric();
+    TestCVarMechanism();
+    TestCVarRegistry();
 
     if (GFailures == 0) {
         std::printf("All core tests passed.\n");
