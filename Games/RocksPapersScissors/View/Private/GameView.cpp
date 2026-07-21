@@ -686,16 +686,34 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // Modules/DevGui (own mono font, widgets, input) replaces it — this is just first pixels.
     Lur::Render::BeginDevGuiLayer(Renderer);
     {
+        // Live CVar browser (bring-up): every AffectsGameplay CVar + its current value,
+        // read straight from the registry (ValueString is guard-free and the global value
+        // is only mutated by the console, never the sim thread — so this render-thread read
+        // is race-free). This is the on-device preview of the content the desktop --tune
+        // panel (#115) and console (#114) will render through real DevGui widgets.
+        const Lur::Render::Color Accent{0.55f, 0.98f, 0.90f, 1.0f};
+        const Lur::Render::Color Ink{0.86f, 0.90f, 0.92f, 1.0f};
+        const float LineH = 20.0f * HS, TitleH = 26.0f * HS;
+        int Count = 0;
+        Lur::Core::CVarRegistry::ForEach(
+            [&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++Count; });
         const float PW = WidthPx - 4.0f * Pad;
-        const float PH = 46.0f * HS;
-        const float Cx = WidthPx * 0.5f, Cy = HeightPx * 0.44f;
-        Blit(DevPanelMat, Cx, Cy, PW, PH);
-        Blit(DevAccentMat, Cx, Cy + PH * 0.5f, PW, 2.0f * HS);   // accent underline
-        char Line[160];
-        std::snprintf(Line, sizeof(Line), "DEV  %s   gameplay cvars: %d", LUR_BUILD_FP,
-                      static_cast<int>(CvIdCount));
-        Text.Draw(Renderer, Line, Cx - PW * 0.5f + 10.0f * HS, Cy - 8.0f * HS, PW - 20.0f * HS,
-                  PH, 15.0f * HS, Lur::Render::Color{0.55f, 0.98f, 0.90f, 1.0f});
+        const float PH = TitleH + LineH * static_cast<float>(Count) + 10.0f * HS;
+        const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.30f;
+        Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
+        Blit(DevAccentMat, X0 + PW * 0.5f, Y0 + TitleH, PW, 2.0f * HS);
+        char T[96];
+        std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
+        Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - 20.0f * HS, TitleH,
+                  14.0f * HS, Accent);
+        float Ly = Y0 + TitleH + 5.0f * HS;
+        Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
+            if (!C->AffectsGameplay()) return;
+            char L[128];
+            std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
+            Text.Draw(Renderer, L, X0 + 12.0f * HS, Ly, PW - 24.0f * HS, LineH, 12.5f * HS, Ink);
+            Ly += LineH;
+        });
     }
 #endif
 
