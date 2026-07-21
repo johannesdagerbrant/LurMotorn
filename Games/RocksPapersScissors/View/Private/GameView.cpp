@@ -282,11 +282,55 @@ void GameView::RefreshSelector() {
 }
 
 #if !LUR_SHIPPING
+namespace {
+int GameplayCvarCount() {
+    int N = 0;
+    Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++N; });
+    return N;
+}
+Lur::Core::ICVar* NthGameplayCvar(int Idx) {
+    Lur::Core::ICVar* Found = nullptr;
+    int N = 0;
+    Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
+        if (!C->AffectsGameplay()) return;
+        if (N == Idx) Found = C;
+        ++N;
+    });
+    return Found;
+}
+// Cycle a CVar's value: Dir +1 doubles (wrapping to default past ~4x), -1 halves, 0 resets.
+// Via strtod/%g so it works for every numeric type (they format as decimals). Dev-only.
+void NudgeCvar(Lur::Core::ICVar* C, int Dir) {
+    if (!C) return;
+    if (Dir == 0) { C->Reset(); return; }
+    const double Cur = std::strtod(C->ValueString().c_str(), nullptr);
+    const double Def = std::strtod(C->DefaultString().c_str(), nullptr);
+    double Nv;
+    if (Dir > 0) {
+        Nv = (Cur != 0.0) ? Cur * 2.0 : (Def != 0.0 ? Def : 1.0);
+        if (Def != 0.0 && Cur >= Def * 3.9) Nv = Def;  // wrap
+    } else {
+        Nv = Cur * 0.5;
+    }
+    char B[40];
+    std::snprintf(B, sizeof(B), "%g", Nv);
+    C->SetFromString(B);
+}
+}  // namespace
+
 void GameView::DevTap(float XPx, float YPx) {
     DevTapX_.store(XPx, std::memory_order_relaxed);
     DevTapY_.store(YPx, std::memory_order_relaxed);
     DevTapPending_.store(true, std::memory_order_release);  // consumed on the render thread
 }
+
+void GameView::DevSelectMove(int Delta) {
+    const int N = GameplayCvarCount();
+    if (N == 0) return;
+    SelectedRow_ = ((SelectedRow_ + Delta) % N + N) % N;  // wrap both directions
+}
+
+void GameView::DevAdjustSelected(int Dir) { NudgeCvar(NthGameplayCvar(SelectedRow_), Dir); }
 #endif
 
 int GameView::OnTap(float XPx, float YPx) {
@@ -721,26 +765,27 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float TapX = DevTapX_.load(std::memory_order_relaxed);
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
+        int Row = 0;
         float Ly = Y0 + TitleH + 5.0f * HS;
         Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
             if (!C->AffectsGameplay()) return;
-            // Tap on this row -> cycle the value (double, wrapping back to default past ~4x).
-            // LOCAL only (updates the browser); a live match would route through the sync.
+            // Tap on this row -> cycle the value (double, wrapping to default past ~4x). LOCAL
+            // (updates the browser + the running solo sim via LiveCvLatch); a lockstep match
+            // would route through the sync instead.
             if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW && TapY >= Ly &&
                 TapY <= Ly + LineH) {
-                const double Cur = std::strtod(C->ValueString().c_str(), nullptr);
-                const double Def = std::strtod(C->DefaultString().c_str(), nullptr);
-                double Nv = (Cur != 0.0) ? Cur * 2.0 : (Def != 0.0 ? Def : 1.0);
-                if (Def != 0.0 && Cur >= Def * 3.9) Nv = Def;  // wrap
-                char B[40];
-                std::snprintf(B, sizeof(B), "%g", Nv);
-                C->SetFromString(B);
+                NudgeCvar(C, +1);
+                SelectedRow_ = Row;
                 TapUsed = true;
             }
+            // #115 desktop --tune: a cyan left-edge marker on the keyboard-selected row.
+            if (TuneMode_ && Row == SelectedRow_)
+                Blit(DevAccentMat, X0 + 6.0f * HS, Ly + LineH * 0.5f, 5.0f * HS, LineH - 5.0f * HS);
             char L[128];
             std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
-            Text.Draw(Renderer, L, X0 + 12.0f * HS, Ly, PW - 24.0f * HS, LineH, 12.5f * HS, Ink);
+            Text.Draw(Renderer, L, X0 + 16.0f * HS, Ly, PW - 28.0f * HS, LineH, 12.5f * HS, Ink);
             Ly += LineH;
+            ++Row;
         });
         if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
     }

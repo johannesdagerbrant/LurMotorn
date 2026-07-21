@@ -783,6 +783,9 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
     // NB: Cv is NOT re-latched here — it is per-Sim state set at Init and mutated only at
     // tick boundaries by synced overrides (#112), so it stays constant across this tick.
+    // Exception: solo/desktop live tuning (#115) opts into re-latching from the globals so
+    // a `--tune` edit moves the running sim — no peer means no desync risk.
+    if (LiveCvLatch) Cv = LatchCvs();
 
     // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
     // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's

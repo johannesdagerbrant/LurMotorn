@@ -80,6 +80,13 @@ struct Sim {
     //      of the flow (momentum smoothing, dense-pack jitter). Never set in real play. ----
     bool DisableCombat = false;
 
+    // ---- Config (NOT hashed) — solo/desktop live CVar tuning (#115). When set, Step
+    //      re-latches Cv from the global CVars every tick, so a desktop `--tune` edit
+    //      changes the RUNNING sim live. OFF by default: a networked (lockstep) match
+    //      keeps Cv per-Sim (latched at Init + synced overrides), so this never affects a
+    //      real match or the determinism tests — only the solo SimRunner turns it on. ----
+    bool LiveCvLatch = false;
+
     // ---- API ----
     void Init(uint64_t Seed);
     void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order

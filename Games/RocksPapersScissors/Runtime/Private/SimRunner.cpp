@@ -24,6 +24,7 @@ void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t Stre
 #if LUR_INTERNAL
     if (StressPerTeam > 0) TheSim.StressFill(static_cast<int32_t>(StressPerTeam));
     TheSim.DisableCombat = DisableCombat;  // --flockdemo (#97): pure flocking, no kills
+    TheSim.LiveCvLatch = true;             // solo (no peer): desktop --tune edits apply live (#115)
 #else
     (void)StressPerTeam; (void)DisableCombat;
 #endif

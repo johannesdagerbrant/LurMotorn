@@ -233,7 +233,7 @@ void SampleSolo(void* Ctx, uint32_t, uint8_t& M0, uint8_t& M1) {
 }
 
 int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
-            bool FoeOnly) {
+            bool FoeOnly, bool Tune) {
     // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
     // ON by default (playtest: how the counters clash is part of the feel) — pass --nocombat
     // for pure-motion tuning (mixed blobs that never kill each other). Defaults to a healthy
@@ -247,6 +247,14 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     if (Renderer == nullptr || !Renderer->Init(Win.NativeHandle())) return 1;
     Rps::GameView View;
     View.CreateResources(Renderer);
+#if !LUR_SHIPPING
+    if (Tune) {
+        View.SetTuneMode(true);  // #115: keyboard editing of the CVar panel (arrows below)
+        Lur::Log::Info("RPS --tune: Up/Down select a cvar, Left/Right halve/double, Del resets");
+    }
+#else
+    (void)Tune;
+#endif
 
     SoloInputs In;
     auto Runner = std::make_unique<Rps::SimRunner>();
@@ -264,6 +272,15 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         const uint64_t ElapsedNs = Now - PrevNs;
         PrevNs = Now;
         for (uint32_t Vk : Win.TakeKeys()) {
+#if !LUR_SHIPPING
+            if (Tune) {  // #115: arrows drive the CVar panel (VK_LEFT/UP/RIGHT/DOWN, VK_DELETE)
+                if (Vk == 0x26) { View.DevSelectMove(-1); continue; }       // Up
+                if (Vk == 0x28) { View.DevSelectMove(+1); continue; }       // Down
+                if (Vk == 0x27) { View.DevAdjustSelected(+1); continue; }   // Right: double
+                if (Vk == 0x25) { View.DevAdjustSelected(-1); continue; }   // Left: halve
+                if (Vk == 0x2E) { View.DevAdjustSelected(0); continue; }    // Delete: reset
+            }
+#endif
             if (Vk >= 0x31 && Vk <= 0x34) In.P0.fetch_or(static_cast<uint8_t>(1u << (Vk - 0x31)));
             else if (Vk >= 0x35 && Vk <= 0x38) In.P1.fetch_or(static_cast<uint8_t>(1u << (Vk - 0x35)));
         }
@@ -413,6 +430,7 @@ int main(int argc, char** argv) {
 
     int MaxFrames = 0;
     bool Auto = false, Solo = false, Ble = false, FlockDemo = false, NoCombat = false, FoeOnly = false;
+    bool Tune = false;  // #115: keyboard CVar tuning panel (implies --solo)
     std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
     uint64_t Seed = 0x1234;
     int Stress = 0;
@@ -432,9 +450,10 @@ int main(int argc, char** argv) {
         else if (A == "--stress" && I + 1 < argc) Stress = std::atoi(argv[++I]);
         else if (A == "--winw" && I + 1 < argc) kWinW = std::atoi(argv[++I]);
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
+        else if (A == "--tune") { Solo = true; Tune = true; }  // #115 CVar tuning panel
     }
 
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
-    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly);
+    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, Tune);
     return RunLoopback(Auto, MaxFrames, Seed);
 }
