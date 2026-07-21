@@ -95,6 +95,32 @@ message(STATUS "LurMotorn config: ${LUR_CONFIG} "
         "(SHIPPING=${_lur_shipping} INTERNAL=${_lur_internal} ASSERTS=${_lur_asserts} "
         "SLOW=${_lur_slow} TRACE=${_lur_trace})")
 
+# ── Build fingerprint (issue #112, Addendum C.3) ─────────────────────────────
+# git commit + dirty flag, baked in so two peers can refuse to connect on a build
+# mismatch (the proactive form of the reactive anchor-hash desync alarm). Snapshotted at
+# configure time; a source edit without reconfigure is still caught by the anchor hash.
+find_package(Git QUIET)
+set(_lur_fp "no-git")
+if(GIT_FOUND)
+    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _lur_sha OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        OUTPUT_VARIABLE _lur_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_lur_sha STREQUAL "")
+        set(_lur_fp "no-git")
+    elseif(_lur_dirty STREQUAL "")
+        set(_lur_fp "${_lur_sha}")
+    else()
+        set(_lur_fp "${_lur_sha}-dirty")
+    endif()
+endif()
+# Include the config in the fingerprint: same commit, different LUR_CONFIG => different sim.
+set(LUR_BUILD_FP "${_lur_fp}+${LUR_CONFIG}" CACHE INTERNAL "build fingerprint (#112)")
+add_compile_definitions(LUR_BUILD_FP=\"${LUR_BUILD_FP}\")
+message(STATUS "LurMotorn build fingerprint: ${LUR_BUILD_FP}")
+
 # ── Optimization axis — the ladder's "Opt" column, coupled to LUR_CONFIG ──────
 # The macros above are only HALF the ladder. The other half — real optimization
 # (-O0 vs -O2) — lives in CMAKE_BUILD_TYPE, a SEPARATE dial. Historically every

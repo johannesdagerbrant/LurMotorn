@@ -28,9 +28,10 @@ enum class EMsgType : uint8_t {
     Keepalive   = 6,  // detect a silently dropped BLE link
     Sync        = 7,  // full game-state resync after a reconnect (game-defined payload)
     Game3       = 8,  // extra generic game slots. DEV-ONLY in practice: the RTS aliases them
-    Game4       = 9,  // to MsgCvar / MsgCvarSync (#112, gameplay-CVar sync), sent/accepted
-                      // only under LUR_INTERNAL. Shipping never emits them and rejects them
-                      // as unknown, so the shipping wire is untouched — ProtocolVersion 5.
+    Game4       = 9,  // to MsgCvar / MsgCvarSync / MsgFingerprint (#112, gameplay-CVar sync
+    Game5       = 10, // + the build-fingerprint gate), sent/accepted only under LUR_INTERNAL.
+                      // Shipping never emits them and rejects them as unknown, so the
+                      // shipping wire is untouched — ProtocolVersion stays 5.
 };
 
 // Protocol version negotiated in Hello. Bump on any wire-format change so two

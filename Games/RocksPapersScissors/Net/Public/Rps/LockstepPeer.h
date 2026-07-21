@@ -24,6 +24,7 @@ constexpr Lur::Net::EMsgType MsgResyncChunk = Lur::Net::EMsgType::Game2;
 // (the opcode is neither sent nor accepted there; the sim's CVars are constexpr).
 constexpr Lur::Net::EMsgType MsgCvar        = Lur::Net::EMsgType::Game3;
 constexpr Lur::Net::EMsgType MsgCvarSync    = Lur::Net::EMsgType::Game4;
+constexpr Lur::Net::EMsgType MsgFingerprint = Lur::Net::EMsgType::Game5;
 #endif
 
 // Lockstep coordinator for ONE peer (design doc §1-§4). Drives a Sim in lockstep with
@@ -78,6 +79,13 @@ public:
     // one designer's tuning propagates to the peer, deterministically.
     void SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
     void SendCvarSync();
+
+    // Build-fingerprint gate (Addendum C.3): exchange a compile-time fingerprint (git
+    // commit + dirty + config, LUR_BUILD_FP) at connect and refuse the match on mismatch,
+    // BEFORE tick 0 — the proactive form of the reactive anchor-hash desync alarm, and what
+    // makes the 1-byte GameplayId agreement safe (identical builds => identical CVar list).
+    void SendFingerprint();
+    bool BuildMismatch() const { return BuildMismatch_; }
 #endif
 
     // Reconnect (cold rejoin or blip): send our executed input history as chunks +
@@ -122,6 +130,8 @@ private:
     std::unordered_map<uint8_t, CvarVal> ActiveCvars;
     void MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs);  // resolver: last-writer; tie -> default
     void ApplyActiveCvars();  // TheSim.Cv = defaults, then overlay ActiveCvars (pre-tick-0)
+
+    bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
 #endif
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);

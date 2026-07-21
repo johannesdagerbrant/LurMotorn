@@ -1,9 +1,16 @@
 #include "Rps/LockstepPeer.h"
 
+#include <cstring>
+
 #include "Lur/Core/Assert.h"
+#include "Lur/Core/Log.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Rps/EventCodec.h"
+
+#ifndef LUR_BUILD_FP
+#define LUR_BUILD_FP "no-fp"  // fallback when the build system didn't inject one (#112)
+#endif
 
 namespace Rps {
 
@@ -150,6 +157,11 @@ void LockstepPeer::SendCvarSync() {
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgCvarSync, B.data(), B.size());
 }
+
+void LockstepPeer::SendFingerprint() {
+    const char* Fp = LUR_BUILD_FP;
+    if (Send) Send(Ctx, MsgFingerprint, reinterpret_cast<const uint8_t*>(Fp), std::strlen(Fp));
+}
 #endif  // LUR_INTERNAL
 
 void LockstepPeer::EmitAnchor() {
@@ -235,6 +247,19 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             if (R.IsOk()) MergeCvar(Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
         }
         if (R.IsOk()) ApplyActiveCvars();  // both peers now hold the identical merged set (pre-tick-0)
+    }
+    else if (Type == MsgFingerprint) {
+        // Compare the peer's compile-time fingerprint to ours; a mismatch means different
+        // builds -> refuse the match (the app checks BuildMismatch() and aborts before
+        // tick 0). Loud, located, and BEFORE any divergence instead of a mid-match draw.
+        const char* Mine = LUR_BUILD_FP;
+        const std::size_t Ml = std::strlen(Mine);
+        if (N != Ml || std::memcmp(Data, Mine, Ml) != 0) {
+            BuildMismatch_ = true;
+            Lur::Log::Error("RPS: build-fingerprint mismatch — peer '%.*s' vs local '%s' "
+                            "(refuse match; rebuild both from the same commit)",
+                            static_cast<int>(N), reinterpret_cast<const char*>(Data), Mine);
+        }
     }
 #endif
 }

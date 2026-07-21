@@ -274,6 +274,24 @@ static void TestCvarSyncMatchStartMerge() {
     }
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 }
+
+// ---- #112: build-fingerprint gate — identical builds pass, a mismatch is refused ----
+static void TestBuildFingerprintGate() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1, 0, Enqueue, &Qa);
+    B.Init(0x1, 1, Enqueue, &Qb);
+    A.SendFingerprint();
+    B.SendFingerprint();
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+    CHECK(!A.BuildMismatch() && !B.BuildMismatch());  // same process = same LUR_BUILD_FP -> ok
+
+    // A peer reporting a different fingerprint is refused (mid-match draw avoided).
+    const char Fake[] = "deadbeefcafe-dirty+Shipping";
+    A.OnMessage(MsgFingerprint, reinterpret_cast<const uint8_t*>(Fake), sizeof(Fake) - 1);
+    CHECK(A.BuildMismatch());
+}
 #endif
 
 // ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
@@ -524,6 +542,7 @@ int main() {
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();
+    TestBuildFingerprintGate();
 #endif
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
