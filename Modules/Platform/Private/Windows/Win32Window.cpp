@@ -63,6 +63,10 @@ LRESULT CALLBACK WndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam) {
             return 0;
         case WM_KEYDOWN:
             if (WParam == VK_F1) Self->RequestOverlayToggle();
+            // The key left of '1' (physical scancode 0x29 — Swedish §, US backtick) toggles
+            // the dev console. Keyed on the SCANCODE so it's layout-independent, the classic
+            // Quake/Unreal console key. Consumed here (not queued as a game key).
+            if (((LParam >> 16) & 0xFF) == 0x29) { Self->RequestConsoleToggle(); return 0; }
             // Queue non-repeat key-down edges (LParam bit 30 = previous key state:
             // set means auto-repeat). One press per physical keystroke.
             if ((LParam & (1 << 30)) == 0) Self->PushKey(static_cast<uint32_t>(WParam));

@@ -1,6 +1,9 @@
 #pragma once
 #include <atomic>
+#include <string>
+#include <unordered_set>
 
+#include "Lur/Core/CVar.h"  // ICVar* (selected cvar)
 #include "Lur/DevGui/Numpad.h"
 #include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
@@ -56,28 +59,16 @@ public:
     // consumed the tap (the opponent selector), or -1 when the tap is the world's.
     int OnTap(float XPx, float YPx);
 #if !LUR_SHIPPING
-    // #113 dev overlay: a tap (input thread) is stashed and consumed on the render thread,
-    // where the CVar-row rects are known — so hit-test + the CVar nudge are race-free with
-    // the ValueString read. Tapping a row cycles that gameplay CVar (double, wrap to
-    // default) LOCALLY; single-device it just updates the browser (no live match to react).
+    // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
+    // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
+    // consumed on the render thread, where the category/row/numpad rects are known — so
+    // hit-test + edits are race-free with the ValueString read. Tapping a category header
+    // folds it; tapping a row selects that cvar + opens the numpad; the numpad Enter commits.
     void DevTap(float XPx, float YPx);
 
-    // #115 desktop --tune: keyboard-driven editing of the CVar panel. SetTuneMode shows a
-    // selection highlight; DevSelectMove moves it (-1 up / +1 down); DevAdjustSelected
-    // edits the selected gameplay CVar (+1 double, -1 halve, 0 reset). Desktop is
-    // single-threaded (keys + Render on one thread), so these act directly.
-    void SetTuneMode(bool On) { TuneMode_ = On; if (On) DevOverlayOpen_ = true; }
-
-    // #115 desktop --tune split: the window is double-wide; the game renders into the left
-    // half (WidthPx is that half's width) and the CVar editor into the right half of width
-    // PanelW. On = the two-viewport layout; off = the phone's full-window overlay.
-    void SetDevSplit(bool On, float PanelW) { DevSplit_ = On; DevSplitPanelW_ = PanelW; }
-    void DevSelectMove(int Delta);
-    void DevAdjustSelected(int Dir);
-
-    // Show/hide the CVar view. Default hidden (the game is unobstructed). Opened by the
-    // phone's two-finger TRIPLE-tap (or desktop --tune); closed by the in-panel top-left
-    // X button. Closing also dismisses the numpad.
+    // Show/hide the console. Default hidden (the game is unobstructed). Opened by the phone's
+    // two-finger TRIPLE-tap or the desktop § key; closed by the in-panel top-right X button.
+    // Closing also dismisses the numpad.
     void SetDevOverlayOpen(bool On) { DevOverlayOpen_ = On; if (!On) NumpadOpen_ = false; }
     bool DevOverlayOpen() const { return DevOverlayOpen_; }
 
@@ -126,11 +117,9 @@ private:
     std::atomic<float> DevTapX_{-1.0e9f};          // input-thread tap -> render-thread nudge
     std::atomic<float> DevTapY_{-1.0e9f};
     std::atomic<bool>  DevTapPending_{false};
-    bool               DevOverlayOpen_ = false;     // CVar view shown? (two-finger triple-tap / --tune)
-    bool               DevSplit_ = false;           // #115 desktop --tune: game-left / panel-right split
-    float              DevSplitPanelW_ = 0.0f;      //   right-half (panel) width in px
-    bool               TuneMode_ = false;          // #115 desktop --tune: keyboard editing on
-    int                SelectedRow_ = 0;            //   selected gameplay-CVar row (registry order)
+    bool               DevOverlayOpen_ = false;     // console shown? (two-finger triple-tap / desktop §)
+    Lur::Core::ICVar*  SelectedCvar_ = nullptr;     // highlighted cvar (numpad target)
+    std::unordered_set<std::string> CollapsedCats_; // category headers currently collapsed
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
     bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)

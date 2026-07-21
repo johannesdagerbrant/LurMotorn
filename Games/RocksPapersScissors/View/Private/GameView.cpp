@@ -1,8 +1,13 @@
 #include "Rps/GameView.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <map>
+#include <string>
+#include <vector>
 
 #include "Lur/Math/Mat4.h"
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
@@ -284,38 +289,19 @@ void GameView::RefreshSelector() {
 
 #if !LUR_SHIPPING
 namespace {
-int GameplayCvarCount() {
-    int N = 0;
-    Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++N; });
-    return N;
-}
-Lur::Core::ICVar* NthGameplayCvar(int Idx) {
-    Lur::Core::ICVar* Found = nullptr;
-    int N = 0;
+// Group the AffectsGameplay cvars by Category — the console's category dropdowns render +
+// navigate from this. std::map keeps categories sorted; each vector sorted by name, so the
+// layout is stable frame to frame.
+std::map<std::string, std::vector<Lur::Core::ICVar*>> GroupGameplayCvars() {
+    std::map<std::string, std::vector<Lur::Core::ICVar*>> By;
     Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-        if (!C->AffectsGameplay()) return;
-        if (N == Idx) Found = C;
-        ++N;
+        if (C->AffectsGameplay()) By[C->Category()].push_back(C);
     });
-    return Found;
-}
-// Cycle a CVar's value: Dir +1 doubles (wrapping to default past ~4x), -1 halves, 0 resets.
-// Via strtod/%g so it works for every numeric type (they format as decimals). Dev-only.
-void NudgeCvar(Lur::Core::ICVar* C, int Dir) {
-    if (!C) return;
-    if (Dir == 0) { C->Reset(); return; }
-    const double Cur = std::strtod(C->ValueString().c_str(), nullptr);
-    const double Def = std::strtod(C->DefaultString().c_str(), nullptr);
-    double Nv;
-    if (Dir > 0) {
-        Nv = (Cur != 0.0) ? Cur * 2.0 : (Def != 0.0 ? Def : 1.0);
-        if (Def != 0.0 && Cur >= Def * 3.9) Nv = Def;  // wrap
-    } else {
-        Nv = Cur * 0.5;
-    }
-    char B[40];
-    std::snprintf(B, sizeof(B), "%g", Nv);
-    C->SetFromString(B);
+    for (auto& [Cat, V] : By)
+        std::sort(V.begin(), V.end(), [](Lur::Core::ICVar* A, Lur::Core::ICVar* B) {
+            return std::strcmp(A->Name(), B->Name()) < 0;
+        });
+    return By;
 }
 }  // namespace
 
@@ -323,18 +309,6 @@ void GameView::DevTap(float XPx, float YPx) {
     DevTapX_.store(XPx, std::memory_order_relaxed);
     DevTapY_.store(YPx, std::memory_order_relaxed);
     DevTapPending_.store(true, std::memory_order_release);  // consumed on the render thread
-}
-
-void GameView::DevSelectMove(int Delta) {
-    const int N = GameplayCvarCount();
-    if (N == 0) return;
-    SelectedRow_ = ((SelectedRow_ + Delta) % N + N) % N;  // wrap both directions
-}
-
-void GameView::DevAdjustSelected(int Dir) {
-    Lur::Core::ICVar* C = NthGameplayCvar(SelectedRow_);
-    NudgeCvar(C, Dir);
-    if (C && CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);  // app: persist + (phone) sync
 }
 #endif
 
@@ -382,11 +356,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     };
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
-#if !LUR_SHIPPING
-    // #115 --tune split: confine the game to the left half (WidthPx wide); BeginFrame just
-    // reset the viewport to the full (double-wide) framebuffer, so re-assert the sub-rect.
-    if (DevSplit_) Renderer->SetViewportRect(0, 0, static_cast<int>(WidthPx), static_cast<int>(HeightPx));
-#endif
 
     // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
     Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
@@ -527,13 +496,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // ---- HUD (GUI layer, pixel space) — the locked layout (#85): opponent
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
-#if !LUR_SHIPPING
-    // --tune split: keep the HUD in the left half (BeginGui would resize the ortho to the
-    // full double-wide framebuffer). SetViewportRect(left, ortho=WidthPx) is the equivalent.
-    if (DevSplit_) Renderer->SetViewportRect(0, 0, static_cast<int>(WidthPx), static_cast<int>(HeightPx));
-    else
-#endif
-        Renderer->BeginGui();
+    Renderer->BeginGui();
     if (SelectorDirty) RefreshSelector();
 
     using Lur::Text::EHAlign;
@@ -748,36 +711,36 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                   24.0f * HS);
 
 #if !LUR_SHIPPING
-    // ---- DEV overlay (#113 bring-up) ----
-    // Prove the BeginDevGui THIRD pass composites a DevTheme surface over the game on real
-    // hardware. Deliberately temporary + game-side: the shipping build compiles none of it
-    // (BeginDevGuiLayer is a no-op, this block is #if'd out). The engine-owned, host-driven
-    // Modules/DevGui (own mono font, widgets, input) replaces it — this is just first pixels.
+    // ---- The CONSOLE (#114) — one tool, ONE UI on both platforms ----
+    // Composited by the BeginDevGui THIRD pass (over the game + its GUI). The shipping build
+    // compiles none of it (BeginDevGuiLayer is a no-op, this block is #if'd out). Opened by
+    // the phone's two-finger triple-tap or the desktop § key; identical either way.
     if (DevOverlayOpen_) {
-        // --tune split: draw into the RIGHT half (ortho sized to the panel width). Phone /
-        // non-split: the full-window dev-overlay pass over the game.
-        if (DevSplit_)
-            Renderer->SetViewportRect(static_cast<int>(WidthPx), 0,
-                                      static_cast<int>(DevSplitPanelW_), static_cast<int>(HeightPx));
-        else
-            Lur::Render::BeginDevGuiLayer(Renderer);
-        const float OW = DevSplit_ ? DevSplitPanelW_ : WidthPx;  // overlay layout width
-        // Live CVar browser (bring-up): every AffectsGameplay CVar + its current value,
-        // read straight from the registry (ValueString is guard-free and the global value
-        // is only mutated by the console, never the sim thread — so this render-thread read
-        // is race-free). This is the on-device preview of the content the desktop --tune
-        // panel (#115) and console (#114) will render through real DevGui widgets.
+        Lur::Render::BeginDevGuiLayer(Renderer);
+        const float OW = WidthPx;  // full-window overlay
+        // Every AffectsGameplay CVar, grouped upfront into collapsible category dropdowns.
+        // Values are read straight from the registry (ValueString is guard-free; the global
+        // value is only mutated by the console, never the sim thread — so this render-thread
+        // read is race-free). Selection is a CVar POINTER, stable across collapse/expand; the
+        // numpad is the pointer-driven text-entry path (the #118 soft-keyboard no-go answer).
         const Lur::Render::Color Accent{0.55f, 0.98f, 0.90f, 1.0f};
         const Lur::Render::Color Ink{0.86f, 0.90f, 0.92f, 1.0f};
-        const float LineH = 20.0f * HS, TitleH = 26.0f * HS;
+        const Lur::Render::Color CatInk{0.62f, 0.72f, 0.78f, 1.0f};
+        const float LineH = 20.0f * HS, CatH = 22.0f * HS, TitleH = 26.0f * HS;
+        auto Groups = GroupGameplayCvars();
         int Count = 0;
-        Lur::Core::CVarRegistry::ForEach(
-            [&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++Count; });
+        for (auto& [Cat, V] : Groups) Count += static_cast<int>(V.size());
+        // Panel height: title + each category header + the rows of every EXPANDED category.
+        float BodyH = 0.0f;
+        for (auto& [Cat, V] : Groups) {
+            BodyH += CatH;
+            if (CollapsedCats_.find(Cat) == CollapsedCats_.end())
+                BodyH += LineH * static_cast<float>(V.size());
+        }
         const float PW = OW - 4.0f * Pad;
-        const float PH = TitleH + LineH * static_cast<float>(Count) + 10.0f * HS;
-        const float X0 = 2.0f * Pad, Y0 = HeightPx * (DevSplit_ ? 0.04f : 0.30f);
+        const float PH = TitleH + BodyH + 10.0f * HS;
+        const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.10f;
         Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
-        Blit(DevAccentMat, X0 + PW * 0.5f, Y0 + TitleH, PW, 2.0f * HS);
         // Top-right X (close) button; the title fills the width to its left.
         const float XbtnS = TitleH;
         const float XbtnX = X0 + PW - XbtnS;
@@ -785,7 +748,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Text.Draw(Renderer, "X", XbtnX, Y0, XbtnS, XbtnS, 16.0f * HS, Accent,
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
         char T[96];
-        std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
+        std::snprintf(T, sizeof(T), "Console  %d cvars", Count);
         Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
                   TitleH, 14.0f * HS, Accent);
         // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test
@@ -817,41 +780,91 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
             TapUsed = true;
             if (Numpad_.TakeEnter()) {  // commit the typed value to the selected CVar
-                if (Lur::Core::ICVar* Sel = NthGameplayCvar(SelectedRow_))
-                    if (!Numpad_.Buffer().empty() && Sel->SetFromString(Numpad_.Buffer().c_str()))
-                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *Sel);  // persist + (phone) sync
+                if (SelectedCvar_)
+                    if (!Numpad_.Buffer().empty() &&
+                        SelectedCvar_->SetFromString(Numpad_.Buffer().c_str()))
+                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);  // persist + sync
                 Numpad_.Clear();
                 NumpadOpen_ = false;
             }
         }
 
-        int Row = 0;
+        // Row columns (constant X across every row, so values line up in a true column):
+        //   [ accent | name .......... | value field | R ]
+        const float RowPad = 4.0f * HS;
+        const float ResetS = LineH - 4.0f * HS;             // reset button (square)
+        const float ResetX = X0 + PW - RowPad - ResetS;
+        const float ValW = 90.0f * HS;
+        const float ValX = ResetX - 6.0f * HS - ValW;
+        const float NameX = X0 + 22.0f * HS;
+        const float NameW = ValX - NameX - 6.0f * HS;
+        const Lur::Render::Color DimInk{0.40f, 0.45f, 0.48f, 1.0f};
+
         float Ly = Y0 + TitleH + 5.0f * HS;
-        Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-            if (!C->AffectsGameplay()) return;
-            // Tap a row -> select it + open the numpad on a fresh buffer. This IS the phone
-            // text-entry path (the #118 soft-keyboard no-go answer): tap digits to enter a
-            // precise value, no OS keyboard. On desktop --solo the edit applies live.
+        for (auto& [Cat, V] : Groups) {
+            const bool Collapsed = CollapsedCats_.find(Cat) != CollapsedCats_.end();
+            // Category header — tap toggles the dropdown open/closed.
             if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW && TapY >= Ly &&
-                TapY <= Ly + LineH) {
-                SelectedRow_ = Row;
-                Numpad_.Clear();
-                NumpadOpen_ = true;
+                TapY <= Ly + CatH) {
+                if (Collapsed) CollapsedCats_.erase(Cat);
+                else CollapsedCats_.insert(Cat);
                 TapUsed = true;
             }
-            const bool Selected = (Row == SelectedRow_);
-            if ((TuneMode_ || NumpadOpen_) && Selected)
-                Blit(DevAccentMat, X0 + 6.0f * HS, Ly + LineH * 0.5f, 5.0f * HS, LineH - 5.0f * HS);
-            char L[128];
-            if (NumpadOpen_ && Selected)  // show the value being typed
-                std::snprintf(L, sizeof(L), "%s = %s_", C->Name(), Numpad_.Buffer().c_str());
-            else
-                std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
-            Text.Draw(Renderer, L, X0 + 16.0f * HS, Ly, PW - 28.0f * HS, LineH, 12.5f * HS,
-                      Selected ? Accent : Ink);
-            Ly += LineH;
-            ++Row;
-        });
+            // Button plate + an ASCII [+]/[-] marker so the header reads as a tappable dropdown
+            // toggle (our MSDF atlas is ASCII-only — no Unicode triangle glyphs).
+            Blit(DevKeyMat, X0 + PW * 0.5f, Ly + CatH * 0.5f, PW - 8.0f * HS, CatH - 3.0f * HS);
+            char H[96];
+            std::snprintf(H, sizeof(H), "[%c] %s  (%d)", Collapsed ? '+' : '-', Cat.c_str(),
+                          static_cast<int>(V.size()));
+            Text.Draw(Renderer, H, X0 + 14.0f * HS, Ly, PW - 20.0f * HS, CatH, 13.0f * HS, CatInk);
+            Ly += CatH;
+            if (Collapsed) continue;
+            for (Lur::Core::ICVar* C : V) {
+                const bool Overridden = C->Overridden();
+                // Reset button hit-test FIRST (it's nested inside the row): restore the default
+                // and commit (persist + phone sync). Tapping anywhere ELSE in the row selects the
+                // cvar + opens the numpad on a fresh buffer — the phone text-entry path (the #118
+                // soft-keyboard no-go answer): tap digits for a precise value, no OS keyboard.
+                if (TapPending && !TapUsed && TapX >= ResetX && TapX <= ResetX + ResetS &&
+                    TapY >= Ly && TapY <= Ly + LineH) {
+                    C->Reset();
+                    if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);
+                    if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; }
+                    TapUsed = true;
+                } else if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW &&
+                           TapY >= Ly && TapY <= Ly + LineH) {
+                    SelectedCvar_ = C;
+                    Numpad_.Clear();
+                    NumpadOpen_ = true;
+                    TapUsed = true;
+                }
+                const bool Selected = (C == SelectedCvar_);
+                if (Selected)
+                    Blit(DevAccentMat, X0 + 6.0f * HS, Ly + LineH * 0.5f, 5.0f * HS,
+                         LineH - 5.0f * HS);
+                // Name column (left, its own field).
+                Text.Draw(Renderer, C->Name(), NameX, Ly, NameW, LineH, 12.5f * HS,
+                          Selected ? Accent : Ink, Lur::Text::EHAlign::Left,
+                          Lur::Text::EVAlign::Middle);
+                // Value column: a boxed field, right-aligned, so numbers align down a column and
+                // read separately from the names. Accent when overridden from default.
+                Blit(DevKeyMat, ValX + ValW * 0.5f, Ly + LineH * 0.5f, ValW, LineH - 4.0f * HS);
+                char VS[64];
+                if (NumpadOpen_ && Selected)  // show the value being typed
+                    std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
+                else
+                    std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
+                Text.Draw(Renderer, VS, ValX + 5.0f * HS, Ly, ValW - 10.0f * HS, LineH, 12.5f * HS,
+                          Overridden ? Accent : Ink, Lur::Text::EHAlign::Right,
+                          Lur::Text::EVAlign::Middle);
+                // Reset button: dim when already at default (a no-op tap), active when overridden.
+                Blit(DevKeyMat, ResetX + ResetS * 0.5f, Ly + LineH * 0.5f, ResetS, ResetS);
+                Text.Draw(Renderer, "R", ResetX, Ly + (LineH - ResetS) * 0.5f, ResetS, ResetS,
+                          12.0f * HS, Overridden ? Accent : DimInk, Lur::Text::EHAlign::Center,
+                          Lur::Text::EVAlign::Middle);
+                Ly += LineH;
+            }
+        }
 
         // The numpad toaster: a backing panel + the 4x3 key grid (shared KeyRect geometry).
         if (NumpadOpen_) {

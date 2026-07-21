@@ -64,3 +64,4 @@ Tools/DeviceRig/.logs/
 # Python bytecode caches
 __pycache__/
 *.pyc
+rps-cvars.cfg

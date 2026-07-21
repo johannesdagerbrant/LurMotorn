@@ -36,6 +36,10 @@ public:
     // True once per F1 press — a debug toggle the game consumes (issue #54 overlay).
     bool TakeOverlayToggle() { bool T = OverlayToggle; OverlayToggle = false; return T; }
 
+    // True once per §/backtick press (the key left of '1') — toggles the dev console. The
+    // desktop equivalent of the phone's two-finger triple-tap; same console, same overlay.
+    bool TakeConsoleToggle() { bool T = ConsoleToggle; ConsoleToggle = false; return T; }
+
     // Move out the key-DOWN edges (virtual-key codes) collected since the last call.
     // Auto-repeat is filtered at the source, so a held key is a single press — what a
     // discrete game action (e.g. RPS's 1-4 production buttons) wants. Casing-agnostic
@@ -47,11 +51,13 @@ public:
     void PushKey(uint32_t Vk) { Keys.push_back(Vk); }
     void RequestClose() { ShouldClose = true; }
     void RequestOverlayToggle() { OverlayToggle = true; }
+    void RequestConsoleToggle() { ConsoleToggle = true; }
 
 private:
     void* Hwnd = nullptr;   // HWND
     bool  ShouldClose = false;
     bool  OverlayToggle = false;
+    bool  ConsoleToggle = false;
     std::vector<Lur::Input::TouchEvent> Touches;
     std::vector<uint32_t> Keys;
 };
