@@ -1,6 +1,7 @@
 #pragma once
 #include <atomic>
 
+#include "Lur/DevGui/Numpad.h"
 #include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Render/Renderer.h"
@@ -110,6 +111,9 @@ private:
     std::atomic<bool>  DevTapPending_{false};
     bool               TuneMode_ = false;          // #115 desktop --tune: keyboard editing on
     int                SelectedRow_ = 0;            //   selected gameplay-CVar row (registry order)
+    Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
+    bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
+    Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
 #endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours

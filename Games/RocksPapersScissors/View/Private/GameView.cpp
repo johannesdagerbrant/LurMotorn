@@ -211,6 +211,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
 #if !LUR_SHIPPING
     DevPanelMat = FlatMat(Renderer, {0.08f, 0.08f, 0.08f, 0.88f});  // DevTheme charcoal
     DevAccentMat = FlatMat(Renderer, {0.25f, 0.95f, 0.85f, 1.0f});  // DevTheme cyan accent
+    DevKeyMat = FlatMat(Renderer, {0.20f, 0.22f, 0.24f, 0.98f});    // numpad key face
 #endif
 
     Font.Init(Lur::Text::InterFont());
@@ -759,34 +760,77 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
         Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - 20.0f * HS, TitleH,
                   14.0f * HS, Accent);
-        // Consume a pending tap (from the input thread) on THIS thread, where the row rects
-        // are laid out — so the hit-test + nudge don't race the ValueString reads.
+        // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test
+        // + edits don't race the ValueString reads. Numpad first (if open), then rows.
         const bool TapPending = DevTapPending_.load(std::memory_order_acquire);
         const float TapX = DevTapX_.load(std::memory_order_relaxed);
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
+
+        // Numpad toaster geometry (drawn below the rows, hit-tested first). Bottom of the
+        // screen so all CVar rows — including the selected one showing the typed value —
+        // stay visible above it.
+        const float NumW = WidthPx * 0.62f;
+        const float NumH = NumW;
+        const float NumX = (WidthPx - NumW) * 0.5f;
+        const float NumY = HeightPx - NumH - 90.0f * HS;
+        const float NumGap = 6.0f * HS;
+
+        if (TapPending && !TapUsed && NumpadOpen_ &&
+            Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
+            TapUsed = true;
+            if (Numpad_.TakeEnter()) {  // commit the typed value to the selected CVar
+                if (Lur::Core::ICVar* Sel = NthGameplayCvar(SelectedRow_))
+                    if (!Numpad_.Buffer().empty()) Sel->SetFromString(Numpad_.Buffer().c_str());
+                Numpad_.Clear();
+                NumpadOpen_ = false;
+            }
+        }
+
         int Row = 0;
         float Ly = Y0 + TitleH + 5.0f * HS;
         Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
             if (!C->AffectsGameplay()) return;
-            // Tap on this row -> cycle the value (double, wrapping to default past ~4x). LOCAL
-            // (updates the browser + the running solo sim via LiveCvLatch); a lockstep match
-            // would route through the sync instead.
+            // Tap a row -> select it + open the numpad on a fresh buffer. This IS the phone
+            // text-entry path (the #118 soft-keyboard no-go answer): tap digits to enter a
+            // precise value, no OS keyboard. On desktop --solo the edit applies live.
             if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW && TapY >= Ly &&
                 TapY <= Ly + LineH) {
-                NudgeCvar(C, +1);
                 SelectedRow_ = Row;
+                Numpad_.Clear();
+                NumpadOpen_ = true;
                 TapUsed = true;
             }
-            // #115 desktop --tune: a cyan left-edge marker on the keyboard-selected row.
-            if (TuneMode_ && Row == SelectedRow_)
+            const bool Selected = (Row == SelectedRow_);
+            if ((TuneMode_ || NumpadOpen_) && Selected)
                 Blit(DevAccentMat, X0 + 6.0f * HS, Ly + LineH * 0.5f, 5.0f * HS, LineH - 5.0f * HS);
             char L[128];
-            std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
-            Text.Draw(Renderer, L, X0 + 16.0f * HS, Ly, PW - 28.0f * HS, LineH, 12.5f * HS, Ink);
+            if (NumpadOpen_ && Selected)  // show the value being typed
+                std::snprintf(L, sizeof(L), "%s = %s_", C->Name(), Numpad_.Buffer().c_str());
+            else
+                std::snprintf(L, sizeof(L), "%s = %s", C->Name(), C->ValueString().c_str());
+            Text.Draw(Renderer, L, X0 + 16.0f * HS, Ly, PW - 28.0f * HS, LineH, 12.5f * HS,
+                      Selected ? Accent : Ink);
             Ly += LineH;
             ++Row;
         });
+
+        // The numpad toaster: a backing panel + the 4x3 key grid (shared KeyRect geometry).
+        if (NumpadOpen_) {
+            Blit(DevPanelMat, NumX + NumW * 0.5f, NumY + NumH * 0.5f, NumW + 10.0f * HS,
+                 NumH + 10.0f * HS);
+            for (int R = 0; R < Lur::DevGui::Numpad::Rows; ++R)
+                for (int C = 0; C < Lur::DevGui::Numpad::Cols; ++C) {
+                    float Kx, Ky, Kw, Kh;
+                    Lur::DevGui::Numpad::KeyRect(NumX, NumY, NumW, NumH, NumGap, R, C, Kx, Ky, Kw, Kh);
+                    const bool Ent = Lur::DevGui::Numpad::IsEnter(R, C);
+                    Blit(Ent ? DevAccentMat : DevKeyMat, Kx + Kw * 0.5f, Ky + Kh * 0.5f, Kw, Kh);
+                    Text.Draw(Renderer, Lur::DevGui::Numpad::Label(R, C), Kx, Ky, Kw, Kh,
+                              Ent ? 15.0f * HS : 22.0f * HS,
+                              Ent ? Lur::Render::Color{0.04f, 0.07f, 0.07f, 1.0f} : Ink,
+                              Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
+                }
+        }
         if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
     }
 #endif

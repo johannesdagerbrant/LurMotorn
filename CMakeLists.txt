@@ -37,9 +37,11 @@ add_subdirectory(Modules/Render)
 add_subdirectory(Modules/Input)
 add_subdirectory(Modules/Hud)
 add_subdirectory(Modules/Platform)  # desktop window + input seam (guarded by LUR_DESKTOP)
-if(NOT LUR_SHIPPING)
-    add_subdirectory(Modules/DevConsole)  # dev console model (+ later its DevGui view) — #114
-endif()
+# Header-only dev-UI utilities. INTERFACE libs (no shipping symbols); their USES are
+# #if !LUR_SHIPPING at the call sites, so always-adding them costs a shipping build nothing
+# and keeps game targets' links unconditional.
+add_subdirectory(Modules/DevGui)      # dev-GUI widget utilities (Numpad, ...) — #113
+add_subdirectory(Modules/DevConsole)  # dev console model (+ later its DevGui view) — #114
 
 # --- Games ---
 add_subdirectory(Games/Chess)
@@ -60,9 +62,8 @@ if(LUR_BUILD_TESTS)
     add_subdirectory(Modules/Text/Tests)
     add_subdirectory(Modules/Audio/Tests)
     add_subdirectory(Modules/Trace/Tests)
-    if(NOT LUR_SHIPPING)
-        add_subdirectory(Modules/DevConsole/Tests)
-    endif()
+    add_subdirectory(Modules/DevGui/Tests)
+    add_subdirectory(Modules/DevConsole/Tests)
     add_subdirectory(Games/Chess/Core/Tests)
     add_subdirectory(Games/RocksPapersScissors/Core/Tests)
     add_subdirectory(Games/RocksPapersScissors/Runtime/Tests)
