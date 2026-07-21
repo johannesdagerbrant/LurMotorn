@@ -119,6 +119,20 @@ static void TestCVarOverrideDeterminism() {
     CHECK(BaseAgain == Base);  // and Reset() restores the exact baseline
 }
 
+#if !LUR_SHIPPING
+// ---- #112: the gameplay-CVar wire list must cover EXACTLY the registered set ----
+// Guards the one gap the LUR_RPS_GAMEPLAY_CVARS X-list has vs a registry-driven cook: a
+// CVar migrated to AffectsGameplay but forgotten in the X-list (so it has no wire id /
+// snapshot field) would silently never sync. If these ever diverge, add the CVar to
+// LUR_RPS_GAMEPLAY_CVARS (or drop AffectsGameplay). This IS the cook's completeness assert.
+static void TestGameplayCvarListComplete() {
+    int Registered = 0;
+    Lur::Core::CVarRegistry::ForEach(
+        [&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++Registered; });
+    CHECK(Registered == CvIdCount);
+}
+#endif
+
 // ---- Grid vs brute-force equivalence (spatial grid, design §5) ----
 // End-to-end: the same seed + input stream, once on the grid path and once on
 // brute force, must produce a bit-identical StateHash EVERY tick. Stronger than a
@@ -439,6 +453,9 @@ int main() {
     TestDeterminism();
     TestReplayReproducibility();
     TestCVarOverrideDeterminism();
+#if !LUR_SHIPPING
+    TestGameplayCvarListComplete();
+#endif
     TestGridEqualsBruteForce();
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
