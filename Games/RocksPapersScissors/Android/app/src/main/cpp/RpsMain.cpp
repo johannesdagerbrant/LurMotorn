@@ -21,6 +21,7 @@
 
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Core/CVarConfig.h"  // #115: persist + load tuned cvars
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
@@ -69,6 +70,7 @@ struct AppState {
     Lur::Net::Session Session;                   // SIM only (after Start)
     Rps::LockstepPeer Lp;                        // SIM only; glue touches ONLY SetLocalMask (atomic)
     std::string DeviceId;
+    std::string CvarsPath;                       // set once at startup (glue), then read-only
     bool Started = false;                        // SIM only
 
     // sim <-> glue hand-off (the whole cross-thread surface):
@@ -89,6 +91,21 @@ struct AppState {
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
 }
+
+#if LUR_INTERNAL
+// A dev CVar edit committed via the numpad/keyboard (GLUE thread). GameView already set the
+// global (browser display); route it to the SIM thread (Lp queue -> MsgCvar, synced to the
+// peer at a stamped tick), timestamp it, and persist. QueueGameplayCvar is the one Lp method
+// (besides SetLocalMask) safe to call off the sim thread.
+void OnCvarCommit(void* Ctx, Lur::Core::ICVar& Cv) {
+    auto* S = static_cast<AppState*>(Ctx);
+    const uint64_t Ms = NowNs() / 1000000ull;
+    Cv.SetEditWallMs(Ms);
+    const int Id = Rps::GameplayIdForName(Cv.Name());
+    if (Id >= 0) S->Lp.QueueGameplayCvar(static_cast<uint8_t>(Id), Cv.RawValue(), Ms);
+    Lur::Core::SaveCVarConfig(S->CvarsPath.c_str());
+}
+#endif
 
 void HandleCmd(android_app* App, int32_t Cmd) {
     auto* S = static_cast<AppState*>(App->userData);
@@ -183,8 +200,27 @@ void android_main(android_app* App) {
     State.Session.SetHandler(Rps::MsgResyncChunk,
                              [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
     State.Session.SetResyncHandler([&State] { State.Lp.BeginResync(); });
+#if LUR_INTERNAL
+    // Dev-only gameplay-CVar sync + build-fingerprint (#112) over the framed slots.
+    State.Session.SetHandler(Rps::MsgCvar,
+                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgCvar, D, N); });
+    State.Session.SetHandler(Rps::MsgCvarSync,
+                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgCvarSync, D, N); });
+    State.Session.SetHandler(Rps::MsgFingerprint,
+                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgFingerprint, D, N); });
+#endif
     State.Session.Start(Transport, State.DeviceId);
     LOGI("RPS session started (device id %zuB)", State.DeviceId.size());
+
+    // #115: persisted dev-cvar overrides (per-game cvars.cfg). Load into the globals now
+    // (before the sim thread's match-start Init latches them); route commits back to disk +
+    // the peer sync via the GameView hook. Dev-only.
+    State.CvarsPath = std::string(DataDir != nullptr ? DataDir : ".") + "/rps-cvars.cfg";
+#if LUR_INTERNAL
+    if (const int N = Lur::Core::LoadCVarConfig(State.CvarsPath.c_str()); N > 0)
+        LOGI("loaded %d persisted cvar override(s) from %s", N, State.CvarsPath.c_str());
+    State.View.SetCvCommitHook(&OnCvarCommit, &State);
+#endif
 
     // ---- SIM thread (#91): owns Session + Lp; pumps BLE, ticks the sim, publishes
     // snapshots. Runs the datagram-driven service loop OFF the render/input thread. ----
@@ -213,6 +249,22 @@ void android_main(android_app* App) {
                 // Team from GUID order (both phones derive it identically; smaller = team 0).
                 const uint8_t Team = State.DeviceId < State.Session.GetPeerGuid() ? 0 : 1;
                 State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Session);
+#if LUR_INTERNAL
+                // #112: exchange the build fingerprint (refuse mismatched builds) and our
+                // persisted gameplay-CVar overrides, so a designer's tuning reaches the peer
+                // and both converge before play. (Two-phone convergence is verified on
+                // hardware; single-device this is a no-op beyond the seed.)
+                State.Lp.SendFingerprint();
+                Lur::Core::CVarRegistry::ForEach([&State](Lur::Core::ICVar* C) {
+                    if (C->AffectsGameplay() && C->Overridden()) {
+                        const int Id = Rps::GameplayIdForName(C->Name());
+                        if (Id >= 0)
+                            State.Lp.SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(),
+                                                      C->EditWallMs());
+                    }
+                });
+                State.Lp.SendCvarSync();
+#endif
                 State.Started = true;
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);
                 State.Linked.store(true, std::memory_order_release);  // glue applies View.SetLinked + flip

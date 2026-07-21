@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -80,6 +81,12 @@ public:
     void SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
     void SendCvarSync();
 
+    // Thread-safe: enqueue a gameplay-CVar edit from the UI/glue thread. Drained on the sim
+    // thread at the top of Tick() into SetGameplayCvar (send + stamp). Rare (human taps), so
+    // a mutex is fine. This is the ONLY Lp method — besides SetLocalMask — safe off the sim
+    // thread; the numpad/console commit routes through here.
+    void QueueGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
+
     // Build-fingerprint gate (Addendum C.3): exchange a compile-time fingerprint (git
     // commit + dirty + config, LUR_BUILD_FP) at connect and refuse the match on mismatch,
     // BEFORE tick 0 — the proactive form of the reactive anchor-hash desync alarm, and what
@@ -132,6 +139,10 @@ private:
     void ApplyActiveCvars();  // TheSim.Cv = defaults, then overlay ActiveCvars (pre-tick-0)
 
     bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
+
+    std::mutex               CvQueueMutex_;  // UI thread -> sim thread edit inbox
+    std::vector<PendingCvar> CvQueue_;
+    void DrainCvarQueue();  // sim thread: apply queued UI edits via SetGameplayCvar
 #endif
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);

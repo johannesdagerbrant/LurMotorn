@@ -44,6 +44,9 @@ void LockstepPeer::ProduceAndSend(uint8_t Mask) {
 
 void LockstepPeer::Tick(uint64_t ElapsedNs) {
     if (Awaiting) return;  // in a resync exchange: hold production/execution until reconciled
+#if LUR_INTERNAL
+    DrainCvarQueue();  // apply any UI-thread gameplay-CVar edits (stamps + sends MsgCvar)
+#endif
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
         const uint8_t M = PendingLocalMask.exchange(0, std::memory_order_relaxed);
@@ -156,6 +159,20 @@ void LockstepPeer::SendCvarSync() {
     }
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgCvarSync, B.data(), B.size());
+}
+
+void LockstepPeer::QueueGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t WallMs) {
+    std::lock_guard<std::mutex> Lock(CvQueueMutex_);
+    CvQueue_.push_back({GameplayId, RawValue, WallMs});
+}
+
+void LockstepPeer::DrainCvarQueue() {
+    std::vector<PendingCvar> Local;
+    {
+        std::lock_guard<std::mutex> Lock(CvQueueMutex_);
+        Local.swap(CvQueue_);
+    }
+    for (const PendingCvar& P : Local) SetGameplayCvar(P.Id, P.Raw, P.WallMs);
 }
 
 void LockstepPeer::SendFingerprint() {
