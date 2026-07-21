@@ -125,22 +125,32 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
 //     variation is free, exactly like chess derives colours from GUIDs. ---
 void BuildMap(Sim& S) {
-    // DENSE grid (2026-07-20): MineCols lanes across the width × MineRows rows evenly up
-    // the field between the camp insets, so a cart always has a mine within a couple units
-    // and the economy never deflates from long hauls. Symmetric top/bottom by construction.
-    const Fixed Xs[MineCols] = {F(4), F(9), F(14), F(20), F(25), F(30)};
-    const int32_t Lo = CampInset;                          // just past the bottom camp
-    const int32_t Hi = WorldHeight.ToInt() - CampInset;    // just short of the top camp
+    // CLUSTERED layout (#108): MinesPerCluster mines spread across the 34-wide field, in
+    // ClustersPerTeam rows per team — home/safe/midfield/contested, a risk gradient toward
+    // mid (closer to centre = shorter enemy walk = higher risk, spec §2). Rows derive from
+    // WorldHeight so they scale with the balance knob. Symmetric top/bottom by construction.
+    // Sparse + rich (x20 MineGoldCapacity) instead of the dense grid that crawled the sim.
+    const Fixed Xs[MinesPerCluster] = {F(4), F(9), F(14), F(20), F(25), F(30)};
+    const int32_t Hi = WorldHeight.ToInt();
+    const int32_t Mid = Hi / 2;
+    const Fixed ClusterY[ClustersPerTeam * 2] = {
+        F(CampInset + 2),        // t0 home      (right at the bottom camp — fast early gold)
+        F(CampInset + 6),        // t0 safe      (near the bottom camp)
+        F(Hi / 4),               // t0 midfield
+        F(Mid - 8),              // t0 contested (toward mid)
+        F(Hi - CampInset - 2),   // t1 home      (right at the top camp)
+        F(Hi - CampInset - 6),   // t1 safe      (near the top camp)
+        F(Hi - Hi / 4),          // t1 midfield
+        F(Mid + 8),              // t1 contested (toward mid)
+    };
     int32_t Idx = 0;
-    for (int32_t R = 0; R < MineRows; ++R) {
-        const int32_t Y = Lo + (Hi - Lo) * R / (MineRows - 1);  // evenly spaced, integer-exact
-        for (int32_t C = 0; C < MineCols; ++C) {
-            S.MineX[Idx] = Xs[C];
-            S.MineY[Idx] = F(Y);
+    for (int G = 0; G < ClustersPerTeam * 2; ++G)
+        for (int K = 0; K < MinesPerCluster; ++K) {
+            S.MineX[Idx] = Xs[K];
+            S.MineY[Idx] = ClusterY[G];
             S.MineGold[Idx] = MineGoldCapacity;  // finite reserve (#84)
             ++Idx;
         }
-    }
 }
 
 // ---- Phase 0: apply this tick's inputs (caller passes P0 then P1) ----

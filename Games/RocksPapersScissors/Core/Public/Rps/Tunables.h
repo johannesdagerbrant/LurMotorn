@@ -79,10 +79,13 @@ constexpr int32_t CarryCapacity = 15;      // gold per round trip
 constexpr int32_t StartGold = 60;
 constexpr int32_t StartMiners = 3;
 // A mine's total reserve. Every completed dig removes the carry from the mine; at
-// zero the mine is GONE (skipped by targeting, hidden by the view). 300 = 20 trips.
-// Total map gold now bounds the whole economy — starvation makes the lose rule
-// genuinely reachable and match length is naturally bounded.
-constexpr int32_t MineGoldCapacity = 300;
+// zero the mine is GONE (skipped by targeting, hidden by the view).
+// #108 (2026-07-20 playtest): x20 to 6000 (= 400 trips) paired with the SPARSE clustered
+// layout below — few, rich, long-lived deposits. A cart settles on a nearby mine and digs
+// it for a long time (little travel), so the economy ramps and doesn't deflate, WITHOUT a
+// battlefield cluttered by hundreds of mines (which also made the sim/gate crawl).
+// Total map gold still bounds the whole economy — starvation keeps the lose rule reachable.
+constexpr int32_t MineGoldCapacity = 6000;
 
 // ---- Sim rate ----
 // 10 Hz (design doc §3). This is what a "tick" means in seconds: BuildTicks and
@@ -235,12 +238,16 @@ constexpr uint32_t AnchorBurstThreshold = 16;
 // "hundreds-to-thousands"). Slot reuse (lowest free slot) bounds live memory here.
 constexpr int32_t MaxUnitsPerTeam = 2048;
 constexpr int32_t MaxUnits = MaxUnitsPerTeam * 2;
-// DENSE mine field (playtest 2026-07-20): sparse mines made carts travel far, then stall
-// as local reserves emptied and the economy deflated. ~10x the mines in a grid keeps one
-// always nearby — MineCols lanes across the width × MineRows rows up the height.
-constexpr int32_t MineCols = 6;             // X lanes across the 34-wide field
-constexpr int32_t MineRows = 80;            // Y rows up the field
-constexpr int32_t NumMines = MineCols * MineRows;   // 480 (~10x the old 48)
+// CLUSTERED mine field (#108, 2026-07-20 playtest): the dense ~480-mine grid was an
+// anti-deflation experiment that also made the sim (and the CI gate) crawl. Reverted to a
+// sparse clustered layout — 6 mines per row × 4 cluster rows per team (home/safe/midfield/
+// contested, a risk gradient toward mid) × 2 teams = 48 — paired with the x20
+// MineGoldCapacity above, so each deposit is rich and long-lived instead of the field
+// being carpeted. Deflation is solved by depth-per-mine, not count.
+constexpr int32_t MinesPerCluster = 6;      // mines spread across the 34-wide field per row
+constexpr int32_t ClustersPerTeam = 4;      // home (at camp) / safe / midfield / contested (near mid)
+constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
+constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 
 
 // ---- #112: per-tick frozen snapshot of the AffectsGameplay CVars the sim reads ----
