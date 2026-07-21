@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "Lur/Math/Mat4.h"
+#include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Text/BuiltinFonts.h"
 #include "Rps/Tunables.h"
@@ -206,6 +207,10 @@ void GameView::CreateResources(IRenderer* Renderer) {
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
     GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
+#if !LUR_SHIPPING
+    DevPanelMat = FlatMat(Renderer, {0.08f, 0.08f, 0.08f, 0.88f});  // DevTheme charcoal
+    DevAccentMat = FlatMat(Renderer, {0.25f, 0.95f, 0.85f, 1.0f});  // DevTheme cyan accent
+#endif
 
     Font.Init(Lur::Text::InterFont());
     Font.UploadAtlas(*Renderer);
@@ -672,6 +677,27 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // The opponent dropdown draws LAST so its open list overlays the panel.
     Selector.Draw(Renderer, "Opponent", Pad, TopInsetPx + 4.0f * HS, WidthPx - 2.0f * Pad,
                   24.0f * HS);
+
+#if !LUR_SHIPPING
+    // ---- DEV overlay (#113 bring-up) ----
+    // Prove the BeginDevGui THIRD pass composites a DevTheme surface over the game on real
+    // hardware. Deliberately temporary + game-side: the shipping build compiles none of it
+    // (BeginDevGuiLayer is a no-op, this block is #if'd out). The engine-owned, host-driven
+    // Modules/DevGui (own mono font, widgets, input) replaces it — this is just first pixels.
+    Lur::Render::BeginDevGuiLayer(Renderer);
+    {
+        const float PW = WidthPx - 4.0f * Pad;
+        const float PH = 46.0f * HS;
+        const float Cx = WidthPx * 0.5f, Cy = HeightPx * 0.44f;
+        Blit(DevPanelMat, Cx, Cy, PW, PH);
+        Blit(DevAccentMat, Cx, Cy + PH * 0.5f, PW, 2.0f * HS);   // accent underline
+        char Line[160];
+        std::snprintf(Line, sizeof(Line), "DEV  %s   gameplay cvars: %d", LUR_BUILD_FP,
+                      static_cast<int>(CvIdCount));
+        Text.Draw(Renderer, Line, Cx - PW * 0.5f + 10.0f * HS, Cy - 8.0f * HS, PW - 20.0f * HS,
+                  PH, 15.0f * HS, Lur::Render::Color{0.55f, 0.98f, 0.90f, 1.0f});
+    }
+#endif
 
     Renderer->EndFrame();
 }

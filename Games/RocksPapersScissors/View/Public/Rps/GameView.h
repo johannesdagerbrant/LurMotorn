@@ -85,6 +85,10 @@ private:
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
     Lur::Render::MaterialHandle GoldBarFg = 0;   // mine reserve bar (#84) — gold accent
+#if !LUR_SHIPPING
+    Lur::Render::MaterialHandle DevPanelMat = 0;   // #113 dev overlay: charcoal translucent
+    Lur::Render::MaterialHandle DevAccentMat = 0;  //   + cyan accent (DevTheme, bring-up)
+#endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours
     // Per-(team,type) tint: a unique shade of the team hue per unit type (playtest

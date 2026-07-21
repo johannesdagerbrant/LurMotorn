@@ -371,6 +371,15 @@ public:
                                         static_cast<float>(Extent.height));
     }
 
+    void BeginDevGui() override {
+        // #113: the DEV-GUI pass — a third phase after the game GUI, same engine ortho,
+        // painter's-order over everything (no depth). Identical camera to BeginGui; the
+        // separate entry point marks the dev overlay as its own layer (and lets a future
+        // backend give it distinct state). Compiled out of shipping at the call site.
+        CurrentCamera = MakeOrthoCamera(static_cast<float>(Extent.width),
+                                        static_cast<float>(Extent.height));
+    }
+
     void BindPipeline(VkPipeline P) {
         if (BoundPipeline != P) {
             vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, P);
