@@ -5,7 +5,10 @@
 #include <string>
 #include <vector>
 
+#include <fstream>
+
 #include "Lur/Core/CVar.h"
+#include "Lur/Core/CVarConfig.h"
 #include "Lur/Core/FlightRecorder.h"
 #include "Lur/Core/FromString.h"
 #include "Lur/Core/Hash.h"
@@ -174,6 +177,34 @@ static void TestCVarRegistry() {
     CHECK(Seen == 3);
 }
 
+// ---- cvars.cfg: human-readable persistence round-trip (Addendum B) ----
+static void TestCVarConfig() {
+    const char* Path = "test_cvars.cfg";
+    std::remove(Path);
+
+    CvTestInt.Set(55);
+    CHECK(CvTestBool.SetFromString("true"));
+    CHECK(Lur::Core::SaveCVarConfig(Path));
+
+    // Wipe in memory, then reload from disk.
+    CvTestInt.Reset();
+    CHECK(CvTestBool.SetFromString("false"));
+    CHECK(Lur::Core::LoadCVarConfig(Path) == 2);
+    CHECK(CvTestInt.Get() == 55 && CvTestBool.Get() == true);
+
+    // A stale/unknown name (renamed or removed CVar) is warned + skipped, not fatal.
+    { std::ofstream A(Path, std::ios::app); A << "no.such.cvar = 3\n"; }
+    CHECK(Lur::Core::LoadCVarConfig(Path) == 2);  // still just our two resolve
+
+    // reset_all clears every override; nothing persists (reloading applies 0). We assert
+    // the invariant rather than file-absence: std::remove succeeds but this toolchain's
+    // ifstream::good() is unreliable immediately after a delete.
+    Lur::Core::ResetAllCVars(Path);
+    CHECK(!CvTestInt.Overridden() && !CvTestBool.Overridden());
+    CHECK(Lur::Core::LoadCVarConfig(Path) == 0);
+    std::remove(Path);
+}
+
 int main() {
     Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
 
@@ -184,6 +215,7 @@ int main() {
     TestFromStringGeneric();
     TestCVarMechanism();
     TestCVarRegistry();
+    TestCVarConfig();
 
     if (GFailures == 0) {
         std::printf("All core tests passed.\n");
