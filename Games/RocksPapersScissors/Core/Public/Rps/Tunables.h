@@ -1,5 +1,6 @@
 #pragma once
 #include <cstdint>
+#include <cstring>  // GameplayIdForName (dev)
 
 #include "Lur/Core/CVar.h"
 #include "Lur/Sim/Fixed.h"
@@ -332,5 +333,19 @@ inline int32_t CvOverrideRaw(const CvSnapshot& S, uint8_t Id) {
         default: return 0;
     }
 }
+
+#if !LUR_SHIPPING
+// Reverse wire map: a CVar's registered name string -> its ECvId, so a runtime (type-
+// erased) edit can be routed through LockstepPeer::SetGameplayCvar. Dev-only (uses the
+// CVar's Name(), which is dev-only metadata). Returns -1 for a non-gameplay name.
+inline int GameplayIdForName(const char* Name) {
+#define FX(F, Cv) if (std::strcmp(Name, Cv.Name()) == 0) return CvId##F;
+#define IX(F, Cv) if (std::strcmp(Name, Cv.Name()) == 0) return CvId##F;
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+    return -1;
+}
+#endif
 
 } // namespace Rps

@@ -69,6 +69,12 @@ public:
     void SetTuneMode(bool On) { TuneMode_ = On; }
     void DevSelectMove(int Delta);
     void DevAdjustSelected(int Dir);
+
+    // Called after a gameplay CVar is committed via the numpad/keyboard (the global value
+    // is already set). The app persists (cvars.cfg) and, on a phone in a live match, routes
+    // it through the LockstepPeer sync. Null on desktop-solo (LiveCvLatch + save suffice).
+    using CvCommitFn = void (*)(void* Ctx, Lur::Core::ICVar& Cv);
+    void SetCvCommitHook(CvCommitFn Fn, void* Ctx) { CvCommitFn_ = Fn; CvCommitCtx_ = Ctx; }
 #endif
 
 private:
@@ -114,6 +120,8 @@ private:
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
     bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
+    CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
+    void*              CvCommitCtx_ = nullptr;
 #endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours

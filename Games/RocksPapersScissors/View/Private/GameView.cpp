@@ -331,7 +331,11 @@ void GameView::DevSelectMove(int Delta) {
     SelectedRow_ = ((SelectedRow_ + Delta) % N + N) % N;  // wrap both directions
 }
 
-void GameView::DevAdjustSelected(int Dir) { NudgeCvar(NthGameplayCvar(SelectedRow_), Dir); }
+void GameView::DevAdjustSelected(int Dir) {
+    Lur::Core::ICVar* C = NthGameplayCvar(SelectedRow_);
+    NudgeCvar(C, Dir);
+    if (C && CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);  // app: persist + (phone) sync
+}
 #endif
 
 int GameView::OnTap(float XPx, float YPx) {
@@ -781,7 +785,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             TapUsed = true;
             if (Numpad_.TakeEnter()) {  // commit the typed value to the selected CVar
                 if (Lur::Core::ICVar* Sel = NthGameplayCvar(SelectedRow_))
-                    if (!Numpad_.Buffer().empty()) Sel->SetFromString(Numpad_.Buffer().c_str());
+                    if (!Numpad_.Buffer().empty() && Sel->SetFromString(Numpad_.Buffer().c_str()))
+                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *Sel);  // persist + (phone) sync
                 Numpad_.Clear();
                 NumpadOpen_ = false;
             }

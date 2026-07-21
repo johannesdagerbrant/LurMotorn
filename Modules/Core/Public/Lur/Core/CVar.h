@@ -64,6 +64,9 @@ public:
     // and the cvars.cfg timestamp column (C.4). 0 = never stamped (loses any real edit).
     virtual uint64_t    EditWallMs() const = 0;
     virtual void        SetEditWallMs(uint64_t Ms) = 0;
+    // Current value as a raw int32 for the wire (Fixed.Raw / int / enum ordinal / bool),
+    // so a type-erased edit can be handed to LockstepPeer::SetGameplayCvar without knowing T.
+    virtual int32_t     RawValue() const = 0;
 
     ICVar* NextRegistered_ = nullptr;  // intrusive singly-linked registry list
 
@@ -156,6 +159,13 @@ public:
     std::string DefaultString() const override { return ToString(Default_); }
     uint64_t    EditWallMs() const override { return EditWallMs_; }
     void        SetEditWallMs(uint64_t Ms) override { EditWallMs_ = Ms; }
+    int32_t     RawValue() const override {
+        if constexpr (std::is_enum_v<T>) return static_cast<int32_t>(Value_);
+        else if constexpr (std::is_same_v<T, bool>) return Value_ ? 1 : 0;
+        else if constexpr (std::is_integral_v<T>) return static_cast<int32_t>(Value_);
+        else if constexpr (requires(const T& V) { V.Raw; }) return Value_.Raw;  // Fixed-like
+        else return 0;  // float (never AffectsGameplay) — not sent on the wire
+    }
 
     // Typed accessors for code that holds the concrete CVar (not through ICVar).
     T    Default() const { return Default_; }

@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 
+#include "Lur/Core/CVarConfig.h"  // #115: persist tuned cvars across runs
 #include "Lur/Core/Log.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Platform/Window.h"
@@ -248,6 +249,14 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     Rps::GameView View;
     View.CreateResources(Renderer);
 #if !LUR_SHIPPING
+    // Persist tuned cvars across runs (solo has no peer, so LiveCvLatch applies edits live
+    // and a whole-file save on each commit keeps them). Load BEFORE the SimRunner starts so
+    // Sim::Init latches the persisted values.
+    static const char* kCvarsPath = "rps-cvars.cfg";
+    if (const int Loaded = Lur::Core::LoadCVarConfig(kCvarsPath); Loaded > 0)
+        Lur::Log::Info("loaded %d persisted cvar override(s) from %s", Loaded, kCvarsPath);
+    View.SetCvCommitHook([](void*, Lur::Core::ICVar&) { Lur::Core::SaveCVarConfig(kCvarsPath); },
+                         nullptr);
     if (Tune) {
         View.SetTuneMode(true);  // #115: keyboard editing of the CVar panel (arrows below)
         Lur::Log::Info("RPS --tune: Up/Down select a cvar, Left/Right halve/double, Del resets");
