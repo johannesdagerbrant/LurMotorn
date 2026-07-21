@@ -760,14 +760,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.30f;
         Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
         Blit(DevAccentMat, X0 + PW * 0.5f, Y0 + TitleH, PW, 2.0f * HS);
-        // Top-left X (close) button; the title starts to its right.
+        // Top-right X (close) button; the title fills the width to its left.
         const float XbtnS = TitleH;
-        Blit(DevKeyMat, X0 + XbtnS * 0.5f, Y0 + XbtnS * 0.5f, XbtnS, XbtnS);
-        Text.Draw(Renderer, "X", X0, Y0, XbtnS, XbtnS, 16.0f * HS, Accent,
+        const float XbtnX = X0 + PW - XbtnS;
+        Blit(DevKeyMat, XbtnX + XbtnS * 0.5f, Y0 + XbtnS * 0.5f, XbtnS, XbtnS);
+        Text.Draw(Renderer, "X", XbtnX, Y0, XbtnS, XbtnS, 16.0f * HS, Accent,
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
         char T[96];
         std::snprintf(T, sizeof(T), "DEV cvars (%d)  %s", Count, LUR_BUILD_FP);
-        Text.Draw(Renderer, T, X0 + XbtnS + 8.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
+        Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
                   TitleH, 14.0f * HS, Accent);
         // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test
         // + edits don't race the ValueString reads. Numpad first (if open), then rows.
@@ -776,8 +777,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
 
-        // Top-left X closes the view.
-        if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + TitleH && TapY >= Y0 &&
+        // Top-right X closes the view.
+        if (TapPending && !TapUsed && TapX >= XbtnX && TapX <= XbtnX + XbtnS && TapY >= Y0 &&
             TapY <= Y0 + TitleH) {
             DevOverlayOpen_ = false;
             NumpadOpen_ = false;
