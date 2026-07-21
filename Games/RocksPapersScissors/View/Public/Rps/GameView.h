@@ -67,6 +67,11 @@ public:
     // edits the selected gameplay CVar (+1 double, -1 halve, 0 reset). Desktop is
     // single-threaded (keys + Render on one thread), so these act directly.
     void SetTuneMode(bool On) { TuneMode_ = On; if (On) DevOverlayOpen_ = true; }
+
+    // #115 desktop --tune split: the window is double-wide; the game renders into the left
+    // half (WidthPx is that half's width) and the CVar editor into the right half of width
+    // PanelW. On = the two-viewport layout; off = the phone's full-window overlay.
+    void SetDevSplit(bool On, float PanelW) { DevSplit_ = On; DevSplitPanelW_ = PanelW; }
     void DevSelectMove(int Delta);
     void DevAdjustSelected(int Dir);
 
@@ -122,6 +127,8 @@ private:
     std::atomic<float> DevTapY_{-1.0e9f};
     std::atomic<bool>  DevTapPending_{false};
     bool               DevOverlayOpen_ = false;     // CVar view shown? (two-finger triple-tap / --tune)
+    bool               DevSplit_ = false;           // #115 desktop --tune: game-left / panel-right split
+    float              DevSplitPanelW_ = 0.0f;      //   right-half (panel) width in px
     bool               TuneMode_ = false;          // #115 desktop --tune: keyboard editing on
     int                SelectedRow_ = 0;            //   selected gameplay-CVar row (registry order)
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)

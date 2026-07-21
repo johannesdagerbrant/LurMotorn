@@ -380,6 +380,19 @@ public:
                                         static_cast<float>(Extent.height));
     }
 
+    void SetViewportRect(int X, int Y, int W, int H) override {
+        // #115 desktop --tune split: draw into a framebuffer sub-rect with an ortho sized to
+        // it. Viewport maps NDC to [X,X+W]x[Y,Y+H]; scissor clips there; ortho(W,H) makes
+        // pixel coords [0,W]x[0,H] land in the rect.
+        if (!Recording) return;
+        VkViewport Vp{static_cast<float>(X), static_cast<float>(Y), static_cast<float>(W),
+                      static_cast<float>(H), 0.0f, 1.0f};
+        VkRect2D Sc{{X, Y}, {static_cast<uint32_t>(W), static_cast<uint32_t>(H)}};
+        vkCmdSetViewport(CommandBuffer, 0, 1, &Vp);
+        vkCmdSetScissor(CommandBuffer, 0, 1, &Sc);
+        CurrentCamera = MakeOrthoCamera(static_cast<float>(W), static_cast<float>(H));
+    }
+
     void BindPipeline(VkPipeline P) {
         if (BoundPipeline != P) {
             vkCmdBindPipeline(CommandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, P);

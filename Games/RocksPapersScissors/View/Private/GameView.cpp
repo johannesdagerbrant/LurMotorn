@@ -382,6 +382,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     };
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
+#if !LUR_SHIPPING
+    // #115 --tune split: confine the game to the left half (WidthPx wide); BeginFrame just
+    // reset the viewport to the full (double-wide) framebuffer, so re-assert the sub-rect.
+    if (DevSplit_) Renderer->SetViewportRect(0, 0, static_cast<int>(WidthPx), static_cast<int>(HeightPx));
+#endif
 
     // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
     Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
@@ -522,7 +527,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // ---- HUD (GUI layer, pixel space) — the locked layout (#85): opponent
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
-    Renderer->BeginGui();
+#if !LUR_SHIPPING
+    // --tune split: keep the HUD in the left half (BeginGui would resize the ortho to the
+    // full double-wide framebuffer). SetViewportRect(left, ortho=WidthPx) is the equivalent.
+    if (DevSplit_) Renderer->SetViewportRect(0, 0, static_cast<int>(WidthPx), static_cast<int>(HeightPx));
+    else
+#endif
+        Renderer->BeginGui();
     if (SelectorDirty) RefreshSelector();
 
     using Lur::Text::EHAlign;
@@ -743,7 +754,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // (BeginDevGuiLayer is a no-op, this block is #if'd out). The engine-owned, host-driven
     // Modules/DevGui (own mono font, widgets, input) replaces it — this is just first pixels.
     if (DevOverlayOpen_) {
-        Lur::Render::BeginDevGuiLayer(Renderer);
+        // --tune split: draw into the RIGHT half (ortho sized to the panel width). Phone /
+        // non-split: the full-window dev-overlay pass over the game.
+        if (DevSplit_)
+            Renderer->SetViewportRect(static_cast<int>(WidthPx), 0,
+                                      static_cast<int>(DevSplitPanelW_), static_cast<int>(HeightPx));
+        else
+            Lur::Render::BeginDevGuiLayer(Renderer);
+        const float OW = DevSplit_ ? DevSplitPanelW_ : WidthPx;  // overlay layout width
         // Live CVar browser (bring-up): every AffectsGameplay CVar + its current value,
         // read straight from the registry (ValueString is guard-free and the global value
         // is only mutated by the console, never the sim thread — so this render-thread read
@@ -755,9 +773,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         int Count = 0;
         Lur::Core::CVarRegistry::ForEach(
             [&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++Count; });
-        const float PW = WidthPx - 4.0f * Pad;
+        const float PW = OW - 4.0f * Pad;
         const float PH = TitleH + LineH * static_cast<float>(Count) + 10.0f * HS;
-        const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.30f;
+        const float X0 = 2.0f * Pad, Y0 = HeightPx * (DevSplit_ ? 0.04f : 0.30f);
         Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
         Blit(DevAccentMat, X0 + PW * 0.5f, Y0 + TitleH, PW, 2.0f * HS);
         // Top-right X (close) button; the title fills the width to its left.
@@ -788,8 +806,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // Numpad geometry — strictly BELOW the CVar panel so it never overlaps a row (esp.
         // the highlighted/selected one, whose typed value must stay visible). Fills the space
         // down toward the bottom (over the plates while open — fine in dev).
-        const float NumW = WidthPx * 0.62f;
-        const float NumX = (WidthPx - NumW) * 0.5f;
+        const float NumW = OW * 0.62f;
+        const float NumX = (OW - NumW) * 0.5f;
         const float NumY = Y0 + PH + 12.0f * HS;
         float NumH = HeightPx - NumY - 60.0f * HS;
         if (NumH > NumW) NumH = NumW;

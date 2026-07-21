@@ -133,6 +133,12 @@ public:
     // shipped build. Declared unconditionally to keep the vtable identical across configs.
     virtual void BeginDevGui() {}
 
+    // Confine subsequent draws to a framebuffer sub-rect (x,y,w,h px) AND size the ortho
+    // GUI camera to (w,h) — so 2D content in [0,w]x[0,h] lands in that rect. The basis for
+    // the desktop --tune split (game in the left half, CVar editor in the right, #115).
+    // Default no-op; full-window backends ignore it. Call after BeginFrame.
+    virtual void SetViewportRect(int X, int Y, int W, int H) { (void)X; (void)Y; (void)W; (void)H; }
+
     virtual void DrawMesh(MeshHandle Mesh, MaterialHandle Material, const Math::Mat4& Model) = 0;
 
     // Draw `Count` instances of `Quad` (a MakeQuad mesh) in ONE call, each transformed

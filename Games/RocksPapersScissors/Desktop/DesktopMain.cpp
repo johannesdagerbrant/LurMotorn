@@ -243,7 +243,9 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     Lur::Log::Info("RPS desktop: solo (SimRunner, no net)%s%s%s", Auto ? " (auto)" : "",
                    FlockDemo ? " (flockdemo)" : "", NoCombat ? " (combat off)" : "");
     Lur::Platform::Window Win;
-    if (!Win.Create("RocksPapersScissors - solo", kWinW, kWinH, 200, 60)) return 1;
+    // #115 --tune: a DOUBLE-WIDE window — game in the left half, CVar editor in the right.
+    const int WinW = Tune ? kWinW * 2 : kWinW;
+    if (!Win.Create("RocksPapersScissors - solo", WinW, kWinH, 200, 60)) return 1;
     Lur::Render::IRenderer* Renderer = Lur::Render::VulkanRenderer::Create();
     if (Renderer == nullptr || !Renderer->Init(Win.NativeHandle())) return 1;
     Rps::GameView View;
@@ -259,7 +261,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                          nullptr);
     if (Tune) {
         View.SetTuneMode(true);  // #115: keyboard editing of the CVar panel (arrows below)
-        Lur::Log::Info("RPS --tune: Up/Down select a cvar, Left/Right halve/double, Del resets");
+        View.SetDevSplit(true, static_cast<float>(kWinW));  // game left, panel in the right half
+        Lur::Log::Info("RPS --tune: game LEFT, cvars RIGHT. Up/Down select, Left/Right halve/double, Del resets");
     }
 #else
     (void)Tune;
@@ -320,14 +323,17 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         if (Runner->LatestSnapshot(Snap)) {
             int W = 0, H = 0;
             Win.GetSize(&W, &H);
+            // --tune: the window is double-wide; the game occupies the LEFT half, so it lays
+            // out to GameW (GameView renders it into the left-half viewport, panel right).
+            const float GameW = Tune ? static_cast<float>(W) * 0.5f : static_cast<float>(W);
             if (W > 0 && H > 0) {
                 const float VisibleH = static_cast<float>(H) / Ppu();
                 const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-                const float MaxCam = FieldMax + View.TopHudWorldUnits(static_cast<float>(W));
-                const float MinCam = -View.BottomHudWorldUnits(static_cast<float>(W));
+                const float MaxCam = FieldMax + View.TopHudWorldUnits(GameW);
+                const float MinCam = -View.BottomHudWorldUnits(GameW);
                 if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
                 Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
-                View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, static_cast<float>(W),
+                View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, GameW,
                             static_cast<float>(H), /*FlipY=*/false,
                             static_cast<float>(ElapsedNs) / 1.0e9f);  // solo = team-0 view
             }
