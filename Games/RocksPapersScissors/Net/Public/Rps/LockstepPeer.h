@@ -17,6 +17,13 @@ namespace Rps {
 constexpr Lur::Net::EMsgType MsgInput       = Lur::Net::EMsgType::Game0;
 constexpr Lur::Net::EMsgType MsgAnchor      = Lur::Net::EMsgType::Game1;
 constexpr Lur::Net::EMsgType MsgResyncChunk = Lur::Net::EMsgType::Game2;
+#if LUR_INTERNAL
+// Dev-only gameplay-CVar sync (#112, Addendum C): a balance knob tweaked in the console/
+// panel is stamped a few exec ticks ahead, sent, and applied on BOTH peers at that tick,
+// so the tweak reaches the peer deterministically mid-match. Never compiled into shipping
+// (the opcode is neither sent nor accepted there; the sim's CVars are constexpr).
+constexpr Lur::Net::EMsgType MsgCvar        = Lur::Net::EMsgType::Game3;
+#endif
 
 // Lockstep coordinator for ONE peer (design doc §1-§4). Drives a Sim in lockstep with
 // the other peer over a reliable, ordered datagram link — which is what BLE GATT and
@@ -53,8 +60,16 @@ public:
     // far as the ceiling allows.
     void Tick(uint64_t ElapsedNs);
 
-    // A datagram arrived (Input / Anchor / ResyncChunk), dispatched by type.
+    // A datagram arrived (Input / Anchor / ResyncChunk / Cvar), dispatched by type.
     void OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N);
+
+#if LUR_INTERNAL
+    // Override an AffectsGameplay CVar (by its 1-byte wire id, raw value): stamps it a few
+    // exec ticks ahead, sends MsgCvar, and applies it on BOTH peers at that tick to the
+    // per-Sim Cv — a deterministic mid-match balance tweak. Dev-only (the console/panel/
+    // desktop --tune caller). EditWallClockMs is the last-writer-wins resolver key.
+    void SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
+#endif
 
     // Reconnect (cold rejoin or blip): send our executed input history as chunks +
     // a frontier marker, and re-base our own timeline to that frontier with a fresh
@@ -82,6 +97,15 @@ public:
 private:
     void ProduceAndSend(uint8_t Mask);
     void Execute();
+#if LUR_INTERNAL
+    // Gameplay-CVar overrides waiting to be applied, keyed by the exec tick they land on
+    // (both peers hold the SAME tick->overrides once the MsgCvar is delivered). Applied to
+    // TheSim.Cv just before Step(tick), so the value is in place for that whole tick.
+    struct PendingCvar { uint8_t Id; int32_t Raw; uint64_t WallMs; };
+    std::unordered_map<uint32_t, std::vector<PendingCvar>> PendingCvars;
+    void StorePendingCvar(uint32_t Tick, uint8_t Id, int32_t Raw, uint64_t WallMs);
+    void ApplyCvarsForTick(uint32_t T);
+#endif
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);
     void RebuildFromHistory(uint32_t Frontier);  // Incoming[0/1] -> fresh sim + timeline at Frontier

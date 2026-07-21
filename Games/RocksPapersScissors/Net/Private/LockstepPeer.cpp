@@ -68,6 +68,9 @@ void LockstepPeer::Execute() {
         // the same on both sides for tick T — the determinism precondition.
         const uint8_t M0 = MyTeam == 0 ? Lm : Pm;
         const uint8_t M1 = MyTeam == 0 ? Pm : Lm;
+#if LUR_INTERNAL
+        ApplyCvarsForTick(T);  // #112: land any gameplay-CVar overrides stamped for tick T
+#endif
         TheSim.Step(M0, M1);
         if (Recording) { RecM0.push_back(M0); RecM1.push_back(M1); }
         // Normal cadence: anchor every 10th tick. During a burst, suppress these and
@@ -77,6 +80,42 @@ void LockstepPeer::Execute() {
     }
     if (Burst && Ran > 0) EmitAnchor();  // one anchor at the reached frontier
 }
+
+#if LUR_INTERNAL
+void LockstepPeer::StorePendingCvar(uint32_t Tick, uint8_t Id, int32_t Raw, uint64_t WallMs) {
+    auto& Vec = PendingCvars[Tick];
+    for (auto& P : Vec) {
+        if (P.Id == Id) {  // same CVar stamped twice for one tick: last wall-clock writer wins
+            if (WallMs > P.WallMs) { P.Raw = Raw; P.WallMs = WallMs; }
+            return;
+        }
+    }
+    Vec.push_back({Id, Raw, WallMs});
+}
+
+void LockstepPeer::ApplyCvarsForTick(uint32_t T) {
+    const auto It = PendingCvars.find(T);
+    if (It == PendingCvars.end()) return;
+    for (const PendingCvar& P : It->second) ApplyCvOverride(TheSim.Cv, P.Id, P.Raw);
+    PendingCvars.erase(It);
+}
+
+void LockstepPeer::SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs) {
+    // Stamp at the same horizon as a produced input (WallTicks + Delay): a few ticks ahead,
+    // so it lands before either peer simulates that tick. Store locally AND send, so both
+    // peers apply the identical override at the identical exec tick.
+    const uint32_t ApplyTick = WallTicks + Delay;
+    StorePendingCvar(ApplyTick, GameplayId, RawValue, EditWallClockMs);
+    Lur::Serialization::BitWriter W;
+    Lur::Serialization::WriteVarUint(W, ApplyTick);
+    W.WriteBits(GameplayId, 8);
+    W.WriteBits(static_cast<uint32_t>(EditWallClockMs >> 32), 32);
+    W.WriteBits(static_cast<uint32_t>(EditWallClockMs & 0xFFFFFFFFu), 32);
+    W.WriteBits(static_cast<uint32_t>(RawValue), 32);
+    const std::vector<uint8_t>& B = W.Finish();
+    if (Send) Send(Ctx, MsgCvar, B.data(), B.size());
+}
+#endif  // LUR_INTERNAL
 
 void LockstepPeer::EmitAnchor() {
     const uint32_t T = TheSim.Tick;
@@ -134,6 +173,21 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             Awaiting = false;           // reconciled either way; resume live
         }
     }
+#if LUR_INTERNAL
+    else if (Type == MsgCvar) {
+        Lur::Serialization::BitReader R(Data, N);
+        const uint32_t ApplyTick = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+        const uint8_t  Id  = static_cast<uint8_t>(R.ReadBits(8));
+        const uint32_t Hi  = R.ReadBits(32);
+        const uint32_t Lo  = R.ReadBits(32);
+        const int32_t  Raw = static_cast<int32_t>(R.ReadBits(32));
+        if (!Awaiting && R.IsOk())
+            StorePendingCvar(ApplyTick, Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
+        // No Execute() kick: overrides don't gate the ceiling (only inputs do); the override
+        // lands when tick ApplyTick runs. Reliable+ordered transport + the Delay horizon put
+        // it in hand before either peer reaches that tick.
+    }
+#endif
 }
 
 void LockstepPeer::BeginResync() {

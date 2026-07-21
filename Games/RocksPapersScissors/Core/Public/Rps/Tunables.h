@@ -250,36 +250,87 @@ constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
 constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 
 
-// ---- #112: per-tick frozen snapshot of the AffectsGameplay CVars the sim reads ----
-// Copied once at the top of Sim::Step so a value is CONSTANT for the whole tick on both
-// peers even if an override is applied between ticks (timing-safety half of determinism,
-// spec S1). POD => lives in Sim, memcpy-able, and folds into StateHash: a mis-latch shows
-// up as an immediate located desync alarm, not silent drift. Read inside the sim as
-// S.Cv.Foo, never CvFoo.Get() directly (that mark = "synced gameplay value", by design).
+// ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----
+// The snapshot Sim reads (CvSnapshot), the initial latch from the globals (LatchCvs), the
+// 1-byte wire id per CVar (ECvId), and the id->field apply/read used by the peer sync
+// (ApplyCvOverride/CvOverrideRaw) all come from this single X-list, so they can never
+// drift. FX = a Fixed-typed knob, IX = an int32 knob. (The GameplayId cook — #112's
+// remaining half — will GENERATE this list from the registry, lexicographically sorted
+// and build-checked against the 256 cap; until then this hand-list is the source, and the
+// id is declaration order, which agrees across peers because the build-fingerprint gate
+// guarantees identical builds.)
+#define LUR_RPS_GAMEPLAY_CVARS(FX, IX)                    \
+    FX(SeparationStrength,      CvSeparationStrength)      \
+    FX(EnemySeparationStrength, CvEnemySeparationStrength) \
+    FX(WSeek,                   CvWSeek)                   \
+    FX(WCohSame,                CvWCohSame)                \
+    FX(WCohAll,                 CvWCohAll)                 \
+    FX(WAlign,                  CvWAlign)                  \
+    FX(WPredatorFlee,           CvWPredatorFlee)           \
+    FX(WNoise,                  CvWNoise)                  \
+    FX(WInterpose,              CvWInterpose)              \
+    FX(MaxAccel,                CvMaxAccel)                \
+    FX(FlockDamping,            CvFlockDamping)            \
+    FX(InRangeDamping,          CvInRangeDamping)          \
+    FX(NoiseTimeScale,          CvNoiseTimeScale)          \
+    IX(CounterMultiplier,       CvCounterMultiplier)
+
+// Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
+// the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
+// by synced overrides — read inside the sim as S.Cv.Foo (that mark = "synced gameplay
+// value", by design).
 struct CvSnapshot {
-    Fixed   SeparationStrength;
-    Fixed   EnemySeparationStrength;
-    Fixed   WSeek;
-    Fixed   WCohSame;
-    Fixed   WCohAll;
-    Fixed   WAlign;
-    Fixed   WPredatorFlee;
-    Fixed   WNoise;
-    Fixed   WInterpose;
-    Fixed   MaxAccel;
-    Fixed   FlockDamping;
-    Fixed   InRangeDamping;
-    Fixed   NoiseTimeScale;
-    int32_t CounterMultiplier;
+#define FX(Name, Cv) Fixed Name;
+#define IX(Name, Cv) int32_t Name;
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
 };
 
 inline CvSnapshot LatchCvs() {
-    return CvSnapshot{
-        CvSeparationStrength.Get(), CvEnemySeparationStrength.Get(), CvWSeek.Get(),
-        CvWCohSame.Get(), CvWCohAll.Get(), CvWAlign.Get(), CvWPredatorFlee.Get(),
-        CvWNoise.Get(), CvWInterpose.Get(), CvMaxAccel.Get(), CvFlockDamping.Get(),
-        CvInRangeDamping.Get(), CvNoiseTimeScale.Get(), CvCounterMultiplier.Get(),
-    };
+    CvSnapshot S;
+#define FX(Name, Cv) S.Name = Cv.Get();
+#define IX(Name, Cv) S.Name = Cv.Get();
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+    return S;
+}
+
+// 1-byte within-build wire id per gameplay CVar (Addendum C.0.1). Declaration order here;
+// the build-fingerprint gate makes both peers agree (same build -> same list).
+enum ECvId : uint8_t {
+#define FX(Name, Cv) CvId##Name,
+#define IX(Name, Cv) CvId##Name,
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+    CvIdCount
+};
+static_assert(CvIdCount <= 256, "AffectsGameplay CVars exceed the 1-byte wire id space (C.0.2)");
+
+// Set / read one snapshot field by wire id, as a raw int32 (Fixed.Raw, or the int value).
+// The value travels raw on the wire (enums-as-int, no float); these two are the id<->field
+// bridge the LockstepPeer sync uses.
+inline void ApplyCvOverride(CvSnapshot& S, uint8_t Id, int32_t Raw) {
+    switch (Id) {
+#define FX(Name, Cv) case CvId##Name: S.Name = Fixed{Raw}; break;
+#define IX(Name, Cv) case CvId##Name: S.Name = Raw; break;
+        LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+        default: break;
+    }
+}
+inline int32_t CvOverrideRaw(const CvSnapshot& S, uint8_t Id) {
+    switch (Id) {
+#define FX(Name, Cv) case CvId##Name: return S.Name.Raw;
+#define IX(Name, Cv) case CvId##Name: return S.Name;
+        LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+        default: return 0;
+    }
 }
 
 } // namespace Rps

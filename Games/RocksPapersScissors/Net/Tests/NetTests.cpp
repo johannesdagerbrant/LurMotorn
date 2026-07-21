@@ -193,6 +193,46 @@ static void TestLockstepStaysInSync() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical state
 }
 
+#if LUR_INTERNAL
+// ---- #112: a gameplay-CVar override on ONE peer syncs to the other, applies at the same
+// stamped tick, and keeps both bit-identical — AND actually changes the match. ----
+static void TestLockstepCvarSyncStaysIdentical() {
+    auto RunMatch = [](bool Tweak) {
+        Outbox Qa, Qb;
+        LockstepPeer A, B;
+        A.Init(0xC0DE, 0, Enqueue, &Qa);
+        B.Init(0xC0DE, 1, Enqueue, &Qb);
+        SplitMix64 Rng(0x9);
+        for (int I = 0; I < 200; ++I) {
+            // At tick ~20, A shoves the goal-seek weight to 3.0. This consumes no RNG, so
+            // the INPUT stream is identical to the untweaked run — only the CVar differs.
+            if (Tweak && I == 20)
+                A.SetGameplayCvar(CvIdWSeek, Fixed::FromInt(3).Raw, /*wallMs*/ 1000);
+            A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2);
+            B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4);
+            A.Tick(OneTickNs);
+            B.Tick(OneTickNs);
+            Deliver(Qa, B);
+            Deliver(Qb, A);
+            CHECK(!A.Desynced() && !B.Desynced());  // the synced override never desyncs
+        }
+        for (int I = 0; I < 6; ++I) {  // settle
+            A.Tick(OneTickNs);
+            B.Tick(OneTickNs);
+            Deliver(Qa, B);
+            Deliver(Qb, A);
+        }
+        CHECK(A.ExecTick() == B.ExecTick());
+        CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // both applied it at the same tick
+        return A.GetSim().StateHash();
+    };
+
+    const uint64_t Tweaked = RunMatch(true);
+    const uint64_t Baseline = RunMatch(false);
+    CHECK(Tweaked != Baseline);  // the synced knob genuinely altered the simulation
+}
+#endif
+
 // ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
 static void TestLockstepExecuteCapBounded() {
     Outbox Qa, Qb;
@@ -438,6 +478,9 @@ int main() {
     TestFuzzDecode();
     TestResyncChunking();
     TestLockstepStaysInSync();
+#if LUR_INTERNAL
+    TestLockstepCvarSyncStaysIdentical();
+#endif
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
