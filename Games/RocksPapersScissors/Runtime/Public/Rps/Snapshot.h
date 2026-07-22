@@ -47,8 +47,12 @@ struct Snapshot {
 
     // Live per-type stats (#122): the sim's Cv-derived Units[] (cost/hp/speed/damage/build),
     // so the HUD's cost label, affordability, build bar, and health-bar scale track a tuned
-    // CVar instead of the compile-time UnitTable default.
-    UnitStats Units[UnitCount] = {};
+    // CVar instead of the compile-time UnitTable default. Defaulted to UnitTable (see the ctor)
+    // so a PRE-MATCH / unpublished snapshot still shows real costs, not zeros — a live match
+    // overwrites it from the latched (and synced) Sim::Units in CaptureFrom.
+    UnitStats Units[UnitCount];
+
+    Snapshot() { std::memcpy(Units, UnitTable, sizeof(Units)); }
 
     // For interpolation: when this tick was published (steady clock ns) and the sim
     // step duration. The render thread times alpha itself from these — the tick
