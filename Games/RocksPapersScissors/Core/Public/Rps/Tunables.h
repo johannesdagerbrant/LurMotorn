@@ -68,7 +68,7 @@ constexpr UnitStats UnitTable[UnitCount] = {
     {  50,   50,  45, F(5, 10),      7, F(2),       6, UnitPaper  }, // Scissor cutter
 };
 
-LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay, "Combat");   // attacker vs the type it beats
+LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay);   // attacker vs the type it beats
 constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
@@ -134,11 +134,11 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // weak separation let cohesion compress the blob into an unreadable mush). Strong push +
 // wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
 constexpr Fixed SeparationRadius = F(24, 10);      // same-team keep-apart range (a touch wider, 2026-07-20)
-LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3, 2), CVarFlagAffectsGameplay, "Flocking");      // > cohesion at contact — sets the spacing
+LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3, 2), CVarFlagAffectsGameplay);      // > cohesion at contact — sets the spacing
 // Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
 // fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
 constexpr Fixed EnemySeparationRadius = F(3, 2);
-LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFlagAffectsGameplay, "Flocking");
+LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFlagAffectsGameplay);
 // Two-tier cohesion (soldiers only) — THE readability mechanism. Toward the same-type
 // centroid (tight: papers blob with papers) plus a weaker pull toward the whole army's
 // warrior centroid (so type-blobs travel loosely together, not scattered).
@@ -152,43 +152,43 @@ LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFla
 // across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
 // lone spawn drifts toward its type over distance without the group compressing to mush.
 constexpr Fixed CohSameR = F(15);                  // same-type affinity radius (wide — find distant teammates)
-LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay, "Flocking");                //   weight (gentle — soft pull, not a hard clump)
+LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay);                //   weight (gentle — soft pull, not a hard clump)
 constexpr Fixed CohAllR = F(9);                    // cross-type army affinity radius (weak pull, below)
 // Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
 // pile onto each other — same-type globs are the readable unit; the whole-army pull is a
 // barely-there nudge so they don't scatter to opposite corners.
-LUR_CVAR(CvWCohAll, "rps.boid.w_coh_all", F(1, 64), CVarFlagAffectsGameplay, "Flocking");                //   weight (≪≪ WCohSame — barely noticeable)
-LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay, "Flocking");                      // goal-pursuit weight (unit direction)
+LUR_CVAR(CvWCohAll, "rps.boid.w_coh_all", F(1, 64), CVarFlagAffectsGameplay);                //   weight (≪≪ WCohSame — barely noticeable)
+LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay);                      // goal-pursuit weight (unit direction)
 // Predator flee (2026-07-20 playtest): a unit must NEVER steer toward the enemy type it
 // is weak against (the type that beats it). A repulsion from that predator, larger radius
 // than enemy separation, corrected falloff (strongest at contact). Chases prey, flees the
 // counter — so the RPS triangle plays out spatially, not just in the damage numbers.
 constexpr Fixed PredatorFleeR = F(7);
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 4), CVarFlagAffectsGameplay, "Flocking");           // subtle drift away (playtest 2026-07-20: nudged up a
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 4), CVarFlagAffectsGameplay);           // subtle drift away (playtest 2026-07-20: nudged up a
                                                    //   little); still < WSeek so hunting prey dominates
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
 // with a smoothstep fade; no floats, no libs). WNoise is its amplitude; NoiseTimeScale is
 // ticks→lattice (smaller = slower, smoother drift).
-LUR_CVAR(CvNoiseTimeScale, "rps.boid.noise_time_scale", F(1, 12), CVarFlagAffectsGameplay, "Flocking");         // ~1.2 s per noise lattice cell at 10 Hz
-LUR_CVAR(CvWNoise, "rps.boid.w_noise", F(2, 5), CVarFlagAffectsGameplay, "Flocking");                  // wander amplitude (world-units-ish of pull)
+LUR_CVAR(CvNoiseTimeScale, "rps.boid.noise_time_scale", F(1, 12), CVarFlagAffectsGameplay);         // ~1.2 s per noise lattice cell at 10 Hz
+LUR_CVAR(CvWNoise, "rps.boid.w_noise", F(2, 5), CVarFlagAffectsGameplay);                  // wander amplitude (world-units-ish of pull)
 // Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
 // last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
 // Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
 // Lava-lamp: slower turns (MaxAccel down) + more glide (Damp up) = the viscous feel.
 constexpr Fixed AlignR = F(5);                     // same-type alignment radius (< CohAllR gather)
-LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay, "Flocking");                  //   weight (match neighbour heading — laminar flow)
-LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", F(10, 100), CVarFlagAffectsGameplay, "Flocking");             // per-tick turn/accel clamp (gloopy, ≈0.7 s to reach Speed)
-LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay, "Flocking");           // carried-Δ retention in free flight (viscous glide)
-LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsGameplay, "Flocking");          // stronger decay when engaged — no orbiting the target
+LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay);                  //   weight (match neighbour heading — laminar flow)
+LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", F(10, 100), CVarFlagAffectsGameplay);             // per-tick turn/accel clamp (gloopy, ≈0.7 s to reach Speed)
+LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay);           // carried-Δ retention in free flight (viscous glide)
+LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsGameplay);          // stronger decay when engaged — no orbiting the target
 // Slice C (#98) — guard-lite INTERPOSE: an enemy soldier within GuardAlertR of one of MY
 // miners is a RAIDER. A defender that has BOTH a friendly cart and a flagged raider within
 // InterposeR steers to the point BETWEEN them — screening the cart (even from a predator it
 // wouldn't attack). Positioning, not targeting: it keeps raiders off the economy by body.
 constexpr Fixed GuardAlertR = F(6);                // raider = enemy soldier this close to a cart
 constexpr Fixed InterposeR = F(12);                // defender reacts to carts/raiders within this (< FlockGatherR)
-LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay, "Flocking");                 // pull toward the block point (≈ WSeek)
+LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay);                 // pull toward the block point (≈ WSeek)
 // The single flock GATHER radius = the LARGEST force radius. One widened neighbour walk
 // feeds every force (each re-tests its own smaller radius), so brute≡grid holds no matter
 // which force is the widest. MUST be ≥ every radius above — derived here so raising any

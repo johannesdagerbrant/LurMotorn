@@ -51,7 +51,6 @@ enum class ECVarOrigin : uint8_t { Game = 0, Engine = 1 };
 class ICVar {
 public:
     virtual const char* Name() const     = 0;
-    virtual const char* Category() const  = 0;
     // Optional one-line help shown by the console's per-CVar "i" button (empty = no tooltip,
     // the "i" renders greyed + inert). Declared via LUR_CVAR_T; plain LUR_CVAR leaves it "".
     virtual const char* Tooltip() const   = 0;
@@ -133,9 +132,9 @@ public:
     constexpr T Get() const noexcept { return Default_; }
     constexpr operator T() const noexcept { return Default_; }
 #else
-    CVar(const char* Name, T Default, uint32_t Flags = CVarFlagNone, const char* Category = "",
+    CVar(const char* Name, T Default, uint32_t Flags = CVarFlagNone,
          const char* Tooltip = nullptr, ECVarOrigin Origin = ECVarOrigin::Game)
-        : Default_(Default), Value_(Default), Name_(Name), Category_(Category),
+        : Default_(Default), Value_(Default), Name_(Name),
           Tooltip_(Tooltip), Flags_(Flags), Origin_(Origin) {}
 
     T Get() const noexcept {
@@ -146,7 +145,6 @@ public:
 
     // ---- ICVar (dev-only introspection / mutation for console, panel, cvars.cfg) ----
     const char* Name() const override { return Name_; }
-    const char* Category() const override { return Category_; }
     const char* Tooltip() const override { return Tooltip_ ? Tooltip_ : ""; }
     uint32_t    Flags() const override { return Flags_; }
     ECVarOrigin Origin() const override { return Origin_; }
@@ -181,7 +179,6 @@ private:
 #if !LUR_SHIPPING
     T           Value_;
     const char* Name_;
-    const char* Category_;
     const char* Tooltip_;
     uint32_t    Flags_;
     ECVarOrigin Origin_;
@@ -189,56 +186,58 @@ private:
 #endif
 };
 
-// CTAD: deduce CVar<T> from the default value, ignoring trailing (flags/category/origin)
+// CTAD: deduce CVar<T> from the default value, ignoring trailing (flags/tooltip/origin)
 // args — one guide covers both the shipping (2-arg) and dev (up to 5-arg) forms.
 template <class T, class... A>
 CVar(const char*, T, A...) -> CVar<T>;
 
 }  // namespace Lur::Core
 
-// LUR_CVAR(Var, "name", Default, Flags, "Category") — the ONE way to declare a CVar.
+// LUR_CVAR(Var, "name", Default, Flags) — the ONE way to declare a CVar. The dotted name IS
+// the hierarchy: the console groups cvars into a tree by splitting the name on '.' (so
+// "rps.boid.sep_strength" nests under rps -> boid), which is why there is no separate category.
 //   Dev:      inline mutable CVar + a separate registrar static (so the console/panel/
 //             cvars.cfg can find it by name) + a compile-time float-gameplay ban.
-//   Shipping: JUST the constant-initialized value (flags/category/registrar vanish),
-//             satisfying §1.1's structural condition for the zero-overhead fold.
+//   Shipping: JUST the constant-initialized value (flags/registrar vanish), satisfying §1.1's
+//             structural condition for the zero-overhead fold.
 // The macro has no trailing ';' — call sites write `LUR_CVAR(...);`.
 #if LUR_SHIPPING
-    #define LUR_CVAR(Var, Name, Default, Flags, Category) \
+    #define LUR_CVAR(Var, Name, Default, Flags) \
         inline constexpr ::Lur::Core::CVar Var { Name, Default }
 #else
-    #define LUR_CVAR(Var, Name, Default, Flags, Category)                                   \
+    #define LUR_CVAR(Var, Name, Default, Flags)                                             \
         static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&       \
                         (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),           \
                       "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category };                   \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags) };                             \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
 
 // LUR_CVAR_T — as LUR_CVAR, plus an optional one-line Tooltip shown by the console's per-CVar
 // "i" button. Shipping drops the tooltip (dev-only string) exactly like the other dev args.
 #if LUR_SHIPPING
-    #define LUR_CVAR_T(Var, Name, Default, Flags, Category, Tooltip) \
+    #define LUR_CVAR_T(Var, Name, Default, Flags, Tooltip) \
         inline constexpr ::Lur::Core::CVar Var { Name, Default }
 #else
-    #define LUR_CVAR_T(Var, Name, Default, Flags, Category, Tooltip)                         \
+    #define LUR_CVAR_T(Var, Name, Default, Flags, Tooltip)                                   \
         static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&        \
                         (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),            \
                       "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category, (Tooltip) };         \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), (Tooltip) };                   \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
 
 // LUR_CVAR_ENGINE — identical, but tags the CVar as engine-origin for the panel's
 // Engine/Game split (Addendum D.3). Only engine modules use it; games use LUR_CVAR.
 #if LUR_SHIPPING
-    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags, Category) \
+    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags) \
         inline constexpr ::Lur::Core::CVar Var { Name, Default }
 #else
-    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags, Category)                            \
+    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags)                                      \
         static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&       \
                         (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),           \
                       "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category, nullptr,            \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), nullptr,                      \
                                        ::Lur::Core::ECVarOrigin::Engine };                   \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif

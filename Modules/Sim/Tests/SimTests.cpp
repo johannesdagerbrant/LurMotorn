@@ -77,8 +77,7 @@ static void TestFixedString() {
 // CVar<Fixed>: a Sim-typed CVar parses/formats via the Fixed overload through ICVar.
 // Default 0.5 (= One/2, an EXACT Q16.16 value) so ValueString is unambiguous — unlike
 // Rps::F(6,10) which truncates to raw 39321 (0.59999), a real gotcha the codec exposes.
-LUR_CVAR(CvTestSpeed, "test.speed", Fixed{Fixed::One / 2}, ::Lur::Core::CVarFlagAffectsGameplay,
-         "Test");
+LUR_CVAR(CvTestSpeed, "test.speed", Fixed{Fixed::One / 2}, ::Lur::Core::CVarFlagAffectsGameplay);
 
 static void TestCVarFixed() {
     CHECK(CvTestSpeed.Get() == Fixed{Fixed::One / 2});

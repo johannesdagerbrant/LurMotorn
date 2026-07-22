@@ -293,14 +293,19 @@ void GameView::RefreshSelector() {
 
 #if !LUR_SHIPPING
 namespace {
-// Every AffectsGameplay cvar as (category-path, cvar) pairs, SORTED by name — the input to the
-// hierarchical category tree (#121). The category string may be |-nested ("Units|Rock"); the
-// tree splits it. Name-sorted input means each tree node's leaves come out name-sorted
-// (BuildCategoryTree preserves leaf order), so the layout is stable frame to frame.
+// Every AffectsGameplay cvar as (parent-path, cvar) pairs, SORTED by name — the input to the
+// hierarchical tree (#121). The DOTTED NAME is the hierarchy: the parent path is the name up to
+// the last '.', so "rps.boid.sep_strength" nests under rps -> boid and the row shows only
+// "sep_strength" (the leaf, after the last dot). There is no separate category. Name-sorted
+// input means each node's leaves come out name-sorted (BuildCategoryTree preserves leaf order),
+// so the layout is stable frame to frame.
 std::vector<std::pair<std::string, Lur::Core::ICVar*>> GatherGameplayCvars() {
     std::vector<std::pair<std::string, Lur::Core::ICVar*>> Items;
     Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-        if (C->AffectsGameplay()) Items.emplace_back(C->Category(), C);
+        if (!C->AffectsGameplay()) return;
+        const std::string Name = C->Name();
+        const auto Dot = Name.rfind('.');
+        Items.emplace_back(Dot == std::string::npos ? std::string{} : Name.substr(0, Dot), C);
     });
     std::sort(Items.begin(), Items.end(), [](const auto& A, const auto& B) {
         return std::strcmp(A.second->Name(), B.second->Name()) < 0;
@@ -736,7 +741,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float LineH = 20.0f * HS, CatH = 22.0f * HS, TitleH = 26.0f * HS;
         const float IndentW = 12.0f * HS;  // per depth level
 
-        auto Root = Lur::DevGui::BuildCategoryTree(GatherGameplayCvars());
+        // Split on '.' — the dotted cvar name IS the category hierarchy (#121).
+        auto Root = Lur::DevGui::BuildCategoryTree(GatherGameplayCvars(), '.');
         const int Count = Root.TotalLeaves;
 
         // Fixed panel viewport (the content scrolls inside it, #121). Height is the screen, not
@@ -825,6 +831,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float NumAnchorY = RowScreenY(SelectedCvar_, HeightPx * 0.45f);
         const float NumY = Lur::DevGui::PlaceBelowOrAbove(NumAnchorY, LineH, NumH + 10.0f * HS,
                                                           NumGap, HeightPx) + 5.0f * HS;
+        // Cancel: a small 4th button just right of the top row (1 2 3 -> x) that closes the
+        // numpad WITHOUT committing a value. Hit-tested before the grid.
+        const float NumKeyH = (NumH - NumGap * 3.0f) / 4.0f;
+        const float CancelS = NumKeyH * 0.62f;
+        const float CancelX = NumX + NumW + 6.0f * HS;
+        const float CancelY = NumY + (NumKeyH - CancelS) * 0.5f;
+        if (TapPending && !TapUsed && NumpadOpen_ && TapX >= CancelX && TapX <= CancelX + CancelS &&
+            TapY >= CancelY && TapY <= CancelY + CancelS) {
+            Numpad_.Clear(); NumpadOpen_ = false; TapUsed = true;  // discard, no write
+        }
         if (TapPending && !TapUsed && NumpadOpen_ &&
             Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
             TapUsed = true;
@@ -902,7 +918,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                       HasTip ? Accent : DimInk, Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
             if (Selected)
                 Blit(DevAccentMat, IndentX + 2.0f * HS, Sy + LineH * 0.5f, 3.0f * HS, LineH - 5.0f * HS);
-            Text.Draw(Renderer, C->Name(), NameX, Sy, NameW, LineH, 12.5f * HS,
+            // Row label = the leaf name only (after the last '.'); the parents live in the tree.
+            const char* Dot = std::strrchr(C->Name(), '.');
+            const char* Label = Dot ? Dot + 1 : C->Name();
+            Text.Draw(Renderer, Label, NameX, Sy, NameW, LineH, 12.5f * HS,
                       Selected ? Accent : Ink, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
             Blit(DevKeyMat, ValX + ValW * 0.5f, Sy + LineH * 0.5f, ValW, LineH - 4.0f * HS);
             char VS[64];
@@ -939,6 +958,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                               Ent ? Lur::Render::Color{0.04f, 0.07f, 0.07f, 1.0f} : Ink,
                               Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
                 }
+            // Cancel "x" — small, right of the top row; dismisses without writing.
+            const Lur::Render::Color Warn{0.94f, 0.52f, 0.46f, 1.0f};
+            Blit(DevKeyMat, CancelX + CancelS * 0.5f, CancelY + CancelS * 0.5f, CancelS, CancelS);
+            Text.Draw(Renderer, "x", CancelX, CancelY, CancelS, CancelS, 12.0f * HS, Warn,
+                      Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
         }
 
         // The tooltip toaster — a panel + the cvar's help text, anchored below/above its row.

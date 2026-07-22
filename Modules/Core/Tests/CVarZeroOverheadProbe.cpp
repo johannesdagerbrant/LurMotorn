@@ -11,7 +11,7 @@
 #include "Lur/Core/CVar.h"
 
 #ifdef USE_CVAR
-LUR_CVAR(CvTune, "probe.tune", 42, 0, "");
+LUR_CVAR(CvTune, "probe.tune", 42, 0);
 static inline int Tune() { return CvTune.Get(); }
 #else
 static constexpr int Tune() { return 42; }

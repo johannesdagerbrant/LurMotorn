@@ -21,9 +21,9 @@ static int GFailures = 0;
 
 // Test fixtures: a local int CVar, a gameplay Fixed CVar, and a dev-command that counts
 // its invocations via its context pointer.
-LUR_CVAR(CvConMax, "con.max", 10, ::Lur::Core::CVarFlagNone, "Test");
+LUR_CVAR(CvConMax, "con.max", 10, ::Lur::Core::CVarFlagNone);
 LUR_CVAR(CvConSpeed, "con.speed", ::Lur::Sim::Fixed{::Lur::Sim::Fixed::One / 2},
-         ::Lur::Core::CVarFlagAffectsGameplay, "Test");
+         ::Lur::Core::CVarFlagAffectsGameplay);
 
 static int GCmdRuns = 0;
 static std::string GCmdLastArg;
