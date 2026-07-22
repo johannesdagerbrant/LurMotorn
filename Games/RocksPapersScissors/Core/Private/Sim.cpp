@@ -110,7 +110,7 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
     S.PosY[I] = Sim::CampY(Team) + RingY[Slot];
     S.PrevX[I] = S.PosX[I];
     S.PrevY[I] = S.PosY[I];
-    S.Hp[I] = UnitTable[Type].MaxHp;
+    S.Hp[I] = S.Units[Type].MaxHp;
     S.Type[I] = Type;
     S.Team[I] = Team;
     S.Target[I] = -1;
@@ -156,7 +156,7 @@ void BuildMap(Sim& S) {
 // ---- Phase 0: apply this tick's inputs (caller passes P0 then P1) ----
 void TryEnqueue(Sim& S, uint8_t Team, uint8_t Type) {
     TeamState& T = S.Teams[Team];
-    const int32_t Cost = UnitTable[Type].Cost;
+    const int32_t Cost = S.Units[Type].Cost;
     // Queue at cap or too poor -> the press is DETERMINISTICALLY ignored (a silent
     // no-op is correct here, distinct from an assert-worthy error). No partial
     // reservation: gold is spent only on a successful enqueue.
@@ -183,9 +183,9 @@ void Production(Sim& S) {
         TeamState& Q = S.Teams[T];
         for (uint8_t Ty = 0; Ty < UnitCount; ++Ty) {
             if (Q.QueueCount[Ty] == 0) { Q.BuildProgress[Ty] = 0; continue; }
-            Q.BuildProgress[Ty] += Q.QueueCount[Ty];
-            while (Q.QueueCount[Ty] > 0 && Q.BuildProgress[Ty] >= UnitTable[Ty].BuildTicks) {
-                Q.BuildProgress[Ty] -= UnitTable[Ty].BuildTicks;
+            Q.BuildProgress[Ty] += Q.QueueCount[Ty] * S.Cv.QueueMult;
+            while (Q.QueueCount[Ty] > 0 && Q.BuildProgress[Ty] >= S.Units[Ty].BuildTicks) {
+                Q.BuildProgress[Ty] -= S.Units[Ty].BuildTicks;
                 --Q.QueueCount[Ty];
                 SpawnUnit(S, T, Ty);
             }
@@ -397,14 +397,14 @@ void MoveToward(Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
     const Fixed Dy = Ty - S.PosY[I];
     const Fixed M = Max(Abs(Dx), Abs(Dy));
     if (M.Raw == 0) return;  // already there (or overlapping) — zero-distance guard
-    const Fixed Sp = UnitTable[S.Type[I]].Speed;
+    const Fixed Sp = S.Units[S.Type[I]].Speed;
     if (M <= Sp) { S.PosX[I] = Tx; S.PosY[I] = Ty; return; }  // arrive, don't overshoot
     S.PosX[I] = S.PosX[I] + Sp * Dx / M;
     S.PosY[I] = S.PosY[I] + Sp * Dy / M;
 }
 bool Arrived(const Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
     const Fixed M = Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I]));
-    return M <= UnitTable[S.Type[I]].Speed;
+    return M <= S.Units[S.Type[I]].Speed;
 }
 void WorkerSeek(Sim& S, int32_t I) {
     switch (S.WorkerState[I]) {
@@ -436,7 +436,7 @@ void WorkerSeek(Sim& S, int32_t I) {
             // no snap onto the deposit; with the mine repulsion the carts ring it.
             if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= MineDigRange) {
                 S.WorkerState[I] = WorkDig;
-                S.WorkerTimer[I] = DigTicks;
+                S.WorkerTimer[I] = S.Cv.DigTicks;
                 return;
             }
             MoveToward(S, I, Tx, Ty);
@@ -690,11 +690,11 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
         const int64_t Damp = (InRange ? S.Cv.InRangeDamping : S.Cv.FlockDamping).Raw;
         int64_t Stepx = (Damp * DeltaX >> Fixed::FracBits) + Ax;
         int64_t Stepy = (Damp * DeltaY >> Fixed::FracBits) + Ay;
-        ChebClamp(Stepx, Stepy, UnitTable[S.Type[I]].Speed.Raw);
-        LUR_ASSERT_MSG((Stepx <= UnitTable[S.Type[I]].Speed.Raw) &&
-                       (-Stepx <= UnitTable[S.Type[I]].Speed.Raw) &&
-                       (Stepy <= UnitTable[S.Type[I]].Speed.Raw) &&
-                       (-Stepy <= UnitTable[S.Type[I]].Speed.Raw),
+        ChebClamp(Stepx, Stepy, S.Units[S.Type[I]].Speed.Raw);
+        LUR_ASSERT_MSG((Stepx <= S.Units[S.Type[I]].Speed.Raw) &&
+                       (-Stepx <= S.Units[S.Type[I]].Speed.Raw) &&
+                       (Stepy <= S.Units[S.Type[I]].Speed.Raw) &&
+                       (-Stepy <= S.Units[S.Type[I]].Speed.Raw),
                        "RPS: soldier step exceeds Speed after clamp (#97 invariant)");
         StepX[I] = Fixed{static_cast<int32_t>(Stepx)};
         StepY[I] = Fixed{static_cast<int32_t>(Stepy)};
@@ -728,7 +728,7 @@ void Attacks(Sim& S) {
         const int32_t T = S.Target[I];
         if (T < 0 || !S.IsAlive(T)) continue;
         if (Dist2(S.PosX[I], S.PosY[I], S.PosX[T], S.PosY[T]) > RangeSq(UnitTable[S.Type[I]].Range)) continue;
-        int32_t D = UnitTable[S.Type[I]].Attack;
+        int32_t D = S.Units[S.Type[I]].Attack;
         if (UnitTable[S.Type[I]].Beats == S.Type[T]) D *= S.Cv.CounterMultiplier;
         Dmg[T] += D;
         S.Cooldown[I] = UnitTable[S.Type[I]].Cooldown;
@@ -760,6 +760,25 @@ void WinCheck(Sim& S) {
 
 }  // namespace
 
+void Sim::DeriveUnits() {
+    // Start from the compile-time table (keeps Range/Cooldown/Beats), then overlay the five
+    // tunable fields from the latched Cv. Defaults equal the table, so StateHash is unchanged
+    // until a value is edited.
+    for (int Ty = 0; Ty < UnitCount; ++Ty) Units[Ty] = UnitTable[Ty];
+    Units[UnitMiner].Cost = Cv.MinerCost; Units[UnitMiner].MaxHp = Cv.MinerHp;
+    Units[UnitMiner].Speed = Cv.MinerSpeed; Units[UnitMiner].Attack = Cv.MinerDamage;
+    Units[UnitMiner].BuildTicks = Cv.MinerBuild;
+    Units[UnitRock].Cost = Cv.RockCost; Units[UnitRock].MaxHp = Cv.RockHp;
+    Units[UnitRock].Speed = Cv.RockSpeed; Units[UnitRock].Attack = Cv.RockDamage;
+    Units[UnitRock].BuildTicks = Cv.RockBuild;
+    Units[UnitPaper].Cost = Cv.PaperCost; Units[UnitPaper].MaxHp = Cv.PaperHp;
+    Units[UnitPaper].Speed = Cv.PaperSpeed; Units[UnitPaper].Attack = Cv.PaperDamage;
+    Units[UnitPaper].BuildTicks = Cv.PaperBuild;
+    Units[UnitScissor].Cost = Cv.ScissorCost; Units[UnitScissor].MaxHp = Cv.ScissorHp;
+    Units[UnitScissor].Speed = Cv.ScissorSpeed; Units[UnitScissor].Attack = Cv.ScissorDamage;
+    Units[UnitScissor].BuildTicks = Cv.ScissorBuild;
+}
+
 void Sim::Init(uint64_t InSeed) {
 #if !LUR_SHIPPING
     Lur::Core::CVarEnterMain();  // Init always runs post-main; arm the no-read-before-main guard (dev-only)
@@ -771,6 +790,7 @@ void Sim::Init(uint64_t InSeed) {
     // Sim state — constant within a tick and mutated ONLY at tick boundaries by synced
     // overrides (LockstepPeer), so two peers in one process hold independent Cv. Hashed.
     Cv = LatchCvs();
+    DeriveUnits();  // #122: fill Units[] from the just-latched Cv before anything spawns
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
         Teams[T].Gold = StartGold;
@@ -786,6 +806,7 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     // Exception: solo/desktop live tuning (#115) opts into re-latching from the globals so
     // a `--tune` edit moves the running sim — no peer means no desync risk.
     if (LiveCvLatch) Cv = LatchCvs();
+    DeriveUnits();  // #122: reflect this tick's Cv (Init latch, live-tune, or a synced override)
 
     // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
     // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's
@@ -832,7 +853,7 @@ void Sim::StressFill(int32_t PerTeam) {
             PosY[I] = F(Y0 + static_cast<int32_t>(R.NextBounded(static_cast<uint32_t>(Hi / 2 - 4))));
             PrevX[I] = PosX[I];
             PrevY[I] = PosY[I];
-            Hp[I] = UnitTable[Ty].MaxHp;
+            Hp[I] = Units[Ty].MaxHp;
             Type[I] = Ty;
             Team[I] = T;
             Target[I] = -1;

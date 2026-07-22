@@ -71,11 +71,44 @@ constexpr UnitStats UnitTable[UnitCount] = {
 LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay);   // attacker vs the type it beats
 constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
+// ---- Per-type unit stats as gameplay CVars (#122). The dotted name IS the console-tree
+// hierarchy: rps.unit.<type>.{cost,hp,speed,damage,build_time}. Defaults EQUAL UnitTable
+// above, so StateHash is unchanged until a value is edited. Cost/Hp/Damage/BuildTime are int,
+// Speed is Fixed. Range/Cooldown and the RPS Beats relation stay compile-time in UnitTable
+// (Beats is wire/order-load-bearing, not a number to twiddle). The Sim latches these into
+// Sim::Units[] (DeriveUnits) each tick. ----
+LUR_CVAR_T(CvMinerCost,      "rps.unit.miner.cost",      30,       CVarFlagAffectsGameplay, "Gold to queue a miner cart");
+LUR_CVAR_T(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
+LUR_CVAR_T(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
+LUR_CVAR_T(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
+LUR_CVAR_T(CvMinerBuild,     "rps.unit.miner.build_time",30,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
+LUR_CVAR_T(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
+LUR_CVAR_T(CvRockHp,         "rps.unit.rock.hp",         60,       CVarFlagAffectsGameplay, "Rock hit points");
+LUR_CVAR_T(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
+LUR_CVAR_T(CvRockDamage,     "rps.unit.rock.damage",     8,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
+LUR_CVAR_T(CvRockBuild,      "rps.unit.rock.build_time", 50,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
+LUR_CVAR_T(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
+LUR_CVAR_T(CvPaperHp,        "rps.unit.paper.hp",        90,       CVarFlagAffectsGameplay, "Paper hit points");
+LUR_CVAR_T(CvPaperSpeed,     "rps.unit.paper.speed",     F(5, 10), CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR_T(CvPaperDamage,    "rps.unit.paper.damage",    9,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
+LUR_CVAR_T(CvPaperBuild,     "rps.unit.paper.build_time",50,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
+LUR_CVAR_T(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
+LUR_CVAR_T(CvScissorHp,      "rps.unit.scissor.hp",      45,       CVarFlagAffectsGameplay, "Scissor hit points");
+LUR_CVAR_T(CvScissorSpeed,   "rps.unit.scissor.speed",   F(5, 10), CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
+LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  7,        CVarFlagAffectsGameplay, "Scissor attack damage per hit");
+LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",50,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
+// Production stack-acceleration: each tick a queue advances by QueueCount x this (the pacing
+// thesis, #84 — deep stacks snowball). Default 1 = today's "progress += count".
+LUR_CVAR_T(CvQueueMult,      "rps.production.queue_mult", 1,       CVarFlagAffectsGameplay, "Build speedup per queued unit (stack accel)");
+
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
 // "room around it" proxy; separation steering spreads the diggers into a ring.
 constexpr int32_t WorkersPerMine = 6;
-constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry
+constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry (default for the CVar below)
+// How fast a cart gathers (#122): ticks to fill one carry. Lower = faster mining. Default =
+// the constant above, so the economy is unchanged until edited.
+LUR_CVAR_T(CvDigTicks, "rps.economy.dig_ticks", DigTicks, CVarFlagAffectsGameplay, "Ticks a cart digs to fill a carry (lower = faster)");
 constexpr int32_t CarryCapacity = 15;      // gold per round trip
 constexpr int32_t StartGold = 60;
 constexpr int32_t StartMiners = 3;
@@ -274,7 +307,29 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     FX(FlockDamping,            CvFlockDamping)            \
     FX(InRangeDamping,          CvInRangeDamping)          \
     FX(NoiseTimeScale,          CvNoiseTimeScale)          \
-    IX(CounterMultiplier,       CvCounterMultiplier)
+    IX(CounterMultiplier,       CvCounterMultiplier)       \
+    IX(MinerCost,               CvMinerCost)               \
+    IX(MinerHp,                 CvMinerHp)                 \
+    FX(MinerSpeed,              CvMinerSpeed)              \
+    IX(MinerDamage,             CvMinerDamage)             \
+    IX(MinerBuild,              CvMinerBuild)              \
+    IX(RockCost,                CvRockCost)                \
+    IX(RockHp,                  CvRockHp)                  \
+    FX(RockSpeed,               CvRockSpeed)               \
+    IX(RockDamage,              CvRockDamage)              \
+    IX(RockBuild,               CvRockBuild)               \
+    IX(PaperCost,               CvPaperCost)               \
+    IX(PaperHp,                 CvPaperHp)                 \
+    FX(PaperSpeed,              CvPaperSpeed)              \
+    IX(PaperDamage,             CvPaperDamage)             \
+    IX(PaperBuild,              CvPaperBuild)              \
+    IX(ScissorCost,             CvScissorCost)             \
+    IX(ScissorHp,               CvScissorHp)               \
+    FX(ScissorSpeed,            CvScissorSpeed)            \
+    IX(ScissorDamage,           CvScissorDamage)           \
+    IX(ScissorBuild,            CvScissorBuild)            \
+    IX(QueueMult,               CvQueueMult)               \
+    IX(DigTicks,                CvDigTicks)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries

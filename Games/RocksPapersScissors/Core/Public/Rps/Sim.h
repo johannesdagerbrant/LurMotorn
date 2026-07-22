@@ -67,6 +67,14 @@ struct Sim {
     // mis-apply/mis-sync is an immediate desync alarm. POD -> Sim stays trivially copyable.
     CvSnapshot Cv{};
 
+    // ---- Derived from Cv (NOT hashed): per-type stats with the tunable fields
+    //      (cost/hp/speed/damage/build_time) taken from the unit CVars and the rest
+    //      (range/cooldown/beats) from UnitTable. Rebuilt by DeriveUnits() whenever Cv
+    //      (re)latches — at Init and each Step — so the hot loops read a struct array, not a
+    //      per-read CVar lookup. Deterministic (a pure function of the hashed Cv), so leaving
+    //      it out of StateHash is safe: both peers derive identical values. ----
+    UnitStats Units[UnitCount] = {};
+
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
     int32_t DepositBuf[2] = {};           // worker deposits buffered in Movement, applied in Economy
 
@@ -90,6 +98,7 @@ struct Sim {
     // ---- API ----
     void Init(uint64_t Seed);
     void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order
+    void DeriveUnits();                        // refresh Units[] from Cv (#122); call after any Cv (re)latch
     uint64_t StateHash() const;                // FNV-1a over pinned state (design §5)
 
 #if LUR_INTERNAL
