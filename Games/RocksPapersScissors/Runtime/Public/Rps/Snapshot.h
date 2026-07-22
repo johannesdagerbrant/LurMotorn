@@ -45,6 +45,11 @@ struct Snapshot {
     int32_t  BuildProgress[2][UnitCount] = {};  // 0..BuildTicks; rate = QueueCount x base
     int32_t  AliveCount[2] = {};
 
+    // Live per-type stats (#122): the sim's Cv-derived Units[] (cost/hp/speed/damage/build),
+    // so the HUD's cost label, affordability, build bar, and health-bar scale track a tuned
+    // CVar instead of the compile-time UnitTable default.
+    UnitStats Units[UnitCount] = {};
+
     // For interpolation: when this tick was published (steady clock ns) and the sim
     // step duration. The render thread times alpha itself from these — the tick
     // thread never exposes its accumulator.
@@ -77,6 +82,7 @@ struct Snapshot {
             }
             AliveCount[T] = S.AliveCount(static_cast<uint8_t>(T));
         }
+        std::memcpy(Units, S.Units, sizeof(Units));  // #122: live per-type stats for the HUD
         PublishNs = InPublishNs;
         StepNs = InStepNs;
     }

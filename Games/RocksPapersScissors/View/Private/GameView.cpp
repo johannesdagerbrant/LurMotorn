@@ -462,7 +462,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // path — a second instanced draw is a later refinement.
     for (int32_t I = 0; I < Snap.Count; ++I) {
         if (!Snap.IsAlive(I)) continue;
-        const int32_t MaxHp = UnitTable[Snap.Type[I]].MaxHp;
+        const int32_t MaxHp = Snap.Units[Snap.Type[I]].MaxHp;
         if (Snap.Hp[I] <= 0 || Snap.Hp[I] >= MaxHp) continue;
         const float Sx = SX(FW(Snap.PrevX[I]) + (FW(Snap.PosX[I]) - FW(Snap.PrevX[I])) * Alpha);
         const float Sy = SY(FW(Snap.PrevY[I]) + (FW(Snap.PosY[I]) - FW(Snap.PrevY[I])) * Alpha);
@@ -574,7 +574,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float X = Ty == 0 ? Pad : TrioX + static_cast<float>(Ty - 1) * (PlateW + Gap);
         PlateRect[Ty][0] = X; PlateRect[Ty][1] = PlateY;
         PlateRect[Ty][2] = PlateW; PlateRect[Ty][3] = PlateH2;
-        const bool Afford = Snap.Gold[My] >= UnitTable[Ty].Cost;
+        const bool Afford = Snap.Gold[My] >= Snap.Units[Ty].Cost;
         Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
              PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
@@ -583,7 +583,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         BlitGlyph(Ty, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
                   X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
         BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
-        std::snprintf(Buf, sizeof(Buf), "%d", UnitTable[Ty].Cost);
+        std::snprintf(Buf, sizeof(Buf), "%d", Snap.Units[Ty].Cost);
         Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
                   13.0f * HS, Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
         const int32_t QN = Snap.QueueCount[My][Ty];
@@ -598,7 +598,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(BarBg, X + PlateW * 0.5f, PlateY + PlateH2 - 7.0f * HS, BarW, 5.0f * HS);
         if (QN > 0) {
             float Frac = static_cast<float>(Snap.BuildProgress[My][Ty]) /
-                         static_cast<float>(UnitTable[Ty].BuildTicks);
+                         static_cast<float>(Snap.Units[Ty].BuildTicks);
             if (Frac > 1.0f) Frac = 1.0f;
             const float Bw = BarW * Frac;
             if (Bw > 0.5f)
