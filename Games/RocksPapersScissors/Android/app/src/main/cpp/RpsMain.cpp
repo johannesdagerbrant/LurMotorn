@@ -108,6 +108,7 @@ void OnCvarCommit(void* Ctx, Lur::Core::ICVar& Cv) {
     const int Id = Rps::GameplayIdForName(Cv.Name());
     if (Id >= 0) S->Lp.QueueGameplayCvar(static_cast<uint8_t>(Id), Cv.RawValue(), Ms);
     Lur::Core::SaveCVarConfig(S->CvarsPath.c_str());
+    Rps::DeriveUnitStats(Rps::LatchCvs(), S->Snap.Units);  // reflect the edit in the pre-match HUD
 }
 #endif
 
@@ -247,6 +248,12 @@ void android_main(android_app* App) {
 #if LUR_INTERNAL
     if (const int N = Lur::Core::LoadCVarConfig(State.CvarsPath.c_str()); N > 0)
         LOGI("loaded %d persisted cvar override(s) from %s", N, State.CvarsPath.c_str());
+    // The persisted overrides are now in the globals; arm the read guard and seed the
+    // pre-match HUD stats from them (before any match Init latches), so the plates show the
+    // loaded/tuned costs instead of the compile-time defaults. A live match overwrites
+    // Snap.Units from the synced sim each tick; OnCvarCommit refreshes this pre-match copy.
+    Lur::Core::CVarEnterMain();
+    Rps::DeriveUnitStats(Rps::LatchCvs(), State.Snap.Units);
     State.View.SetCvCommitHook(&OnCvarCommit, &State);
 #endif
 

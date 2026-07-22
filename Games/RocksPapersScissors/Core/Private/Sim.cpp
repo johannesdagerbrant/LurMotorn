@@ -776,22 +776,7 @@ void WinCheck(Sim& S) {
 }  // namespace
 
 void Sim::DeriveUnits() {
-    // Start from the compile-time table (keeps Range/Cooldown/Beats), then overlay the five
-    // tunable fields from the latched Cv. Defaults equal the table, so StateHash is unchanged
-    // until a value is edited.
-    for (int Ty = 0; Ty < UnitCount; ++Ty) Units[Ty] = UnitTable[Ty];
-    Units[UnitMiner].Cost = Cv.MinerCost; Units[UnitMiner].MaxHp = Cv.MinerHp;
-    Units[UnitMiner].Speed = Cv.MinerSpeed; Units[UnitMiner].Attack = Cv.MinerDamage;
-    Units[UnitMiner].BuildTicks = Cv.MinerBuild;
-    Units[UnitRock].Cost = Cv.RockCost; Units[UnitRock].MaxHp = Cv.RockHp;
-    Units[UnitRock].Speed = Cv.RockSpeed; Units[UnitRock].Attack = Cv.RockDamage;
-    Units[UnitRock].BuildTicks = Cv.RockBuild;
-    Units[UnitPaper].Cost = Cv.PaperCost; Units[UnitPaper].MaxHp = Cv.PaperHp;
-    Units[UnitPaper].Speed = Cv.PaperSpeed; Units[UnitPaper].Attack = Cv.PaperDamage;
-    Units[UnitPaper].BuildTicks = Cv.PaperBuild;
-    Units[UnitScissor].Cost = Cv.ScissorCost; Units[UnitScissor].MaxHp = Cv.ScissorHp;
-    Units[UnitScissor].Speed = Cv.ScissorSpeed; Units[UnitScissor].Attack = Cv.ScissorDamage;
-    Units[UnitScissor].BuildTicks = Cv.ScissorBuild;
+    DeriveUnitStats(Cv, Units);  // #122: per-type stats from the latched Cv (shared with the HUD)
     // #123: the flock gather radius = max of every radius tested in the soldier gather, so the
     // grid neighbour box always covers brute's reach (grid==brute) whatever the radii are set to.
     GatherR = Max(Max(Max(Cv.SepRadius, Cv.EnemySepRadius), Max(Cv.CohSameRadius, Cv.CohAllRadius)),

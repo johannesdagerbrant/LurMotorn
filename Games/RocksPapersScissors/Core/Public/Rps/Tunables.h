@@ -367,6 +367,26 @@ inline CvSnapshot LatchCvs() {
     return S;
 }
 
+// Derive the per-type UnitStats the sim + HUD read from a latched snapshot: the compile-time
+// table for the fixed fields (range/cooldown/beats), overlaid with the tunable CVars (#122).
+// Shared by Sim::DeriveUnits (from the sim's latched Cv) and the pre-match HUD (straight from
+// LatchCvs()), so the two can never disagree.
+inline void DeriveUnitStats(const CvSnapshot& Cv, UnitStats Out[UnitCount]) {
+    for (int Ty = 0; Ty < UnitCount; ++Ty) Out[Ty] = UnitTable[Ty];
+    Out[UnitMiner].Cost = Cv.MinerCost;   Out[UnitMiner].MaxHp = Cv.MinerHp;
+    Out[UnitMiner].Speed = Cv.MinerSpeed; Out[UnitMiner].Attack = Cv.MinerDamage;
+    Out[UnitMiner].BuildTicks = Cv.MinerBuild;
+    Out[UnitRock].Cost = Cv.RockCost;     Out[UnitRock].MaxHp = Cv.RockHp;
+    Out[UnitRock].Speed = Cv.RockSpeed;   Out[UnitRock].Attack = Cv.RockDamage;
+    Out[UnitRock].BuildTicks = Cv.RockBuild;
+    Out[UnitPaper].Cost = Cv.PaperCost;   Out[UnitPaper].MaxHp = Cv.PaperHp;
+    Out[UnitPaper].Speed = Cv.PaperSpeed; Out[UnitPaper].Attack = Cv.PaperDamage;
+    Out[UnitPaper].BuildTicks = Cv.PaperBuild;
+    Out[UnitScissor].Cost = Cv.ScissorCost;   Out[UnitScissor].MaxHp = Cv.ScissorHp;
+    Out[UnitScissor].Speed = Cv.ScissorSpeed; Out[UnitScissor].Attack = Cv.ScissorDamage;
+    Out[UnitScissor].BuildTicks = Cv.ScissorBuild;
+}
+
 // 1-byte within-build wire id per gameplay CVar (Addendum C.0.1). Declaration order here;
 // the build-fingerprint gate makes both peers agree (same build -> same list).
 enum ECvId : uint8_t {
