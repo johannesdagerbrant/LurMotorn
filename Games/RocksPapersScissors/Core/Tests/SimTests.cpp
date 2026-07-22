@@ -438,13 +438,13 @@ static void TestStressTickBudget() {
     for (int I = 0; I < Ticks; ++I) S.Step(0, 0);
     const auto T1 = std::chrono::steady_clock::now();
     const double Ms = std::chrono::duration<double, std::milli>(T1 - T0).count();
-    // The flock GATHER is the hot phase (plan §6): each unit visits a cell box sized by
-    // FlockGatherR (the largest force radius). Log it — this is the knob to watch on device.
-    const int32_t CellK = (FlockGatherR.ToInt() + GridCellSize) / GridCellSize;  // ceil-ish half-width
+    // The flock GATHER is the hot phase (plan §6): each unit visits a cell box sized by the
+    // runtime gather radius (#123: Sim::GatherR = max force radius). Log it — the device knob.
+    const int32_t CellK = (S.GatherR.ToInt() + GridCellSize) / GridCellSize;  // ceil-ish half-width
     const int32_t Box = 2 * CellK + 1;
     std::printf("  stress: %d units, %.3f ms/tick over %d ticks (10 Hz budget = 100 ms); "
-                "flock gather = %dx%d cells/unit (FlockGatherR=%d, GridCellSize=%d)\n",
-                S.Count, Ms / Ticks, Ticks, Box, Box, FlockGatherR.ToInt(), GridCellSize);
+                "flock gather = %dx%d cells/unit (GatherR=%d, GridCellSize=%d)\n",
+                S.Count, Ms / Ticks, Ticks, Box, Box, S.GatherR.ToInt(), GridCellSize);
     CHECK(S.Count > 0);
 }
 #endif

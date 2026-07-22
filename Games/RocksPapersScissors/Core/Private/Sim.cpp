@@ -496,7 +496,7 @@ void AddCohesion(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R,
 // AlignR (position range). Reads Δ — valid ONLY before the tick's bulk Prev=Pos copy.
 void AddAlignment(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
     const Fixed Ox = S.PosX[I] - S.PosX[J], Oy = S.PosY[I] - S.PosY[J];
-    if (Max(Abs(Ox), Abs(Oy)) >= AlignR) return;
+    if (Max(Abs(Ox), Abs(Oy)) >= S.Cv.AlignRadius) return;
     A.AlnX += static_cast<int64_t>(S.PosX[J].Raw) - S.PrevX[J].Raw;
     A.AlnY += static_cast<int64_t>(S.PosY[J].Raw) - S.PrevY[J].Raw;
     ++A.AlnN;
@@ -510,24 +510,24 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
     if (S.Team[J] == S.Team[I]) {
-        AddRepel(Ix, Iy, Jx, Jy, SeparationRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
+        AddRepel(Ix, Iy, Jx, Jy, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
         if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
-            AddCohesion(Ix, Iy, Jx, Jy, CohAllR, A.AllX, A.AllY, A.AllN);
+            AddCohesion(Ix, Iy, Jx, Jy, S.Cv.CohAllRadius, A.AllX, A.AllY, A.AllN);
             if (S.Type[J] == S.Type[I]) {
-                AddCohesion(Ix, Iy, Jx, Jy, CohSameR, A.SameX, A.SameY, A.SameN);
+                AddCohesion(Ix, Iy, Jx, Jy, S.Cv.CohSameRadius, A.SameX, A.SameY, A.SameN);
                 AddAlignment(S, I, J, A);
             }
-        } else if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) < InterposeR) {
+        } else if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;  // a friendly cart to screen (#98)
         }
     } else {
-        AddRepel(Ix, Iy, Jx, Jy, EnemySeparationRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
+        AddRepel(Ix, Iy, Jx, Jy, S.Cv.EnemySepRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
         // Flee your PREDATOR — the enemy type that beats me (UnitTable[Type[J]].Beats == my
         // type): steer away, larger radius, so I never walk toward my counter.
         if (UnitTable[S.Type[J]].Beats == S.Type[I])
-            AddRepel(Ix, Iy, Jx, Jy, PredatorFleeR, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
+            AddRepel(Ix, Iy, Jx, Jy, S.Cv.PredatorFleeRadius, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
         // A flagged RAIDER within InterposeR: note it so I can interpose (#98).
-        if (Threat.Get(J) && Max(Abs(Ix - Jx), Abs(Iy - Jy)) < InterposeR) {
+        if (Threat.Get(J) && Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
             A.RaidX += Jx.Raw; A.RaidY += Jy.Raw; ++A.RaidN;
         }
     }
@@ -541,8 +541,8 @@ void GatherBrute(const Sim& S, int32_t I, const ThreatSet& Threat, FlockAcc& A) 
 // and thus the sum — is identical to brute. Queried by Pos (== each unit's bucketed
 // build-time Pos — nothing has moved yet in the gather pass, so this stays consistent).
 void GatherGrid(const Sim& S, const Grid& G, int32_t I, const ThreatSet& Threat, FlockAcc& A) {
-    const int32_t Cx0 = CellX(S.PosX[I] - FlockGatherR), Cx1 = CellX(S.PosX[I] + FlockGatherR);
-    const int32_t Cy0 = CellY(S.PosY[I] - FlockGatherR), Cy1 = CellY(S.PosY[I] + FlockGatherR);
+    const int32_t Cx0 = CellX(S.PosX[I] - S.GatherR), Cx1 = CellX(S.PosX[I] + S.GatherR);
+    const int32_t Cy0 = CellY(S.PosY[I] - S.GatherR), Cy1 = CellY(S.PosY[I] + S.GatherR);
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
@@ -589,6 +589,21 @@ Fixed ValueNoise(uint32_t Unit, Fixed T, uint32_t Axis) {
     const Fixed G1 = NoiseGrad(Unit, I + 1, Axis);
     const Fixed U = F0 * F0 * (Fixed::FromInt(3) - (F0 + F0)); // smoothstep 3f²−2f³
     return G0 + (G1 - G0) * U;                                // lerp
+}
+// Fractal (fBm) noise (#123): sum Octaves of ValueNoise, each octave at Lacunarity× the
+// frequency and Gain× the amplitude, then normalize back to ~[-1,1). Octaves decorrelate via
+// a per-octave hash offset on Unit. Octaves==1 returns EXACTLY ValueNoise(Unit,T,Axis) (Amp and
+// Freq start at One, Norm==One), so the default is bit-identical — determinism preserved.
+Fixed FbmNoise(uint32_t Unit, Fixed T, uint32_t Axis, int32_t Octaves, Fixed Gain, Fixed Lac) {
+    if (Octaves < 1) Octaves = 1;
+    Fixed Sum{0}, Amp = Fixed::FromInt(1), Freq = Fixed::FromInt(1), Norm{0};
+    for (int32_t O = 0; O < Octaves; ++O) {
+        Sum = Sum + Amp * ValueNoise(Unit + static_cast<uint32_t>(O) * 0x68E31DA4u, T * Freq, Axis);
+        Norm = Norm + Amp;
+        Amp = Amp * Gain;
+        Freq = Freq * Lac;
+    }
+    return Sum / Norm;
 }
 // Phase 3 (boids slice B, #97). TWO passes with the bulk Prev=Pos copy BETWEEN them:
 //   pass 1 GATHERs every unit's forces from end-of-last-tick Pos and velocity Δ=Pos−Prev
@@ -676,8 +691,8 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
             // 15 bits so Fixed::FromInt never overflows (loops ~55 min — cosmetic).
             const uint32_t Uu = static_cast<uint32_t>(I);
             const Fixed Tn = Fixed::FromInt(static_cast<int32_t>(S.Tick & 0x7FFF)) * S.Cv.NoiseTimeScale;
-            Dx += (ValueNoise(Uu, Tn, 0) * S.Cv.WNoise).Raw;
-            Dy += (ValueNoise(Uu, Tn, 1) * S.Cv.WNoise).Raw;
+            Dx += (FbmNoise(Uu, Tn, 0, S.Cv.NoiseOctaves, S.Cv.NoiseGain, S.Cv.NoiseLacunarity) * S.Cv.WNoise).Raw;
+            Dy += (FbmNoise(Uu, Tn, 1, S.Cv.NoiseOctaves, S.Cv.NoiseGain, S.Cv.NoiseLacunarity) * S.Cv.WNoise).Raw;
         }
         // Verlet finalize: Δ is last tick's velocity (Pos−Prev, still valid pre-copy).
         // Accelerate toward the desired velocity, clamped to MaxAccel; carry damped
@@ -777,6 +792,10 @@ void Sim::DeriveUnits() {
     Units[UnitScissor].Cost = Cv.ScissorCost; Units[UnitScissor].MaxHp = Cv.ScissorHp;
     Units[UnitScissor].Speed = Cv.ScissorSpeed; Units[UnitScissor].Attack = Cv.ScissorDamage;
     Units[UnitScissor].BuildTicks = Cv.ScissorBuild;
+    // #123: the flock gather radius = max of every radius tested in the soldier gather, so the
+    // grid neighbour box always covers brute's reach (grid==brute) whatever the radii are set to.
+    GatherR = Max(Max(Max(Cv.SepRadius, Cv.EnemySepRadius), Max(Cv.CohSameRadius, Cv.CohAllRadius)),
+                  Max(Max(Cv.AlignRadius, Cv.PredatorFleeRadius), Cv.InterposeRadius));
 }
 
 void Sim::Init(uint64_t InSeed) {

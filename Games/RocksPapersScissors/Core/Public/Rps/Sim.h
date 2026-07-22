@@ -74,6 +74,10 @@ struct Sim {
     //      per-read CVar lookup. Deterministic (a pure function of the hashed Cv), so leaving
     //      it out of StateHash is safe: both peers derive identical values. ----
     UnitStats Units[UnitCount] = {};
+    // Runtime flock-gather radius (#123): max of the gathered soldier-flock radii in Cv,
+    // recomputed by DeriveUnits(). The grid neighbour walk uses it so grid==brute holds for
+    // ANY radii — raising a radius CVar can't under-cover the grid. Derived, NOT hashed.
+    Fixed GatherR{};
 
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
     int32_t DepositBuf[2] = {};           // worker deposits buffered in Movement, applied in Economy
