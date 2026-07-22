@@ -266,6 +266,9 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 
     Rps::CameraScroll Cam;
     bool CamInit = false;
+#if !LUR_SHIPPING
+    float DevDragY = 0.0f, DevDragMoved = 0.0f;  // drag-to-scroll the console (# 121)
+#endif
     Lur::Sim::SplitMix64 Rng(Seed ^ 0xA11CE);
     uint64_t AutoAccumNs = 0, PrevNs = NowNs();
     static Rps::Snapshot Snap;
@@ -288,7 +291,16 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             // release becomes a DevTap the overlay hit-tests on the render thread — same path
             // as the phone's touch, so desktop drives the identical console.
             if (View.DevOverlayOpen()) {
-                if (T.Phase == Lur::Input::ETouchPhase::Ended) View.DevTap(T.XPx, T.YPx);
+                // Drag = scroll the cvar list; a click that barely moved = a tap the overlay
+                // hit-tests. Same gesture model as the phone (finger drag / tap).
+                if (T.Phase == Lur::Input::ETouchPhase::Began) { DevDragY = T.YPx; DevDragMoved = 0.0f; }
+                else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
+                    View.DevScroll(DevDragY - T.YPx);
+                    DevDragMoved += std::fabs(DevDragY - T.YPx);
+                    DevDragY = T.YPx;
+                } else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                    if (DevDragMoved < 6.0f) View.DevTap(T.XPx, T.YPx);
+                }
                 continue;
             }
 #endif

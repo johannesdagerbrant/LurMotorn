@@ -5,10 +5,14 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
+#include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
@@ -289,19 +293,19 @@ void GameView::RefreshSelector() {
 
 #if !LUR_SHIPPING
 namespace {
-// Group the AffectsGameplay cvars by Category — the console's category dropdowns render +
-// navigate from this. std::map keeps categories sorted; each vector sorted by name, so the
-// layout is stable frame to frame.
-std::map<std::string, std::vector<Lur::Core::ICVar*>> GroupGameplayCvars() {
-    std::map<std::string, std::vector<Lur::Core::ICVar*>> By;
+// Every AffectsGameplay cvar as (category-path, cvar) pairs, SORTED by name — the input to the
+// hierarchical category tree (#121). The category string may be |-nested ("Units|Rock"); the
+// tree splits it. Name-sorted input means each tree node's leaves come out name-sorted
+// (BuildCategoryTree preserves leaf order), so the layout is stable frame to frame.
+std::vector<std::pair<std::string, Lur::Core::ICVar*>> GatherGameplayCvars() {
+    std::vector<std::pair<std::string, Lur::Core::ICVar*>> Items;
     Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-        if (C->AffectsGameplay()) By[C->Category()].push_back(C);
+        if (C->AffectsGameplay()) Items.emplace_back(C->Category(), C);
     });
-    for (auto& [Cat, V] : By)
-        std::sort(V.begin(), V.end(), [](Lur::Core::ICVar* A, Lur::Core::ICVar* B) {
-            return std::strcmp(A->Name(), B->Name()) < 0;
-        });
-    return By;
+    std::sort(Items.begin(), Items.end(), [](const auto& A, const auto& B) {
+        return std::strcmp(A.second->Name(), B.second->Name()) < 0;
+    });
+    return Items;
 }
 }  // namespace
 
@@ -718,30 +722,67 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (DevOverlayOpen_) {
         Lur::Render::BeginDevGuiLayer(Renderer);
         const float OW = WidthPx;  // full-window overlay
-        // Every AffectsGameplay CVar, grouped upfront into collapsible category dropdowns.
-        // Values are read straight from the registry (ValueString is guard-free; the global
-        // value is only mutated by the console, never the sim thread — so this render-thread
-        // read is race-free). Selection is a CVar POINTER, stable across collapse/expand; the
-        // numpad is the pointer-driven text-entry path (the #118 soft-keyboard no-go answer).
+        // Every AffectsGameplay CVar, arranged into a HIERARCHICAL (|-nested) category tree
+        // (#121) drawn as recursively-collapsible sections inside a SCROLLABLE viewport, each
+        // row carrying an "i" tooltip button (#129). Values are read straight from the registry
+        // (ValueString is guard-free; the global value is only mutated by the console, never the
+        // sim thread — so this render-thread read is race-free). Selection is a CVar POINTER,
+        // stable across collapse/expand/scroll; the numpad + the tooltip toaster anchor BELOW
+        // the selected row (flipping above when they'd run off-screen, PlaceBelowOrAbove).
         const Lur::Render::Color Accent{0.55f, 0.98f, 0.90f, 1.0f};
         const Lur::Render::Color Ink{0.86f, 0.90f, 0.92f, 1.0f};
         const Lur::Render::Color CatInk{0.62f, 0.72f, 0.78f, 1.0f};
+        const Lur::Render::Color DimInk{0.40f, 0.45f, 0.48f, 1.0f};
         const float LineH = 20.0f * HS, CatH = 22.0f * HS, TitleH = 26.0f * HS;
-        auto Groups = GroupGameplayCvars();
-        int Count = 0;
-        for (auto& [Cat, V] : Groups) Count += static_cast<int>(V.size());
-        // Panel height: title + each category header + the rows of every EXPANDED category.
-        float BodyH = 0.0f;
-        for (auto& [Cat, V] : Groups) {
-            BodyH += CatH;
-            if (CollapsedCats_.find(Cat) == CollapsedCats_.end())
-                BodyH += LineH * static_cast<float>(V.size());
-        }
+        const float IndentW = 12.0f * HS;  // per depth level
+
+        auto Root = Lur::DevGui::BuildCategoryTree(GatherGameplayCvars());
+        const int Count = Root.TotalLeaves;
+
+        // Fixed panel viewport (the content scrolls inside it, #121). Height is the screen, not
+        // the content — so an arbitrary number of cvars fits.
         const float PW = OW - 4.0f * Pad;
-        const float PH = TitleH + BodyH + 10.0f * HS;
-        const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.10f;
+        const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.06f;
+        const float PH = HeightPx * 0.86f;
+        const float ViewTop = Y0 + TitleH + 4.0f * HS;   // content clip band
+        const float ViewBot = Y0 + PH - 4.0f * HS;
+        const float ViewH = ViewBot - ViewTop;
+
+        // Flatten the (honouring-collapse) tree into a linear list of rows with content-space Y,
+        // so scroll, culling, hit-testing + the anchored popovers all read one array. Kind 0 =
+        // category header (Node), 1 = a cvar row (Cv).
+        struct VItem { int Kind; const Lur::DevGui::CatNode<Lur::Core::ICVar*>* Node;
+                       Lur::Core::ICVar* Cv; int Depth; float Cy; };
+        std::vector<VItem> Vis;
+        float Cy = 0.0f;
+        for (Lur::Core::ICVar* C : Root.Leaves) { Vis.push_back({1, nullptr, C, 0, Cy}); Cy += LineH; }
+        using Node = Lur::DevGui::CatNode<Lur::Core::ICVar*>;
+        std::function<void(const Node&, int)> Flatten = [&](const Node& N, int Depth) {
+            Vis.push_back({0, &N, nullptr, Depth, Cy});
+            Cy += CatH;
+            if (CollapsedCats_.find(N.Path) != CollapsedCats_.end()) return;  // folded: skip body
+            for (Lur::Core::ICVar* C : N.Leaves) { Vis.push_back({1, nullptr, C, Depth + 1, Cy}); Cy += LineH; }
+            for (const Node& Ch : N.Children) Flatten(Ch, Depth + 1);
+        };
+        for (const Node& Ch : Root.Children) Flatten(Ch, 0);
+        const float ContentH = Cy;
+
+        // Fold in this frame's accumulated scroll (drag on phone / wheel on desktop), clamp.
+        ScrollY_ += DevScrollAccum_.exchange(0.0f, std::memory_order_relaxed);
+        const float MaxScroll = ContentH > ViewH ? ContentH - ViewH : 0.0f;
+        if (ScrollY_ < 0.0f) ScrollY_ = 0.0f;
+        if (ScrollY_ > MaxScroll) ScrollY_ = MaxScroll;
+
+        // A cvar's row screen-Y this frame (content-Y - scroll + viewport top), for anchoring
+        // the numpad/toaster. Defaults to mid-viewport if the row is folded/scrolled away.
+        auto RowScreenY = [&](Lur::Core::ICVar* Which, float Fallback) {
+            for (const VItem& It : Vis)
+                if (It.Kind == 1 && It.Cv == Which) return ViewTop - ScrollY_ + It.Cy;
+            return Fallback;
+        };
+
+        // Panel + title + close-X.
         Blit(DevPanelMat, X0 + PW * 0.5f, Y0 + PH * 0.5f, PW, PH);
-        // Top-right X (close) button; the title fills the width to its left.
         const float XbtnS = TitleH;
         const float XbtnX = X0 + PW - XbtnS;
         Blit(DevKeyMat, XbtnX + XbtnS * 0.5f, Y0 + XbtnS * 0.5f, XbtnS, XbtnS);
@@ -751,31 +792,39 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         std::snprintf(T, sizeof(T), "Console  %d cvars", Count);
         Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
                   TitleH, 14.0f * HS, Accent);
-        // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test
-        // + edits don't race the ValueString reads. Numpad first (if open), then rows.
+
+        // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test +
+        // edits don't race the ValueString reads.
         const bool TapPending = DevTapPending_.load(std::memory_order_acquire);
         const float TapX = DevTapX_.load(std::memory_order_relaxed);
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
 
+        // A visible toaster is modal-lite: the next tap ANYWHERE dismisses it (and is consumed),
+        // so it can't also trigger a row underneath. Auto-expires after a few seconds.
+        if (!ToastText_.empty()) {
+            ToastAge_ += DtSec;
+            if (ToastAge_ > 6.0f) { ToastText_.clear(); ToastCvar_ = nullptr; }
+        }
+        if (TapPending && !TapUsed && !ToastText_.empty()) {
+            ToastText_.clear(); ToastCvar_ = nullptr; TapUsed = true;
+        }
+
         // Top-right X closes the view.
         if (TapPending && !TapUsed && TapX >= XbtnX && TapX <= XbtnX + XbtnS && TapY >= Y0 &&
             TapY <= Y0 + TitleH) {
-            DevOverlayOpen_ = false;
-            NumpadOpen_ = false;
-            TapUsed = true;
+            DevOverlayOpen_ = false; NumpadOpen_ = false; TapUsed = true;
         }
 
-        // Numpad geometry — strictly BELOW the CVar panel so it never overlaps a row (esp.
-        // the highlighted/selected one, whose typed value must stay visible). Fills the space
-        // down toward the bottom (over the plates while open — fine in dev).
+        // Numpad geometry — anchored BELOW the selected row, flipped above when it wouldn't fit.
         const float NumW = OW * 0.62f;
         const float NumX = (OW - NumW) * 0.5f;
-        const float NumY = Y0 + PH + 12.0f * HS;
-        float NumH = HeightPx - NumY - 60.0f * HS;
-        if (NumH > NumW) NumH = NumW;
-        const float NumGap = 6.0f * HS;
-
+        float NumH = NumW;
+        if (NumH > HeightPx * 0.42f) NumH = HeightPx * 0.42f;
+        const float NumGap = 8.0f * HS;
+        const float NumAnchorY = RowScreenY(SelectedCvar_, HeightPx * 0.45f);
+        const float NumY = Lur::DevGui::PlaceBelowOrAbove(NumAnchorY, LineH, NumH + 10.0f * HS,
+                                                          NumGap, HeightPx) + 5.0f * HS;
         if (TapPending && !TapUsed && NumpadOpen_ &&
             Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
             TapUsed = true;
@@ -789,84 +838,93 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             }
         }
 
-        // Row columns (constant X across every row, so values line up in a true column):
-        //   [ accent | name .......... | value field | R ]
+        // Row columns (constant right edge, so values align down a true column).
         const float RowPad = 4.0f * HS;
-        const float ResetS = LineH - 4.0f * HS;             // reset button (square)
+        const float ResetS = LineH - 4.0f * HS;
         const float ResetX = X0 + PW - RowPad - ResetS;
         const float ValW = 90.0f * HS;
         const float ValX = ResetX - 6.0f * HS - ValW;
-        const float NameX = X0 + 22.0f * HS;
-        const float NameW = ValX - NameX - 6.0f * HS;
-        const Lur::Render::Color DimInk{0.40f, 0.45f, 0.48f, 1.0f};
 
-        float Ly = Y0 + TitleH + 5.0f * HS;
-        for (auto& [Cat, V] : Groups) {
-            const bool Collapsed = CollapsedCats_.find(Cat) != CollapsedCats_.end();
-            // Category header — tap toggles the dropdown open/closed.
-            if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW && TapY >= Ly &&
-                TapY <= Ly + CatH) {
-                if (Collapsed) CollapsedCats_.erase(Cat);
-                else CollapsedCats_.insert(Cat);
-                TapUsed = true;
-            }
-            // Button plate + an ASCII [+]/[-] marker so the header reads as a tappable dropdown
-            // toggle (our MSDF atlas is ASCII-only — no Unicode triangle glyphs).
-            Blit(DevKeyMat, X0 + PW * 0.5f, Ly + CatH * 0.5f, PW - 8.0f * HS, CatH - 3.0f * HS);
-            char H[96];
-            std::snprintf(H, sizeof(H), "[%c] %s  (%d)", Collapsed ? '+' : '-', Cat.c_str(),
-                          static_cast<int>(V.size()));
-            Text.Draw(Renderer, H, X0 + 14.0f * HS, Ly, PW - 20.0f * HS, CatH, 13.0f * HS, CatInk);
-            Ly += CatH;
-            if (Collapsed) continue;
-            for (Lur::Core::ICVar* C : V) {
-                const bool Overridden = C->Overridden();
-                // Reset button hit-test FIRST (it's nested inside the row): restore the default
-                // and commit (persist + phone sync). Tapping anywhere ELSE in the row selects the
-                // cvar + opens the numpad on a fresh buffer — the phone text-entry path (the #118
-                // soft-keyboard no-go answer): tap digits for a precise value, no OS keyboard.
-                if (TapPending && !TapUsed && TapX >= ResetX && TapX <= ResetX + ResetS &&
-                    TapY >= Ly && TapY <= Ly + LineH) {
-                    C->Reset();
-                    if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);
-                    if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; }
-                    TapUsed = true;
-                } else if (TapPending && !TapUsed && TapX >= X0 && TapX <= X0 + PW &&
-                           TapY >= Ly && TapY <= Ly + LineH) {
-                    SelectedCvar_ = C;
-                    Numpad_.Clear();
-                    NumpadOpen_ = true;
+        // Draw + hit-test every visible row, culled to the viewport (rows scrolled fully out of
+        // the band are neither drawn nor tappable).
+        for (const VItem& It : Vis) {
+            const float RowH = It.Kind == 0 ? CatH : LineH;
+            const float Sy = ViewTop - ScrollY_ + It.Cy;
+            if (Sy + RowH <= ViewTop || Sy >= ViewBot) continue;  // fully outside the band
+            const float IndentX = X0 + static_cast<float>(It.Depth) * IndentW;
+            const bool InBand = TapY >= ViewTop && TapY <= ViewBot;
+
+            if (It.Kind == 0) {  // ---- category header: tap toggles fold ----
+                const bool Collapsed = CollapsedCats_.find(It.Node->Path) != CollapsedCats_.end();
+                if (TapPending && !TapUsed && InBand && TapX >= IndentX && TapX <= X0 + PW &&
+                    TapY >= Sy && TapY <= Sy + CatH) {
+                    if (Collapsed) CollapsedCats_.erase(It.Node->Path);
+                    else CollapsedCats_.insert(It.Node->Path);
                     TapUsed = true;
                 }
-                const bool Selected = (C == SelectedCvar_);
-                if (Selected)
-                    Blit(DevAccentMat, X0 + 6.0f * HS, Ly + LineH * 0.5f, 5.0f * HS,
-                         LineH - 5.0f * HS);
-                // Name column (left, its own field).
-                Text.Draw(Renderer, C->Name(), NameX, Ly, NameW, LineH, 12.5f * HS,
-                          Selected ? Accent : Ink, Lur::Text::EHAlign::Left,
-                          Lur::Text::EVAlign::Middle);
-                // Value column: a boxed field, right-aligned, so numbers align down a column and
-                // read separately from the names. Accent when overridden from default.
-                Blit(DevKeyMat, ValX + ValW * 0.5f, Ly + LineH * 0.5f, ValW, LineH - 4.0f * HS);
-                char VS[64];
-                if (NumpadOpen_ && Selected)  // show the value being typed
-                    std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
-                else
-                    std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
-                Text.Draw(Renderer, VS, ValX + 5.0f * HS, Ly, ValW - 10.0f * HS, LineH, 12.5f * HS,
-                          Overridden ? Accent : Ink, Lur::Text::EHAlign::Right,
-                          Lur::Text::EVAlign::Middle);
-                // Reset button: dim when already at default (a no-op tap), active when overridden.
-                Blit(DevKeyMat, ResetX + ResetS * 0.5f, Ly + LineH * 0.5f, ResetS, ResetS);
-                Text.Draw(Renderer, "R", ResetX, Ly + (LineH - ResetS) * 0.5f, ResetS, ResetS,
-                          12.0f * HS, Overridden ? Accent : DimInk, Lur::Text::EHAlign::Center,
-                          Lur::Text::EVAlign::Middle);
-                Ly += LineH;
+                Blit(DevKeyMat, (IndentX + X0 + PW) * 0.5f, Sy + CatH * 0.5f,
+                     (X0 + PW - IndentX) - 6.0f * HS, CatH - 3.0f * HS);
+                char H[96];
+                std::snprintf(H, sizeof(H), "[%c] %s  (%d)", Collapsed ? '+' : '-',
+                              It.Node->Segment.c_str(), It.Node->TotalLeaves);
+                Text.Draw(Renderer, H, IndentX + 10.0f * HS, Sy, X0 + PW - IndentX - 14.0f * HS,
+                          CatH, 13.0f * HS, CatInk);
+                continue;
             }
+
+            // ---- a cvar row: [ i | name .......... | value | R ] ----
+            Lur::Core::ICVar* C = It.Cv;
+            const bool Overridden = C->Overridden();
+            const bool HasTip = C->Tooltip()[0] != '\0';
+            const float InfoS = LineH - 6.0f * HS;
+            const float InfoX = IndentX + RowPad;
+            const float NameX = InfoX + InfoS + 5.0f * HS;
+            const float NameW = ValX - NameX - 6.0f * HS;
+
+            if (TapPending && !TapUsed && InBand && TapX >= InfoX && TapX <= InfoX + InfoS &&
+                TapY >= Sy && TapY <= Sy + LineH && HasTip) {  // "i": open the tooltip toaster
+                ToastText_ = C->Tooltip(); ToastCvar_ = C; ToastAge_ = 0.0f; TapUsed = true;
+            } else if (TapPending && !TapUsed && InBand && TapX >= ResetX && TapX <= ResetX + ResetS &&
+                       TapY >= Sy && TapY <= Sy + LineH) {  // reset -> default + commit
+                C->Reset();
+                if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);
+                if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; }
+                TapUsed = true;
+            } else if (TapPending && !TapUsed && InBand && TapX >= IndentX && TapX <= X0 + PW &&
+                       TapY >= Sy && TapY <= Sy + LineH) {  // select -> open the numpad
+                SelectedCvar_ = C; Numpad_.Clear(); NumpadOpen_ = true; TapUsed = true;
+            }
+
+            const bool Selected = (C == SelectedCvar_);
+            // "i" button — active (accent) when a tooltip exists, greyed + inert otherwise.
+            Blit(DevKeyMat, InfoX + InfoS * 0.5f, Sy + LineH * 0.5f, InfoS, InfoS);
+            Text.Draw(Renderer, "i", InfoX, Sy + (LineH - InfoS) * 0.5f, InfoS, InfoS, 12.0f * HS,
+                      HasTip ? Accent : DimInk, Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
+            if (Selected)
+                Blit(DevAccentMat, IndentX + 2.0f * HS, Sy + LineH * 0.5f, 3.0f * HS, LineH - 5.0f * HS);
+            Text.Draw(Renderer, C->Name(), NameX, Sy, NameW, LineH, 12.5f * HS,
+                      Selected ? Accent : Ink, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
+            Blit(DevKeyMat, ValX + ValW * 0.5f, Sy + LineH * 0.5f, ValW, LineH - 4.0f * HS);
+            char VS[64];
+            if (NumpadOpen_ && Selected) std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
+            else                         std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
+            Text.Draw(Renderer, VS, ValX + 5.0f * HS, Sy, ValW - 10.0f * HS, LineH, 12.5f * HS,
+                      Overridden ? Accent : Ink, Lur::Text::EHAlign::Right, Lur::Text::EVAlign::Middle);
+            Blit(DevKeyMat, ResetX + ResetS * 0.5f, Sy + LineH * 0.5f, ResetS, ResetS);
+            Text.Draw(Renderer, "R", ResetX, Sy + (LineH - ResetS) * 0.5f, ResetS, ResetS,
+                      12.0f * HS, Overridden ? Accent : DimInk, Lur::Text::EHAlign::Center,
+                      Lur::Text::EVAlign::Middle);
         }
 
-        // The numpad toaster: a backing panel + the 4x3 key grid (shared KeyRect geometry).
+        // Scrollbar indicator (right edge) when the content overflows the viewport.
+        if (MaxScroll > 0.0f) {
+            const float TrackW = 3.0f * HS, TrackX = X0 + PW - TrackW - 1.0f * HS;
+            const float ThumbH = ViewH * (ViewH / ContentH);
+            const float ThumbY = ViewTop + (ViewH - ThumbH) * (ScrollY_ / MaxScroll);
+            Blit(DevAccentMat, TrackX + TrackW * 0.5f, ThumbY + ThumbH * 0.5f, TrackW, ThumbH);
+        }
+
+        // The numpad: a backing panel + the 4x3 key grid (shared KeyRect geometry).
         if (NumpadOpen_) {
             Blit(DevPanelMat, NumX + NumW * 0.5f, NumY + NumH * 0.5f, NumW + 10.0f * HS,
                  NumH + 10.0f * HS);
@@ -882,9 +940,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                               Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
                 }
         }
+
+        // The tooltip toaster — a panel + the cvar's help text, anchored below/above its row.
+        if (!ToastText_.empty()) {
+            const float TW = PW - 20.0f * HS, TX = X0 + (PW - TW) * 0.5f;
+            const float TH = 40.0f * HS;
+            const float TAnchorY = RowScreenY(ToastCvar_, HeightPx * 0.4f);
+            const float TY = Lur::DevGui::PlaceBelowOrAbove(TAnchorY, LineH, TH, NumGap, HeightPx);
+            Blit(DevPanelMat, TX + TW * 0.5f, TY + TH * 0.5f, TW, TH);
+            Blit(DevAccentMat, TX + TW * 0.5f, TY + 2.0f * HS, TW, 2.0f * HS);  // accent top edge
+            Text.Draw(Renderer, ToastText_.c_str(), TX + 8.0f * HS, TY, TW - 16.0f * HS, TH,
+                      12.0f * HS, Ink, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
+        }
+
         if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
     } else {
         DevTapPending_.store(false, std::memory_order_relaxed);  // discard taps while hidden
+        DevScrollAccum_.store(0.0f, std::memory_order_relaxed);
     }
 #endif
 

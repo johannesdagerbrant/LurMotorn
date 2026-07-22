@@ -3,7 +3,12 @@
 #include <cstdio>
 #include <string>
 
+#include <utility>
+#include <vector>
+
+#include "Lur/DevGui/CategoryTree.h"
 #include "Lur/DevGui/Numpad.h"
+#include "Lur/DevGui/Popover.h"
 
 using Lur::DevGui::Numpad;
 
@@ -64,10 +69,76 @@ static void TestTapHitTest() {
     CHECK(N.Buffer().empty());
 }
 
+// Hierarchical category tree: split on '|', nest, sort children, count the subtree.
+static void TestCategoryTree() {
+    using Lur::DevGui::BuildCategoryTree;
+    using Item = std::pair<std::string, int>;
+    // Feed items sorted by (path, leaf) as the console does; leaf = a stand-in id.
+    std::vector<Item> Items = {
+        {"Combat", 1},          // flat category, one leaf at its own node
+        {"Units|Miner", 2},
+        {"Units|Rock", 3},
+        {"Units|Rock", 4},      // two leaves under the same leaf-category
+        {"Boid|Noise", 5},
+        {"", 6},                // empty path -> lands on the root
+        {"Units", 7},           // a leaf directly on the "Units" parent (not a child)
+    };
+    auto Root = BuildCategoryTree(Items);
+    CHECK(Root.Segment.empty() && Root.Path.empty());
+    CHECK(Root.TotalLeaves == 7);         // every leaf counted once
+    CHECK(Root.Leaves.size() == 1 && Root.Leaves[0] == 6);  // the empty-path leaf
+    // Children sorted by segment: Boid, Combat, Units.
+    CHECK(Root.Children.size() == 3);
+    CHECK(Root.Children[0].Segment == "Boid");
+    CHECK(Root.Children[1].Segment == "Combat");
+    CHECK(Root.Children[2].Segment == "Units");
+    // Combat: a leaf directly on it, no children.
+    const auto& Combat = Root.Children[1];
+    CHECK(Combat.Path == "Combat" && Combat.TotalLeaves == 1 && Combat.Children.empty());
+    CHECK(Combat.Leaves.size() == 1 && Combat.Leaves[0] == 1);
+    // Units: one direct leaf (7) + children Miner, Rock; Rock holds two leaves (3,4).
+    const auto& Units = Root.Children[2];
+    CHECK(Units.Path == "Units" && Units.TotalLeaves == 4);
+    CHECK(Units.Leaves.size() == 1 && Units.Leaves[0] == 7);
+    CHECK(Units.Children.size() == 2);
+    CHECK(Units.Children[0].Segment == "Miner" && Units.Children[0].Path == "Units|Miner");
+    CHECK(Units.Children[1].Segment == "Rock" && Units.Children[1].Path == "Units|Rock");
+    CHECK(Units.Children[1].Leaves.size() == 2);
+    CHECK(Units.Children[1].Leaves[0] == 3 && Units.Children[1].Leaves[1] == 4);
+    // Empty/doubled separators collapse: "A||B" == "A|B", trailing '|' ignored.
+    std::vector<Item> Sloppy = {{"A||B", 1}, {"A|", 2}};
+    auto R2 = BuildCategoryTree(Sloppy);
+    CHECK(R2.Children.size() == 1 && R2.Children[0].Segment == "A");
+    CHECK(R2.Children[0].Leaves.size() == 1 && R2.Children[0].Leaves[0] == 2);  // "A|" -> leaf on A
+    CHECK(R2.Children[0].Children.size() == 1 && R2.Children[0].Children[0].Segment == "B");
+}
+
+// Popover placement: prefer below the row, flip above when it would overflow the bottom.
+static void TestPopoverPlacement() {
+    using Lur::DevGui::PlaceBelowOrAbove;
+    const float ScreenH = 1000, Gap = 8;
+    // Row near the top with lots of room below -> placed below.
+    CHECK(PlaceBelowOrAbove(/*Ay*/100, /*Ah*/20, /*Ph*/300, Gap, ScreenH) == 100 + 20 + Gap);
+    // Row near the bottom, no room below -> flips above.
+    {
+        const float Ay = 900, Ah = 20, Ph = 300;
+        const float Y = PlaceBelowOrAbove(Ay, Ah, Ph, Gap, ScreenH);
+        CHECK(Y == Ay - Gap - Ph);
+        CHECK(Y >= 0 && Y + Ph <= ScreenH);   // fully on-screen
+    }
+    // Popover taller than either gap -> clamped on-screen (never negative).
+    {
+        const float Y = PlaceBelowOrAbove(/*Ay*/500, /*Ah*/20, /*Ph*/1200, Gap, ScreenH);
+        CHECK(Y == 0);
+    }
+}
+
 int main() {
     TestLayout();
     TestPressBuildsBuffer();
     TestTapHitTest();
+    TestCategoryTree();
+    TestPopoverPlacement();
     if (GFailures == 0) { std::printf("devgui_tests: ALL PASS\n"); return 0; }
     std::printf("devgui_tests: %d FAILURE(S)\n", GFailures);
     return 1;

@@ -66,6 +66,11 @@ public:
     // folds it; tapping a row selects that cvar + opens the numpad; the numpad Enter commits.
     void DevTap(float XPx, float YPx);
 
+    // Scroll the console's cvar list (it holds more cvars than fit on screen, #121). DeltaY in
+    // pixels, POSITIVE scrolls the content DOWN (reveals lower rows). Accumulated on the input
+    // thread, applied + clamped on the render thread. No-op while the console is hidden.
+    void DevScroll(float DeltaY) { DevScrollAccum_.fetch_add(DeltaY, std::memory_order_relaxed); }
+
     // Show/hide the console. Default hidden (the game is unobstructed). Opened by the phone's
     // two-finger TRIPLE-tap or the desktop § key; closed by the in-panel top-right X button.
     // Closing also dismisses the numpad.
@@ -119,7 +124,12 @@ private:
     std::atomic<bool>  DevTapPending_{false};
     bool               DevOverlayOpen_ = false;     // console shown? (two-finger triple-tap / desktop §)
     Lur::Core::ICVar*  SelectedCvar_ = nullptr;     // highlighted cvar (numpad target)
-    std::unordered_set<std::string> CollapsedCats_; // category headers currently collapsed
+    std::unordered_set<std::string> CollapsedCats_; // folded category headers, keyed by FULL path
+    std::atomic<float> DevScrollAccum_{0.0f};       // input-thread scroll delta -> render thread
+    float              ScrollY_ = 0.0f;             // console scroll offset (px into the content)
+    Lur::Core::ICVar*  ToastCvar_ = nullptr;        // cvar whose tooltip toaster is showing
+    std::string        ToastText_;                  //   the tooltip text ("" = no toaster)
+    float              ToastAge_ = 0.0f;            //   seconds shown (auto-dismiss)
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
     bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)

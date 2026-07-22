@@ -52,6 +52,9 @@ class ICVar {
 public:
     virtual const char* Name() const     = 0;
     virtual const char* Category() const  = 0;
+    // Optional one-line help shown by the console's per-CVar "i" button (empty = no tooltip,
+    // the "i" renders greyed + inert). Declared via LUR_CVAR_T; plain LUR_CVAR leaves it "".
+    virtual const char* Tooltip() const   = 0;
     virtual uint32_t    Flags() const     = 0;
     virtual ECVarOrigin Origin() const    = 0;
     virtual bool        AffectsGameplay() const = 0;
@@ -131,9 +134,9 @@ public:
     constexpr operator T() const noexcept { return Default_; }
 #else
     CVar(const char* Name, T Default, uint32_t Flags = CVarFlagNone, const char* Category = "",
-         ECVarOrigin Origin = ECVarOrigin::Game)
-        : Default_(Default), Value_(Default), Name_(Name), Category_(Category), Flags_(Flags),
-          Origin_(Origin) {}
+         const char* Tooltip = nullptr, ECVarOrigin Origin = ECVarOrigin::Game)
+        : Default_(Default), Value_(Default), Name_(Name), Category_(Category),
+          Tooltip_(Tooltip), Flags_(Flags), Origin_(Origin) {}
 
     T Get() const noexcept {
         LUR_ASSERT_MSG(GCVarMainEntered, "CVar '%s' read before main()", Name_);
@@ -144,6 +147,7 @@ public:
     // ---- ICVar (dev-only introspection / mutation for console, panel, cvars.cfg) ----
     const char* Name() const override { return Name_; }
     const char* Category() const override { return Category_; }
+    const char* Tooltip() const override { return Tooltip_ ? Tooltip_ : ""; }
     uint32_t    Flags() const override { return Flags_; }
     ECVarOrigin Origin() const override { return Origin_; }
     bool        AffectsGameplay() const override { return (Flags_ & CVarFlagAffectsGameplay) != 0; }
@@ -178,6 +182,7 @@ private:
     T           Value_;
     const char* Name_;
     const char* Category_;
+    const char* Tooltip_;
     uint32_t    Flags_;
     ECVarOrigin Origin_;
     uint64_t    EditWallMs_ = 0;
@@ -209,6 +214,20 @@ CVar(const char*, T, A...) -> CVar<T>;
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
 
+// LUR_CVAR_T — as LUR_CVAR, plus an optional one-line Tooltip shown by the console's per-CVar
+// "i" button. Shipping drops the tooltip (dev-only string) exactly like the other dev args.
+#if LUR_SHIPPING
+    #define LUR_CVAR_T(Var, Name, Default, Flags, Category, Tooltip) \
+        inline constexpr ::Lur::Core::CVar Var { Name, Default }
+#else
+    #define LUR_CVAR_T(Var, Name, Default, Flags, Category, Tooltip)                         \
+        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&        \
+                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),            \
+                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category, (Tooltip) };         \
+        inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
+#endif
+
 // LUR_CVAR_ENGINE — identical, but tags the CVar as engine-origin for the panel's
 // Engine/Game split (Addendum D.3). Only engine modules use it; games use LUR_CVAR.
 #if LUR_SHIPPING
@@ -219,7 +238,7 @@ CVar(const char*, T, A...) -> CVar<T>;
         static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&       \
                         (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),           \
                       "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category,                     \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), Category, nullptr,            \
                                        ::Lur::Core::ECVarOrigin::Engine };                   \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
