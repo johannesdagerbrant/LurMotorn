@@ -59,6 +59,25 @@ public:
     // consumed the tap (the opponent selector), or -1 when the tap is the world's.
     int OnTap(float XPx, float YPx);
 
+    // ---- #139 drag-to-place a building ----
+    // Which build plate (building type 0..3) is under (XPx,YPx), or -1. The main tests this on
+    // a pointer-DOWN to decide whether a drag is a building placement (vs a camera pan).
+    int PlateAt(float XPx, float YPx) const;
+    // Begin dragging building Type out of its plate; the ghost follows the pointer until release.
+    void BeginPlaceDrag(int Type);
+    // Update the dragged ghost's screen position + whether the current drop is valid (the caller
+    // computes validity from the authoritative sim: Sim::WouldAcceptPlace at the drop world pos).
+    void UpdatePlaceDrag(float XPx, float YPx, bool Valid);
+    // Release: Placed==true when the caller emitted the place event (valid drop); false slides the
+    // ghost back to its plate (invalid drop / no-op). Either way the drag ends.
+    void EndPlaceDrag(bool Placed);
+    bool IsPlacing() const { return GhostType_ >= 0 && GhostDragging_; }  // a live drag is following the pointer
+    int  PlacingType() const { return GhostType_; }
+    // Invert the world<->screen transform Render uses, so the main can turn a pointer pixel into a
+    // world position (for the place event + validity). Pure function of the passed view params.
+    void ScreenToWorld(float XPx, float YPx, float CameraY, float WidthPx, float HeightPx,
+                       bool FlipY, float& OutWx, float& OutWy) const;
+
     // One-shot: the AI tier (0=Easy,1=Medium,2=Hard) just chosen from the opponent selector,
     // or -1 if none since the last call. The main polls this to start a single-player match
     // (#127). Reused on desktop + phone.
@@ -117,6 +136,10 @@ private:
     // Atlas-tinted materials for the DrawMesh path (mines / camps).
     Lur::Render::MaterialHandle CampMat[2] = {};
     Lur::Render::MaterialHandle MineMat = 0;
+    // #139 placement ghost: translucent team-tinted silhouette while valid; blinking red (two
+    // alpha steps) while the drop is invalid. Materials are immutable, so the blink walks a LUT.
+    Lur::Render::MaterialHandle GhostMat[2] = {};
+    Lur::Render::MaterialHandle GhostBadMat[2] = {};
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
@@ -201,6 +224,16 @@ private:
     Lur::Render::MaterialHandle HintPointer[HintAlphaSteps] = {};
     Lur::Render::MaterialHandle HintArrow[HintAlphaSteps] = {};
     Lur::Render::MeshHandle ArrowUp = 0, ArrowDown = 0;
+
+    // #139 drag-to-place state (view-only). GhostType_ >= 0 while a placement is in play (either
+    // following the pointer, GhostDragging_, or sliding back after an invalid drop, SlideT_>=0).
+    int   GhostType_ = -1;
+    bool  GhostDragging_ = false;
+    float GhostXPx_ = 0.0f, GhostYPx_ = 0.0f;   // current pointer (or slide-back head) position
+    bool  GhostValid_ = false;
+    float GhostBlink_ = 0.0f;                    // invalid-blink clock (seconds)
+    float SlideT_ = -1.0f;                       // >=0 while the ghost tweens back to its plate
+    float SlideFromX_ = 0.0f, SlideFromY_ = 0.0f;
 
     bool Ready = false;
 };

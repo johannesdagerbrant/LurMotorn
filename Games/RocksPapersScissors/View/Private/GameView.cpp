@@ -213,6 +213,14 @@ void GameView::CreateResources(IRenderer* Renderer) {
             Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
         }
+    // #139 placement ghost: a translucent team-tinted silhouette while the drop is valid, and a
+    // blinking red one while invalid (two alpha steps the blink alternates — materials are immutable).
+    for (int Tm = 0; Tm < 2; ++Tm) {
+        Color G = TeamTint[Tm]; G.A = 0.5f;
+        GhostMat[Tm] = AtlasTinted(G);
+    }
+    GhostBadMat[0] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.85f});  // red, bright
+    GhostBadMat[1] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.30f});  // red, dim
     MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
@@ -355,6 +363,42 @@ int GameView::OnTap(float XPx, float YPx) {
     return -1;
 }
 
+int GameView::PlateAt(float XPx, float YPx) const {
+    if (!Ready) return -1;
+    for (int Ty = 0; Ty < 4; ++Ty) {
+        const float* Rc = PlateRect[Ty];
+        if (XPx >= Rc[0] && XPx <= Rc[0] + Rc[2] && YPx >= Rc[1] && YPx <= Rc[1] + Rc[3]) return Ty;
+    }
+    return -1;
+}
+
+void GameView::BeginPlaceDrag(int Type) {
+    GhostType_ = Type;
+    GhostDragging_ = true;
+    GhostValid_ = false;
+    SlideT_ = -1.0f;  // cancel any in-flight slide-back
+}
+
+void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
+    if (GhostType_ < 0) return;
+    GhostXPx_ = XPx; GhostYPx_ = YPx; GhostValid_ = Valid;
+}
+
+void GameView::EndPlaceDrag(bool Placed) {
+    if (GhostType_ < 0) return;
+    GhostDragging_ = false;
+    if (Placed) { GhostType_ = -1; SlideT_ = -1.0f; }  // placed: the real building takes over
+    else { SlideT_ = 0.0f; SlideFromX_ = GhostXPx_; SlideFromY_ = GhostYPx_; }  // invalid: slide home
+}
+
+void GameView::ScreenToWorld(float XPx, float YPx, float CameraY, float WidthPx, float HeightPx,
+                             bool FlipY, float& OutWx, float& OutWy) const {
+    const float P = Ppu(WidthPx);
+    OutWx = XPx / P;
+    const float Fy = CameraY + (HeightPx - YPx) / P;  // inverse of SY
+    OutWy = FlipY ? FW(WorldHeight) - Fy : Fy;
+}
+
 void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, float CameraY,
                       float WidthPx, float HeightPx, bool FlipY, float DtSec) {
     if (!Ready) return;
@@ -413,11 +457,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Renderer->DrawMesh(GlyphMesh[Glyph], Mat, M);
     };
 
-    // Camps render as ICONS like everything else (design lock: same tech, no bespoke
-    // geometry) — tinted the owner's ABSOLUTE team colour (see the unit-tint note).
-    const float CampPx = 4.5f * P;
-    BlitGlyph(GlyphCamp, CampMat[0], SX(FW(CampX)), SY(FW(Camp0Y)), CampPx);
-    BlitGlyph(GlyphCamp, CampMat[1], SX(FW(CampX)), SY(FW(Camp1Y)), CampPx);
+    // #135/#139: camps are no longer fixed locations — each team's mining camp is a PLACED
+    // building (rendered in the entity loop below, tinted the owner's team colour). Nothing is
+    // drawn here pre-placement; the pre-match camera sits at the player's baseline (§9.1).
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
@@ -440,10 +482,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const float UnitPx = 1.7f * P;
     uint32_t N = 0;
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
+    const float BldgPx = FW(Snap.BuildingFootprint) * 2.0f * P;  // #139: buildings read footprint-sized
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
-        if (Tm == My) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }
+        const bool Bldg = Snap.IsBuilding(I);  // #139: buildings are static, footprint-sized entities
+        if (Tm == My && !Bldg) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }  // buildings aren't army
         // ABSOLUTE team colours (playtest: the players sit together and compare
         // screens — team 0 is blue and team 1 red on BOTH phones, so a unit looks
         // the same wherever you see it), now a UNIQUE per-type shade of that team hue
@@ -453,14 +497,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
-        D.Size = Ty == UnitMiner ? UnitPx * 1.5f : UnitPx;  // carts read bigger (playtest)
-        D.U0 = static_cast<float>(Ty) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
-        D.U1 = static_cast<float>(Ty + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
-        // Facing (soldiers only; carts stay upright): the glyph's TOP points along the
+        // A miner BUILDING wears the camp glyph; other buildings their (bigger) type glyph.
+        const int Glyph = Bldg && Ty == UnitMiner ? static_cast<int>(GlyphCamp) : static_cast<int>(Ty);
+        D.Size = Bldg ? BldgPx : (Ty == UnitMiner ? UnitPx * 1.5f : UnitPx);  // carts read bigger (playtest)
+        D.U0 = static_cast<float>(Glyph) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
+        D.U1 = static_cast<float>(Glyph + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
+        // Facing (soldiers only; carts + buildings stay upright): the glyph's TOP points along the
         // MOVE direction. Below a low speed we DON'T update the stored heading — a nearly
         // stopped unit holds its last angle instead of spinning on sub-pixel noise.
         D.FaceX = 0.0f; D.FaceY = 0.0f;
-        if (Ty != UnitMiner) {
+        if (!Bldg && Ty != UnitMiner) {
             const float Vx = D.CurX - D.PrevX, Vy = D.CurY - D.PrevY;
             const float Sp = std::sqrt(Vx * Vx + Vy * Vy);
             if (Sp > 0.12f * P) { LastFaceX[I] = Vx / Sp; LastFaceY[I] = Vy / Sp; }  // fast: update
@@ -468,7 +514,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         }
         // A LOADED cart shows its ore heap in COIN gold (playtest): one extra
         // instance, same endpoints, the heap glyph over the cart — still one draw.
-        if (Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
+        if (!Bldg && Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
             Lur::Render::InstanceData& O = Instances[N++];
             O = D;  // same size: the enlarged heap is baked into the mask, seated on the rail
             O.R = Srgb(0xD9); O.G = Srgb(0xA9); O.B = Srgb(0x3C); O.A = 1.0f;
@@ -481,7 +527,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // Health bars on top of the units (sparse: only hurt units). Kept on the per-mesh
     // path — a second instanced draw is a later refinement.
     for (int32_t I = 0; I < Snap.Count; ++I) {
-        if (!Snap.IsAlive(I)) continue;
+        if (!Snap.IsAlive(I) || Snap.IsBuilding(I)) continue;  // #139: building HP bar is #141
         const int32_t MaxHp = Snap.Units[Snap.Type[I]].MaxHp;
         if (Snap.Hp[I] <= 0 || Snap.Hp[I] >= MaxHp) continue;
         const float Sx = SX(FW(Snap.PrevX[I]) + (FW(Snap.PosX[I]) - FW(Snap.PrevX[I])) * Alpha);
@@ -491,6 +537,31 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float BarY = Sy - UnitPx * 0.5f - 3.0f * HS;
         Blit(HealthBg, Sx, BarY, BarW, BarH);
         Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
+    }
+
+    // #139 placement ghost: while dragging, a footprint-sized silhouette follows the pointer —
+    // team-tinted when the drop is valid, blinking red when invalid (mirrors Sim::WouldAcceptPlace,
+    // evaluated by the caller). On an invalid release it slides back to its plate and vanishes.
+    GhostBlink_ += DtSec;
+    if (GhostType_ >= 0) {
+        float Gx = GhostXPx_, Gy = GhostYPx_;
+        if (!GhostDragging_ && SlideT_ >= 0.0f) {
+            SlideT_ += DtSec;
+            constexpr float Dur = 0.18f;
+            float K = SlideT_ / Dur; if (K > 1.0f) K = 1.0f;
+            K = 1.0f - (1.0f - K) * (1.0f - K);  // ease-out
+            const float* Rc = PlateRect[GhostType_];
+            Gx = SlideFromX_ + (Rc[0] + Rc[2] * 0.5f - SlideFromX_) * K;
+            Gy = SlideFromY_ + (Rc[1] + Rc[3] * 0.5f - SlideFromY_) * K;
+            if (SlideT_ >= Dur) { GhostType_ = -1; SlideT_ = -1.0f; }
+        }
+        if (GhostType_ >= 0) {
+            const Lur::Render::MaterialHandle GM =
+                (GhostDragging_ && !GhostValid_) ? GhostBadMat[std::sin(GhostBlink_ * 12.0f) > 0.0f ? 0 : 1]
+                                                 : GhostMat[My];
+            const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphCamp) : GhostType_;
+            BlitGlyph(GG, GM, Gx, Gy, BldgPx);
+        }
     }
 
     // Deposit juice (#85 playtest): "+N" floats where a miner banked its carry —
@@ -683,12 +754,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         for (int T = 0; T < NumMines; ++T)
             if (Snap.MineGold[T] > 0)
                 Dot(MapX(FW(Snap.MineX[T])), MapFy(FlipW(FW(Snap.MineY[T]))), 2.6f * HS, MiniGold);
-        Dot(MapX(FW(CampX)), MapFy(FlipW(FW(Camp0Y))), 3.4f * HS, TeamTint[0]);
-        Dot(MapX(FW(CampX)), MapFy(FlipW(FW(Camp1Y))), 3.4f * HS, TeamTint[1]);
+        // Units + buildings (#139: camps are placed entities now, no fixed camp dots). A building
+        // reads as a bigger dot in the owner's base team colour so the two bases stand out.
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I)) continue;
-            Dot(MapX(FW(Snap.PosX[I])), MapFy(FlipW(FW(Snap.PosY[I]))), 2.0f * HS,
-                TeamTypeTint[Snap.Team[I]][Snap.Type[I]]);  // same per-type tint as the units
+            const bool Bldg = Snap.IsBuilding(I);
+            Dot(MapX(FW(Snap.PosX[I])), MapFy(FlipW(FW(Snap.PosY[I]))), Bldg ? 3.4f * HS : 2.0f * HS,
+                Bldg ? TeamTint[Snap.Team[I]] : TeamTypeTint[Snap.Team[I]][Snap.Type[I]]);
         }
         Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
     }

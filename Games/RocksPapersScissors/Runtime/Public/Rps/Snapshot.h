@@ -27,6 +27,7 @@ struct Snapshot {
     Fixed    PosY[MaxUnits];
     uint8_t  Type[MaxUnits];
     uint8_t  Team[MaxUnits];
+    uint8_t  Kind[MaxUnits];    // #139 EKind — KindBuilding renders as a placed building, not a unit
     int32_t  Hp[MaxUnits];
     int32_t  Carry[MaxUnits];   // miner gold in hand — the view's deposit-flash edge
     uint64_t AliveBits[(MaxUnits + 63) / 64];
@@ -36,6 +37,12 @@ struct Snapshot {
     Fixed   MineX[NumMines];
     Fixed   MineY[NumMines];
     int32_t MineGold[NumMines];
+
+    // #139/#141: per-team frontier high-water (the build line) + the shared building footprint
+    // radius, carried so the view can draw the frontier lines and size the placement ghost.
+    Fixed    FrontierT0{};
+    Fixed    FrontierT1{};
+    Fixed    BuildingFootprint{};
 
     // HUD / overlay counters (read via this same hand-off, never from the live Sim).
     uint32_t Tick = 0;
@@ -73,12 +80,16 @@ struct Snapshot {
         std::memcpy(PosY, S.PosY, sizeof(Fixed) * N);
         std::memcpy(Type, S.Type, N);
         std::memcpy(Team, S.Team, N);
+        std::memcpy(Kind, S.Kind, N);
         std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
         std::memcpy(Carry, S.Carry, sizeof(int32_t) * N);
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
         std::memcpy(MineX, S.MineX, sizeof(Fixed) * NumMines);
         std::memcpy(MineY, S.MineY, sizeof(Fixed) * NumMines);
         std::memcpy(MineGold, S.MineGold, sizeof(int32_t) * NumMines);
+        FrontierT0 = S.FrontierT0;
+        FrontierT1 = S.FrontierT1;
+        BuildingFootprint = S.Cv.BuildingFootprint;
         Tick = S.Tick;
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
@@ -101,6 +112,7 @@ struct Snapshot {
     }
 
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
+    bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }  // #139
 
     // Fixed-timestep interpolation factor at render time NowNs. Clamps to [0,1] — no
     // extrapolation: if the next tick is late (sim stalled), it holds at Pos, which is

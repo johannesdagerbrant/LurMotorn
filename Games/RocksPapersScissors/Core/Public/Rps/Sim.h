@@ -153,6 +153,13 @@ struct Sim {
     // view each frame for the ghost's valid/invalid blink (§4.1) — read-only, writes nothing.
     bool CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const;
 
+    // #139/§4.1: the FULL placement-acceptance predicate a place event must pass — spatial
+    // validity (CanPlaceBuilding) AND affordable AND the opening gates (miner camp forced first;
+    // soldier buildings disabled until the team's first miner UNIT). A pure, non-mutating read of
+    // the hashed state (identical on both peers), shared by ApplyPlace and the view's ghost blink
+    // (§4.1) so the preview can never disagree with what the sim will actually accept.
+    bool WouldAcceptPlace(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const;
+
 #if LUR_INTERNAL
     // Dev-only stress scene (issue #75): bulk-spawn PerTeam soldiers spread across each
     // half of the field, to prove the tick budget (grid) + one-draw render hold at the

@@ -59,6 +59,13 @@ float Ppu() {
 float WorldHeightF() {
     return static_cast<float>(Rps::WorldHeight.Raw) / static_cast<float>(Rps::Fixed::One);
 }
+// View-side world (float) -> Fixed for a place event. Only the placing peer computes this; the
+// resulting Fixed travels over the wire, so both peers apply the identical position (no float
+// crosses into the sim's determinism — the event carries the raw int).
+Rps::Fixed WorldToFixed(float W) {
+    if (W < 0.0f) W = 0.0f;
+    return Rps::Fixed{static_cast<int32_t>(W * static_cast<float>(Rps::Fixed::One) + 0.5f)};
+}
 
 // ------------------------------------------------------------------ two-window lockstep
 
@@ -118,28 +125,66 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
     const float MaxCam = FieldMax + P.View.TopHudWorldUnits(static_cast<float>(W));
     const float MinCam = -P.View.BottomHudWorldUnits(static_cast<float>(W));
     if (!P.CamInit) { P.Cam.Y = MinCam; P.CamInit = true; }  // camp clear of the plates on launch
-    P.Cam.Update(DtSec, MaxCam, MinCam);
+    // #139/§9.1: pre-match the camera is LOCKED at the player's baseline (the starting band where
+    // the camp goes); free scrolling begins once the match starts (both camps placed).
+    if (!P.Lp.MatchStarted()) P.Cam.Y = MinCam;
+    else P.Cam.Update(DtSec, MaxCam, MinCam);
     P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.Cam.Y, static_cast<float>(W),
                   static_cast<float>(H), P.Team == 1, DtSec);
 }
 
+// #139 drag-to-place: turn a pointer at (XPx,YPx) into a place-event world position + validity,
+// asking the authoritative sim (WouldAcceptPlace) so the ghost's red/valid blink can never
+// disagree with what the sim will accept. Wx/Wy are the world drop; returns validity.
+bool DragValidity(Peer& P, float XPx, float YPx, int W, int H, float& Wx, float& Wy) {
+    P.View.ScreenToWorld(XPx, YPx, P.Cam.Y, static_cast<float>(W), static_cast<float>(H),
+                         P.Team == 1, Wx, Wy);
+    return P.Lp.GetSim().WouldAcceptPlace(P.Team, static_cast<uint8_t>(P.View.PlacingType()),
+                                          WorldToFixed(Wx), WorldToFixed(Wy));
+}
+
 void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t ElapsedNs,
                      uint64_t& AutoAccumNs) {
-    // #137b: the old 4-bit press mask is retired. Unit input is now place/queue EVENTS via
-    // Lp.QueueLocalEvent, produced by the drag-to-place + per-building x1/x5/x20 UI landing in
-    // #139/#140. Until then the keyboard/plate taps are drained (camera still pans) but issue
-    // no game input. TODO(#139/#140): route drags/taps to QueueLocalEvent(InputEvent::Place/Queue).
+    // #139: a pointer-down on a build plate starts a drag-to-place (the ghost follows to the
+    // field; a valid release emits a Place event, an invalid one slides back); any other drag
+    // pans the camera. The per-building x1/x5/x20 queue taps land in #140.
     for (uint32_t Vk : P.Win.TakeKeys()) (void)Vk;
+    int W = 0, H = 0;
+    P.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
-        if (T.Phase == Lur::Input::ETouchPhase::Began) P.Cam.Begin(T.YPx);
-        else if (T.Phase == Lur::Input::ETouchPhase::Moved) P.Cam.Move(T.YPx, Ppu());
-        else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                 T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-            P.Cam.End();
-            if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);  // HUD/selector taps
+        if (T.Phase == Lur::Input::ETouchPhase::Began) {
+            const int Plate = P.View.PlateAt(T.XPx, T.YPx);
+            if (Plate >= 0) P.View.BeginPlaceDrag(Plate);  // start placing this building type
+            else P.Cam.Begin(T.YPx);
+        } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
+            if (P.View.IsPlacing()) {
+                float Wx = 0, Wy = 0;
+                const bool Valid = DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy);
+                P.View.UpdatePlaceDrag(T.XPx, T.YPx, Valid);
+            } else {
+                P.Cam.Move(T.YPx, Ppu());
+            }
+        } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
+                   T.Phase == Lur::Input::ETouchPhase::Cancelled) {
+            if (P.View.IsPlacing()) {
+                bool Placed = false;
+                if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                    float Wx = 0, Wy = 0;
+                    if (DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy)) {
+                        P.Lp.QueueLocalEvent(Rps::InputEvent::Place(
+                            P.Team, static_cast<uint8_t>(P.View.PlacingType()),
+                            WorldToFixed(Wx), WorldToFixed(Wy)));
+                        Placed = true;
+                    }
+                }
+                P.View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
+            } else {
+                P.Cam.End();
+                if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);  // HUD/selector
+            }
         }
     }
-    (void)Auto; (void)Rng; (void)ElapsedNs; (void)AutoAccumNs;  // #137b: auto-soak re-wires to events in #139/#140
+    (void)Auto; (void)Rng; (void)ElapsedNs; (void)AutoAccumNs;  // #137b: auto-soak re-wires to events in #140
 }
 
 int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {

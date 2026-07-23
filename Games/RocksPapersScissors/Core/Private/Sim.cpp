@@ -841,22 +841,8 @@ void WinCheck(Sim& S) {
 // invalid/unaffordable request (identical on both peers — pure functions of the hashed state). ----
 // EventPlaceBuilding: validate (§5.1), deduct the placement cost, and drop a building slot.
 void ApplyPlace(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
-    if (Type >= UnitCount) return;
-    // #135/§9: the opening is forced camp -> miners -> military. A miner CAMP is always placeable,
-    // but SOLDIER (non-miner) buildings are DISABLED until the team's first miner UNIT has spawned
-    // (a placed camp isn't enough — it must have produced a cart). The UI enforces this too; this
-    // is the defensive, deterministic sim-side guard — pure state, identical on both peers.
-    if (Type != UnitMiner) {
-        bool HasMinerUnit = false;
-        for (int32_t J = 0; J < S.Count; ++J)
-            if (S.IsAlive(J) && !S.IsBuilding(J) && S.Team[J] == Team && S.Type[J] == UnitMiner) {
-                HasMinerUnit = true; break;
-            }
-        if (!HasMinerUnit) return;
-    }
-    if (!S.CanPlaceBuilding(Team, Type, X, Y)) return;   // invalid tile -> no-op (§5.1)
+    if (!S.WouldAcceptPlace(Team, Type, X, Y)) return;   // invalid/unaffordable/gated -> no-op
     const int32_t Cost = BuildingCostFor(S.Cv, Type);
-    if (S.Teams[Team].Gold < Cost) return;               // unaffordable -> no-op
     const int32_t I = AllocSlot(S);
     LUR_ASSERT_MSG(I >= 0, "RPS: slot exhausted placing a building");
     if (I < 0) return;
@@ -945,6 +931,22 @@ bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
         if (Dist2(X, Y, MineX[M], MineY[M]) < MinBM) return false;
     }
     return true;
+}
+
+bool Sim::WouldAcceptPlace(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
+    if (Type >= UnitCount || Team > 1) return false;
+    // #135/§9 opening gates: a miner CAMP is always placeable, but SOLDIER (non-miner) buildings
+    // are disabled until the team's first miner UNIT has spawned (a placed camp isn't enough).
+    if (Type != UnitMiner) {
+        bool HasMinerUnit = false;
+        for (int32_t J = 0; J < Count; ++J)
+            if (IsAlive(J) && !IsBuilding(J) && this->Team[J] == Team && this->Type[J] == UnitMiner) {
+                HasMinerUnit = true; break;
+            }
+        if (!HasMinerUnit) return false;
+    }
+    if (!CanPlaceBuilding(Team, Type, X, Y)) return false;      // spatial validity (§5.1)
+    return Teams[Team].Gold >= BuildingCostFor(Cv, Type);       // affordable
 }
 
 void Sim::Init(uint64_t InSeed) {
