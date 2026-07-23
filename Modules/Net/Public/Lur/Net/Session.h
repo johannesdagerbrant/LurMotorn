@@ -47,7 +47,11 @@ enum class EMsgType : uint8_t {
 //     instead of deadlocking with no recovery (issue #72).
 // (2026-07-19: enum slots 3..5 renamed Move/Resign/DrawOffer -> generic Game0..2 for the
 //  RTS; a pure source rename with no wire-format change, so ProtocolVersion stays 5.)
-inline constexpr uint8_t ProtocolVersion = 5;
+// v6: RPS buildings rework (#137) — MsgInput's per-tick payload changed from a 4-bit press
+//     mask to a framed input-EVENT batch (place/queue), and the resync history now carries
+//     event batches. A genuine game-wire-format change, so a mixed-build session must be
+//     refused at the Hello handshake rather than desync mid-match.
+inline constexpr uint8_t ProtocolVersion = 6;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {

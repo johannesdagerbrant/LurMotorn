@@ -125,33 +125,21 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
 
 void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t ElapsedNs,
                      uint64_t& AutoAccumNs) {
-    for (uint32_t Vk : P.Win.TakeKeys())
-        if (Vk >= 0x31 && Vk <= 0x34) P.Lp.SetLocalMask(static_cast<uint8_t>(1u << (Vk - 0x31)));
+    // #137b: the old 4-bit press mask is retired. Unit input is now place/queue EVENTS via
+    // Lp.QueueLocalEvent, produced by the drag-to-place + per-building x1/x5/x20 UI landing in
+    // #139/#140. Until then the keyboard/plate taps are drained (camera still pans) but issue
+    // no game input. TODO(#139/#140): route drags/taps to QueueLocalEvent(InputEvent::Place/Queue).
+    for (uint32_t Vk : P.Win.TakeKeys()) (void)Vk;
     for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
         if (T.Phase == Lur::Input::ETouchPhase::Began) P.Cam.Begin(T.YPx);
         else if (T.Phase == Lur::Input::ETouchPhase::Moved) P.Cam.Move(T.YPx, Ppu());
         else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
                  T.Phase == Lur::Input::ETouchPhase::Cancelled) {
             P.Cam.End();
-            if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                // HUD first (chess's pattern): plates press units, the selector
-                // consumes its own taps; only world taps fall through.
-                const int Plate = P.View.OnTap(T.XPx, T.YPx);
-                if (Plate >= 0) P.Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));
-            }
+            if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);  // HUD/selector taps
         }
     }
-#if LUR_INTERNAL
-    if (Auto) {
-        AutoAccumNs += ElapsedNs;
-        if (AutoAccumNs > 200'000'000ull) {
-            AutoAccumNs = 0;
-            P.Lp.SetLocalMask(static_cast<uint8_t>(1u << Rng.NextBounded(4)));  // random soldier
-        }
-    }
-#else
-    (void)Auto; (void)ElapsedNs; (void)AutoAccumNs;
-#endif
+    (void)Auto; (void)Rng; (void)ElapsedNs; (void)AutoAccumNs;  // #137b: auto-soak re-wires to events in #139/#140
 }
 
 int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
@@ -259,7 +247,8 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
     Lur::Log::Info("AI-vs-AI: team0=%s vs team1=%s, %d matches, cap %d ticks",
                    Names[static_cast<int>(TierA)], Names[static_cast<int>(TierB)], Matches, MaxTicks);
     int Wins[3] = {0, 0, 0};  // [ongoing unused], team0, team1 -> index by EResult
-    int Draws = 0;
+    int Draws = 0, Resolved = 0;
+    long long SumA0 = 0, SumA1 = 0;  // army totals for the continuous strength signal
     for (int M = 0; M < Matches; ++M) {
         const uint64_t MatchSeed = BaseSeed + static_cast<uint64_t>(M);
         Rps::Sim S;
@@ -273,19 +262,21 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
             const uint8_t M1 = Ai1.DecideMask(S, S.Tick);
             S.Step(M0, M1);
         }
+        const int A0 = S.AliveCount(0), A1 = S.AliveCount(1);
+        SumA0 += A0;
+        SumA1 += A1;
         uint8_t Res = S.Result;
-        if (Res == Rps::ResultOngoing) {  // undecided at the cap -> stronger army wins
-            const int A0 = S.AliveCount(0), A1 = S.AliveCount(1);
-            Res = A0 > A1 ? Rps::ResultTeam0Wins : A1 > A0 ? Rps::ResultTeam1Wins : Rps::ResultDraw;
-        }
+        if (Res != Rps::ResultOngoing) ++Resolved;      // real wipeout (not a cap tiebreak)
+        else Res = A0 > A1 ? Rps::ResultTeam0Wins : A1 > A0 ? Rps::ResultTeam1Wins : Rps::ResultDraw;
         if (Res == Rps::ResultDraw) ++Draws; else ++Wins[Res];
-        Lur::Log::Info("  match %d (seed 0x%llx): result=%u ticks=%d army0=%d army1=%d",
-                       M, static_cast<unsigned long long>(MatchSeed), Res, T, S.AliveCount(0),
-                       S.AliveCount(1));
     }
-    Lur::Log::Info("AI-vs-AI RESULT: team0(%s) %d wins | team1(%s) %d wins | %d draws",
+    // Binary wins are noisy for near-even tiers (cap tiebreak + team0/1 positional bias), so
+    // ALSO report resolved-count and average army sizes — the continuous strength signal.
+    Lur::Log::Info("AI-vs-AI RESULT: team0(%s) %d wins | team1(%s) %d wins | %d draws | %d/%d resolved | "
+                   "avg army: t0=%.0f t1=%.0f",
                    Names[static_cast<int>(TierA)], Wins[Rps::ResultTeam0Wins],
-                   Names[static_cast<int>(TierB)], Wins[Rps::ResultTeam1Wins], Draws);
+                   Names[static_cast<int>(TierB)], Wins[Rps::ResultTeam1Wins], Draws, Resolved, Matches,
+                   static_cast<double>(SumA0) / Matches, static_cast<double>(SumA1) / Matches);
     return 0;
 }
 
@@ -475,16 +466,9 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
                            Session.GetPeerGuid().c_str());
         }
         if (Started) {
-            (void)Auto; (void)Rng;
-#if LUR_INTERNAL
-            if (Auto) {
-                AutoAccumNs += ElapsedNs;
-                if (AutoAccumNs > 200'000'000ull) {  // ~1.4 presses/s, a random soldier type
-                    AutoAccumNs = 0;
-                    Lp.SetLocalMask(static_cast<uint8_t>(1u << Rng.NextBounded(4)));
-                }
-            }
-#endif
+            // #137b: auto-soak spammed a random press mask; that's retired with the mask. The
+            // event-based soak (random place/queue) re-lands with the input UI in #139/#140.
+            (void)Auto; (void)Rng; (void)AutoAccumNs;
             Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
             if (Lp.Desynced()) Lur::Log::Error("DESYNC (tick %u)", Lp.ExecTick());
         }
@@ -525,6 +509,7 @@ int main(int argc, char** argv) {
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
     int Matches = 9;
+    int MaxTicks = 6000;
     auto ParseTier = [](const std::string& T) {
         return T == "easy" ? Rps::EAiTier::Easy : T == "hard" ? Rps::EAiTier::Hard
                                                               : Rps::EAiTier::Medium;
@@ -546,6 +531,7 @@ int main(int argc, char** argv) {
             AiVsB = ParseTier(C == std::string::npos ? std::string{} : V.substr(C + 1));
         }
         else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
+        else if (A == "--maxticks" && I + 1 < argc) MaxTicks = std::atoi(argv[++I]);
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
         else if (A == "--nocombat") NoCombat = true;                     // pure-motion tuning (no kills)
         else if (A == "--autofoe") { Solo = true; Auto = true; FoeOnly = true; }  // you play, only the foe mashes
@@ -559,7 +545,7 @@ int main(int argc, char** argv) {
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
-    if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, /*MaxTicks*/ 6000);
+    if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, AiTier);
     return RunLoopback(Auto, MaxFrames, Seed);

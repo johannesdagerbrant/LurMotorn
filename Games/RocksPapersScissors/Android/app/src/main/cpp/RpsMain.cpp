@@ -203,10 +203,11 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 // live: the solo AI sim, else the linked peer.
                 const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
                 if (Plate >= 0) {
+                    // Solo AI sim still reads the legacy press mask (Step(mask) path, AI is #144).
                     if (S->SoloActive.load(std::memory_order_acquire))
                         S->SoloHumanMask.fetch_or(static_cast<uint8_t>(1u << Plate), std::memory_order_relaxed);
-                    else if (S->Linked.load(std::memory_order_acquire))
-                        S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
+                    // Linked (lockstep) input is now place/queue EVENTS (#137b) — the 4-bit mask
+                    // is retired. TODO(#139/#140): route drags/taps to Lp.QueueLocalEvent.
                 }
                 const int Tier = S->View.TakeAiTier();  // an AI row was picked -> start solo (#127)
                 if (Tier >= 0) S->SoloAiTier.store(Tier, std::memory_order_release);
@@ -358,13 +359,9 @@ void android_main(android_app* App) {
                 LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
             }
 #if LUR_INTERNAL
-            if (State.Started && AutoPlay) {
-                AutoAccumNs += ElapsedNs;
-                if (AutoAccumNs > 200'000'000ull) {
-                    AutoAccumNs = 0;
-                    State.Lp.SetLocalMask(static_cast<uint8_t>(1u << AutoRng.NextBounded(4)));
-                }
-            }
+            // #137b: the linked auto-soak spammed a random press mask, retired with the mask.
+            // Event-based soak (random place/queue) returns with the input UI in #139/#140.
+            (void)AutoPlay; (void)AutoRng; (void)AutoAccumNs;
 #endif
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)

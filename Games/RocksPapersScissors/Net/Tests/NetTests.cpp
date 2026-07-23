@@ -148,6 +148,27 @@ static void TestEventBatchFuzz() {
     CHECK(true);  // no crash/hang == pass
 }
 
+// #137: a deterministic per-tick input schedule for the lockstep tests — each peer places a
+// mining camp early (funded by the CvStartingGold Init default) then queues units at it, so the
+// tests exercise real place/queue EVENTS over the wire and stay reproducible. Team 0 builds in
+// the bottom band, team 1 in the top. The camp lands at slot 6 (team 0) / 7 (team 1): slots 0..5
+// are the six start miners, and the combined batch applies team 0's place before team 1's.
+static void DriveInput(LockstepPeer& P, uint8_t Team, int TickIdx) {
+    if (TickIdx == 3)
+        P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, F(17), Team == 0 ? F(10) : F(230)));
+    else if (TickIdx == 15)
+        P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 6 : 7, 5));
+}
+
+// Replay a recorded/reassembled EVENT stream (combined batch per tick) into a fresh sim -> hash.
+static uint64_t ReplayHashEvents(uint64_t Seed, const std::vector<std::vector<InputEvent>>& Rec) {
+    static Sim S;
+    S.Init(Seed);
+    for (const std::vector<InputEvent>& Batch : Rec)
+        S.StepEvents(Batch.data(), static_cast<int32_t>(Batch.size()));
+    return S.StateHash();
+}
+
 // Replay a recorded/reassembled (mask0, mask1) stream into a fresh sim -> final hash.
 static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
                            const std::vector<uint8_t>& M1,
@@ -215,10 +236,9 @@ static void TestLockstepStaysInSync() {
     A.Init(0x1234, 0, Enqueue, &Qa);
     B.Init(0x1234, 1, Enqueue, &Qb);
 
-    SplitMix64 Rng(0x5151);
     for (int I = 0; I < 300; ++I) {
-        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
-        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);  // A's inputs+anchors -> B
@@ -246,14 +266,14 @@ static void TestLockstepCvarSyncStaysIdentical() {
         LockstepPeer A, B;
         A.Init(0xC0DE, 0, Enqueue, &Qa);
         B.Init(0xC0DE, 1, Enqueue, &Qb);
-        SplitMix64 Rng(0x9);
         for (int I = 0; I < 200; ++I) {
-            // At tick ~20, A shoves the goal-seek weight to 3.0. This consumes no RNG, so
-            // the INPUT stream is identical to the untweaked run — only the CVar differs.
+            // At tick ~20, A doubles the miner speed. Miners exist from the start + the placed
+            // camp, so the tweak measurably shifts mining/deposit timing -> state diverges. The
+            // input schedule is identical to the untweaked run — only the CVar differs.
             if (Tweak && I == 20)
-                A.SetGameplayCvar(CvIdWSeek, Fixed::FromInt(3).Raw, /*wallMs*/ 1000);
-            A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2);
-            B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4);
+                A.SetGameplayCvar(CvIdMinerSpeed, F(8, 10).Raw, /*wallMs*/ 1000);
+            DriveInput(A, 0, I);
+            DriveInput(B, 1, I);
             A.Tick(OneTickNs);
             B.Tick(OneTickNs);
             Deliver(Qa, B);
@@ -306,10 +326,9 @@ static void TestCvarSyncMatchStartMerge() {
     CHECK(B.GetSim().Cv.WAlign == A.GetSim().Cv.WAlign);
 
     // And they stay bit-identical once the match runs on the merged set.
-    SplitMix64 Rng(0x7);
     for (int I = 0; I < 120; ++I) {
-        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2);
-        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4);
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -348,7 +367,7 @@ static void TestLockstepExecuteCapBounded() {
     // Pile up a big peer-input backlog on A WITHOUT letting it execute: A never ticks,
     // so WallTicks=0 keeps the ceiling shut while PeerMasks accumulates.
     const int N = 40;
-    for (int I = 0; I < N; ++I) { B.SetLocalMask(1); B.Tick(OneTickNs); }  // B produces N inputs
+    for (int I = 0; I < N; ++I) B.Tick(OneTickNs);  // B produces N input frames (empty batches suffice)
     Deliver(Qb, A);
     CHECK(A.ExecTick() == 0);
 
@@ -373,10 +392,9 @@ static void TestLockstepReplayHashIdentical() {
     B.Init(0x77, 1, Enqueue, &Qb);
     A.SetRecording(true);  // record the executed stream
 
-    SplitMix64 Rng(0xF00D);
     for (int I = 0; I < 200; ++I) {
-        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
-        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -384,9 +402,9 @@ static void TestLockstepReplayHashIdentical() {
     }
     for (int I = 0; I < 4; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
 
-    CHECK(A.RecordedTeam0().size() == A.ExecTick());  // recorded every executed tick
+    CHECK(A.RecordedEvents().size() == A.ExecTick());  // recorded every executed tick
     // Feed the recording into a FRESH sim -> must land on the same state (the replay law).
-    const uint64_t Replayed = ReplayHash(A.Seed(), A.RecordedTeam0(), A.RecordedTeam1());
+    const uint64_t Replayed = ReplayHashEvents(A.Seed(), A.RecordedEvents());
     CHECK(Replayed == A.GetSim().StateHash());
     CHECK(Replayed == B.GetSim().StateHash());  // both peers, one recording
 }
@@ -503,12 +521,11 @@ static void TestLockstepOverSessionLoopback() {
     A->Lp.Init(0xABCD, ATeam, SendViaSession, &A->S);
     B->Lp.Init(0xABCD, BTeam, SendViaSession, &B->S);
 
-    SplitMix64 Rng(0x2468);
     for (int I = 0; I < 250; ++I) {
         A->S.Tick(OneTickNs);   // pump transports -> deliver queued datagrams to OnMessage
         B->S.Tick(OneTickNs);
-        A->Lp.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
-        B->Lp.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        DriveInput(A->Lp, ATeam, I);
+        DriveInput(B->Lp, BTeam, I);
         A->Lp.Tick(OneTickNs);  // produce + send (enqueues to peer inbox), execute
         B->Lp.Tick(OneTickNs);
         CHECK(!A->Lp.Desynced() && !B->Lp.Desynced());
@@ -531,10 +548,9 @@ static void TestLockstepColdRejoinResync() {
     A.Init(0x55, 0, Enqueue, &Qa);
     B.Init(0x55, 1, Enqueue, &Qb);
 
-    SplitMix64 Rng(0xBADCAB);
     for (int I = 0; I < 40; ++I) {  // play a while
-        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
-        B.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -562,8 +578,8 @@ static void TestLockstepColdRejoinResync() {
 
     // Resume LIVE lockstep A <-> B2 from the frontier — must stay bit-identical, no desync.
     for (int I = 0; I < 60; ++I) {
-        A.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
-        B2.SetLocalMask(static_cast<uint8_t>(Rng.NextBounded(16)));
+        DriveInput(A, 0, I);
+        DriveInput(B2, 1, I);
         A.Tick(OneTickNs);
         B2.Tick(OneTickNs);
         Deliver(Qa, B2);

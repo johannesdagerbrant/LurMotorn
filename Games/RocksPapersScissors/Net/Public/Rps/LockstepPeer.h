@@ -54,10 +54,11 @@ public:
 
     void Init(uint64_t Seed, uint8_t MyTeam, SendFn Send, void* Ctx);
 
-    // OR in this frame's presses; consumed (once) by the next produced wall tick.
-    // Atomic: on Android the INPUT thread calls this while the SIM thread consumes it in
-    // Tick (#91). Relaxed is fine — it's a lossy-OR mailbox, not an ordering barrier.
-    void SetLocalMask(uint8_t Mask) { PendingLocalMask.fetch_or(Mask & 0xFu, std::memory_order_relaxed); }
+    // #137: queue a local input EVENT (place/queue) for the next produced wall tick — replaces
+    // the 4-bit SetLocalMask. Thread-safe (the Android INPUT thread queues while the SIM thread
+    // drains it in Tick, #91): a mutex-guarded inbox, fine for the human tap rate. The Team on
+    // the event is overwritten with MyTeam here, so the UI can't spoof the peer's team.
+    void QueueLocalEvent(InputEvent E);
 
     // Advance wallclock: produce + send local input for the new ticks, then execute as
     // far as the ceiling allows.
@@ -115,11 +116,13 @@ public:
     // desync. Both peers execute the SAME stream, so either peer's recording replays both.
     void SetRecording(bool On) { Recording = On; }
     uint64_t Seed() const { return TheSim.Seed; }
-    const std::vector<uint8_t>& RecordedTeam0() const { return RecM0; }
-    const std::vector<uint8_t>& RecordedTeam1() const { return RecM1; }
+    // #137: the executed COMBINED per-tick event batch (team0's events then team1's) — one
+    // stream now (StepEvents takes one batch), replacing the two mask vectors. Replay feeds
+    // each tick's batch back through StepEvents on a fresh Sim to a hash-identical state.
+    const std::vector<std::vector<InputEvent>>& RecordedEvents() const { return RecEvents; }
 
 private:
-    void ProduceAndSend(uint8_t Mask);
+    void ProduceAndSend(const std::vector<InputEvent>& Batch);
     void Execute();
 #if LUR_INTERNAL
     // Gameplay-CVar overrides waiting to be applied, keyed by the exec tick they land on
@@ -153,20 +156,23 @@ private:
     Lur::Sim::TickClock Clock{TickRateHz};
     uint32_t Delay = InputDelayTicks;
     uint8_t MyTeam = 0;
-    std::atomic<uint8_t> PendingLocalMask{0};  // input thread -> sim thread (#91)
+    std::mutex EventQueueMutex_;              // input thread -> sim thread inbox (#91)
+    std::vector<InputEvent> PendingLocalEvents;
 
-    std::vector<uint8_t> LocalMasks;  // index = exec tick (pre-seeded empty for 0..Delay-1)
-    std::vector<uint8_t> PeerMasks;
+    // index = exec tick; each entry is that tick's event batch for the team (pre-seeded empty
+    // for ticks 0..Delay-1, the by-convention empty delay window on both peers).
+    std::vector<std::vector<InputEvent>> LocalEvents;
+    std::vector<std::vector<InputEvent>> PeerEvents;
     uint32_t WallTicks = 0;           // local wall ticks elapsed = the execution target
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;
 
     bool Recording = false;
-    std::vector<uint8_t> RecM0, RecM1;  // executed masks per tick (only while Recording)
+    std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)
 
-    bool Awaiting = false;              // in a resync exchange: don't produce/execute yet
-    std::vector<uint8_t> Incoming[2];   // reassembled peer history streams (team0, team1)
+    bool Awaiting = false;                            // in a resync exchange: don't produce/execute yet
+    std::vector<std::vector<InputEvent>> IncomingHistory;  // reassembled peer combined-batch history
 
     SendFn Send = nullptr;
     void* Ctx = nullptr;

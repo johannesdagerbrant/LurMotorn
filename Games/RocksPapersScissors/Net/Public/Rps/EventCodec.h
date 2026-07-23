@@ -56,6 +56,7 @@ inline bool DecodeEvent(Lur::Serialization::BitReader& R, uint32_t& Delta, uint8
 //     place: [type:2][varint PosX.raw][varint PosY.raw]   (positions are >=0, in-bounds)
 //     queue: [varint slot][varint count]
 constexpr int MaxEventsPerTick = 16;  // a human can't issue more than a few taps per 100 ms tick
+constexpr std::size_t MaxResyncChunkBytes = 512;  // transport's framed payload cap (also used below)
 
 inline void EncodeEventBatch(Lur::Serialization::BitWriter& W, const InputEvent* Evs, int Count) {
     Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(Count));
@@ -87,6 +88,57 @@ inline int DecodeEventBatch(Lur::Serialization::BitReader& R, InputEvent* Out, i
     return R.IsOk() ? static_cast<int>(Count) : -1;
 }
 
+// ---- #137: EVENT-history resync (buildings rework). The cold-rejoin/blip path serialises the
+// executed COMBINED per-tick batches (team0's events then team1's, the order Execute applies)
+// so a rejoiner free-runs them through a fresh sim (the replay law) and snaps to the frontier.
+// Byte-bounded chunking: a tick batch is variable-length now (not the old 1-byte mask), so pack
+// as many whole ticks as fit under MaxResyncChunkBytes. Header: [varint firstTick][varint
+// tickCount] then tickCount batches. A single batch is <=~160 B (<< the cap), so every chunk
+// holds >=1 tick.
+inline std::vector<std::vector<uint8_t>> EncodeEventResyncChunks(
+        uint32_t FirstTick, const std::vector<std::vector<InputEvent>>& Hist) {
+    std::vector<std::vector<uint8_t>> Chunks;
+    std::size_t I = 0;
+    while (I < Hist.size()) {
+        const std::size_t Start = I;
+        std::size_t Bits = 0;
+        while (I < Hist.size()) {
+            Lur::Serialization::BitWriter Tmp;
+            EncodeEventBatch(Tmp, Hist[I].data(), static_cast<int>(Hist[I].size()));
+            const std::size_t Add = Tmp.GetBitCount();
+            // Reserve ~8 header bytes; require at least one tick per chunk.
+            if (I > Start && (Bits + Add) / 8 + 8 > MaxResyncChunkBytes) break;
+            Bits += Add;
+            ++I;
+        }
+        Lur::Serialization::BitWriter W;
+        Lur::Serialization::WriteVarUint(W, FirstTick + static_cast<uint32_t>(Start));
+        Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(I - Start));
+        for (std::size_t T = Start; T < I; ++T)
+            EncodeEventBatch(W, Hist[T].data(), static_cast<int>(Hist[T].size()));
+        const std::vector<uint8_t>& B = W.Finish();
+        Chunks.emplace_back(B.begin(), B.end());
+    }
+    return Chunks;
+}
+
+// Decode one event-history chunk, appending its per-tick batches to Out (reliable ordered
+// transport -> append). Total on hostile input (never traps).
+inline bool DecodeEventResyncChunk(const uint8_t* Data, std::size_t N, uint32_t& OutFirstTick,
+                                   std::vector<std::vector<InputEvent>>& Out) {
+    Lur::Serialization::BitReader R(Data, N);
+    OutFirstTick = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    const uint32_t Count = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    if (!R.IsOk() || Count > 100000u) return false;
+    for (uint32_t K = 0; K < Count; ++K) {
+        InputEvent Buf[MaxEventsPerTick];
+        const int M = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+        if (M < 0) return false;
+        Out.emplace_back(Buf, Buf + M);
+    }
+    return R.IsOk();
+}
+
 // ---- Resync: the SAME event codec, chunked for the cold-rejoin / blip path (design §4).
 // A dense input-history stream (one mask per tick from FirstTick) is framed into chunks,
 // each no larger than MaxResyncChunkBytes so nothing exceeds the transport's framed
@@ -95,7 +147,6 @@ inline int DecodeEventBatch(Lur::Serialization::BitReader& R, InputEvent* Out, i
 // order (reliable GATT makes reassembly an append). Worst case (mask-per-tick collapse):
 // a 15-min game is ≤ 9 KB ≈ 18 chunks per stream. The rejoiner free-runs the decoded
 // stream through a fresh sim (the replay law), then snaps to the frontier.
-constexpr std::size_t MaxResyncChunkBytes = 512;
 constexpr std::size_t ResyncTicksPerChunk = 500;  // 500 x 1-byte events + a ~6-byte header < 512
 
 inline std::vector<std::vector<uint8_t>> EncodeResyncChunks(uint32_t FirstTick,

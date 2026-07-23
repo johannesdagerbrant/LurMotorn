@@ -993,7 +993,7 @@ void Sim::Init(uint64_t InSeed) {
     FrontierT1 = WorldHeight - Cv.InitialFrontier;
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
-        Teams[T].Gold = StartGold;
+        Teams[T].Gold = Cv.StartingGold;  // #138/§12.6 opening gold (was the legacy StartGold)
         for (int K = 0; K < StartMiners; ++K) SpawnUnit(*this, T, UnitMiner);
     }
 }

@@ -20,24 +20,28 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     Send = InSend;
     Ctx = InCtx;
     Delay = InputDelayTicks;
-    LocalMasks.assign(Delay, 0);  // ticks 0..Delay-1 are empty by convention on BOTH peers
-    PeerMasks.assign(Delay, 0);
+    LocalEvents.assign(Delay, {});  // ticks 0..Delay-1 are empty by convention on BOTH peers
+    PeerEvents.assign(Delay, {});
     WallTicks = 0;
-    PendingLocalMask.store(0, std::memory_order_relaxed);
+    { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     Desync = false;
     MyHash.clear();
     PeerHash.clear();
-    RecM0.clear();
-    RecM1.clear();
+    RecEvents.clear();
     Awaiting = false;
-    Incoming[0].clear();
-    Incoming[1].clear();
+    IncomingHistory.clear();
 }
 
-void LockstepPeer::ProduceAndSend(uint8_t Mask) {
-    LocalMasks.push_back(Mask);  // lands at exec tick Delay + WallTicks
+void LockstepPeer::QueueLocalEvent(InputEvent E) {
+    E.Team = MyTeam;  // authoritative — the UI can only ever act for its own team
+    std::lock_guard<std::mutex> Lock(EventQueueMutex_);
+    PendingLocalEvents.push_back(E);
+}
+
+void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
+    LocalEvents.push_back(Batch);  // lands at exec tick Delay + WallTicks
     Lur::Serialization::BitWriter W;
-    EncodeEvent(W, 1, Mask);     // live wire: delta always 1 (tick implicit by count)
+    EncodeEventBatch(W, Batch.data(), static_cast<int>(Batch.size()));  // one framed batch per tick
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgInput, B.data(), B.size());
 }
@@ -49,8 +53,15 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 #endif
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
-        const uint8_t M = PendingLocalMask.exchange(0, std::memory_order_relaxed);
-        ProduceAndSend(M);
+        // All events queued since the last produced tick fold into the FIRST new tick's batch
+        // (mirrors the old mask's accumulate-then-consume); later ticks in this burst are empty.
+        // If N==0 the pending events persist for the next Tick (never dropped).
+        std::vector<InputEvent> Batch;
+        if (I == 0) {
+            std::lock_guard<std::mutex> Lock(EventQueueMutex_);
+            Batch.swap(PendingLocalEvents);
+        }
+        ProduceAndSend(Batch);
         ++WallTicks;
     }
     Execute();
@@ -60,8 +71,8 @@ void LockstepPeer::Execute() {
     // Ceiling: wallclock pace, gated by BOTH input timelines (min of the three).
     auto Ceiling = [this]() -> uint32_t {
         uint32_t C = WallTicks;
-        if (LocalMasks.size() < C) C = static_cast<uint32_t>(LocalMasks.size());
-        if (PeerMasks.size() < C)  C = static_cast<uint32_t>(PeerMasks.size());
+        if (LocalEvents.size() < C) C = static_cast<uint32_t>(LocalEvents.size());
+        if (PeerEvents.size() < C)  C = static_cast<uint32_t>(PeerEvents.size());
         return C;
     };
     // Cap ticks per call (#90): a catch-up burst drains over subsequent calls instead
@@ -73,16 +84,22 @@ void LockstepPeer::Execute() {
     uint32_t Ran = 0;
     while (!Desync && TheSim.Tick < Ceiling() && Ran < MaxExecTicksPerService) {
         const uint32_t T = TheSim.Tick;
-        const uint8_t Lm = LocalMasks[T], Pm = PeerMasks[T];
-        // Both peers map (local, peer) -> (team0, team1) IDENTICALLY, so Step's args are
-        // the same on both sides for tick T — the determinism precondition.
-        const uint8_t M0 = MyTeam == 0 ? Lm : Pm;
-        const uint8_t M1 = MyTeam == 0 ? Pm : Lm;
+        // Combine the tick's per-team batches in a TEAM0-FIRST order both peers agree on
+        // (each event also carries its Team), so StepEvents applies the identical sequence on
+        // both sides — the determinism precondition. Fixed stack scratch, no per-tick heap.
+        InputEvent Combined[2 * MaxEventsPerTick];
+        int NC = 0;
+        const std::vector<InputEvent>& L = LocalEvents[T];
+        const std::vector<InputEvent>& P = PeerEvents[T];
+        const std::vector<InputEvent>& First  = MyTeam == 0 ? L : P;  // team 0's batch
+        const std::vector<InputEvent>& Second = MyTeam == 0 ? P : L;  // team 1's batch
+        for (const InputEvent& E : First)  if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
+        for (const InputEvent& E : Second) if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
 #if LUR_INTERNAL
         ApplyCvarsForTick(T);  // #112: land any gameplay-CVar overrides stamped for tick T
 #endif
-        TheSim.Step(M0, M1);
-        if (Recording) { RecM0.push_back(M0); RecM1.push_back(M1); }
+        TheSim.StepEvents(Combined, NC);
+        if (Recording) RecEvents.emplace_back(Combined, Combined + NC);
         // Normal cadence: anchor every 10th tick. During a burst, suppress these and
         // emit a single anchor at the frontier below (avoids flooding the GATT queue).
         if (!Burst && TheSim.Tick % 10 == 0) EmitAnchor();
@@ -208,11 +225,11 @@ constexpr uint8_t ResyncTagMarker = 0xFF;
 void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
     if (Type == MsgInput) {
         Lur::Serialization::BitReader R(Data, N);
-        uint32_t D = 0;
-        uint8_t M = 0;
-        if (!Awaiting && DecodeEvent(R, D, M)) {
-            PeerMasks.push_back(M);  // live wire: each Input message is the next peer exec tick
-            Execute();               // peer input may unblock the ceiling
+        InputEvent Buf[MaxEventsPerTick];
+        const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+        if (!Awaiting && Cnt >= 0) {
+            PeerEvents.emplace_back(Buf, Buf + Cnt);  // live wire: each Input frame = next peer exec tick
+            Execute();                                // peer input may unblock the ceiling
         }
     } else if (Type == MsgAnchor) {
         Lur::Serialization::BitReader R(Data, N);
@@ -225,16 +242,16 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
     } else if (Type == MsgResyncChunk) {
         if (N < 1) return;
         const uint8_t Tag = Data[0];
-        if (Tag < 2) {
+        if (Tag == 0) {  // #137: a chunk of the peer's combined event history
             uint32_t Ft = 0;
-            DecodeResyncChunk(Data + 1, N - 1, Ft, Incoming[Tag]);  // reliable order -> append
+            DecodeEventResyncChunk(Data + 1, N - 1, Ft, IncomingHistory);  // reliable order -> append
         } else if (Tag == ResyncTagMarker) {
             Lur::Serialization::BitReader R(Data + 1, N - 1);
             const uint32_t F = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
-            if (R.IsOk() && F > TheSim.Tick && Incoming[0].size() >= F && Incoming[1].size() >= F)
+            if (R.IsOk() && F > TheSim.Tick && IncomingHistory.size() >= F)
                 RebuildFromHistory(F);  // peer is ahead -> adopt its history
-            else { Incoming[0].clear(); Incoming[1].clear(); }  // we're ahead / short -> keep ours
-            Awaiting = false;           // reconciled either way; resume live
+            else IncomingHistory.clear();  // we're ahead / short -> keep ours
+            Awaiting = false;              // reconciled either way; resume live
         }
     }
 #if LUR_INTERNAL
@@ -283,22 +300,28 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
 
 void LockstepPeer::BeginResync() {
     const uint32_t F = TheSim.Tick;  // our executed frontier
-    // Reconstruct the executed combined history as two team streams.
-    std::vector<uint8_t> Stream[2];
+    // Reconstruct the executed COMBINED history (team0-first per tick, the Execute order) so a
+    // rejoiner replays it through a fresh sim and both split it back per team.
+    std::vector<std::vector<InputEvent>> Hist;
+    Hist.reserve(F);
     for (uint32_t T = 0; T < F; ++T) {
-        const uint8_t Lm = LocalMasks[T], Pm = PeerMasks[T];
-        Stream[0].push_back(MyTeam == 0 ? Lm : Pm);
-        Stream[1].push_back(MyTeam == 0 ? Pm : Lm);
+        const std::vector<InputEvent>& L = LocalEvents[T];
+        const std::vector<InputEvent>& P = PeerEvents[T];
+        std::vector<InputEvent> C;
+        C.reserve(L.size() + P.size());
+        const std::vector<InputEvent>& First  = MyTeam == 0 ? L : P;
+        const std::vector<InputEvent>& Second = MyTeam == 0 ? P : L;
+        C.insert(C.end(), First.begin(), First.end());
+        C.insert(C.end(), Second.begin(), Second.end());
+        Hist.push_back(std::move(C));
     }
-    for (uint8_t St = 0; St < 2; ++St) {
-        const std::vector<std::vector<uint8_t>> Chunks = EncodeResyncChunks(0, Stream[St]);
-        for (const std::vector<uint8_t>& C : Chunks) {
-            std::vector<uint8_t> Payload;
-            Payload.reserve(C.size() + 1);
-            Payload.push_back(St);
-            Payload.insert(Payload.end(), C.begin(), C.end());
-            if (Send) Send(Ctx, MsgResyncChunk, Payload.data(), Payload.size());
-        }
+    const std::vector<std::vector<uint8_t>> Chunks = EncodeEventResyncChunks(0, Hist);
+    for (const std::vector<uint8_t>& C : Chunks) {
+        std::vector<uint8_t> Payload;
+        Payload.reserve(C.size() + 1);
+        Payload.push_back(0);  // tag 0 = history chunk
+        Payload.insert(Payload.end(), C.begin(), C.end());
+        if (Send) Send(Ctx, MsgResyncChunk, Payload.data(), Payload.size());
     }
     Lur::Serialization::BitWriter W;  // completion marker [0xFF][varint frontier]
     Lur::Serialization::WriteVarUint(W, F);
@@ -310,36 +333,37 @@ void LockstepPeer::BeginResync() {
     if (Send) Send(Ctx, MsgResyncChunk, Marker.data(), Marker.size());
 
     ReseedFrom(F);  // re-base our own timeline (drops in-flight beyond F); sim already at F
-    Incoming[0].clear();
-    Incoming[1].clear();
+    IncomingHistory.clear();
     Awaiting = true;  // cleared when we process the peer's marker
 }
 
 void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     const uint64_t S = TheSim.Seed;
     TheSim.Init(S);  // fresh sim, same seed
-    LocalMasks.clear();
-    PeerMasks.clear();
+    LocalEvents.clear();
+    PeerEvents.clear();
     for (uint32_t T = 0; T < Frontier; ++T) {
-        const uint8_t M0 = Incoming[0][T], M1 = Incoming[1][T];
-        TheSim.Step(M0, M1);  // free-run to the frontier (the replay law)
-        LocalMasks.push_back(MyTeam == 0 ? M0 : M1);
-        PeerMasks.push_back(MyTeam == 0 ? M1 : M0);
+        const std::vector<InputEvent>& C = IncomingHistory[T];
+        TheSim.StepEvents(C.data(), static_cast<int32_t>(C.size()));  // free-run (the replay law)
+        // Split the combined batch back into this peer's local + peer streams by Team.
+        std::vector<InputEvent> Loc, Peer;
+        for (const InputEvent& E : C) (E.Team == MyTeam ? Loc : Peer).push_back(E);
+        LocalEvents.push_back(std::move(Loc));
+        PeerEvents.push_back(std::move(Peer));
     }
     ReseedFrom(Frontier);  // sim now at Frontier; append the fresh Delay slack
-    Incoming[0].clear();
-    Incoming[1].clear();
+    IncomingHistory.clear();
 }
 
 void LockstepPeer::ReseedFrom(uint32_t Frontier) {
-    LocalMasks.resize(Frontier);  // drop anything in-flight beyond the frontier
-    PeerMasks.resize(Frontier);
+    LocalEvents.resize(Frontier);  // drop anything in-flight beyond the frontier
+    PeerEvents.resize(Frontier);
     for (uint32_t I = 0; I < Delay; ++I) {  // fresh empty delay slack, both sides agree
-        LocalMasks.push_back(0);
-        PeerMasks.push_back(0);
+        LocalEvents.push_back({});
+        PeerEvents.push_back({});
     }
     WallTicks = Frontier;
-    PendingLocalMask.store(0, std::memory_order_relaxed);
+    { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();
 }
