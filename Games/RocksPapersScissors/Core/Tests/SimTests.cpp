@@ -514,6 +514,22 @@ static void TestWipeoutLoses() {
     CHECK(S.Result == ResultTeam1Wins);
 }
 
+// #136/§12.1: buildings DO NOT enter the loss test. A team with buildings standing (even a
+// combat building) but no alive units and no rebuy gold is doomed and loses anyway.
+static void TestBuildingsDoNotSaveFromLoss() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceBuilding(S, 0, F(17), F(10), 0, UnitMiner);   // a mining camp stands...
+    PlaceBuilding(S, 1, F(17), F(14), 0, UnitRock);    // ...and a combat building
+    S.Count = 2;
+    S.Teams[0].Gold = 0;        // but no units and can't afford the cheapest -> doomed
+    S.Teams[1].Gold = 1000;     // team 1 solvent, so it does not also lose
+    S.Step(0, 0);
+    CHECK(S.AliveCount(0) == 0);          // buildings are not counted as units
+    CHECK(S.Result == ResultTeam1Wins);   // team 0 loses despite its buildings
+}
+
 static void TestRebuyIsNotLoss() {
     static Sim S;
     S.Init(0);
@@ -681,6 +697,7 @@ int main() {
     TestCartDepositsAtNearestMinerBuilding();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
+    TestBuildingsDoNotSaveFromLoss();
     TestRebuyIsNotLoss();
     TestBrokePressIgnored();
     TestQueueCapIgnored();

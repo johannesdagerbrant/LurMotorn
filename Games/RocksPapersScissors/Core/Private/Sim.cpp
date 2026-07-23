@@ -859,11 +859,17 @@ void Economy(Sim& S) {
     for (int T = 0; T < 2; ++T) { S.Teams[T].Gold += S.DepositBuf[T]; S.DepositBuf[T] = 0; }
 }
 
-// ---- Phase 7: win check (spec §6, edge-proof) ----
+// ---- Phase 7: win check (#136/§12.1, edge-proof) ----
+// A team LOSES iff it has NO alive units AND cannot afford even the cheapest unit
+// (Gold < CheapestCost = a miner). BUILDINGS DO NOT ENTER THIS TEST: a building can't gather
+// (only miner UNITS mine) and can't produce without gold, so with no units and no rebuy money
+// the player can never make a unit or gold again — doomed, however many buildings stand. A
+// gold-carrying cart IS a unit (AliveCount counts it), so stranded-gold needs no special case.
+// Queues no longer enter: they live on buildings now, and a building can't build while broke.
 void WinCheck(Sim& S) {
     bool Lose[2];
     for (uint8_t T = 0; T < 2; ++T)
-        Lose[T] = S.AliveCount(T) == 0 && S.QueuedTotal(T) == 0 && S.Teams[T].Gold < CheapestCost;
+        Lose[T] = S.AliveCount(T) == 0 && S.Teams[T].Gold < CheapestCost;
     if (Lose[0] && Lose[1]) S.Result = ResultDraw;  // both this tick -> draw (simultaneous damage makes it reachable)
     else if (Lose[0]) S.Result = ResultTeam1Wins;
     else if (Lose[1]) S.Result = ResultTeam0Wins;
@@ -1006,9 +1012,11 @@ void Sim::StressFill(int32_t PerTeam) {
 #endif
 
 int32_t Sim::AliveCount(uint8_t TeamId) const {
+    // #136: alive MOBILE units only — buildings are separate entities and never count as army
+    // (the win rule, the HUD army count, and the AI's strength read all want units, not camps).
     int32_t C = 0;
     for (int32_t I = 0; I < Count; ++I)
-        if (IsAlive(I) && Team[I] == TeamId) ++C;
+        if (IsAlive(I) && !IsBuilding(I) && Team[I] == TeamId) ++C;
     return C;
 }
 
