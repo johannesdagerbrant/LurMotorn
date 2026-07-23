@@ -246,6 +246,22 @@ static void ClearField(Sim& S) {
     for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;  // no mines: idle carts, controlled scenario
     S.Count = 0;
 }
+// #132: drop a BUILDING (Kind==KindBuilding) that produces `Type` into a slot. No placement
+// API yet (#137), so tests seed the SoA directly — same POD-is-public discipline as PlaceUnit.
+static void PlaceBuilding(Sim& S, int I, Fixed X, Fixed Y, uint8_t Team, uint8_t Type) {
+    S.PosX[I] = X; S.PosY[I] = Y; S.PrevX[I] = X; S.PrevY[I] = Y;
+    S.Team[I] = Team; S.Type[I] = Type; S.Hp[I] = BuildingHpFor(S.Cv, Type);
+    S.Kind[I] = KindBuilding; S.Queue[I] = 0; S.BuildProgress[I] = 0;
+    S.Target[I] = -1; S.Cooldown[I] = 0;
+    S.AliveBits[I >> 6] |= (1ull << (I & 63));
+}
+// Count alive MOBILE units (not buildings) on a team.
+static int32_t MobileCount(const Sim& S, uint8_t Team) {
+    int32_t C = 0;
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Team[I] == Team) ++C;
+    return C;
+}
 
 // Targeting (#98): an enemy CART shares the top priority with prey, so it's chosen over a
 // NEARER same-type mirror in the same band — economy denial ranks above the even fight.
@@ -320,6 +336,48 @@ static void TestBuildingSoaHashedAndCopyable() {
     CHECK(Snap.Kind[0] == KindBuilding && Snap.IsBuilding(0));
     CHECK(Snap.Queue[0] == 7 && Snap.BuildProgress[0] == 13);
     CHECK(Snap.FrontierT0 == F(42) && Snap.FrontierT1 == F(200));
+}
+
+// ---- #132 building production: FLAT cadence, no stack acceleration ----
+// A building with a deep queue must build at ONE-per-BuildTicks — a big queue does NOT build
+// faster (the removed stack-snowball). Trace the exact edges: unit #1 lands at BuildTicks,
+// #2 at 2·BuildTicks, #3 at 3·BuildTicks; queue + progress zero out at the end.
+static void TestBuildingProducesFlatCadence() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceBuilding(S, 0, F(17), F(20), 0, UnitRock);
+    S.Count = 1;
+    S.Queue[0] = 3;
+    const int Bt = S.Units[UnitRock].BuildTicks;
+    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    CHECK(MobileCount(S, 0) == 1);        // exactly one after Bt ticks (flat: +1/tick, not +Queue)
+    CHECK(S.Queue[0] == 2);
+    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    CHECK(MobileCount(S, 0) == 2);        // second at 2·Bt
+    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    CHECK(MobileCount(S, 0) == 3);        // third at 3·Bt
+    CHECK(S.Queue[0] == 0 && S.BuildProgress[0] == 0);  // drained, no banked progress
+    CHECK(S.IsBuilding(0) && S.IsAlive(0));             // the building persists (it produces, isn't consumed)
+}
+
+// #132: throughput scales by BUILDING COUNT, not queue depth. Two buildings each queued 1
+// finish BOTH units in Bt ticks (parallel), where one building queued 2 has produced only 1.
+static void TestBuildingCountScalesThroughput() {
+    static Sim Two, One;
+    Two.Init(0); ClearField(Two);
+    PlaceBuilding(Two, 0, F(12), F(20), 0, UnitScissor);
+    PlaceBuilding(Two, 1, F(22), F(20), 0, UnitScissor);
+    Two.Count = 2; Two.Queue[0] = 1; Two.Queue[1] = 1;
+
+    One.Init(0); ClearField(One);
+    PlaceBuilding(One, 0, F(17), F(20), 0, UnitScissor);
+    One.Count = 1; One.Queue[0] = 2;
+
+    const int Bt = Two.Units[UnitScissor].BuildTicks;
+    for (int t = 1; t <= Bt; ++t) { Two.Step(0, 0); One.Step(0, 0); }
+    CHECK(MobileCount(Two, 0) == 2);   // two buildings -> both units out in Bt ticks
+    CHECK(MobileCount(One, 0) == 1);   // one building -> only the first, second still building
 }
 
 // ---- 2. Win rule (spec §6, edge-proof) ----
@@ -500,6 +558,8 @@ int main() {
     TestCartPriorityOverMirror();
     TestInterposeScreensCart();
     TestBuildingSoaHashedAndCopyable();
+    TestBuildingProducesFlatCadence();
+    TestBuildingCountScalesThroughput();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();

@@ -98,18 +98,18 @@ int32_t AllocSlot(const Sim& S) {
 void SetAlive(Sim& S, int32_t I) { S.AliveBits[I >> 6] |= (1ull << (I & 63)); }
 void ClearAlive(Sim& S, int32_t I) { S.AliveBits[I >> 6] &= ~(1ull << (I & 63)); }
 
-void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
+// Spawn a mobile unit at an explicit position (#132). The one place a unit slot is filled;
+// callers pick the position — the legacy camp+ring path and building production both route
+// here. Returns the slot (-1 if the cap is hit).
+int32_t SpawnUnitAt(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
     const int32_t I = AllocSlot(S);
     LUR_ASSERT_MSG(I >= 0, "RPS: unit slot exhausted (MaxUnits) — raise the cap");
-    if (I < 0) return;
+    if (I < 0) return -1;
 
-    const int32_t Slot = S.Teams[Team].SpawnCounter % RingSlots;
-    ++S.Teams[Team].SpawnCounter;
-
-    S.PosX[I] = CampX + RingX[Slot];
-    S.PosY[I] = Sim::CampY(Team) + RingY[Slot];
-    S.PrevX[I] = S.PosX[I];
-    S.PrevY[I] = S.PosY[I];
+    S.PosX[I] = X;
+    S.PosY[I] = Y;
+    S.PrevX[I] = X;
+    S.PrevY[I] = Y;
     S.Hp[I] = S.Units[Type].MaxHp;
     S.Type[I] = Type;
     S.Team[I] = Team;
@@ -123,6 +123,15 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
     S.BuildProgress[I] = 0;
     SetAlive(S, I);
     if (I + 1 > S.Count) S.Count = I + 1;
+    return I;
+}
+
+// Legacy camp-anchored spawn (the pre-buildings opening + AI harness). The per-team spawn
+// ring lives on TeamState.SpawnCounter; retired with the old production path in the flip.
+void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
+    const int32_t Slot = S.Teams[Team].SpawnCounter % RingSlots;
+    ++S.Teams[Team].SpawnCounter;
+    SpawnUnitAt(S, Team, Type, CampX + RingX[Slot], Sim::CampY(Team) + RingY[Slot]);
 }
 
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
@@ -193,6 +202,33 @@ void Production(Sim& S) {
                 SpawnUnit(S, T, Ty);
             }
             if (Q.QueueCount[Ty] == 0) Q.BuildProgress[Ty] = 0;  // no banked progress on an empty queue
+        }
+    }
+}
+
+// ---- Phase 1 (buildings, #132): per-BUILDING production — FLAT, no stack acceleration.
+// Each alive building with Queue>0 advances BuildProgress by +1/tick (NOT += Queue), so a
+// deep queue never builds faster: throughput scales by BUILDING COUNT, not stack depth
+// (the deliberate lever handoff, spec §3). At BuildTicks it spawns ONE unit of the
+// building's Type adjacent to itself and decrements the queue. Buildings are visited in
+// slot order [0, Count) — the same determinism guarantee as the legacy spawn loop.
+//
+// The per-building spawn-ring index reuses Cooldown[] (buildings never attack, so it is free
+// building state) — no global SpawnCounter. Flat cadence means at most one spawn per building
+// per tick (BuildProgress can't leap past BuildTicks in one +1), so no inner loop.
+void ProductionBuildings(Sim& S) {
+    for (int32_t B = 0; B < S.Count; ++B) {
+        if (!S.IsAlive(B) || !S.IsBuilding(B)) continue;
+        if (S.Queue[B] <= 0) { S.BuildProgress[B] = 0; continue; }  // no banked progress
+        const uint8_t Ty = S.Type[B];
+        S.BuildProgress[B] += 1;  // FLAT
+        if (S.BuildProgress[B] >= S.Units[Ty].BuildTicks) {
+            S.BuildProgress[B] -= S.Units[Ty].BuildTicks;
+            const int32_t Slot = static_cast<int32_t>(static_cast<uint32_t>(S.Cooldown[B]) % RingSlots);
+            ++S.Cooldown[B];
+            SpawnUnitAt(S, S.Team[B], Ty, S.PosX[B] + RingX[Slot], S.PosY[B] + RingY[Slot]);
+            --S.Queue[B];
+            if (S.Queue[B] <= 0) S.BuildProgress[B] = 0;
         }
     }
 }
@@ -822,6 +858,7 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1
     ApplyInput(*this, 1, Mask1);
     Production(*this);            // phase 1 (spawns) — grid must see the new units
+    ProductionBuildings(*this);   // phase 1 (#132): per-building production (no-op until buildings exist)
 
     // Build the spatial grid AFTER production (so spawns are bucketed) but before any
     // movement, capturing start-of-tick positions. Both target acq and the flock gather
