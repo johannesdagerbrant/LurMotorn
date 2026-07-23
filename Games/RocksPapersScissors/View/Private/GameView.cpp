@@ -23,7 +23,7 @@
 // 0..3 are EUnit order (miner, rock, paper, scissors), then gold / mine / swords /
 // camp. Sources: game-icons.net (CC BY 3.0) + Font Awesome Free (CC BY 4.0) + the
 // custom bold pick (ours) — attribution required in-app before shipping (#85).
-// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png,Icons/pointer.png,Icons/oreload.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
+// LUR_COOK rg8-shade-coverage src=Icons/miner.png,Icons/rock.png,Icons/paper.png,Icons/scissors.png,Icons/gold.png,Icons/mine.png,Icons/swords.png,Icons/camp.png,Icons/pointer.png,Icons/oreload.png,Icons/minecamp.png,Icons/hammer.png out=View/Private/IconMasks.h ns=RpsArt size=IconSize coverage=IconCoverage shade=IconShade
 #include "IconMasks.h"
 
 namespace Rps {
@@ -44,6 +44,21 @@ float Ppu(float WidthPx) { return WidthPx / FW(WorldWidth); }  // pixels per wor
 float HudScale(float WidthPx) {
     const float S = WidthPx / 360.0f;
     return S < 1.0f ? 1.0f : S;
+}
+
+// #142 team palette: fully-bright/saturated hues (HSV, h in [0,360)) instead of lightness shades.
+Color Hsv(float H, float S, float V) {
+    const float C = V * S;
+    const float X = C * (1.0f - std::fabs(std::fmod(H / 60.0f, 2.0f) - 1.0f));
+    const float M = V - C;
+    float R = 0, G = 0, B = 0;
+    if (H < 60)       { R = C; G = X; }
+    else if (H < 120) { R = X; G = C; }
+    else if (H < 180) { G = C; B = X; }
+    else if (H < 240) { G = X; B = C; }
+    else if (H < 300) { R = X; B = C; }
+    else              { R = C; B = X; }
+    return {R + M, G + M, B + M, 1.0f};
 }
 
 Lur::Render::MaterialHandle FlatMat(IRenderer* R, Color C) {
@@ -186,9 +201,15 @@ void GameView::CreateResources(IRenderer* Renderer) {
         GlyphMesh[G] = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
     }
 
-    // Locked team + accent tints (rps-hud-prototype.html): silhouette fill colours.
-    TeamTint[0] = {Srgb(0x3F), Srgb(0xA8), Srgb(0xDC), 1.0f};  // you (bottom)
-    TeamTint[1] = {Srgb(0xE0), Srgb(0x4A), Srgb(0x31), 1.0f};  // foe (top)
+    // #142 team palette: CYAN (team 0) & MAGENTA (team 1) — yellow is the GOLD economy colour and
+    // RED is the invalid signal, so neither can be a team; magenta is cyan's vivid opposite, clear
+    // of both (and of the green health bars). Each unit type is FULLY bright + saturated (no
+    // lightness shading / desaturation); type is read by HUE, interpolated across the four types
+    // 1/3 of the way from the team base toward blue (cyan team) / purple (magenta team). Order = EUnit.
+    constexpr float TeamBaseHue[2] = {180.0f, 320.0f};  // cyan, magenta
+    constexpr float TeamEndHue[2]  = {200.0f, 290.0f};  // 1/3 toward blue / purple
+    TeamTint[0] = Hsv(TeamBaseHue[0], 1.0f, 1.0f);
+    TeamTint[1] = Hsv(TeamBaseHue[1], 1.0f, 1.0f);
     auto AtlasTinted = [&](Color C) {
         MaterialDesc D;
         D.BaseColor = IconAtlas;
@@ -197,18 +218,11 @@ void GameView::CreateResources(IRenderer* Renderer) {
     };
     CampMat[0] = AtlasTinted(TeamTint[0]);
     CampMat[1] = AtlasTinted(TeamTint[1]);
-    // Per-type shade of each team's hue — same colour family, four readable variants
-    // (negative = toward black, positive = toward white: keeps the hue, shifts lightness).
-    // Order matches EUnit: Miner, Rock, Paper, Scissor. Playtest 2026-07-20: cart is the
-    // LIGHTEST, then progressively DARKER left→right, with HIGH contrast between steps.
-    constexpr float TypeLight[UnitCount] = {0.62f, 0.22f, -0.22f, -0.62f};
-    auto Shade = [](Color B, float F) -> Color {
-        if (F < 0.0f) { const float K = 1.0f + F; return {B.R * K, B.G * K, B.B * K, B.A}; }
-        return {B.R + (1.0f - B.R) * F, B.G + (1.0f - B.G) * F, B.B + (1.0f - B.B) * F, B.A};
-    };
     for (int Tm = 0; Tm < 2; ++Tm)
         for (int Ty = 0; Ty < UnitCount; ++Ty) {
-            TeamTypeTint[Tm][Ty] = Shade(TeamTint[Tm], TypeLight[Ty]);
+            const float Frac = static_cast<float>(Ty) / static_cast<float>(UnitCount - 1);  // 0 .. 1
+            const float H = TeamBaseHue[Tm] + Frac * (TeamEndHue[Tm] - TeamBaseHue[Tm]);
+            TeamTypeTint[Tm][Ty] = Hsv(H, 1.0f, 1.0f);
             TypeTintMat[Tm][Ty] = AtlasTinted(TeamTypeTint[Tm][Ty]);
             Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
@@ -222,6 +236,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
     GhostBadMat[0] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.85f});  // red, bright
     GhostBadMat[1] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.30f});  // red, dim
     ProdBtnBg = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.62f});  // #140 translucent button
+    for (int Tm = 0; Tm < 2; ++Tm)  // #141 build-frontier line in each team's colour (semi-transparent)
+        FrontierMat[Tm] = FlatMat(Renderer, {TeamTint[Tm].R, TeamTint[Tm].G, TeamTint[Tm].B, 0.6f});
     MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
@@ -492,6 +508,28 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
     }
 
+    // #141 build-frontier lines: a dotted horizontal line in EACH team's colour at its high-water
+    // Y — your own build boundary AND the opponent's, as intel — with a "build up to here" marker
+    // at the left end. View-only (reads Snap frontier, writes nothing, not hashed). SY handles the
+    // per-player flip, so each side sees its own line toward the bottom. (Marker is a placeholder
+    // for a hammer icon — pending a sourced glyph.)
+    {
+        const float Dash = 7.0f * HS, DashGap = 6.0f * HS, Thick = 2.0f * HS;
+        const float Target[2] = {FW(Snap.FrontierT0), FW(Snap.FrontierT1)};
+        const float Ease = 1.0f - std::exp(-9.0f * DtSec);  // smooth follow (decouples from the 10 Hz step)
+        auto DrawFrontier = [&](int Team) {
+            if (DispFrontier[Team] < 0.0f) DispFrontier[Team] = Target[Team];      // snap on first frame
+            else DispFrontier[Team] += (Target[Team] - DispFrontier[Team]) * Ease;  // then glide
+            const float Y = SY(DispFrontier[Team]);
+            if (Y < -2.0f || Y > HeightPx + 2.0f) return;
+            for (float X = 32.0f * HS; X < WidthPx - 2.0f * HS; X += Dash + DashGap)
+                Blit(FrontierMat[Team], X + Dash * 0.5f, Y, Dash, Thick);
+            BlitGlyph(GlyphHammer, CampMat[Team], 17.0f * HS, Y, 22.0f * HS);  // "build up to here" legend
+        };
+        DrawFrontier(0);
+        DrawFrontier(1);
+    }
+
     // Units — ONE instanced draw. Each instance carries prev+cur pixel centres; the
     // vertex shader lerps by Alpha, so there is no per-unit CPU interpolation (design §6).
     // We map prev/cur to pixels here (a cheap affine per unit, not a lerp).
@@ -500,8 +538,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const float UnitPx = 1.7f * P;
     uint32_t N = 0;
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
-    const float BldgPx = FW(Snap.BuildingFootprint) * 2.7f * P;  // #139/#140: buildings read a bit bigger
-                                                                 //   than the footprint so the buttons fit
+    const float BldgPx = FW(Snap.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
+                                                                 //   footprint so the slim buttons fit inside
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
@@ -517,7 +555,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
         // A miner BUILDING wears the camp glyph; other buildings their (bigger) type glyph.
-        const int Glyph = Bldg && Ty == UnitMiner ? static_cast<int>(GlyphCamp) : static_cast<int>(Ty);
+        const int Glyph = Bldg && Ty == UnitMiner ? static_cast<int>(GlyphMineCamp) : static_cast<int>(Ty);
         D.Size = Bldg ? BldgPx : (Ty == UnitMiner ? UnitPx * 1.5f : UnitPx);  // carts read bigger (playtest)
         D.U0 = static_cast<float>(Glyph) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
         D.U1 = static_cast<float>(Glyph + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
@@ -547,7 +585,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // camp appears the instant you drop it (not after the opponent readies), at the exact world
     // spot the real building will land, so there's no jump when the match starts.
     if (PreviewActive_ && PreviewType_ >= 0 && PreviewType_ < UnitCount) {
-        const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphCamp) : PreviewType_;
+        const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphMineCamp) : PreviewType_;
         BlitGlyph(PG, TypeTintMat[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
     }
 
@@ -563,7 +601,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
-        const float Bw = 42.0f * HS, Bh = 36.0f * HS, BGap = 4.0f * HS;   // tall buttons: label over cost
+        // The two x1/x5 buttons are a SLIM column hugging the icon's LEFT edge, INSIDE it (semi-
+        // transparent so the icon reads through) — so they never stick out past the screen edge.
+        const float BGap = 3.0f * HS;
+        const float Bw = BldgPx * 0.42f;                     // slim
+        const float Bh = (BldgPx * 0.90f - BGap) * 0.5f;     // two stacked, inside the icon height
         ProdBtnCount_ = 0;
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I) || !Snap.IsBuilding(I)) continue;
@@ -597,12 +639,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 if (PbW * PFrac > 0.5f)
                     Blit(GoldFlat, PbX - PbW * 0.5f + PbW * PFrac * 0.5f, RowY, PbW * PFrac, PbH);
             }
-            // x1 / x5 buttons stacked vertically to the LEFT, pulled IN to overlap the icon a bit.
+            // x1 / x5 buttons: a slim column hugging the LEFT inside edge of the icon, stacked.
             if (ProdBtnCount_ >= MaxProdButtons) continue;
             ProdButtons& PB = ProdBtns_[ProdBtnCount_++];
             PB.Slot = I;
             const float StackH = ProdBtnPerBldg * Bh + (ProdBtnPerBldg - 1) * BGap;
-            const float BtnX = Bx - Half - Bw * 0.55f;  // overlaps the building's left edge
+            const float BtnX = Bx - Half + BldgPx * 0.05f;   // just inside the icon's left edge
             const float Top = By - StackH * 0.5f;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
             for (int K = 0; K < ProdBtnPerBldg; ++K) {
@@ -754,7 +796,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // the exact icon that follows the finger and lands on the field (#139). While THIS plate
         // is being dragged (or its ghost is sliding home), the icon has "left" the button, so it
         // is hidden here; it reappears the instant a valid drop lands or the slide-back completes.
-        const int PlateGlyph = Ty == UnitMiner ? static_cast<int>(GlyphCamp) : Ty;
+        const int PlateGlyph = Ty == UnitMiner ? static_cast<int>(GlyphMineCamp) : Ty;
         if (GhostType_ != Ty)
             BlitGlyph(PlateGlyph, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
                       X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
@@ -790,7 +832,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const Lur::Render::MaterialHandle GM =
                 (GhostDragging_ && !GhostValid_) ? GhostBadMat[std::sin(GhostBlink_ * 12.0f) > 0.0f ? 0 : 1]
                                                  : GhostMat[My];
-            const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphCamp) : GhostType_;
+            const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphMineCamp) : GhostType_;
             BlitGlyph(GG, GM, Gx, Gy, GPx);
         }
     }

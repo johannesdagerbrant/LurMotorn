@@ -120,7 +120,7 @@ LUR_CVAR_T(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFla
 LUR_CVAR_T(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
-LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(75), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
+LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(45), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
 // Opening gold (§12.6): a tunable knob whose DEFAULT is exactly one mining camp + three miner
 // carts = MinerBuildingCost(100) + 3 x MinerCost(30) = 190. Enough for the forced camp-then-miners
 // opening and nothing else (a combat building is gated on the first miner unit anyway, ApplyPlace),

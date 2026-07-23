@@ -910,9 +910,13 @@ void Sim::DeriveUnits() {
 bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
     (void)Type;  // one shared footprint for all building types (§12.2); Type reserved for later
     const Fixed Fp = Cv.BuildingFootprint;
-    // In-bounds with the footprint margin (the whole footprint must sit inside the world rect).
-    if (X.Raw - Fp.Raw < 0 || X + Fp > WorldWidth) return false;
-    if (Y.Raw - Fp.Raw < 0 || Y + Fp > WorldHeight) return false;
+    // In-bounds with a margin covering the building's VISUAL extent (the icon draws ~1.35x the
+    // footprint radius, GameView), not just the footprint — so a placed building (and the x1/x5
+    // buttons drawn inside its icon) can never poke off the map/screen edge. World-space (matches
+    // the view's world-space visual scale), so it stays deterministic across devices.
+    const Fixed Edge = Fp * F(3, 2);  // ~1.5x footprint: keeps the whole icon on-map
+    if (X.Raw - Edge.Raw < 0 || X + Edge > WorldWidth) return false;
+    if (Y.Raw - Edge.Raw < 0 || Y + Edge > WorldHeight) return false;
     // §5.3 frontier gate: you cannot build past your own high-water line.
     if (Team == 0) { if (Y > FrontierT0) return false; }
     else           { if (Y < FrontierT1) return false; }

@@ -139,7 +139,9 @@ private:
     // is one of these masks under a tint (the locked "alpha-cutout silhouette" rule).
     enum EGlyph { GlyphMiner = 0, GlyphRock, GlyphPaper, GlyphScissors,
                   GlyphGold, GlyphMine, GlyphSwords, GlyphCamp, GlyphPointer,
-                  GlyphOreLoad, GlyphCount };  // OreLoad = the heap on a full cart
+                  GlyphOreLoad, GlyphMineCamp, GlyphHammer, GlyphCount };
+    // OreLoad = the heap on a full cart; MineCamp = the miner building (mine entrance, #140);
+    // Hammer = the build-frontier "up to here" legend (#141). Order MUST match the LUR_COOK src.
     Lur::Render::TextureHandle IconAtlas = 0;
     Lur::Render::MaterialHandle AtlasMat = 0;        // white tint: per-instance colour is the fill
     Lur::Render::MeshHandle GlyphMesh[GlyphCount] = {};  // unit quads with per-glyph atlas UVs
@@ -152,6 +154,7 @@ private:
     Lur::Render::MaterialHandle GhostMat[2] = {};
     Lur::Render::MaterialHandle GhostBadMat[2] = {};
     Lur::Render::MaterialHandle ProdBtnBg = 0;    // #140 semi-transparent production-button plate
+    Lur::Render::MaterialHandle FrontierMat[2] = {};  // #141 per-team build-frontier dotted line
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
@@ -227,6 +230,9 @@ private:
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;
+    // #141 build-frontier lines ease toward the sim's (10 Hz, monotonic-jump) frontier so they
+    // glide like the interpolated units instead of stepping per tick. -1 = snap on first frame.
+    float DispFrontier[2] = {-1.0f, -1.0f};
     // First-scroll hint: pointing finger + up/down arrows bobbing mid-screen from the
     // moment one of YOUR units leaves the screen until the first camera pan.
     enum class EHint : uint8_t { Idle, Active, Fading, Done };
