@@ -227,6 +227,14 @@ void GameView::CreateResources(IRenderer* Renderer) {
             Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
         }
+    // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
+    // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
+    for (int I = 0; I < PulseSteps; ++I) {
+        const float F = static_cast<float>(I) / (PulseSteps - 1);
+        PulsePlate[I] = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.40f + 0.58f * F});
+        const Color G{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};  // gold -> white
+        CoinGlow[I] = AtlasTinted({G.R + (1.0f - G.R) * F, G.G + (1.0f - G.G) * F, G.B + (1.0f - G.B) * F, 1.0f});
+    }
     // #139 placement ghost: a translucent team-tinted silhouette while the drop is valid, and a
     // blinking red one while invalid (two alpha steps the blink alternates — materials are immutable).
     for (int Tm = 0; Tm < 2; ++Tm) {
@@ -607,6 +615,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Bw = BldgPx * 0.42f;                     // slim
         const float Bh = (BldgPx * 0.90f - BGap) * 0.5f;     // two stacked, inside the icon height
         ProdBtnCount_ = 0;
+        PulseT_ += DtSec;              // #143 production-pulse throb clock
+        bool FirstLocalSeen = false;   // the first (lowest-slot) local building = the camp
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I) || !Snap.IsBuilding(I)) continue;
             const uint8_t Bty = Snap.Type[I];
@@ -621,6 +631,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Blit(HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH);
 
             if (Snap.Team[I] != My) continue;  // production controls: your buildings only
+            // #143: the FIRST building (the camp) teaches production — its buttons pulse until
+            // anything is queued anywhere on it, then it's taught for the rest of the session.
+            const bool IsFirstBldg = !FirstLocalSeen;
+            FirstLocalSeen = true;
+            if (IsFirstBldg && Snap.Queue[I] > 0) ProductionTaught_ = true;
+            const bool Pulse = IsFirstBldg && Snap.Queue[I] == 0 && !ProductionTaught_;
 
             // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
             if (Snap.Queue[I] > 0) {
@@ -647,24 +663,39 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const float BtnX = Bx - Half + BldgPx * 0.05f;   // just inside the icon's left edge
             const float Top = By - StackH * 0.5f;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
+            // #143 production pulse throb (the first camp only, until taught): the buttons THEMSELVES
+            // animate — scale up + brighten + saturate on the beat, walking the pulse-plate LUT.
+            const float Throb = Pulse ? 0.5f + 0.5f * std::sin(PulseT_ * 6.0f) : 0.0f;
+            const float PulseK = 1.0f + 0.16f * Throb;
+            const int PulseStep = Pulse ? static_cast<int>(Throb * (PulseSteps - 1) + 0.5f) : 0;
             for (int K = 0; K < ProdBtnPerBldg; ++K) {
                 const float BY = Top + static_cast<float>(K) * (Bh + BGap);
-                PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;
+                PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
-                Blit(ProdBtnBg, BtnX + Bw * 0.5f, BY + Bh * 0.5f, Bw, Bh);  // semi-transparent plate
+                // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
+                const float Cx = BtnX + Bw * 0.5f, Cy = BY + Bh * 0.5f;
+                const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
+                // Plate: opacity-only throb (base colour), else the normal translucent plate.
+                Blit(Pulse ? PulsePlate[PulseStep] : ProdBtnBg, Cx, Cy, bw, bh);
+                // Text + coin glow toward crystal-clear white on the beat (afford colours only).
+                auto Glow = [&](Color C) -> Color {
+                    return {C.R + (1.0f - C.R) * Throb, C.G + (1.0f - C.G) * Throb,
+                            C.B + (1.0f - C.B) * Throb, 1.0f};
+                };
                 char L[8];
                 std::snprintf(L, sizeof(L), "x%d", ProdMult[K]);      // upper row: the multiplier
-                Text.Draw(Renderer, L, BtnX, BY + 3.0f * HS, Bw, Bh * 0.42f, 14.0f * HS,
-                          Afford ? Ico : DimC, EHAlign::Center, EVAlign::Middle, false);
-                const float LowY = BY + Bh * 0.68f;                   // lower row: coin LEFT of price
-                BlitGlyph(GlyphGold, Afford ? GoldIconMat : PlateIconDim,
-                          BtnX + Bw * 0.5f - 12.0f * HS, LowY, 12.0f * HS);
+                Text.Draw(Renderer, L, bx, by2 + 3.0f * HS * PulseK, bw, bh * 0.42f, 14.0f * HS * PulseK,
+                          Afford ? Glow(Ico) : DimC, EHAlign::Center, EVAlign::Middle, false);
+                const float LowY = by2 + bh * 0.68f;                  // lower row: coin LEFT of price
+                const Lur::Render::MaterialHandle CoinMat =
+                    Afford ? (Pulse ? CoinGlow[PulseStep] : GoldIconMat) : PlateIconDim;
+                BlitGlyph(GlyphGold, CoinMat, Cx - 12.0f * HS * PulseK, LowY, 12.0f * HS * PulseK);
                 char PBuf[12];
                 std::snprintf(PBuf, sizeof(PBuf), "%d", Price);
-                Text.Draw(Renderer, PBuf, BtnX + Bw * 0.5f - 4.0f * HS, LowY - 7.0f * HS, Bw * 0.5f,
-                          14.0f * HS, 12.0f * HS, Afford ? GoldC : DimC, EHAlign::Left,
-                          EVAlign::Middle, false);
+                Text.Draw(Renderer, PBuf, Cx - 4.0f * HS * PulseK, LowY - 7.0f * HS * PulseK, bw * 0.5f,
+                          14.0f * HS * PulseK, 12.0f * HS * PulseK, Afford ? Glow(GoldC) : DimC,
+                          EHAlign::Left, EVAlign::Middle, false);
             }
         }
     }
@@ -834,6 +865,32 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                                                  : GhostMat[My];
             const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphMineCamp) : GhostType_;
             BlitGlyph(GG, GM, Gx, Gy, GPx);
+        }
+    }
+
+    // #143 placement hand: loop a pointing hand from the miner plate up into the buildable band,
+    // demoing the first camp placement — until you place one (no local building in the sim yet AND
+    // no pending placed-preview). Reuses the alpha-stepped pointer materials from the scroll hint.
+    {
+        bool HasLocalBuilding = false;
+        for (int32_t I = 0; I < Snap.Count; ++I)
+            if (Snap.IsAlive(I) && Snap.IsBuilding(I) && Snap.Team[I] == My) { HasLocalBuilding = true; break; }
+        if (!HasLocalBuilding && !PreviewActive_) {
+            OnbHandT_ += DtSec;
+            const float Period = 1.7f;
+            const float t = std::fmod(OnbHandT_, Period) / Period;   // 0..1 loop
+            const float* MpR = PlateRect[UnitMiner];
+            const float Sx = MpR[0] + MpR[2] * 0.5f, Sy = MpR[1] + MpR[3] * 0.5f;  // miner plate centre
+            const float Ex = WidthPx * 0.5f, Ey = HeightPx * 0.46f;               // up into the field
+            const float E = t * t * (3.0f - 2.0f * t);                            // smoothstep ease
+            const float Hx = Sx + (Ex - Sx) * E, Hy = Sy + (Ey - Sy) * E;
+            const float A = t < 0.15f ? t / 0.15f : (t > 0.8f ? (1.0f - t) / 0.2f : 1.0f);  // fade ends
+            int Step = static_cast<int>(A * HintAlphaSteps) - 1;
+            if (Step < 0) Step = 0;
+            if (Step >= HintAlphaSteps) Step = HintAlphaSteps - 1;
+            BlitGlyph(GlyphPointer, HintPointer[Step], Hx, Hy, 46.0f * HS);
+        } else {
+            OnbHandT_ = 0.0f;
         }
     }
 

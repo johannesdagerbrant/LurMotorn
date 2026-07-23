@@ -154,6 +154,12 @@ private:
     Lur::Render::MaterialHandle GhostMat[2] = {};
     Lur::Render::MaterialHandle GhostBadMat[2] = {};
     Lur::Render::MaterialHandle ProdBtnBg = 0;    // #140 semi-transparent production-button plate
+    // #143 production pulse: the first building's x1/x5 buttons animate — the PLATE only in
+    // opacity (transparent -> opaque, same base colour), the coin toward bright white glow; the
+    // text colour glows toward white in code. The throb walks these step LUTs.
+    static constexpr int PulseSteps = 5;
+    Lur::Render::MaterialHandle PulsePlate[PulseSteps] = {};  // base-colour plate, rising alpha
+    Lur::Render::MaterialHandle CoinGlow[PulseSteps] = {};    // gold coin -> white glow
     Lur::Render::MaterialHandle FrontierMat[2] = {};  // #141 per-team build-frontier dotted line
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle HealthBg = 0;
@@ -233,6 +239,12 @@ private:
     // #141 build-frontier lines ease toward the sim's (10 Hz, monotonic-jump) frontier so they
     // glide like the interpolated units instead of stepping per tick. -1 = snap on first frame.
     float DispFrontier[2] = {-1.0f, -1.0f};
+    // #143 onboarding (view-only, per session): a looping pointing hand demos the first camp
+    // placement until you place one; then the first building's x1/x5 buttons PULSE until you
+    // queue anything there (taught once, never nags again).
+    float OnbHandT_ = 0.0f;      // placement-hand loop clock
+    float PulseT_ = 0.0f;        // production-pulse throb clock
+    bool  ProductionTaught_ = false;
     // First-scroll hint: pointing finger + up/down arrows bobbing mid-screen from the
     // moment one of YOUR units leaves the screen until the first camera pan.
     enum class EHint : uint8_t { Idle, Active, Fading, Done };
