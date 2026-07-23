@@ -97,11 +97,6 @@ LUR_CVAR_T(CvScissorHp,      "rps.unit.scissor.hp",      45,       CVarFlagAffec
 LUR_CVAR_T(CvScissorSpeed,   "rps.unit.scissor.speed",   F(5, 10), CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
 LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  7,        CVarFlagAffectsGameplay, "Scissor attack damage per hit");
 LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",50,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
-// Production stack-acceleration: each tick a queue advances by QueueCount x this (the pacing
-// thesis, #84 — deep stacks snowball). Default 1 = today's "progress += count".
-// REMOVED by the buildings rework (#132): throughput scales by BUILDING COUNT, not stack
-// depth. Kept latched until the old camp-production path is deleted in the integration flip.
-LUR_CVAR_T(CvQueueMult,      "rps.production.queue_mult", 1,       CVarFlagAffectsGameplay, "Build speedup per queued unit (stack accel)");
 
 // ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
 // (#131 SoA). Each building type's health + placement cost is a knob nested UNDER that unit's
@@ -157,13 +152,10 @@ constexpr int32_t MineGoldCapacity = 6000;
 // sim at this rate via TickClock, decoupled from render/vsync (#69).
 constexpr uint32_t TickRateHz = 10;
 
-// ---- Production (#84: four PARALLEL per-type queues with stack acceleration) ----
-// A press appends to that type's queue (gold deducted at enqueue). Each queue's
-// build progress advances by its QUEUED COUNT per tick — i.e. rate = count x base,
-// so a deep stack snowballs: effective build time = BuildTicks / count. This is the
-// pacing thesis (games accelerate as economies grow) — protect it in balance passes.
-constexpr int32_t PerTypeQueueCap = 64;    // sanity bound, not a gameplay knob
-constexpr int32_t RingSlots = 8;           // deterministic spawn ring (SpawnCounter % RingSlots)
+// ---- Production spawn ring (#132) ----
+// A building spawns each finished unit at a small deterministic offset around its center;
+// RingSlots is the ring size (index % RingSlots, no RNG). Also seeds the start-miner ring.
+constexpr int32_t RingSlots = 8;           // deterministic spawn ring
 
 // ---- The field (design doc §9: portrait, width fixed, height the balance knob) ----
 // PORTRAIT: short axis = width (fills the screen), long axis = height (scrollable).
@@ -407,7 +399,6 @@ LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
     FX(ScissorSpeed,            CvScissorSpeed)            \
     IX(ScissorDamage,           CvScissorDamage)           \
     IX(ScissorBuild,            CvScissorBuild)            \
-    IX(QueueMult,               CvQueueMult)               \
     IX(DigTicks,                CvDigTicks)                \
     IX(MinerBuildingHp,         CvMinerBuildingHp)         \
     IX(MinerBuildingCost,       CvMinerBuildingCost)       \

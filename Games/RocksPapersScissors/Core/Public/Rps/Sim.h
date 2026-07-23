@@ -43,14 +43,11 @@ constexpr int MaxEventsPerTick = 16;
 // type). KindUnit==0 so a zero-initialised (or legacy) slot is a unit by default.
 enum EKind : uint8_t { KindUnit = 0, KindBuilding = 1 };
 
-// Per-team production + economy state (#84: four PARALLEL per-type queues).
-// QueueCount[ty] includes the unit currently building; BuildProgress[ty] advances
-// by QueueCount[ty] per tick (stack acceleration) and spawns every BuildTicks.
+// Per-team economy state. Production is per-BUILDING now (#132: Queue/BuildProgress live on
+// the SoA slot), so this slimmed to just the team's gold — the parallel per-type camp queues
+// and the spawn-ring counter retired with the mask/camp path (#145).
 struct TeamState {
     int32_t Gold = 0;
-    int32_t QueueCount[UnitCount] = {};
-    int32_t BuildProgress[UnitCount] = {};
-    int32_t SpawnCounter = 0;  // drives the deterministic spawn ring (no RNG)
 };
 
 // The entire simulation as Plain Old Data — SoA parallel arrays, trivially
@@ -142,10 +139,9 @@ struct Sim {
 
     // ---- API ----
     void Init(uint64_t Seed);
-    void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order
-    // #137: one tick driven by the tick's INPUT EVENT batch (both teams interleaved, applied in
-    // array order — deterministic on both peers). Replaces the mask on the wire/history/recorder;
-    // Step(mask) stays for the legacy camp path + old tests until the flip retires it.
+    // One 10 Hz tick driven by the tick's INPUT EVENT batch (both teams interleaved, applied in
+    // array order — deterministic on both peers) — spec §6's 8 phases, in order. The 4-bit press
+    // mask + Step(mask0,mask1) it replaced is gone (#145): production is now spatial (buildings).
     void StepEvents(const InputEvent* Events, int32_t Count);
     void DeriveUnits();                        // refresh Units[] from Cv (#122); call after any Cv (re)latch
     uint64_t StateHash() const;                // FNV-1a over pinned state (design §5)
@@ -168,7 +164,6 @@ struct Sim {
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
     bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }   // #131
     int32_t AliveCount(uint8_t TeamId) const;
-    int32_t QueuedTotal(uint8_t TeamId) const;   // sum over the four per-type queues
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }
 };
 

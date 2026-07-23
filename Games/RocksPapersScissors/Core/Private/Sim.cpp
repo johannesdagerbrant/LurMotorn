@@ -1,14 +1,15 @@
 // RocksPapersScissors deterministic simulation core.
 //
 // The one law: State = Replay(Inputs, Seed) (design doc §1). Init derives the
-// world from the seed; Step(mask0, mask1) applies exactly one 10 Hz tick as the
+// world from the seed; StepEvents(events) applies exactly one 10 Hz tick as the
 // eight fixed-order phases of spec §6. No wallclock, no float, no allocation ever
 // touches this file — that is the precondition for the slice-1 lockstep netcode.
 //
 // The input DELAY (press at T executes at T+3) is deliberately NOT here: it is a
-// netcode concern (slice 1). The sim just applies whatever masks it's handed for
-// this tick, which keeps the replay law clean and makes the flight-recorder stream
-// literally the (mask0, mask1) sequence.
+// netcode concern (slice 1). The sim just applies whatever input-event batch it's
+// handed for this tick, which keeps the replay law clean and makes the flight-
+// recorder stream literally the per-tick event sequence (#145: the old 4-bit press
+// mask is gone — production is spatial buildings now).
 //
 // Neighbour queries are brute-force O(n^2) here ON PURPOSE: this is the reference
 // the deterministic spatial grid gets equivalence-tested against (issue #75). The
@@ -24,8 +25,9 @@
 namespace Rps {
 namespace {
 
-// Deterministic spawn ring around a camp (radius ~2). SpawnCounter % RingSlots
-// picks the offset — no RNG, identical on both peers.
+// Deterministic spawn ring around a spawn center (radius ~2). A per-building counter
+// (Cooldown[], #132) or the start-miner index picks the offset % RingSlots — no RNG,
+// identical on both peers.
 constexpr Fixed RingX[RingSlots] = {F(2), F(0), F(-2), F(0), F(1), F(-1), F(1), F(-1)};
 constexpr Fixed RingY[RingSlots] = {F(0), F(2), F(0), F(-2), F(1), F(1), F(-1), F(-1)};
 
@@ -126,14 +128,6 @@ int32_t SpawnUnitAt(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
     return I;
 }
 
-// Legacy camp-anchored spawn (the pre-buildings opening + AI harness). The per-team spawn
-// ring lives on TeamState.SpawnCounter; retired with the old production path in the flip.
-void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
-    const int32_t Slot = S.Teams[Team].SpawnCounter % RingSlots;
-    ++S.Teams[Team].SpawnCounter;
-    SpawnUnitAt(S, Team, Type, CampX + RingX[Slot], Sim::CampY(Team) + RingY[Slot]);
-}
-
 // --- map: v1 is fixed + mirrored; the seed is derived and stored so later
 //     variation is free, exactly like chess derives colours from GUIDs. ---
 void BuildMap(Sim& S) {
@@ -163,47 +157,6 @@ void BuildMap(Sim& S) {
             S.MineGold[Idx] = MineGoldCapacity;  // finite reserve (#84)
             ++Idx;
         }
-}
-
-// ---- Phase 0: apply this tick's inputs (caller passes P0 then P1) ----
-void TryEnqueue(Sim& S, uint8_t Team, uint8_t Type) {
-    TeamState& T = S.Teams[Team];
-    const int32_t Cost = S.Units[Type].Cost;
-    // Queue at cap or too poor -> the press is DETERMINISTICALLY ignored (a silent
-    // no-op is correct here, distinct from an assert-worthy error). No partial
-    // reservation: gold is spent only on a successful enqueue.
-    if (T.QueueCount[Type] >= PerTypeQueueCap) return;
-    if (T.Gold < Cost) return;
-    T.Gold -= Cost;
-    ++T.QueueCount[Type];
-}
-void ApplyInput(Sim& S, uint8_t Team, uint8_t Mask) {
-    // Bit ty of the mask = a press of unit type ty this tick. Same-type presses
-    // collapse to one bit (a built-in one-per-button-per-tick rate limit).
-    for (uint8_t Ty = 0; Ty < UnitCount; ++Ty)
-        if (Mask & (1u << Ty)) TryEnqueue(S, Team, Ty);
-}
-
-// ---- Phase 1: production — four parallel per-type queues with stack
-// acceleration (#84). Progress is in integer "queue-ticks": a queue with N units
-// stacked advances N per tick, so effective build time = BuildTicks / N and deep
-// stacks snowball (the pacing thesis). A very deep stack can complete more than
-// one unit in a tick — the while loop spawns them all, in type order (deterministic:
-// teams 0 then 1, types 0..3, spawn ring ordered by SpawnCounter). ----
-void Production(Sim& S) {
-    for (uint8_t T = 0; T < 2; ++T) {
-        TeamState& Q = S.Teams[T];
-        for (uint8_t Ty = 0; Ty < UnitCount; ++Ty) {
-            if (Q.QueueCount[Ty] == 0) { Q.BuildProgress[Ty] = 0; continue; }
-            Q.BuildProgress[Ty] += Q.QueueCount[Ty] * S.Cv.QueueMult;
-            while (Q.QueueCount[Ty] > 0 && Q.BuildProgress[Ty] >= S.Units[Ty].BuildTicks) {
-                Q.BuildProgress[Ty] -= S.Units[Ty].BuildTicks;
-                --Q.QueueCount[Ty];
-                SpawnUnit(S, T, Ty);
-            }
-            if (Q.QueueCount[Ty] == 0) Q.BuildProgress[Ty] = 0;  // no banked progress on an empty queue
-        }
-    }
 }
 
 // ---- Phase 1 (buildings, #132): per-BUILDING production — FLAT, no stack acceleration.
@@ -920,8 +873,7 @@ void PreTick(Sim& S) {
     S.DeriveUnits();  // reflect this tick's Cv (Init latch, live-tune, or a synced override)
 }
 void RunTick(Sim& S) {
-    Production(S);            // phase 1 (legacy camp path — retired in the flip)
-    ProductionBuildings(S);   // phase 1 (#132): per-building production
+    ProductionBuildings(S);   // phase 1 (#132): per-building production (the only production now)
     Grid G;
     { LUR_TRACE_SCOPE("sim.grid"); G.Build(S); }  // after production so spawns are bucketed
     ThreatSet Threat;
@@ -994,17 +946,11 @@ void Sim::Init(uint64_t InSeed) {
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
         Teams[T].Gold = Cv.StartingGold;  // #138/§12.6 opening gold (was the legacy StartGold)
-        for (int K = 0; K < StartMiners; ++K) SpawnUnit(*this, T, UnitMiner);
+        // Start-miners spawn on the old camp ring (#145 keeps them as spawn geometry until #135
+        // removes the opening entirely); no SpawnCounter now — the ring slot is K itself.
+        for (int K = 0; K < StartMiners; ++K)
+            SpawnUnitAt(*this, T, UnitMiner, CampX + RingX[K % RingSlots], CampY(T) + RingY[K % RingSlots]);
     }
-}
-
-void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
-    if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
-    LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
-    PreTick(*this);
-    ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1 (legacy mask path)
-    ApplyInput(*this, 1, Mask1);
-    RunTick(*this);
 }
 
 void Sim::StepEvents(const InputEvent* Events, int32_t Count) {
@@ -1063,12 +1009,6 @@ int32_t Sim::AliveCount(uint8_t TeamId) const {
     return C;
 }
 
-int32_t Sim::QueuedTotal(uint8_t TeamId) const {
-    int32_t C = 0;
-    for (uint8_t Ty = 0; Ty < UnitCount; ++Ty) C += Teams[TeamId].QueueCount[Ty];
-    return C;
-}
-
 uint64_t Sim::StateHash() const {
     // FNV-1a over the pinned authoritative state, in declaration order. Assumes a
     // little-endian target (host x86, Android/iOS ARM — all LE). PrevX/PrevY ARE hashed
@@ -1100,13 +1040,7 @@ uint64_t Sim::StateHash() const {
     Mix(Queue, sizeof(int32_t) * N);           // #131 per-building production queue
     Mix(BuildProgress, sizeof(int32_t) * N);   // #131 per-building construction progress
     Mix(AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
-    for (int T = 0; T < 2; ++T) {
-        const TeamState& Q = Teams[T];
-        Mix(&Q.Gold, sizeof(int32_t));
-        Mix(Q.QueueCount, sizeof(int32_t) * UnitCount);
-        Mix(Q.BuildProgress, sizeof(int32_t) * UnitCount);
-        Mix(&Q.SpawnCounter, sizeof(int32_t));
-    }
+    for (int T = 0; T < 2; ++T) Mix(&Teams[T].Gold, sizeof(int32_t));  // #145: per-team state is Gold only now
     Mix(MineGold, sizeof(int32_t) * NumMines);  // mutable reserves (#84) — MineX/Y stay excluded (static)
     Mix(&FrontierT0, sizeof(Fixed));            // #131/§5.3 frontier high-water (gates placement)
     Mix(&FrontierT1, sizeof(Fixed));

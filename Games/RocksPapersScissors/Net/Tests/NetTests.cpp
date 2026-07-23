@@ -29,81 +29,6 @@ static int GFailures = 0;
         }                                                               \
     } while (0)
 
-// ---- Round-trip: every (delta, mask) survives encode -> decode ----
-static void TestRoundTrip() {
-    const uint32_t Deltas[] = {1, 2, 7, 14, 15, 16, 100, 9000, 1u << 20};
-    for (uint32_t D : Deltas)
-        for (uint8_t M = 0; M < 16; ++M) {
-            BitWriter W;
-            EncodeEvent(W, D, M);
-            const std::vector<uint8_t>& Bytes = W.Finish();
-            BitReader R(Bytes.data(), Bytes.size());
-            uint32_t Dd = 0;
-            uint8_t Mm = 0;
-            CHECK(DecodeEvent(R, Dd, Mm));
-            CHECK(Dd == D && Mm == M);
-        }
-}
-
-// ---- Byte budget: a live-wire event (delta 1..14) is exactly ONE byte ----
-static void TestByteBudget() {
-    for (uint32_t D = 1; D < EventDeltaInline; ++D) {
-        BitWriter W;
-        EncodeEvent(W, D, 0xB);
-        CHECK(W.Finish().size() == 1);  // 1 byte; framed (+type) = the 2-byte budget
-    }
-    // A watermark (mask 0, delta 1) is also one byte — the idle case is not special.
-    BitWriter Wm;
-    EncodeEvent(Wm, 1, 0x0);
-    CHECK(Wm.Finish().size() == 1);
-    // The escape (delta >= 15) costs the varint but stays small.
-    BitWriter We;
-    EncodeEvent(We, 9000, 0x5);
-    CHECK(We.Finish().size() <= 4);
-}
-
-// ---- A stream of events (resync/recorder use): decode reconstructs absolute ticks ----
-static void TestStreamAbsoluteTicks() {
-    struct EV { uint32_t Delta; uint8_t Mask; };
-    const EV In[] = {{1, 0x2}, {3, 0x4}, {1, 0x0}, {20, 0x8}, {1, 0x1}};
-    BitWriter W;
-    for (const EV& E : In) EncodeEvent(W, E.Delta, E.Mask);
-    const std::vector<uint8_t>& Bytes = W.Finish();
-
-    BitReader R(Bytes.data(), Bytes.size());
-    uint32_t Tick = 0;  // events are delta-coded; accumulate to absolute ticks
-    int I = 0;
-    for (;;) {
-        uint32_t D = 0;
-        uint8_t M = 0;
-        if (!DecodeEvent(R, D, M)) break;
-        Tick += D;
-        CHECK(I < 5 && M == In[I].Mask);
-        ++I;
-        if (I == 5) break;  // consumed all five (trailing padding bits may look like a 0,0 event)
-    }
-    CHECK(I == 5);
-    CHECK(Tick == 1 + 3 + 1 + 20 + 1);
-}
-
-// ---- Fuzz: hostile bytes never crash; the decoder stays total ----
-static void TestFuzzDecode() {
-    SplitMix64 Rng(0xF0FF);
-    for (int Iter = 0; Iter < 20000; ++Iter) {
-        uint8_t Buf[8];
-        const int N = 1 + static_cast<int>(Rng.NextBounded(8));
-        for (int I = 0; I < N; ++I) Buf[I] = static_cast<uint8_t>(Rng.NextBounded(256));
-        BitReader R(Buf, static_cast<size_t>(N));
-        // Drain events until the reader runs dry — must always terminate, never trap.
-        for (int Guard = 0; Guard < 64; ++Guard) {
-            uint32_t D = 0;
-            uint8_t M = 0;
-            if (!DecodeEvent(R, D, M)) break;
-        }
-    }
-    CHECK(true);  // reaching here without a crash/hang is the assertion
-}
-
 // ---- #137: input-EVENT batch codec — round-trip place + queue events, and the empty batch ----
 static void TestEventBatchRoundTrip() {
     InputEvent In[] = {
@@ -167,52 +92,6 @@ static uint64_t ReplayHashEvents(uint64_t Seed, const std::vector<std::vector<In
     for (const std::vector<InputEvent>& Batch : Rec)
         S.StepEvents(Batch.data(), static_cast<int32_t>(Batch.size()));
     return S.StateHash();
-}
-
-// Replay a recorded/reassembled (mask0, mask1) stream into a fresh sim -> final hash.
-static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
-                           const std::vector<uint8_t>& M1,
-                           std::size_t MaxTicks = static_cast<std::size_t>(-1)) {
-    static Sim S;
-    S.Init(Seed);
-    std::size_t N = M0.size() < M1.size() ? M0.size() : M1.size();
-    if (N > MaxTicks) N = MaxTicks;
-    for (std::size_t I = 0; I < N; ++I) S.Step(M0[I], M1[I]);
-    return S.StateHash();
-}
-
-// ---- Resync: chunk a full input history, reassemble, replay hash-identical (§4) ----
-static void TestResyncChunking() {
-    constexpr int Ticks = 9000;  // ~15 min at 10 Hz — the worst-case bound
-    std::vector<uint8_t> M0, M1;
-    SplitMix64 Rng(0x1234);
-    for (int T = 0; T < Ticks; ++T) {
-        M0.push_back(static_cast<uint8_t>(Rng.NextBounded(16)));
-        M1.push_back(static_cast<uint8_t>(Rng.NextBounded(16)));
-    }
-
-    const auto C0 = EncodeResyncChunks(0, M0);
-    const auto C1 = EncodeResyncChunks(0, M1);
-    // Byte budget: no chunk exceeds the framed cap; the whole history is a handful of them.
-    for (const auto& C : C0) CHECK(C.size() <= MaxResyncChunkBytes);
-    CHECK(C0.size() <= 20);  // 9000/500 ~ 18 chunks/stream
-
-    // Reassemble (append in order, as reliable transport delivers) and check exactness.
-    std::vector<uint8_t> D0, D1;
-    uint32_t Ft = 0;
-    for (const auto& C : C0) CHECK(DecodeResyncChunk(C.data(), C.size(), Ft, D0));
-    for (const auto& C : C1) CHECK(DecodeResyncChunk(C.data(), C.size(), Ft, D1));
-    CHECK(D0 == M0 && D1 == M1);
-
-    // Smoke-check that the reassembled bytes actually DRIVE the sim identically to the
-    // original. The reassembly is already byte-exact (D0==M0 above), and the replay law
-    // (same inputs -> same hash over a full match) is covered by TestLockstepReplayHash-
-    // Identical + rps_sim_tests — so a short prefix suffices here. Replaying the WHOLE
-    // 9000-tick history twice added ~18k flock-heavy Steps that dominated the CI gate for
-    // zero extra coverage; the 9000-tick CHUNKING/byte-budget checks above are the point of
-    // this test and stay intact.
-    constexpr std::size_t ReplaySmoke = 400;
-    CHECK(ReplayHash(0xAA, D0, D1, ReplaySmoke) == ReplayHash(0xAA, M0, M1, ReplaySmoke));
 }
 
 // ---- Lockstep harness: a QUEUED link (models the real deferred delivery / Pump, and
@@ -593,13 +472,8 @@ static void TestLockstepColdRejoinResync() {
 }
 
 int main() {
-    TestRoundTrip();
-    TestByteBudget();
-    TestStreamAbsoluteTicks();
-    TestFuzzDecode();
     TestEventBatchRoundTrip();
     TestEventBatchFuzz();
-    TestResyncChunking();
     TestLockstepStaysInSync();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();

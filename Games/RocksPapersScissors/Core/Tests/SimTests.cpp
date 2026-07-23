@@ -33,32 +33,65 @@ static void KillTeam(Sim& S, uint8_t Team) {
         if (S.Team[I] == Team) S.AliveBits[I >> 6] &= ~(1ull << (I & 63));
 }
 
+// #145 (buildings flip): a deterministic PLACE+QUEUE event schedule the determinism-family
+// tests share — armies must actually spawn now that the mask/camp production is gone. Emits
+// BOTH teams' events for loop index Tick, TEAM-0-FIRST (Execute's combined-batch order), so
+// slots are predictable across a fresh sim. Init fills slots 0..5 with the six start miners
+// (3/team), then this script places into 6.. in placement order:
+//   Tick 1: both mining camps         -> t0 camp = slot 6, t1 camp = slot 7
+//   Tick 3: two combat buildings/team -> t0 = 8,9   t1 = 10,11
+//   Tick 5: queue 20 at every placed building (miner camps + the four combat buildings)
+// The caller sets both teams' Gold high first so nothing is rejected for cost. All positions
+// sit inside the initial frontier band and clear of mines/each other (validated in §5.1).
+// Returns the count written into Out (<= MaxEventsPerTick).
+static int32_t ArmyScript(uint32_t Tick, InputEvent* Out) {
+    const Fixed T0Y = F(20), T1Y = F(WorldHeight.ToInt() - 20);
+    int32_t N = 0;
+    if (Tick == 1) {
+        Out[N++] = InputEvent::Place(0, UnitMiner, F(17), T0Y);
+        Out[N++] = InputEvent::Place(1, UnitMiner, F(17), T1Y);
+    } else if (Tick == 3) {
+        Out[N++] = InputEvent::Place(0, UnitRock,    F(10), T0Y);
+        Out[N++] = InputEvent::Place(0, UnitScissor, F(24), T0Y);
+        Out[N++] = InputEvent::Place(1, UnitRock,    F(10), T1Y);
+        Out[N++] = InputEvent::Place(1, UnitScissor, F(24), T1Y);
+    } else if (Tick == 5) {
+        Out[N++] = InputEvent::Queue(0, 6, 20);
+        Out[N++] = InputEvent::Queue(0, 8, 20);
+        Out[N++] = InputEvent::Queue(0, 9, 20);
+        Out[N++] = InputEvent::Queue(1, 7, 20);
+        Out[N++] = InputEvent::Queue(1, 10, 20);
+        Out[N++] = InputEvent::Queue(1, 11, 20);
+    }
+    return N;
+}
+// Step one scripted tick on S at loop index I (build the combined batch, apply it).
+static void ArmyStep(Sim& S, uint32_t I) {
+    InputEvent Evs[MaxEventsPerTick];
+    const int32_t N = ArmyScript(I, Evs);
+    S.StepEvents(Evs, N);
+}
+// Fund both teams so the whole ArmyScript succeeds, and run it for Ticks ticks.
+static void FundForArmyScript(Sim& S) { S.Teams[0].Gold = 100000; S.Teams[1].Gold = 100000; }
+
 // ---- 1. Determinism: two independent runs, identical hash every tick ----
 static void TestDeterminism() {
     constexpr int Ticks = 600;
     constexpr uint64_t Seed = 0x0123456789ABCDEFull;
 
-    // A pre-recorded random input stream (the flight-recorder's payload, in effect).
-    static uint8_t M0[Ticks], M1[Ticks];
-    SplitMix64 Rng(0xC0FFEE);
-    for (int I = 0; I < Ticks; ++I) {
-        M0[I] = static_cast<uint8_t>(Rng.NextBounded(16));  // 4-bit button mask
-        M1[I] = static_cast<uint8_t>(Rng.NextBounded(16));
-    }
-
     static Sim A, B;  // static: ~200 KB each, keep them off the stack
-    A.Init(Seed);
-    B.Init(Seed);
+    A.Init(Seed);   FundForArmyScript(A);
+    B.Init(Seed);   FundForArmyScript(B);
     CHECK(A.StateHash() == B.StateHash());  // identical from tick 0
 
     bool AllMatch = true;
     for (int I = 0; I < Ticks; ++I) {
-        A.Step(M0[I], M1[I]);
-        B.Step(M0[I], M1[I]);
+        ArmyStep(A, I);
+        ArmyStep(B, I);
         if (A.StateHash() != B.StateHash()) { AllMatch = false; break; }
     }
     CHECK(AllMatch);
-    // The match should actually DO something over 600 ticks (units spawned/moved),
+    // The match should actually DO something over 600 ticks (buildings + spawned armies),
     // otherwise "deterministic" is trivially true over an empty sim.
     CHECK(A.Count > StartMiners * 2);
 }
@@ -68,41 +101,29 @@ static void TestDeterminism() {
 static void TestReplayReproducibility() {
     constexpr int Ticks = 300;
     constexpr uint64_t Seed = 0xFEEDBEEFu;
-    static uint8_t M0[Ticks], M1[Ticks];
-    SplitMix64 Rng(0x5EED);
-    for (int I = 0; I < Ticks; ++I) {
-        M0[I] = static_cast<uint8_t>(Rng.NextBounded(16));
-        M1[I] = static_cast<uint8_t>(Rng.NextBounded(16));
-    }
     static Sim Live;
-    Live.Init(Seed);
-    for (int I = 0; I < Ticks; ++I) Live.Step(M0[I], M1[I]);
+    Live.Init(Seed);   FundForArmyScript(Live);
+    for (int I = 0; I < Ticks; ++I) ArmyStep(Live, I);
     const uint64_t Final = Live.StateHash();
 
     static Sim Replay;
-    Replay.Init(Seed);
-    for (int I = 0; I < Ticks; ++I) Replay.Step(M0[I], M1[I]);
+    Replay.Init(Seed);   FundForArmyScript(Replay);
+    for (int I = 0; I < Ticks; ++I) ArmyStep(Replay, I);
     CHECK(Replay.StateHash() == Final);
 }
 
 // ---- #112: a latched AffectsGameplay CVar override changes the sim deterministically ----
-// Exercises both halves of the CVar-determinism design: the per-tick latch (Sim::Step's
+// Exercises both halves of the CVar-determinism design: the per-tick latch (PreTick's
 // Cv = LatchCvs()) means an override applied between runs takes effect, and folding Cv
 // into StateHash means two runs with the same override hash identically while a different
 // override diverges. This is the sim-side proof under which the Addendum-C peer sync sits.
 static void TestCVarOverrideDeterminism() {
     constexpr int Ticks = 400;
     constexpr uint64_t Seed = 0x112C0DEull;
-    static uint8_t M0[Ticks], M1[Ticks];
-    SplitMix64 Rng(0x112);
-    for (int I = 0; I < Ticks; ++I) {
-        M0[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2;  // bias to soldiers so WSeek bites
-        M1[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4;
-    }
     auto Run = [&]() {
         static Sim S;  // static: keep the ~200 KB off the stack
-        S.Init(Seed);
-        for (int I = 0; I < Ticks; ++I) S.Step(M0[I], M1[I]);
+        S.Init(Seed);   FundForArmyScript(S);
+        for (int I = 0; I < Ticks; ++I) ArmyStep(S, I);  // places combat buildings -> soldiers exist
         return S.StateHash();
     };
 
@@ -147,24 +168,19 @@ static void TestGameplayCvarListComplete() {
 static void TestGridEqualsBruteForce() {
     constexpr int Ticks = LUR_SLOW ? 800 : 250;
     for (uint64_t Seed : {uint64_t(1), uint64_t(0xABCDEF), uint64_t(0xDEADBEEF)}) {
-        static uint8_t M0[Ticks], M1[Ticks];
-        SplitMix64 Rng(Seed ^ 0x9999);
-        for (int I = 0; I < Ticks; ++I) {
-            // Bias toward soldier presses (bits 1..3) so armies actually clash and
-            // the nearest-enemy grid search is genuinely exercised.
-            M0[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2;
-            M1[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4;
-        }
         static Sim Grid, Brute;
-        Grid.Init(Seed);
-        Brute.Init(Seed);
+        // Same PLACE+QUEUE schedule on both paths: buildings produce clashing armies (and the
+        // building-repel force) — exercises the nearest-enemy ring search AND building repulsion
+        // through the grid, which must reproduce brute bit-for-bit.
+        Grid.Init(Seed);    FundForArmyScript(Grid);
+        Brute.Init(Seed);   FundForArmyScript(Brute);
         Brute.UseBruteForce = true;  // after Init (Init resets the flag)
 
         bool Match = true;
         int FirstDiverge = -1;
         for (int I = 0; I < Ticks; ++I) {
-            Grid.Step(M0[I], M1[I]);
-            Brute.Step(M0[I], M1[I]);
+            ArmyStep(Grid, I);
+            ArmyStep(Brute, I);
             if (Grid.StateHash() != Brute.StateHash()) { Match = false; FirstDiverge = I; break; }
         }
         if (!Match) std::printf("  grid!=brute seed=%llu diverged at tick %d\n",
@@ -203,7 +219,7 @@ static void TestSameTypeCohesionContracts() {
         return Hi - Lo;
     };
     const Fixed Before = XSpread(S);
-    for (int I = 0; I < 40; ++I) S.Step(0, 0);
+    for (int I = 0; I < 40; ++I) S.StepEvents(nullptr, 0);
     const Fixed After = XSpread(S);
     CHECK(After < Before);                 // cohesion pulled the type together (not apart)
     CHECK(After.Raw > 0);                  // separation kept them from collapsing to a point
@@ -220,11 +236,11 @@ static void TestDisableCombatNoDeaths() {
     static Sim S;
     S.Init(0);
     S.DisableCombat = true;
-    S.Teams[0].Gold = 100000; S.Teams[1].Gold = 100000;
+    FundForArmyScript(S);
     int32_t Prev = S.AliveCount(0) + S.AliveCount(1);
     bool NeverDropped = true;
     for (int I = 0; I < 200; ++I) {
-        S.Step(1u << UnitRock, 1u << UnitScissor);  // both spam warriors that would counter-kill
+        ArmyStep(S, I);  // both teams place combat buildings + queue warriors that would counter-kill
         const int32_t Now = S.AliveCount(0) + S.AliveCount(1);
         if (Now < Prev) { NeverDropped = false; break; }
         Prev = Now;
@@ -274,7 +290,7 @@ static void TestCartPriorityOverMirror() {
     PlaceUnit(S, 1, F(17), F(26), 1, UnitMiner);   // enemy CART (farther)
     PlaceUnit(S, 2, F(17), F(24), 1, UnitRock);    // enemy mirror (nearer)
     S.Count = 3;
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     CHECK(S.Target[0] == 1);  // the cart beats the nearer mirror
 }
 
@@ -297,7 +313,7 @@ static void TestInterposeScreensCart() {
     static Sim A, B;
     Setup(A, true);
     Setup(B, false);
-    for (int I = 0; I < 25; ++I) { A.Step(0, 0); B.Step(0, 0); }
+    for (int I = 0; I < 25; ++I) { A.StepEvents(nullptr, 0); B.StepEvents(nullptr, 0); }
     CHECK(A.PosY[0] > B.PosY[0]);  // interpose held the defender back (north) vs the free chase south
 }
 
@@ -351,12 +367,12 @@ static void TestBuildingProducesFlatCadence() {
     S.Count = 1;
     S.Queue[0] = 3;
     const int Bt = S.Units[UnitRock].BuildTicks;
-    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    for (int t = 1; t <= Bt; ++t) S.StepEvents(nullptr, 0);
     CHECK(MobileCount(S, 0) == 1);        // exactly one after Bt ticks (flat: +1/tick, not +Queue)
     CHECK(S.Queue[0] == 2);
-    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    for (int t = 1; t <= Bt; ++t) S.StepEvents(nullptr, 0);
     CHECK(MobileCount(S, 0) == 2);        // second at 2·Bt
-    for (int t = 1; t <= Bt; ++t) S.Step(0, 0);
+    for (int t = 1; t <= Bt; ++t) S.StepEvents(nullptr, 0);
     CHECK(MobileCount(S, 0) == 3);        // third at 3·Bt
     CHECK(S.Queue[0] == 0 && S.BuildProgress[0] == 0);  // drained, no banked progress
     CHECK(S.IsBuilding(0) && S.IsAlive(0));             // the building persists (it produces, isn't consumed)
@@ -376,7 +392,7 @@ static void TestBuildingCountScalesThroughput() {
     One.Count = 1; One.Queue[0] = 2;
 
     const int Bt = Two.Units[UnitScissor].BuildTicks;
-    for (int t = 1; t <= Bt; ++t) { Two.Step(0, 0); One.Step(0, 0); }
+    for (int t = 1; t <= Bt; ++t) { Two.StepEvents(nullptr, 0); One.StepEvents(nullptr, 0); }
     CHECK(MobileCount(Two, 0) == 2);   // two buildings -> both units out in Bt ticks
     CHECK(MobileCount(One, 0) == 1);   // one building -> only the first, second still building
 }
@@ -414,12 +430,12 @@ static void TestFrontierMonotonicHighWater() {
     CHECK(S.FrontierT0 == S.Cv.InitialFrontier);        // seeded at the initial band
     PlaceUnit(S, 0, F(17), F(100), 0, UnitRock);        // a team-0 unit already past the line
     S.Count = 1;
-    for (int t = 0; t < 10; ++t) S.Step(0, 0);          // it marches forward (up, toward enemy camp)
+    for (int t = 0; t < 10; ++t) S.StepEvents(nullptr, 0);          // it marches forward (up, toward enemy camp)
     const Fixed Adv = S.FrontierT0;
     CHECK(Adv >= F(100));                                // advanced to the unit's reach
     CHECK(Adv > S.Cv.InitialFrontier);
     S.AliveBits[0] &= ~1ull;                             // the forward unit dies
-    for (int t = 0; t < 10; ++t) S.Step(0, 0);
+    for (int t = 0; t < 10; ++t) S.StepEvents(nullptr, 0);
     CHECK(S.FrontierT0 == Adv);                          // ground held — no retreat
 }
 
@@ -440,7 +456,7 @@ static void TestBuildingRepelsUnits() {
     static Sim A, B;
     const int Ia = Setup(A, true);
     const int Ib = Setup(B, false);
-    for (int t = 0; t < 20; ++t) { A.Step(0, 0); B.Step(0, 0); }
+    for (int t = 0; t < 20; ++t) { A.StepEvents(nullptr, 0); B.StepEvents(nullptr, 0); }
     CHECK(A.PosX[Ia] > B.PosX[Ib] + F(1, 2));           // building shoved the unit measurably east
     CHECK(A.IsBuilding(0) && A.PosX[0] == F(15) && A.PosY[0] == F(20));  // the building never moved
 }
@@ -453,7 +469,7 @@ static void TestSoldierTargetsEnemyBuildingByType() {
     PlaceUnit(S, 0, F(17), F(20), 0, UnitScissor);   // Scissor beats Paper -> the building is prey
     PlaceBuilding(S, 1, F(17), F(23), 1, UnitPaper); // enemy PAPER building
     S.Count = 2;
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     CHECK(S.Target[0] == 1);  // targeted the building as if a Paper unit
 }
 
@@ -467,11 +483,11 @@ static void TestScissorDestroysPaperBuildingWithCounter() {
     PlaceBuilding(S, 1, F(17), F(21), 1, UnitPaper);  // adjacent, inside Scissor range
     S.Count = 2;
     const int32_t Hp0 = S.Hp[1];
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     // First engaged hit is counter-multiplied (Scissor beats Paper -> 3x).
     CHECK(S.Hp[1] == Hp0 - S.Units[UnitScissor].Attack * S.Cv.CounterMultiplier);
     CHECK(S.Hp[0] == UnitTable[UnitScissor].MaxHp);  // the building did NOT fight back
-    for (int t = 0; t < 800 && S.IsAlive(1); ++t) S.Step(0, 0);
+    for (int t = 0; t < 800 && S.IsAlive(1); ++t) S.StepEvents(nullptr, 0);
     CHECK(!S.IsAlive(1));  // economy/production building razed
 }
 
@@ -487,7 +503,7 @@ static void TestCartDepositsAtNearestMinerBuilding() {
     S.Count = 3;
     S.WorkerState[2] = WorkToCamp; S.Carry[2] = CarryCapacity; S.Target[2] = -1;
     const int32_t Before = S.Teams[0].Gold;
-    for (int t = 0; t < 100 && S.Carry[2] != 0; ++t) S.Step(0, 0);
+    for (int t = 0; t < 100 && S.Carry[2] != 0; ++t) S.StepEvents(nullptr, 0);
     CHECK(S.Carry[2] == 0);
     CHECK(S.Teams[0].Gold == Before + CarryCapacity);  // banked at a miner building
     CHECK(S.PosX[2] > F(20));                           // went to the NEAR camp (x=26), not the far (x=8)
@@ -570,7 +586,7 @@ static void TestMutualAnnihilationDraw() {
     KillTeam(S, 1);
     S.Teams[0].Gold = 0;
     S.Teams[1].Gold = 0;
-    S.Step(0, 0);  // win check runs at phase 7
+    S.StepEvents(nullptr, 0);  // win check runs at phase 7
     CHECK(S.Result == ResultDraw);
 }
 
@@ -579,7 +595,7 @@ static void TestWipeoutLoses() {
     S.Init(0);
     KillTeam(S, 0);
     S.Teams[0].Gold = 0;  // no units, no queue, can't rebuy -> team 0 loses
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     CHECK(S.Result == ResultTeam1Wins);
 }
 
@@ -594,7 +610,7 @@ static void TestBuildingsDoNotSaveFromLoss() {
     S.Count = 2;
     S.Teams[0].Gold = 0;        // but no units and can't afford the cheapest -> doomed
     S.Teams[1].Gold = 1000;     // team 1 solvent, so it does not also lose
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     CHECK(S.AliveCount(0) == 0);          // buildings are not counted as units
     CHECK(S.Result == ResultTeam1Wins);   // team 0 loses despite its buildings
 }
@@ -604,84 +620,8 @@ static void TestRebuyIsNotLoss() {
     S.Init(0);
     KillTeam(S, 0);
     S.Teams[0].Gold = CheapestCost;  // zero units but can still rebuy -> NOT a loss
-    S.Step(0, 0);
+    S.StepEvents(nullptr, 0);
     CHECK(S.Result == ResultOngoing);
-}
-
-// ---- 3. Production press edges (deterministic no-op) ----
-static void TestBrokePressIgnored() {
-    static Sim S;
-    S.Init(0);
-    S.Teams[0].Gold = UnitTable[UnitRock].Cost - 1;  // one short
-    const int32_t GoldBefore = S.Teams[0].Gold;
-    S.Step(1u << UnitRock, 0);
-    CHECK(S.Teams[0].QueueCount[UnitRock] == 0);
-    CHECK(S.Teams[0].Gold == GoldBefore);  // no partial reservation
-}
-
-static void TestQueueCapIgnored() {
-    static Sim S;
-    S.Init(0);
-    S.Teams[0].Gold = 100000;
-    S.Teams[0].QueueCount[UnitScissor] = PerTypeQueueCap;  // at the sanity cap
-    const int32_t GoldBefore = S.Teams[0].Gold;
-    S.Step(1u << UnitScissor, 0);
-    // The press is ignored (cap); production still ran — a cap-deep stack (64) beats
-    // BuildTicks (50) in one tick, so exactly one scissor spawned from the stack.
-    CHECK(S.Teams[0].QueueCount[UnitScissor] == PerTypeQueueCap - 1);
-    CHECK(S.Teams[0].Gold == GoldBefore);  // nothing was spent on the ignored press
-}
-
-// ---- Tick-phase behaviour sanity ----
-static void TestProductionSpawnsAfterBuildTime() {
-    static Sim S;
-    S.Init(0);
-    const int32_t Before = S.AliveCount(0);
-    S.Step(1u << UnitScissor, 0);  // enqueue a Scissor (cost 50, build 50 ticks)
-    CHECK(S.Teams[0].QueueCount[UnitScissor] == 1);
-    // The enqueue tick already advanced progress once (count 1 => +1/tick); a solo
-    // unit therefore lands BuildTicks-1 idle ticks later — check the exact edge.
-    for (int I = 0; I < UnitTable[UnitScissor].BuildTicks - 2; ++I) S.Step(0, 0);
-    CHECK(S.AliveCount(0) == Before);        // one tick early: not yet
-    S.Step(0, 0);
-    CHECK(S.AliveCount(0) == Before + 1);    // exactly BuildTicks queue-ticks
-    CHECK(S.Teams[0].QueueCount[UnitScissor] == 0);
-}
-
-// ---- 4. Parallel queues + stack acceleration (#84) ----
-static void TestParallelQueuesProgressIndependently() {
-    static Sim S;
-    S.Init(0);
-    S.Teams[0].Gold = 1000;
-    const int32_t Before = S.AliveCount(0);
-    S.Step((1u << UnitRock) | (1u << UnitPaper), 0);  // both queues start the same tick
-    CHECK(S.Teams[0].QueueCount[UnitRock] == 1);
-    CHECK(S.Teams[0].QueueCount[UnitPaper] == 1);
-    for (int I = 0; I < UnitTable[UnitRock].BuildTicks; ++I) S.Step(0, 0);
-    // A single serial queue would need 2x BuildTicks; parallel queues finish together.
-    CHECK(S.AliveCount(0) == Before + 2);
-}
-
-static void TestStackAccelerationSpawnsFaster() {
-    static Sim A, B;
-    A.Init(0);
-    B.Init(0);
-    A.Teams[0].Gold = 1000;
-    B.Teams[0].Gold = 1000;
-    A.Step(1u << UnitScissor, 0);  // A stacks two scissors...
-    A.Step(1u << UnitScissor, 0);
-    B.Step(1u << UnitScissor, 0);  // ...B queues one (same elapsed ticks)
-    B.Step(0, 0);
-    const int32_t ABefore = A.AliveCount(0), BBefore = B.AliveCount(0);
-    int32_t AFirst = -1, BFirst = -1;
-    for (int I = 0; I < UnitTable[UnitScissor].BuildTicks + 2; ++I) {
-        A.Step(0, 0);
-        B.Step(0, 0);
-        if (AFirst < 0 && A.AliveCount(0) > ABefore) AFirst = I;
-        if (BFirst < 0 && B.AliveCount(0) > BBefore) BFirst = I;
-    }
-    CHECK(AFirst >= 0 && BFirst >= 0);
-    CHECK(AFirst < BFirst);  // the deeper stack builds STRICTLY faster (the pacing thesis)
 }
 
 // ---- 5. Finite mines (#84) ----
@@ -693,7 +633,7 @@ static void TestMineDepletesAndVanishes() {
     for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
     S.MineGold[0] = CarryCapacity;
     const int32_t Before0 = S.Teams[0].Gold, Before1 = S.Teams[1].Gold;
-    for (int I = 0; I < 400; ++I) S.Step(0, 0);
+    for (int I = 0; I < 400; ++I) S.StepEvents(nullptr, 0);
     CHECK(S.MineGold[0] == 0);
     CHECK(S.Teams[0].Gold == Before0 + CarryCapacity);  // mine 0 is team 0's safe cluster
     CHECK(S.Teams[1].Gold == Before1);                  // the far team never got a carry
@@ -704,7 +644,7 @@ static void TestDepletedMinesStopEconomy() {
     S.Init(0);
     for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
     const int32_t Before = S.Teams[0].Gold;
-    for (int I = 0; I < 300; ++I) S.Step(0, 0);
+    for (int I = 0; I < 300; ++I) S.StepEvents(nullptr, 0);
     CHECK(S.Teams[0].Gold == Before);          // no phantom income from dead mines
     CHECK(S.Result == ResultOngoing);          // gold >= CheapestCost: still a rebuy, not a loss
 }
@@ -713,7 +653,7 @@ static void TestEconomyGathersGold() {
     static Sim S;
     S.Init(0);
     const int32_t Before = S.Teams[0].Gold;
-    for (int I = 0; I < 300; ++I) S.Step(0, 0);  // idle: the 3 starting workers just gather
+    for (int I = 0; I < 300; ++I) S.StepEvents(nullptr, 0);  // idle: the 3 starting workers just gather
     CHECK(S.Teams[0].Gold > Before);  // at least one full round trip deposited
 }
 
@@ -729,7 +669,7 @@ static void TestStressTickBudget() {
     CHECK(S.Count > 1500);
     constexpr int Ticks = 60;
     const auto T0 = std::chrono::steady_clock::now();
-    for (int I = 0; I < Ticks; ++I) S.Step(0, 0);
+    for (int I = 0; I < Ticks; ++I) S.StepEvents(nullptr, 0);
     const auto T1 = std::chrono::steady_clock::now();
     const double Ms = std::chrono::duration<double, std::milli>(T1 - T0).count();
     // The flock GATHER is the hot phase (plan §6): each unit visits a cell box sized by the
@@ -771,11 +711,6 @@ int main() {
     TestWipeoutLoses();
     TestBuildingsDoNotSaveFromLoss();
     TestRebuyIsNotLoss();
-    TestBrokePressIgnored();
-    TestQueueCapIgnored();
-    TestProductionSpawnsAfterBuildTime();
-    TestParallelQueuesProgressIndependently();
-    TestStackAccelerationSpawnsFaster();
     TestMineDepletesAndVanishes();
     TestDepletedMinesStopEconomy();
     TestEconomyGathersGold();

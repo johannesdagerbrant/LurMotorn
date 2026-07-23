@@ -41,8 +41,11 @@ struct Snapshot {
     uint32_t Tick = 0;
     uint8_t  Result = 0;              // EResult
     int32_t  Gold[2] = {};
-    int32_t  QueueCount[2][UnitCount] = {};     // per-type parallel queues (#84)
-    int32_t  BuildProgress[2][UnitCount] = {};  // 0..BuildTicks; rate = QueueCount x base
+    // Per-team, per-produced-type queue totals for the HUD — now AGGREGATED over that team's
+    // buildings (#132/#145: production is per-building; there are no per-team camp queues). Sum
+    // of Queue across a team's buildings of each type; BuildProgress is the max in-flight bar.
+    int32_t  QueueCount[2][UnitCount] = {};
+    int32_t  BuildProgress[2][UnitCount] = {};
     int32_t  AliveCount[2] = {};
 
     // Live per-type stats (#122): the sim's Cv-derived Units[] (cost/hp/speed/damage/build),
@@ -80,11 +83,17 @@ struct Snapshot {
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
             Gold[T] = S.Teams[T].Gold;
-            for (int K = 0; K < UnitCount; ++K) {
-                QueueCount[T][K] = S.Teams[T].QueueCount[K];
-                BuildProgress[T][K] = S.Teams[T].BuildProgress[K];
-            }
+            for (int K = 0; K < UnitCount; ++K) { QueueCount[T][K] = 0; BuildProgress[T][K] = 0; }
             AliveCount[T] = S.AliveCount(static_cast<uint8_t>(T));
+        }
+        // Aggregate per-building queues into the per-type HUD totals (#145): sum queued units,
+        // keep the furthest-along build bar per type. Buildings share the [0,Count) slot space.
+        for (int32_t I = 0; I < S.Count; ++I) {
+            if (!S.IsAlive(I) || !S.IsBuilding(I)) continue;
+            const int T = S.Team[I], K = S.Type[I];
+            if (T < 0 || T >= 2 || K < 0 || K >= UnitCount) continue;
+            QueueCount[T][K] += S.Queue[I];
+            if (S.BuildProgress[I] > BuildProgress[T][K]) BuildProgress[T][K] = S.BuildProgress[I];
         }
         std::memcpy(Units, S.Units, sizeof(Units));  // #122: live per-type stats for the HUD
         PublishNs = InPublishNs;
