@@ -99,7 +99,37 @@ LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  7,        CVarFlagAffec
 LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",50,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 // Production stack-acceleration: each tick a queue advances by QueueCount x this (the pacing
 // thesis, #84 — deep stacks snowball). Default 1 = today's "progress += count".
+// REMOVED by the buildings rework (#132): throughput scales by BUILDING COUNT, not stack
+// depth. Kept latched until the old camp-production path is deleted in the integration flip.
 LUR_CVAR_T(CvQueueMult,      "rps.production.queue_mult", 1,       CVarFlagAffectsGameplay, "Build speedup per queued unit (stack accel)");
+
+// ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
+// (#131 SoA). Each building type's health + placement cost is a knob nested UNDER that unit's
+// console node (rps.unit.<type>.building_*) so a type's unit knobs and building knobs group
+// together (spec §8 goal). All AffectsGameplay: they gate the deterministic sim (placement
+// cost, building HP, queue cap, footprint/repulsion geometry, the frontier gate, opening
+// gold), so they latch into Cv, sync over lockstep, and are console-tunable. Numbers are
+// PLACEHOLDERS for the #84 balance pass — structure (which knobs exist) is what's code here. ----
+LUR_CVAR_T(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
+LUR_CVAR_T(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   100, CVarFlagAffectsGameplay, "Gold to place a mining camp");
+LUR_CVAR_T(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
+LUR_CVAR_T(CvRockBuildingCost,    "rps.unit.rock.building_cost",    150, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR_T(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
+LUR_CVAR_T(CvPaperBuildingCost,   "rps.unit.paper.building_cost",   150, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR_T(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
+LUR_CVAR_T(CvScissorBuildingCost, "rps.unit.scissor.building_cost", 150, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+// Shared building knobs (one per concept, not per-type) under rps.build.*
+LUR_CVAR_T(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
+LUR_CVAR_T(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
+LUR_CVAR_T(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
+LUR_CVAR_T(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
+// World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
+// tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
+LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(75), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
+// Opening gold (§12.6): enough for one mining camp + a few carts, deliberately too little for
+// a mining camp + a combat building — forces the healthy economy-first opening. Replaces the
+// compile-time StartGold once the old opening is retired.
+LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  180,      CVarFlagAffectsGameplay, "Opening gold per team (§12.6 window)");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
@@ -379,6 +409,20 @@ LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
     IX(ScissorBuild,            CvScissorBuild)            \
     IX(QueueMult,               CvQueueMult)               \
     IX(DigTicks,                CvDigTicks)                \
+    IX(MinerBuildingHp,         CvMinerBuildingHp)         \
+    IX(MinerBuildingCost,       CvMinerBuildingCost)       \
+    IX(RockBuildingHp,          CvRockBuildingHp)          \
+    IX(RockBuildingCost,        CvRockBuildingCost)        \
+    IX(PaperBuildingHp,         CvPaperBuildingHp)         \
+    IX(PaperBuildingCost,       CvPaperBuildingCost)       \
+    IX(ScissorBuildingHp,       CvScissorBuildingHp)       \
+    IX(ScissorBuildingCost,     CvScissorBuildingCost)     \
+    IX(BuildingQueueMax,        CvBuildingQueueMax)        \
+    FX(BuildingFootprint,       CvBuildingFootprint)       \
+    FX(BuildingRepelRadius,     CvBuildingRepelRadius)     \
+    FX(BuildingRepelStrength,   CvBuildingRepelStrength)   \
+    FX(InitialFrontier,         CvInitialFrontier)         \
+    IX(StartingGold,            CvStartingGold)            \
     LUR_AI_TIER_IDS(IX, Easy)                              \
     LUR_AI_TIER_IDS(IX, Medium)                            \
     LUR_AI_TIER_IDS(IX, Hard)
@@ -423,6 +467,27 @@ inline void DeriveUnitStats(const CvSnapshot& Cv, UnitStats Out[UnitCount]) {
     Out[UnitScissor].Cost = Cv.ScissorCost;   Out[UnitScissor].MaxHp = Cv.ScissorHp;
     Out[UnitScissor].Speed = Cv.ScissorSpeed; Out[UnitScissor].Attack = Cv.ScissorDamage;
     Out[UnitScissor].BuildTicks = Cv.ScissorBuild;
+}
+
+// Per-type building health / placement cost from a latched snapshot (#138). One switch so
+// the sim (placement HP + cost deduct, #133) and the HUD (button prices, #140) never disagree.
+inline int32_t BuildingHpFor(const CvSnapshot& Cv, uint8_t Type) {
+    switch (Type) {
+        case UnitMiner:   return Cv.MinerBuildingHp;
+        case UnitRock:    return Cv.RockBuildingHp;
+        case UnitPaper:   return Cv.PaperBuildingHp;
+        case UnitScissor: return Cv.ScissorBuildingHp;
+        default:          return 0;
+    }
+}
+inline int32_t BuildingCostFor(const CvSnapshot& Cv, uint8_t Type) {
+    switch (Type) {
+        case UnitMiner:   return Cv.MinerBuildingCost;
+        case UnitRock:    return Cv.RockBuildingCost;
+        case UnitPaper:   return Cv.PaperBuildingCost;
+        case UnitScissor: return Cv.ScissorBuildingCost;
+        default:          return 0;
+    }
 }
 
 // 1-byte within-build wire id per gameplay CVar (Addendum C.0.1). Declaration order here;
