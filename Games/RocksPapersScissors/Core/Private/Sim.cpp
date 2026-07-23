@@ -118,6 +118,9 @@ void SpawnUnit(Sim& S, uint8_t Team, uint8_t Type) {
     S.WorkerState[I] = WorkToMine;
     S.Carry[I] = 0;
     S.WorkerTimer[I] = 0;
+    S.Kind[I] = KindUnit;         // #131: reset — this slot may be a recycled dead-building slot
+    S.Queue[I] = 0;
+    S.BuildProgress[I] = 0;
     SetAlive(S, I);
     if (I + 1 > S.Count) S.Count = I + 1;
 }
@@ -865,6 +868,9 @@ void Sim::StressFill(int32_t PerTeam) {
             WorkerState[I] = WorkToMine;
             Carry[I] = 0;
             WorkerTimer[I] = 0;
+            Kind[I] = KindUnit;         // #131: reset recycled slot
+            Queue[I] = 0;
+            BuildProgress[I] = 0;
             SetAlive(*this, I);
             if (I + 1 > Count) Count = I + 1;
         }
@@ -912,6 +918,9 @@ uint64_t Sim::StateHash() const {
     Mix(WorkerState, N);
     Mix(Carry, sizeof(int32_t) * N);
     Mix(WorkerTimer, sizeof(int32_t) * N);
+    Mix(Kind, N);                              // #131 buildings (0 = unit)
+    Mix(Queue, sizeof(int32_t) * N);           // #131 per-building production queue
+    Mix(BuildProgress, sizeof(int32_t) * N);   // #131 per-building construction progress
     Mix(AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
     for (int T = 0; T < 2; ++T) {
         const TeamState& Q = Teams[T];
@@ -921,6 +930,8 @@ uint64_t Sim::StateHash() const {
         Mix(&Q.SpawnCounter, sizeof(int32_t));
     }
     Mix(MineGold, sizeof(int32_t) * NumMines);  // mutable reserves (#84) — MineX/Y stay excluded (static)
+    Mix(&FrontierT0, sizeof(Fixed));            // #131/§5.3 frontier high-water (gates placement)
+    Mix(&FrontierT1, sizeof(Fixed));
     Mix(&Cv, sizeof(Cv));  // #112: latched gameplay-CVar snapshot — a mis-latch surfaces as a desync
     Mix(&Tick, sizeof(uint32_t));
     Mix(&Result, sizeof(uint8_t));

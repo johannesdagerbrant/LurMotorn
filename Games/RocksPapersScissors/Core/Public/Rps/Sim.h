@@ -12,6 +12,12 @@ using Lur::Sim::Fixed;
 enum EWorkerState : uint8_t { WorkToMine = 0, WorkDig = 1, WorkToCamp = 2 };
 enum EResult : uint8_t { ResultOngoing = 0, ResultTeam0Wins = 1, ResultTeam1Wins = 2, ResultDraw = 3 };
 
+// #131 (buildings rework): a slot is either a mobile UNIT or a static BUILDING. Buildings
+// live in the SAME per-unit SoA — a slot with Kind==KindBuilding reuses Hp/Team/Pos/AliveBits
+// with building meaning (Type = the unit type it PRODUCES; §7 targeting treats it as that
+// type). KindUnit==0 so a zero-initialised (or legacy) slot is a unit by default.
+enum EKind : uint8_t { KindUnit = 0, KindBuilding = 1 };
+
 // Per-team production + economy state (#84: four PARALLEL per-type queues).
 // QueueCount[ty] includes the unit currently building; BuildProgress[ty] advances
 // by QueueCount[ty] per tick (stack acceleration) and spawns every BuildTicks.
@@ -42,6 +48,11 @@ struct Sim {
     uint8_t  WorkerState[MaxUnits] = {};  // EWorkerState
     int32_t  Carry[MaxUnits] = {};        // worker gold in hand
     int32_t  WorkerTimer[MaxUnits] = {};  // worker dig countdown, ticks
+    // ---- #131 buildings: appended to the per-unit SoA so the existing unit-field StateHash
+    //      layout is undisturbed; the hash is then EXTENDED with these. Zero for unit slots. ----
+    uint8_t  Kind[MaxUnits] = {};         // EKind — KindUnit (0) or KindBuilding
+    int32_t  Queue[MaxUnits] = {};        // building: units queued here (0 for units). Cap = Cv.BuildingQueueMax
+    int32_t  BuildProgress[MaxUnits] = {};// building: current unit's construction progress, ticks (0 for units)
     uint64_t AliveBits[(MaxUnits + 63) / 64] = {};
     int32_t  Count = 0;                   // high-water slot; iterate [0, Count) (deterministic on both peers)
 
@@ -54,6 +65,11 @@ struct Sim {
 
     // ---- Per-team + global ----
     TeamState Teams[2];
+    // #131/§5.3 frontier high-water: the furthest-forward Y any of a team's units has EVER
+    // reached (team 0 advances up = max Y; team 1 advances down = min Y). Monotonic, HASHED —
+    // gates forward placement (§5.1), so both peers must agree. Init to CvInitialFrontier (#133).
+    Fixed     FrontierT0{};
+    Fixed     FrontierT1{};
     uint32_t  Tick = 0;
     uint8_t   Result = ResultOngoing;     // EResult
     uint64_t  Seed = 0;
@@ -114,6 +130,7 @@ struct Sim {
 
     // ---- Read helpers (tests / view) ----
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
+    bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }   // #131
     int32_t AliveCount(uint8_t TeamId) const;
     int32_t QueuedTotal(uint8_t TeamId) const;   // sum over the four per-type queues
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }

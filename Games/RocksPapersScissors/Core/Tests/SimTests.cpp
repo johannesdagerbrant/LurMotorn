@@ -284,6 +284,44 @@ static void TestInterposeScreensCart() {
     CHECK(A.PosY[0] > B.PosY[0]);  // interpose held the defender back (north) vs the free chase south
 }
 
+// ---- #131 buildings SoA foundation: the new authoritative fields (Kind / per-building
+// Queue / BuildProgress / frontier high-water) must be BOTH hashed AND memcpy-preserved.
+// There is no placement API yet (#133), so we mutate the SoA directly — the same POD-is-
+// public discipline the win-rule tests use. Two properties are the whole point of #131:
+//   (a) each new field is folded into StateHash (flipping it changes the hash), and
+//   (b) Sim stays trivially copyable, so a memcpy snapshot round-trips the new state.
+static void TestBuildingSoaHashedAndCopyable() {
+    static_assert(std::is_trivially_copyable<Sim>::value, "#131: Sim must stay memcpy-able");
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    // A lone unit — baseline hash with no building state set.
+    PlaceUnit(S, 0, F(17), F(20), 0, UnitRock);
+    S.Count = 1;
+    const uint64_t H0 = S.StateHash();
+
+    // Turn slot 0 into a building (reuse Type as the produced type). Each field flip must
+    // move the hash, proving it is mixed in.
+    S.Kind[0] = KindBuilding;               CHECK(S.StateHash() != H0);
+    const uint64_t H1 = S.StateHash();
+    S.Queue[0] = 7;                          CHECK(S.StateHash() != H1);
+    const uint64_t H2 = S.StateHash();
+    S.BuildProgress[0] = 13;                 CHECK(S.StateHash() != H2);
+    const uint64_t H3 = S.StateHash();
+    S.FrontierT0 = F(42);                     CHECK(S.StateHash() != H3);
+    const uint64_t H4 = S.StateHash();
+    S.FrontierT1 = F(200);                    CHECK(S.StateHash() != H4);
+    const uint64_t H5 = S.StateHash();
+
+    // memcpy snapshot (the rollback mechanism) preserves every new field bit-for-bit.
+    static Sim Snap;
+    Snap = S;  // trivially-copyable assignment == memcpy
+    CHECK(Snap.StateHash() == H5);
+    CHECK(Snap.Kind[0] == KindBuilding && Snap.IsBuilding(0));
+    CHECK(Snap.Queue[0] == 7 && Snap.BuildProgress[0] == 13);
+    CHECK(Snap.FrontierT0 == F(42) && Snap.FrontierT1 == F(200));
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -461,6 +499,7 @@ int main() {
     TestDisableCombatNoDeaths();
     TestCartPriorityOverMirror();
     TestInterposeScreensCart();
+    TestBuildingSoaHashedAndCopyable();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();
