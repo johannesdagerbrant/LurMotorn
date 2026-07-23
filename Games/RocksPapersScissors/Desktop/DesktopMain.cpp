@@ -30,6 +30,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Loopback.h"
+#include "Rps/AiController.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
@@ -227,14 +228,26 @@ struct SoloInputs {
     std::atomic<uint8_t> P0{0};
     std::atomic<uint8_t> P1{0};
 };
-void SampleSolo(void* Ctx, uint32_t, uint8_t& M0, uint8_t& M1) {
+void SampleSolo(void* Ctx, const Rps::Sim&, uint32_t, uint8_t& M0, uint8_t& M1) {
     SoloInputs* In = static_cast<SoloInputs*>(Ctx);
     M0 = In->P0.exchange(0, std::memory_order_relaxed);
     M1 = In->P1.exchange(0, std::memory_order_relaxed);
 }
 
+// Human (team 0, keys/plates via In.P0) vs the single-player AI (team 1). The AI reads the sim
+// on the sim thread — right before Step — so its board read is race-free (#124).
+struct SoloAiCtx {
+    SoloInputs* In;
+    Rps::AiController* Ai;
+};
+void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, uint8_t& M0, uint8_t& M1) {
+    SoloAiCtx* C = static_cast<SoloAiCtx*>(Ctx);
+    M0 = C->In->P0.exchange(0, std::memory_order_relaxed);
+    M1 = C->Ai->DecideMask(S, Tick);
+}
+
 int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
-            bool FoeOnly) {
+            bool FoeOnly, Rps::EAiTier AiTier) {
     // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
     // ON by default (playtest: how the counters clash is part of the feel) — pass --nocombat
     // for pure-motion tuning (mixed blobs that never kill each other). Defaults to a healthy
@@ -261,8 +274,20 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 #endif
 
     SoloInputs In;
+    // Default solo opponent is the AI (team 1); you play team 0 (#124). --auto (soak) and
+    // --flockdemo (stress) keep the old random/idle P1 instead.
+    Rps::AiController Ai;
+    const bool UseAi = !Auto && !FlockDemo;
+    if (UseAi) {
+        Ai.Init(Seed, /*team*/ 1, AiTier);
+        const char* Names[] = {"easy", "medium", "hard"};
+        Lur::Log::Info("solo opponent: AI (%s)", Names[static_cast<int>(AiTier)]);
+    }
+    SoloAiCtx AiCtx{&In, &Ai};
     auto Runner = std::make_unique<Rps::SimRunner>();
-    Runner->Start(Seed, SampleSolo, &In, static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
+    Runner->Start(Seed, UseAi ? &SampleSoloVsAi : &SampleSolo,
+                  UseAi ? static_cast<void*>(&AiCtx) : static_cast<void*>(&In),
+                  static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
 
     Rps::CameraScroll Cam;
     bool CamInit = false;
@@ -453,11 +478,18 @@ int main(int argc, char** argv) {
     std::string RadioExe = "Tools\\BleDevRig\\BleRadio.exe";  // relative to the repo root
     uint64_t Seed = 0x1234;
     int Stress = 0;
+    Rps::EAiTier AiTier = Rps::EAiTier::Medium;  // solo opponent difficulty (#124)
     for (int I = 1; I < argc; ++I) {
         std::string A = argv[I];
         if (A == "--frames" && I + 1 < argc) MaxFrames = std::atoi(argv[++I]);
         else if (A == "--auto") Auto = true;
         else if (A == "--solo") Solo = true;
+        else if (A == "--ai" && I + 1 < argc) {
+            const std::string T = argv[++I];
+            Solo = true;
+            AiTier = T == "easy" ? Rps::EAiTier::Easy : T == "hard" ? Rps::EAiTier::Hard
+                                                                    : Rps::EAiTier::Medium;
+        }
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
         else if (A == "--nocombat") NoCombat = true;                     // pure-motion tuning (no kills)
         else if (A == "--autofoe") { Solo = true; Auto = true; FoeOnly = true; }  // you play, only the foe mashes
@@ -472,6 +504,6 @@ int main(int argc, char** argv) {
     }
 
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
-    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly);
+    if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, AiTier);
     return RunLoopback(Auto, MaxFrames, Seed);
 }

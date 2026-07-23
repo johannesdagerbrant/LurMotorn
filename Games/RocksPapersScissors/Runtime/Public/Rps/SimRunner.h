@@ -25,9 +25,12 @@ namespace Rps {
 class SimRunner {
 public:
     // Sampled ON THE SIM THREAD at the start of each tick to get that tick's inputs.
-    // Fn-ptr + ctx (not std::function) to stay allocation-free. Real play reads
-    // atomics set by the input layer; tests return a scripted schedule by tick index.
-    using InputFn = void (*)(void* Ctx, uint32_t Tick, uint8_t& Mask0, uint8_t& Mask1);
+    // Fn-ptr + ctx (not std::function) to stay allocation-free. Real play reads atomics set
+    // by the input layer; tests return a scripted schedule by tick index; a single-player AI
+    // reads the (const) sim state to decide its press. The sim is passed by const-ref because
+    // the AI's whole input IS the game state — read here on the sim thread, before Step, so
+    // the read is race-free and deterministic.
+    using InputFn = void (*)(void* Ctx, const Sim& S, uint32_t Tick, uint8_t& Mask0, uint8_t& Mask1);
 
     ~SimRunner() { Stop(); }
 

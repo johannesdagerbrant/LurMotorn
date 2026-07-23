@@ -87,7 +87,7 @@ struct Script {
     uint8_t M0[4096] = {};
     uint8_t M1[4096] = {};
 };
-static void ScriptInput(void* Ctx, uint32_t Tick, uint8_t& M0, uint8_t& M1) {
+static void ScriptInput(void* Ctx, const Sim&, uint32_t Tick, uint8_t& M0, uint8_t& M1) {
     const Script* S = static_cast<const Script*>(Ctx);
     if (static_cast<int>(Tick) < S->N) { M0 = S->M0[Tick]; M1 = S->M1[Tick]; }
     else { M0 = 0; M1 = 0; }
@@ -121,7 +121,7 @@ static void TestRunnerMatchesSynchronous() {
     Synchronous.Init(Seed);
     for (uint32_t I = 0; I < K; ++I) {
         uint8_t M0, M1;
-        ScriptInput(&Sc, I, M0, M1);
+        ScriptInput(&Sc, Synchronous, I, M0, M1);
         Synchronous.Step(M0, M1);
     }
     CHECK(Synchronous.StateHash() == ThreadedHash);

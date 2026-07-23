@@ -4,7 +4,8 @@
 # engine Modules but never the reverse. Layout mirrors Games/Chess/ on purpose —
 # that duplication is Phase 4's raw material (GameHost/IGame), not a mistake.
 add_library(rps_core
-    Core/Private/Sim.cpp)
+    Core/Private/Sim.cpp
+    Core/Private/AiController.cpp)
 
 target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
 # lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT;

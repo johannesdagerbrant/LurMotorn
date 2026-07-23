@@ -287,6 +287,41 @@ constexpr int32_t ClustersPerTeam = 4;      // home (at camp) / safe / midfield 
 constexpr int32_t MinesPerTeam = MinesPerCluster * ClustersPerTeam;
 constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 
+// ---- AI opponent per-tier knobs (#124-#126). The dotted name is the console tree:
+// rps.ai.<tier>.<knob>, so each difficulty is its own sub-category (rps > ai > easy/medium/
+// hard). All AffectsGameplay, so they latch into Cv (deterministic + latched-at-Init + console-
+// visible) exactly like every other gameplay knob; single-player never has a peer, so the sync
+// is moot but harmless. Difficulty = information quality (staleness/precision) + reaction
+// cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
+// knobs for a tier so the three stay in lockstep. ----
+#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR)                                                    \
+    LUR_CVAR_T(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
+    LUR_CVAR_T(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
+    LUR_CVAR_T(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
+    LUR_CVAR_T(CvAi##Tier##Precision,    "rps.ai." Pfx ".precision",     PR, CVarFlagAffectsGameplay, "Enemy-count rounding bucket (1 = exact)");    \
+    LUR_CVAR_T(CvAi##Tier##Cadence,      "rps.ai." Pfx ".cadence",       CA, CVarFlagAffectsGameplay, "Ticks between re-decisions");                 \
+    LUR_CVAR_T(CvAi##Tier##Jitter,       "rps.ai." Pfx ".jitter",        JI, CVarFlagAffectsGameplay, "Random +/- cadence jitter (ticks)");          \
+    LUR_CVAR_T(CvAi##Tier##Hysteresis,   "rps.ai." Pfx ".hysteresis",    HY, CVarFlagAffectsGameplay, "Lead margin before switching countered type");\
+    LUR_CVAR_T(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
+    LUR_CVAR_T(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)")
+//                 OW  WT  ST  PR  CA  JI HY  AL  SR
+LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 50);
+LUR_AI_TIER(Medium, "medium", 4,  8,  20, 2, 20, 6,  2, 15, 60);
+LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
+#undef LUR_AI_TIER
+
+// The X-macro fragment for one tier's nine ids (all int knobs), used 3x in the gameplay list.
+#define LUR_AI_TIER_IDS(IX, Tier)              \
+    IX(Ai##Tier##OpenWorkers,  CvAi##Tier##OpenWorkers)  \
+    IX(Ai##Tier##WorkerTarget, CvAi##Tier##WorkerTarget) \
+    IX(Ai##Tier##Staleness,    CvAi##Tier##Staleness)    \
+    IX(Ai##Tier##Precision,    CvAi##Tier##Precision)    \
+    IX(Ai##Tier##Cadence,      CvAi##Tier##Cadence)      \
+    IX(Ai##Tier##Jitter,       CvAi##Tier##Jitter)       \
+    IX(Ai##Tier##Hysteresis,   CvAi##Tier##Hysteresis)   \
+    IX(Ai##Tier##AllinLead,    CvAi##Tier##AllinLead)    \
+    IX(Ai##Tier##SoldierRatio, CvAi##Tier##SoldierRatio)
+
 
 // ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----
 // The snapshot Sim reads (CvSnapshot), the initial latch from the globals (LatchCvs), the
@@ -343,7 +378,10 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     IX(ScissorDamage,           CvScissorDamage)           \
     IX(ScissorBuild,            CvScissorBuild)            \
     IX(QueueMult,               CvQueueMult)               \
-    IX(DigTicks,                CvDigTicks)
+    IX(DigTicks,                CvDigTicks)                \
+    LUR_AI_TIER_IDS(IX, Easy)                              \
+    LUR_AI_TIER_IDS(IX, Medium)                            \
+    LUR_AI_TIER_IDS(IX, Hard)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
