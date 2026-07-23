@@ -29,6 +29,7 @@
 #include "Lur/Transport/Ble.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
+#include "Rps/AiController.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
@@ -90,6 +91,16 @@ struct AppState {
     int TwoTapCount = 0;
     bool TwoFingerActive = false;
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
+
+    // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
+    // an AI row is picked; the sim thread starts the match, ticks it at 10 Hz, and publishes to
+    // the same Mailbox. Human is team 0; SoloHumanMask carries the human's presses. Additive —
+    // when no AI row is picked the normal peer path is untouched.
+    std::atomic<int>     SoloAiTier{-1};    // glue -> sim: -1 none, else EAiTier ordinal
+    std::atomic<bool>    SoloActive{false}; // sim -> glue: solo match running (tap routing)
+    std::atomic<uint8_t> SoloHumanMask{0};  // glue -> sim: the human's presses (OR-accumulated)
+    Rps::Sim             SoloSim;           // SIM only (after SoloActive)
+    Rps::AiController    SoloAi;            // SIM only
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
@@ -187,10 +198,18 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
 #if !LUR_SHIPPING
                 S->View.DevTap(X, Y);  // dev CVar-browser tap (no-op when hidden / off a row)
 #endif
-                if (S->Linked.load(std::memory_order_acquire)) {
-                    const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
-                    if (Plate >= 0) S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
+                // Always route to the View so the opponent selector works pre-match (the AI rows
+                // are how a solo match starts, #127). A production plate goes to whichever sim is
+                // live: the solo AI sim, else the linked peer.
+                const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
+                if (Plate >= 0) {
+                    if (S->SoloActive.load(std::memory_order_acquire))
+                        S->SoloHumanMask.fetch_or(static_cast<uint8_t>(1u << Plate), std::memory_order_relaxed);
+                    else if (S->Linked.load(std::memory_order_acquire))
+                        S->Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));  // atomic -> sim
                 }
+                const int Tier = S->View.TakeAiTier();  // an AI row was picked -> start solo (#127)
+                if (Tier >= 0) S->SoloAiTier.store(Tier, std::memory_order_release);
             }
             S->TwoFingerActive = false;
             return 1;
@@ -262,6 +281,8 @@ void android_main(android_app* App) {
     std::thread SimThread([&State] {
         auto PrevTime = std::chrono::steady_clock::now();
         uint32_t LastPubTick = 0xFFFFFFFFu;
+        bool SoloRunning = false;          // #127 solo AI match active (sim thread)
+        uint64_t SoloAccumNs = 0;          //   fixed-timestep accumulator for the local sim
 #if LUR_INTERNAL
         uint64_t DiagAccumNs = 0, AutoAccumNs = 0;
         // Dev-only autospam (#101): debug.lur.autoplay=1 (set before launch) floods our own
@@ -277,6 +298,37 @@ void android_main(android_app* App) {
             const uint64_t ElapsedNs =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
             PrevTime = Now;
+
+            // ---- Solo AI match (#127): local Sim + AiController, no peer. Once a tier is
+            // picked it owns the tick + publish and the peer path below is skipped. ----
+            const int SoloTier = State.SoloAiTier.load(std::memory_order_acquire);
+            if (SoloTier >= 0 && !SoloRunning && !State.Started) {
+                State.SoloSim.Init(kMatchSeed);
+                State.SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier));
+                SoloRunning = true;
+                State.SoloActive.store(true, std::memory_order_release);
+                State.LinkedTeam.store(0, std::memory_order_relaxed);  // you are team 0 (no view flip)
+                State.Linked.store(true, std::memory_order_release);   // glue: View.SetLinked + render HUD
+                LOGI("solo AI match started (tier %d)", SoloTier);
+            }
+            if (SoloRunning) {
+                SoloAccumNs += ElapsedNs;
+                while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from the service loop
+                    SoloAccumNs -= kStepNs;
+                    const uint8_t M0 = State.SoloHumanMask.exchange(0, std::memory_order_relaxed);
+                    const uint8_t M1 = State.SoloAi.DecideMask(State.SoloSim, State.SoloSim.Tick);
+                    State.SoloSim.Step(M0, M1);
+                }
+                const uint32_t T = State.SoloSim.Tick;
+                if (T != LastPubTick) {
+                    LastPubTick = T;
+                    State.Mailbox.Back().CaptureFrom(State.SoloSim, NowNs(), kStepNs);
+                    State.Mailbox.Publish();
+                    State.PublishedTick.store(T, std::memory_order_release);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;  // solo owns the loop; skip Session/Lp
+            }
 
             State.Session.Tick(ElapsedNs);  // drain the BLE EventInbox + handshake/liveness
 

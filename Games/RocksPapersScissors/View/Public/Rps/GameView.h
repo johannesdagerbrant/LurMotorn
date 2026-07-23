@@ -58,6 +58,11 @@ public:
     // Returns a unit type 0..3 when a production plate was pressed, -2 when the HUD
     // consumed the tap (the opponent selector), or -1 when the tap is the world's.
     int OnTap(float XPx, float YPx);
+
+    // One-shot: the AI tier (0=Easy,1=Medium,2=Hard) just chosen from the opponent selector,
+    // or -1 if none since the last call. The main polls this to start a single-player match
+    // (#127). Reused on desktop + phone.
+    int TakeAiTier() { const int T = AiTierPicked_; AiTierPicked_ = -1; return T; }
 #if !LUR_SHIPPING
     // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
     // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
@@ -156,6 +161,7 @@ private:
     float BottomInsetPx = 0.0f;
     bool Linked = false;
     bool SelectorDirty = true;            // rebuild items when link state changes
+    int  AiTierPicked_ = -1;              // #127: AI tier chosen from the selector (one-shot via TakeAiTier)
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap

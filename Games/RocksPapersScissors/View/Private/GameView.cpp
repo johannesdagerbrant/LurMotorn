@@ -276,17 +276,31 @@ void GameView::SetLinked(bool InLinked) {
 }
 
 void GameView::RefreshSelector() {
-    // Two rows for now: the live BLE/loopback peer and the local hot-seat. Real
-    // opponent enumeration (chess's OpponentRegistry pattern) rides the RPS
-    // persistence work — #85's follow-up; the widget and layout are final.
-    Lur::Hud::DropdownItem Items[2];
+    // The live BLE/loopback peer + the local hot-seat, then a "vs AI" section with the three
+    // single-player tiers (#127). The AI rows are always present (no peer/radio needed to
+    // practice), so the game is playable solo out of the box. Real peer enumeration (chess's
+    // OpponentRegistry pattern) rides the RPS persistence work — #85's follow-up.
+    Lur::Hud::DropdownItem Items[6];
     Items[0].Label = Linked ? "Linked peer" : "Searching...";
     Items[0].Lead = Lur::Hud::ELeadStyle::Dot;
     Items[0].LeadFill = Linked ? Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f}
                                : Color{Srgb(0x5B), Srgb(0x67), Srgb(0x70), 1.0f};
     Items[1].Label = "Same device";
     Items[1].Lead = Lur::Hud::ELeadStyle::Split;
-    Selector.SetItems(Items, 2);
+    // Non-selectable section header, then Easy/Medium/Hard (indices 3,4,5 -> tier 0,1,2). The
+    // dot encodes the tier (green/amber/red), reusing the peer-row status dot.
+    Items[2].Label = "vs AI";
+    Items[2].Header = true;
+    Items[3].Label = "Easy";
+    Items[3].Lead = Lur::Hud::ELeadStyle::Dot;
+    Items[3].LeadFill = Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f};
+    Items[4].Label = "Medium";
+    Items[4].Lead = Lur::Hud::ELeadStyle::Dot;
+    Items[4].LeadFill = Color{Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f};
+    Items[5].Label = "Hard";
+    Items[5].Lead = Lur::Hud::ELeadStyle::Dot;
+    Items[5].LeadFill = Color{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};
+    Selector.SetItems(Items, 6);
     Selector.SetSelected(0);
     SelectorDirty = false;
 }
@@ -324,7 +338,13 @@ void GameView::DevTap(float XPx, float YPx) {
 int GameView::OnTap(float XPx, float YPx) {
     if (!Ready) return -1;
     if (Selector.OnTap(XPx, YPx)) {
-        Selector.TookSelection();  // selection has no target yet (#85 follow-up)
+        // A settled selection on an AI row (indices 3..5) starts a single-player match at that
+        // tier (#127); the main polls TakeAiTier(). Peer/same-device rows have no target yet
+        // (#85 follow-up). TookSelection() is the one-shot latch.
+        if (Selector.TookSelection()) {
+            const int Sel = Selector.Selected();
+            if (Sel >= 3 && Sel <= 5) AiTierPicked_ = Sel - 3;
+        }
         return -2;
     }
     for (int Ty = 0; Ty < 4; ++Ty) {
