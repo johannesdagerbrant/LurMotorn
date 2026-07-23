@@ -56,9 +56,10 @@ void SimRunner::ThreadMain() {
 
         const uint32_t Owed = Clock.AdvancePreserving(Elapsed, MaxTicksPerService);
         for (uint32_t K = 0; K < Owed; ++K) {
-            uint8_t M0 = 0, M1 = 0;
-            if (Input) Input(Ctx, TheSim, TheSim.Tick, M0, M1);  // sample by tick number (deterministic)
-            TheSim.Step(M0, M1);
+            InputEvent Evs[MaxEventsPerTick];
+            int Count = 0;
+            if (Input) Input(Ctx, TheSim, TheSim.Tick, Evs, MaxEventsPerTick, Count);  // by tick number
+            TheSim.StepEvents(Evs, Count);
 
             // Publish this tick. CaptureFrom (the heavy copy) runs UNLOCKED into the
             // back buffer; Publish() only flips indices under a short lock.

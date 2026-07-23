@@ -24,13 +24,15 @@ namespace Rps {
 // makes it lockstep-ready and unit-testable against a synchronous run.
 class SimRunner {
 public:
-    // Sampled ON THE SIM THREAD at the start of each tick to get that tick's inputs.
-    // Fn-ptr + ctx (not std::function) to stay allocation-free. Real play reads atomics set
-    // by the input layer; tests return a scripted schedule by tick index; a single-player AI
-    // reads the (const) sim state to decide its press. The sim is passed by const-ref because
-    // the AI's whole input IS the game state — read here on the sim thread, before Step, so
-    // the read is race-free and deterministic.
-    using InputFn = void (*)(void* Ctx, const Sim& S, uint32_t Tick, uint8_t& Mask0, uint8_t& Mask1);
+    // Sampled ON THE SIM THREAD at the start of each tick to get that tick's input EVENTS
+    // (#137: place/queue, replacing the old 4-bit mask). Fn-ptr + ctx (not std::function) to
+    // stay allocation-free — the callee writes up to Cap events into Out and sets Count. Real
+    // play drains the input layer; tests return a scripted schedule by tick index; a single-
+    // player AI reads the (const) sim state to decide its events. The sim is const-ref because
+    // the AI's whole input IS the game state — read here on the sim thread, before StepEvents,
+    // so the read is race-free and deterministic.
+    using InputFn = void (*)(void* Ctx, const Sim& S, uint32_t Tick, InputEvent* Out, int Cap,
+                             int& Count);
 
     ~SimRunner() { Stop(); }
 

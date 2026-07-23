@@ -216,22 +216,24 @@ struct SoloInputs {
     std::atomic<uint8_t> P0{0};
     std::atomic<uint8_t> P1{0};
 };
-void SampleSolo(void* Ctx, const Rps::Sim&, uint32_t, uint8_t& M0, uint8_t& M1) {
-    SoloInputs* In = static_cast<SoloInputs*>(Ctx);
-    M0 = In->P0.exchange(0, std::memory_order_relaxed);
-    M1 = In->P1.exchange(0, std::memory_order_relaxed);
+void SampleSolo(void* Ctx, const Rps::Sim&, uint32_t, Rps::InputEvent*, int, int& Count) {
+    // #137b: the solo human's place/queue EVENTS arrive with the drag-place UI (#139/#140);
+    // until then solo has no local input (the SimRunner just advances the sim).
+    (void)Ctx;
+    Count = 0;
 }
 
-// Human (team 0, keys/plates via In.P0) vs the single-player AI (team 1). The AI reads the sim
-// on the sim thread — right before Step — so its board read is race-free (#124).
+// Human (team 0) vs the single-player AI (team 1). The AI reads the sim on the sim thread —
+// right before StepEvents — so its board read is race-free (#124).
 struct SoloAiCtx {
     SoloInputs* In;
     Rps::AiController* Ai;
 };
-void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, uint8_t& M0, uint8_t& M1) {
+void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, Rps::InputEvent* Out, int Cap,
+                    int& Count) {
     SoloAiCtx* C = static_cast<SoloAiCtx*>(Ctx);
-    M0 = C->In->P0.exchange(0, std::memory_order_relaxed);
-    M1 = C->Ai->DecideMask(S, Tick);
+    Count = 0;
+    C->Ai->DecideEvents(S, Tick, Out, Cap, Count);  // team-1 AI; human (team 0) input joins in #139/#140
 }
 
 // #128: headless AI-vs-AI tier-strength harness. Because the AI is a pure InputFn over sim
@@ -258,9 +260,15 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
         Ai1.Init(MatchSeed, 1, TierB);
         int T = 0;
         for (; T < MaxTicks && S.Result == Rps::ResultOngoing; ++T) {
-            const uint8_t M0 = Ai0.DecideMask(S, S.Tick);
-            const uint8_t M1 = Ai1.DecideMask(S, S.Tick);
-            S.Step(M0, M1);
+            Rps::InputEvent E0[Rps::MaxEventsPerTick], E1[Rps::MaxEventsPerTick];
+            int C0 = 0, C1 = 0;
+            Ai0.DecideEvents(S, S.Tick, E0, Rps::MaxEventsPerTick, C0);
+            Ai1.DecideEvents(S, S.Tick, E1, Rps::MaxEventsPerTick, C1);
+            Rps::InputEvent Comb[2 * Rps::MaxEventsPerTick];
+            int NC = 0;
+            for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];  // team 0 first (Execute order)
+            for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+            S.StepEvents(Comb, NC);
         }
         const int A0 = S.AliveCount(0), A1 = S.AliveCount(1);
         SumA0 += A0;

@@ -33,7 +33,24 @@ static void Inject(Sim& S, uint8_t Team, uint8_t Type, int N) {
     }
 }
 
-static uint8_t Bit(uint8_t Ty) { return static_cast<uint8_t>(1u << Ty); }
+// Drop a BUILDING (produces Type) onto the board so a test can put the AI past the forced
+// first-camp placement and into its production/counter logic.
+static int32_t InjectBuilding(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
+    const int32_t I = S.Count++;
+    S.PosX[I] = X; S.PosY[I] = Y; S.PrevX[I] = X; S.PrevY[I] = Y;
+    S.Type[I] = Type; S.Team[I] = Team; S.Hp[I] = BuildingHpFor(S.Cv, Type);
+    S.Kind[I] = KindBuilding; S.Queue[I] = 0; S.BuildProgress[I] = 0;
+    S.Target[I] = -1; S.Cooldown[I] = 0;
+    S.AliveBits[I >> 6] |= (1ull << (I & 63));
+    return I;
+}
+
+// The AI's events this tick (Count set); Out[0] is the primary action.
+static int AiTick(AiController& Ai, const Sim& S, uint32_t Tick, InputEvent* Out) {
+    int C = 0;
+    Ai.DecideEvents(S, Tick, Out, MaxEventsPerTick, C);
+    return C;
+}
 
 // The AI plays team 1; team 0 is idle. Run Ticks steps, return the final StateHash.
 static uint64_t RunAiVsIdle(uint64_t Seed, EAiTier Tier, int Ticks) {
@@ -42,8 +59,9 @@ static uint64_t RunAiVsIdle(uint64_t Seed, EAiTier Tier, int Ticks) {
     AiController Ai;
     Ai.Init(Seed, 1, Tier);
     for (int T = 0; T < Ticks; ++T) {
-        const uint8_t M1 = Ai.DecideMask(S, S.Tick);
-        S.Step(0, M1);
+        InputEvent E[MaxEventsPerTick];
+        const int C = AiTick(Ai, S, S.Tick, E);
+        S.StepEvents(E, C);
     }
     return S.StateHash();
 }
@@ -58,40 +76,50 @@ static void TestDeterminism() {
 }
 
 static void TestOpening() {
-    // Fresh board: 3 miners/team, gold 60. Medium opens to 4 miners, so the first press is a
-    // miner (the fixed opening, all tiers full-speed).
+    // Fresh board, no buildings yet. The AI's FORCED first action is to place a mining camp
+    // (all tiers, full-speed) — the pre-match ready move.
     Sim S;
     S.Init(0x1234);
     AiController Ai;
     Ai.Init(0x1234, 1, EAiTier::Medium);
-    CHECK(Ai.DecideMask(S, 0) == Bit(UnitMiner));
+    InputEvent E[MaxEventsPerTick];
+    const int C = AiTick(Ai, S, 0, E);
+    CHECK(C == 1 && E[0].Kind == EventPlaceBuilding && E[0].Type == UnitMiner);
 }
 
 static void TestCounterChoice() {
-    // Hard (staleness 0, exact) facing 6 enemy Rocks, past its opening, with gold to spend,
-    // should build the counter to Rock = Paper.
+    // Hard (staleness 0, exact) facing 6 enemy Rocks, ALREADY has a mining camp, past its
+    // opening, gold to spend -> it builds the counter to Rock = Paper (places a Paper building,
+    // since it has none yet).
     Sim S;
     S.Init(0x1234);
-    Inject(S, /*team*/ 0, UnitRock, 6);   // enemy army
-    Inject(S, /*team*/ 1, UnitMiner, 6);  // my economy, past Hard's OpenWorkers (5)
+    Inject(S, /*team*/ 0, UnitRock, 6);            // enemy army
+    Inject(S, /*team*/ 1, UnitMiner, 6);           // my economy, past Hard's OpenWorkers (5)
+    InjectBuilding(S, 1, UnitMiner, F(17), F(230));// AI already has its camp
     S.Teams[1].Gold = 100000;
     AiController Ai;
     Ai.Init(0x1234, 1, EAiTier::Hard);
-    CHECK(Ai.DecideMask(S, 0) == Bit(UnitPaper));
+    InputEvent E[MaxEventsPerTick];
+    const int C = AiTick(Ai, S, 0, E);
+    CHECK(C == 1 && E[0].Kind == EventPlaceBuilding && E[0].Type == UnitPaper);
 }
 
-// Tick at which the tier first presses the correct counter (Paper) against a static Rock army.
-// The board is held fixed (no Step) to isolate the AI's reaction timing.
+// Tick at which the tier first acts on the correct counter (a Paper building) against a static
+// Rock army. The board is held fixed (no Step) to isolate the AI's reaction timing.
 static uint32_t FirstCounterTick(EAiTier Tier) {
     Sim S;
     S.Init(0x1234);
     Inject(S, 0, UnitRock, 6);
     Inject(S, 1, UnitMiner, 6);
+    InjectBuilding(S, 1, UnitMiner, F(17), F(230));  // camp present -> AI is in production logic
     S.Teams[1].Gold = 100000;
     AiController Ai;
     Ai.Init(0x1234, 1, Tier);
-    for (uint32_t T = 0; T < 512; ++T)
-        if (Ai.DecideMask(S, T) == Bit(UnitPaper)) return T;
+    for (uint32_t T = 0; T < 512; ++T) {
+        InputEvent E[MaxEventsPerTick];
+        const int C = AiTick(Ai, S, T, E);
+        if (C == 1 && E[0].Kind == EventPlaceBuilding && E[0].Type == UnitPaper) return T;
+    }
     return 0xFFFFFFFFu;  // never
 }
 
@@ -114,9 +142,14 @@ static uint64_t RunAiVsAi(uint64_t Seed, EAiTier A, EAiTier B, int MaxTicks, uin
     Ai0.Init(Seed, 0, A);
     Ai1.Init(Seed, 1, B);
     for (int T = 0; T < MaxTicks && S.Result == ResultOngoing; ++T) {
-        const uint8_t M0 = Ai0.DecideMask(S, S.Tick);
-        const uint8_t M1 = Ai1.DecideMask(S, S.Tick);
-        S.Step(M0, M1);
+        InputEvent E0[MaxEventsPerTick], E1[MaxEventsPerTick];
+        const int C0 = AiTick(Ai0, S, S.Tick, E0);
+        const int C1 = AiTick(Ai1, S, S.Tick, E1);
+        InputEvent Comb[2 * MaxEventsPerTick];
+        int NC = 0;
+        for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];  // team 0 first (matches Execute order)
+        for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+        S.StepEvents(Comb, NC);
     }
     OutResult = S.Result;
     return S.StateHash();

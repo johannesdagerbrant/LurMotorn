@@ -34,6 +34,27 @@ int32_t Quantize(int32_t C, int32_t Bucket) {
     if (Bucket <= 1) return C;
     return ((C + Bucket / 2) / Bucket) * Bucket;
 }
+// First alive building of (Team, Type), or -1.
+int32_t FindBuilding(const Sim& S, uint8_t Team, uint8_t Type) {
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsBuilding(I) && S.Team[I] == Team && S.Type[I] == Type) return I;
+    return -1;
+}
+// First valid placement spot for the AI in its own band — a deterministic sweep of candidate
+// cells, first one CanPlaceBuilding accepts (avoids overlaps/mines/frontier). Buildings
+// accumulate, so successive placements naturally step to the next free cell.
+bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY) {
+    const int32_t Base = Team == 0 ? 5 : (WorldHeight.ToInt() - 5);
+    const int32_t Dir = Team == 0 ? 1 : -1;
+    const int32_t Xs[4] = {8, 14, 20, 26};
+    for (int32_t R = 0; R < 8; ++R)
+        for (int32_t Xi = 0; Xi < 4; ++Xi) {
+            const Fixed X = F(Xs[Xi]);
+            const Fixed Y = F(Base + Dir * R * 4);
+            if (S.CanPlaceBuilding(Team, Type, X, Y)) { OX = X; OY = Y; return true; }
+        }
+    return false;
+}
 }  // namespace
 
 void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
@@ -48,7 +69,8 @@ void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
     for (int32_t I = 0; I < RingSize; ++I) Ring_[I][0] = Ring_[I][1] = Ring_[I][2] = 0;
 }
 
-uint8_t AiController::DecideMask(const Sim& S, uint32_t Tick) {
+void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, int Cap, int& Count) {
+    Count = 0;
     const AiKnobs K = KnobsFor(S.Cv, Tier_);
 
     // --- Scan the board once: my economy/army + the TRUE enemy soldier composition. ---
@@ -139,12 +161,27 @@ uint8_t AiController::DecideMask(const Sim& S, uint32_t Tick) {
         }
     }
 
-    // Gold-gate: press only what we can afford. If a soldier is too dear, fall back to a miner
-    // (build economy while saving) rather than waste the decision; else save this tick.
-    const int32_t Gold = S.Teams[MyTeam_].Gold;
-    if (Gold >= S.Units[Want].Cost) return static_cast<uint8_t>(1u << Want);
-    if (Want != UnitMiner && Gold >= S.Units[UnitMiner].Cost) return static_cast<uint8_t>(1u << UnitMiner);
-    return 0;
+    // --- Translate the desired unit type into building EVENTS (#137). ---
+    if (Cap < 1) return;
+    // 1. The forced first building is a mining camp: until one exists, that's the only action.
+    const int32_t MinerB = FindBuilding(S, MyTeam_, UnitMiner);
+    if (MinerB < 0) {
+        Fixed X, Y;
+        if (AiPlaceSpot(S, MyTeam_, UnitMiner, X, Y))
+            Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
+        return;
+    }
+    // 2. To produce Want, ensure a building of that type. If it exists, queue there (but don't
+    //    over-stack — flat production drains slowly); else place one when affordable. Gold and
+    //    validity are enforced deterministically by the sim (ApplyPlace/ApplyQueue).
+    const int32_t WantB = FindBuilding(S, MyTeam_, Want);
+    if (WantB >= 0) {
+        if (S.Queue[WantB] < 3) Out[Count++] = InputEvent::Queue(MyTeam_, WantB, 1);
+    } else if (S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, Want)) {
+        Fixed X, Y;
+        if (AiPlaceSpot(S, MyTeam_, Want, X, Y))
+            Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
+    }
 }
 
 }  // namespace Rps

@@ -81,33 +81,29 @@ static void TestInterpolationAlpha() {
     CHECK(Near(S.AlphaAt(900), 0.0f));   // before publish
 }
 
-// ---- Scripted input source (deterministic, by tick number) ----
-struct Script {
-    int N = 0;
-    uint8_t M0[4096] = {};
-    uint8_t M1[4096] = {};
-};
-static void ScriptInput(void* Ctx, const Sim&, uint32_t Tick, uint8_t& M0, uint8_t& M1) {
-    const Script* S = static_cast<const Script*>(Ctx);
-    if (static_cast<int>(Tick) < S->N) { M0 = S->M0[Tick]; M1 = S->M1[Tick]; }
-    else { M0 = 0; M1 = 0; }
+// ---- Scripted EVENT source (deterministic, by tick number): #137 place + queue ----
+// Both teams place a mining camp early, then queue units at it (camp lands at slot 6/7:
+// slots 0..5 are the six start miners, team 0's place applies before team 1's).
+static void ScriptInput(void* /*Ctx*/, const Sim&, uint32_t Tick, InputEvent* Out, int Cap,
+                        int& Count) {
+    Count = 0;
+    if (Cap < 2) return;
+    if (Tick == 3) {
+        Out[Count++] = InputEvent::Place(0, UnitMiner, F(17), F(10));
+        Out[Count++] = InputEvent::Place(1, UnitMiner, F(17), F(230));
+    } else if (Tick == 25) {
+        Out[Count++] = InputEvent::Queue(0, 6, 10);
+        Out[Count++] = InputEvent::Queue(1, 7, 10);
+    }
 }
 
 // ---- The seam does not corrupt determinism: live threaded run == synchronous run ----
 static void TestRunnerMatchesSynchronous() {
     constexpr uint64_t Seed = 0x1357;
-    static Script Sc;
-    Sc.N = 4096;
-    SplitMix64 Rng(0xBEEF);
-    for (int I = 0; I < Sc.N; ++I) {
-        Sc.M0[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x2;
-        Sc.M1[I] = static_cast<uint8_t>(Rng.NextBounded(16)) | 0x4;
-    }
-
     SimRunner* R = new SimRunner();
-    R->Start(Seed, ScriptInput, &Sc);
-    // Wait for a modest number of ticks (bounded wall-clock guard so a bug can't hang CI).
-    constexpr uint32_t Target = 15;  // ~1.5 s at 10 Hz
+    R->Start(Seed, ScriptInput, nullptr);
+    // Wait for enough ticks to place + queue + produce (bounded guard so a bug can't hang CI).
+    constexpr uint32_t Target = 40;
     for (int I = 0; I < 2000 && R->PublishedTick() < Target; ++I)
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     R->Stop();
@@ -120,9 +116,10 @@ static void TestRunnerMatchesSynchronous() {
     static Sim Synchronous;
     Synchronous.Init(Seed);
     for (uint32_t I = 0; I < K; ++I) {
-        uint8_t M0, M1;
-        ScriptInput(&Sc, Synchronous, I, M0, M1);
-        Synchronous.Step(M0, M1);
+        InputEvent Evs[MaxEventsPerTick];
+        int Count = 0;
+        ScriptInput(nullptr, Synchronous, I, Evs, MaxEventsPerTick, Count);
+        Synchronous.StepEvents(Evs, Count);
     }
     CHECK(Synchronous.StateHash() == ThreadedHash);
     delete R;

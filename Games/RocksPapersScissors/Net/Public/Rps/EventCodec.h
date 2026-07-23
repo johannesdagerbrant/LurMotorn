@@ -55,7 +55,7 @@ inline bool DecodeEvent(Lur::Serialization::BitReader& R, uint32_t& Delta, uint8
 //   [varint count] then per event: [kind:1][team:1]
 //     place: [type:2][varint PosX.raw][varint PosY.raw]   (positions are >=0, in-bounds)
 //     queue: [varint slot][varint count]
-constexpr int MaxEventsPerTick = 16;  // a human can't issue more than a few taps per 100 ms tick
+// MaxEventsPerTick lives in Rps/Sim.h (Core) — shared by the sim/runner/AI and this codec.
 constexpr std::size_t MaxResyncChunkBytes = 512;  // transport's framed payload cap (also used below)
 
 inline void EncodeEventBatch(Lur::Serialization::BitWriter& W, const InputEvent* Evs, int Count) {

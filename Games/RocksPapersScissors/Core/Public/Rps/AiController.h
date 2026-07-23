@@ -1,11 +1,16 @@
 #pragma once
 // Rps::AiController — the single-player opponent (design: Docs/Journal/2026-07-22/
-// rps-ai-opponent-spec.md, epic #120). Its SOLE interface to the game is the 4-bit input
-// mask a human has (miner + three unit types): DecideMask(state, tick) reads the (const) sim
-// and returns the press for its team this tick. It never touches sim state — so it is
-// structurally fair (can't do anything a player can't) and deterministic (integer/Fixed only,
-// seeded SplitMix64 on its own stream, ticks not wall-clock), which keeps single-player inside
-// the same replay/rollback model as a networked match.
+// rps-ai-opponent-spec.md, epic #120). Its SOLE interface to the game is the SAME input EVENTS
+// a human issues (#137 buildings rework — place a building, queue units at it): DecideEvents
+// (state, tick) reads the (const) sim and emits this tick's events for its team. It never
+// touches sim state — so it is structurally fair (can't do anything a player can't) and
+// deterministic (integer/Fixed only, seeded SplitMix64 on its own stream, ticks not wall-clock),
+// which keeps single-player inside the same replay/rollback model as a networked match.
+//
+// The tier structure (staleness/precision/cadence/hysteresis + the Opening/Building/Reacting/
+// AllIn FSM) carries over from the press-model AI unchanged; only the ACTION changed — instead
+// of pressing a unit type it ensures a building of that type exists (placing a forced mining
+// camp first) and queues units there.
 //
 // Difficulty is NOT a handicap: every tier plays by identical rules and has identical actions.
 // They differ only in (a) how STALE their read of the enemy army is, (b) how PRECISE (fuzzy
@@ -36,9 +41,10 @@ public:
     // when the caller salts the seed.
     void Init(uint64_t Seed, uint8_t Team, EAiTier Tier);
 
-    // One tick's press for the AI's team. Pure function of (S, Tick) + the controller's seeded
-    // RNG + S.Cv; call once per tick on the sim thread (the InputFn seam).
-    uint8_t DecideMask(const Sim& S, uint32_t Tick);
+    // One tick's input events for the AI's team, written into Out (capacity Cap; Count set on
+    // return). Pure function of (S, Tick) + the controller's seeded RNG + S.Cv; call once per
+    // tick on the sim thread (the InputFn seam).
+    void DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, int Cap, int& Count);
 
     EAiTier Tier() const { return Tier_; }
 

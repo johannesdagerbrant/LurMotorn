@@ -33,6 +33,9 @@ struct InputEvent {
         return {EventQueueUnits, Team, 0, Slot, Count};
     }
 };
+// Per-tick input cap: a human (or the AI) can't issue more than a few taps per 100 ms tick.
+// One home for it (Core), shared by the sim/runner/AI and the Net batch codec.
+constexpr int MaxEventsPerTick = 16;
 
 // #131 (buildings rework): a slot is either a mobile UNIT or a static BUILDING. Buildings
 // live in the SAME per-unit SoA — a slot with Kind==KindBuilding reuses Hp/Team/Pos/AliveBits

@@ -201,14 +201,10 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 // Always route to the View so the opponent selector works pre-match (the AI rows
                 // are how a solo match starts, #127). A production plate goes to whichever sim is
                 // live: the solo AI sim, else the linked peer.
-                const int Plate = S->View.OnTap(X, Y);            // View: glue-only (safe here)
-                if (Plate >= 0) {
-                    // Solo AI sim still reads the legacy press mask (Step(mask) path, AI is #144).
-                    if (S->SoloActive.load(std::memory_order_acquire))
-                        S->SoloHumanMask.fetch_or(static_cast<uint8_t>(1u << Plate), std::memory_order_relaxed);
-                    // Linked (lockstep) input is now place/queue EVENTS (#137b) — the 4-bit mask
-                    // is retired. TODO(#139/#140): route drags/taps to Lp.QueueLocalEvent.
-                }
+                S->View.OnTap(X, Y);            // View: glue-only (HUD/selector taps)
+                // #137b: unit input (solo AND linked) is now place/queue EVENTS. The plate-press
+                // mask is retired; drags/taps route to QueueLocalEvent with the drag-place UI in
+                // #139/#140. (The AI row selection below still starts a solo match.)
                 const int Tier = S->View.TakeAiTier();  // an AI row was picked -> start solo (#127)
                 if (Tier >= 0) S->SoloAiTier.store(Tier, std::memory_order_release);
             }
@@ -316,9 +312,13 @@ void android_main(android_app* App) {
                 SoloAccumNs += ElapsedNs;
                 while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from the service loop
                     SoloAccumNs -= kStepNs;
-                    const uint8_t M0 = State.SoloHumanMask.exchange(0, std::memory_order_relaxed);
-                    const uint8_t M1 = State.SoloAi.DecideMask(State.SoloSim, State.SoloSim.Tick);
-                    State.SoloSim.Step(M0, M1);
+                    // #137b: AI (team 1) emits events; the human's (team 0) place/queue events
+                    // arrive with the drag-place UI in #139/#140 (SoloHumanMask retired).
+                    Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+                    int Count = 0;
+                    State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs,
+                                              Rps::MaxEventsPerTick, Count);
+                    State.SoloSim.StepEvents(Evs, Count);
                 }
                 const uint32_t T = State.SoloSim.Tick;
                 if (T != LastPubTick) {
