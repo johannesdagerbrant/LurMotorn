@@ -108,6 +108,20 @@ static void Deliver(Outbox& From, LockstepPeer& To) {
 }
 static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
 
+// #139: drive both peers through the pre-match placement handshake — each places its mining camp
+// (its "ready"), the camps are exchanged, and the match starts from tick 0 with both camps in.
+// Tests that don't otherwise place a camp call this so the clock actually starts.
+static void PlaceCampsAndStart(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(10)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(230)));
+    for (int I = 0; I < 4 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+}
+
 // ---- Two peers, random inputs, stay bit-identical in lockstep with zero desyncs ----
 static void TestLockstepStaysInSync() {
     Outbox Qa, Qb;
@@ -134,6 +148,41 @@ static void TestLockstepStaysInSync() {
     CHECK(A.ExecTick() > 250);                 // the match actually progressed
     CHECK(A.ExecTick() == B.ExecTick());       // both at the same tick
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical state
+}
+
+// ---- #139: the match-start ready gate — neither clock advances until BOTH camps are placed ----
+static void TestLockstepReadyGate() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x135, 0, Enqueue, &Qa);
+    B.Init(0x135, 1, Enqueue, &Qb);
+
+    // Only A readies (places its camp): the match must NOT start; both clocks hold at tick 0.
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(10)));
+    for (int I = 0; I < 10; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(!A.MatchStarted() && !B.MatchStarted());
+    CHECK(A.ExecTick() == 0 && B.ExecTick() == 0);
+
+    // B readies too -> both camps in -> the match starts and runs bit-identical.
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(230)));
+    for (int I = 0; I < 40; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    for (int I = 0; I < 4; ++I) {  // settle to a common frontier (B readied a half-step ahead)
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(A.ExecTick() > 0 && A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    // Both camps landed in the tick-0 state: one alive miner building per team.
+    int Camps0 = 0, Camps1 = 0;
+    const Sim& S = A.GetSim();
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J) && S.IsBuilding(J) && S.Type[J] == UnitMiner) ++(S.Team[J] == 0 ? Camps0 : Camps1);
+    CHECK(Camps0 >= 1 && Camps1 >= 1);
 }
 
 #if LUR_INTERNAL
@@ -242,9 +291,10 @@ static void TestLockstepExecuteCapBounded() {
     LockstepPeer A, B;
     A.Init(0x2468, 0, Enqueue, &Qa);
     B.Init(0x2468, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);  // #139: match started; both still at WallTicks 0
 
     // Pile up a big peer-input backlog on A WITHOUT letting it execute: A never ticks,
-    // so WallTicks=0 keeps the ceiling shut while PeerMasks accumulates.
+    // so WallTicks=0 keeps the ceiling shut while PeerEvents accumulates.
     const int N = 40;
     for (int I = 0; I < N; ++I) B.Tick(OneTickNs);  // B produces N input frames (empty batches suffice)
     Deliver(Qb, A);
@@ -297,6 +347,7 @@ static void TestLockstepDetectsDivergence() {
     LockstepPeer A, B;
     A.Init(0x99, 0, Enqueue, &Qa);
     B.Init(0x99, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);  // #139: start the match before warming up
     for (int I = 0; I < 12; ++I) {  // warm up in sync
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
@@ -323,6 +374,7 @@ static void TestLockstepCeilingStallAndResume() {
     LockstepPeer A, B;
     A.Init(0x99, 0, Enqueue, &Qa);
     B.Init(0x99, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);  // #139: start the match before the blip scenario
 
     for (int I = 0; I < 15; ++I) {  // warm up in sync
         A.Tick(OneTickNs);
@@ -474,6 +526,7 @@ static void TestLockstepColdRejoinResync() {
 int main() {
     TestEventBatchRoundTrip();
     TestEventBatchFuzz();
+    TestLockstepReadyGate();
     TestLockstepStaysInSync();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();

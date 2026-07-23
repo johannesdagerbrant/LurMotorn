@@ -30,6 +30,12 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     RecEvents.clear();
     Awaiting = false;
     IncomingHistory.clear();
+    MatchStarted_ = false;   // #139: hold the clock until both camps are placed
+    LocalReady_ = false;
+    PeerReady_ = false;
+    LocalCampSent_ = false;
+    LocalCamp_ = InputEvent{};
+    PeerCamp_ = InputEvent{};
 }
 
 void LockstepPeer::QueueLocalEvent(InputEvent E) {
@@ -51,6 +57,12 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 #if LUR_INTERNAL
     DrainCvarQueue();  // apply any UI-thread gameplay-CVar edits (stamps + sends MsgCvar)
 #endif
+    // #139: pre-match — hold the clock (ElapsedNs is dropped, so the match times from start, not
+    // from the menu) while the two camps are exchanged. ALWAYS return this call: whether the
+    // match is still pending OR just started here, no wall tick is produced yet, so both peers
+    // begin advancing from WallTicks==0 on their NEXT Tick — symmetric, no start-skew (one peer
+    // readies during its own Tick, the other during a delivered message).
+    if (!MatchStarted_) { PreMatchTick(); return; }
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
         // All events queued since the last produced tick fold into the FIRST new tick's batch
@@ -65,6 +77,37 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
         ++WallTicks;
     }
     Execute();
+}
+
+// #139 match-start: pre-match, the clock is held. Capture the local camp (the first miner-place
+// the UI queued) as tick 0's local input, send it once so the peer can mirror it, and start the
+// match the moment both camps are in. No wall ticks are produced/executed until then.
+void LockstepPeer::PreMatchTick() {
+    if (!LocalReady_) {
+        std::lock_guard<std::mutex> Lock(EventQueueMutex_);
+        for (const InputEvent& E : PendingLocalEvents)
+            if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner) { LocalCamp_ = E; LocalReady_ = true; break; }
+        PendingLocalEvents.clear();  // pre-match: only the mining camp is accepted; drop the rest
+    }
+    if (LocalReady_ && !LocalCampSent_) {
+        Lur::Serialization::BitWriter W;
+        EncodeEventBatch(W, &LocalCamp_, 1);          // the same framed batch as a live input tick
+        const std::vector<uint8_t>& B = W.Finish();
+        if (Send) Send(Ctx, MsgInput, B.data(), B.size());
+        LocalCampSent_ = true;
+    }
+    TryStartMatch();
+}
+
+// Both camps in hand -> make them tick 0's input on BOTH peers and start the clock. LocalEvents[0]
+// = our camp, PeerEvents[0] = the peer's; Execute combines team0-first, so both peers apply the
+// identical [team0 camp, team1 camp] at tick 0 and diverge from an identical state. The Delay-1
+// pre-seeded empties after index 0 stay the delay buffer; real input still lands at Delay+.
+void LockstepPeer::TryStartMatch() {
+    if (MatchStarted_ || !LocalReady_ || !PeerReady_) return;
+    LocalEvents[0] = {LocalCamp_};
+    PeerEvents[0]  = {PeerCamp_};
+    MatchStarted_ = true;
 }
 
 void LockstepPeer::Execute() {
@@ -227,6 +270,15 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         Lur::Serialization::BitReader R(Data, N);
         InputEvent Buf[MaxEventsPerTick];
         const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+        if (!MatchStarted_) {
+            // #139 pre-match: the peer's FIRST frame is its start camp (its "ready"); any later
+            // frame is its post-match input arriving before we've started — buffer it (it lands
+            // at PeerEvents[Delay]+ once we start) so nothing is dropped across the skew.
+            if (Cnt < 0) return;
+            if (!PeerReady_) { if (Cnt >= 1) { PeerCamp_ = Buf[0]; PeerReady_ = true; TryStartMatch(); } }
+            else PeerEvents.emplace_back(Buf, Buf + Cnt);
+            return;
+        }
         if (!Awaiting && Cnt >= 0) {
             PeerEvents.emplace_back(Buf, Buf + Cnt);  // live wire: each Input frame = next peer exec tick
             Execute();                                // peer input may unblock the ceiling
@@ -353,6 +405,10 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     }
     ReseedFrom(Frontier);  // sim now at Frontier; append the fresh Delay slack
     IncomingHistory.clear();
+    // #139: a cold rejoin resumes an already-running match (the camps are in the replayed
+    // history at tick 0), so the ready gate is already satisfied — don't hold the clock.
+    MatchStarted_ = true;
+    LocalReady_ = PeerReady_ = LocalCampSent_ = true;
 }
 
 void LockstepPeer::ReseedFrom(uint32_t Frontier) {

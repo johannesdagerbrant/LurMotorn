@@ -110,6 +110,14 @@ public:
     bool Desynced() const { return Desync; }
     bool Stalled() const { return TheSim.Tick < WallTicks; }  // behind wallclock = waiting on peer
 
+    // #135/#139: match-start ready gate. The match clock does NOT start until BOTH teams have
+    // placed their mining camp — the placement of camp #1 IS each peer's "ready" (the seed/ready
+    // handshake re-skinned). Pre-match, Tick() holds (the clock never accumulates); the local
+    // camp is exchanged over MsgInput and both camps are applied as tick 0's input on both peers,
+    // so play begins from tick 0 with both camps already in the identical sim state. The view
+    // reads this for the pre-match camera / "waiting for opponent" state.
+    bool MatchStarted() const { return MatchStarted_; }
+
     // Flight recording (opt-in, off by default so it costs nothing): capture the
     // executed (mask0, mask1) per tick so a fresh Sim can replay the whole match to a
     // hash-identical state — the replay law (design §1), and the post-mortem dump on a
@@ -124,6 +132,8 @@ public:
 private:
     void ProduceAndSend(const std::vector<InputEvent>& Batch);
     void Execute();
+    void PreMatchTick();    // #139: hold the clock, exchange the start camp, start on both-ready
+    void TryStartMatch();   // #139: both camps in -> seed tick 0 with them + begin the clock
 #if LUR_INTERNAL
     // Gameplay-CVar overrides waiting to be applied, keyed by the exec tick they land on
     // (both peers hold the SAME tick->overrides once the MsgCvar is delivered). Applied to
@@ -173,6 +183,16 @@ private:
 
     bool Awaiting = false;                            // in a resync exchange: don't produce/execute yet
     std::vector<std::vector<InputEvent>> IncomingHistory;  // reassembled peer combined-batch history
+
+    // #135/#139 match-start ready gate. Pre-match the clock holds; each peer's first miner-camp
+    // placement is its "ready", exchanged over MsgInput. Both camps become tick 0's input on both
+    // peers (LocalEvents[0]/PeerEvents[0]) so play begins from tick 0 with both camps in.
+    bool MatchStarted_ = false;
+    bool LocalReady_ = false;      // our camp placed (and captured as the tick-0 local input)
+    bool PeerReady_ = false;       // peer's camp received
+    bool LocalCampSent_ = false;   // we've sent our camp to the peer once
+    InputEvent LocalCamp_{};
+    InputEvent PeerCamp_{};
 
     SendFn Send = nullptr;
     void* Ctx = nullptr;
