@@ -121,10 +121,11 @@ LUR_CVAR_T(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFla
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
 LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(75), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
-// Opening gold (§12.6): enough for one mining camp + a few carts, deliberately too little for
-// a mining camp + a combat building — forces the healthy economy-first opening. Replaces the
-// compile-time StartGold once the old opening is retired.
-LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  180,      CVarFlagAffectsGameplay, "Opening gold per team (§12.6 window)");
+// Opening gold (§12.6): a tunable knob whose DEFAULT is exactly one mining camp + three miner
+// carts = MinerBuildingCost(100) + 3 x MinerCost(30) = 190. Enough for the forced camp-then-miners
+// opening and nothing else (a combat building is gated on the first miner unit anyway, ApplyPlace),
+// so a player can't open with military. Keep the default in step with those costs if they change.
+LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  190,      CVarFlagAffectsGameplay, "Opening gold: 1 miner building + 3 miner units");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
@@ -135,8 +136,8 @@ constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry (default for
 // the constant above, so the economy is unchanged until edited.
 LUR_CVAR_T(CvDigTicks, "rps.economy.dig_ticks", DigTicks, CVarFlagAffectsGameplay, "Ticks a cart digs to fill a carry (lower = faster)");
 constexpr int32_t CarryCapacity = 15;      // gold per round trip
-constexpr int32_t StartGold = 60;
-constexpr int32_t StartMiners = 3;
+// (#135: no compile-time StartGold/StartMiners — the match opens with only CvStartingGold and no
+// units; each team places its mining camp to begin producing.)
 // A mine's total reserve. Every completed dig removes the carry from the mine; at
 // zero the mine is GONE (skipped by targeting, hidden by the view).
 // #108 (2026-07-20 playtest): x20 to 6000 (= 400 trips) paired with the SPARSE clustered

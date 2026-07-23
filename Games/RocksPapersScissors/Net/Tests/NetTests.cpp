@@ -76,13 +76,13 @@ static void TestEventBatchFuzz() {
 // #137: a deterministic per-tick input schedule for the lockstep tests — each peer places a
 // mining camp early (funded by the CvStartingGold Init default) then queues units at it, so the
 // tests exercise real place/queue EVENTS over the wire and stay reproducible. Team 0 builds in
-// the bottom band, team 1 in the top. The camp lands at slot 6 (team 0) / 7 (team 1): slots 0..5
-// are the six start miners, and the combined batch applies team 0's place before team 1's.
+// the bottom band, team 1 in the top. #135: the match opens empty (no start-miners), so the camp
+// lands at slot 0 (team 0) / 1 (team 1) — the combined batch applies team 0's place before team 1's.
 static void DriveInput(LockstepPeer& P, uint8_t Team, int TickIdx) {
     if (TickIdx == 3)
         P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, F(17), Team == 0 ? F(10) : F(230)));
     else if (TickIdx == 15)
-        P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 6 : 7, 5));
+        P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
 }
 
 // Replay a recorded/reassembled EVENT stream (combined batch per tick) into a fresh sim -> hash.

@@ -33,45 +33,47 @@ static void KillTeam(Sim& S, uint8_t Team) {
         if (S.Team[I] == Team) S.AliveBits[I >> 6] &= ~(1ull << (I & 63));
 }
 
-// #145 (buildings flip): a deterministic PLACE+QUEUE event schedule the determinism-family
-// tests share — armies must actually spawn now that the mask/camp production is gone. Emits
-// BOTH teams' events for loop index Tick, TEAM-0-FIRST (Execute's combined-batch order), so
-// slots are predictable across a fresh sim. Init fills slots 0..5 with the six start miners
-// (3/team), then this script places into 6.. in placement order:
-//   Tick 1: both mining camps         -> t0 camp = slot 6, t1 camp = slot 7
-//   Tick 3: two combat buildings/team -> t0 = 8,9   t1 = 10,11
-//   Tick 5: queue 20 at every placed building (miner camps + the four combat buildings)
-// The caller sets both teams' Gold high first so nothing is rejected for cost. All positions
-// sit inside the initial frontier band and clear of mines/each other (validated in §5.1).
-// Returns the count written into Out (<= MaxEventsPerTick).
-static int32_t ArmyScript(uint32_t Tick, InputEvent* Out) {
+// First alive building of (Team, Type), or -1; and whether the team has an alive miner UNIT.
+static int32_t FindTeamBuilding(const Sim& S, uint8_t Team, uint8_t Type) {
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsBuilding(I) && S.Team[I] == Team && S.Type[I] == Type) return I;
+    return -1;
+}
+static bool HasMinerUnit(const Sim& S, uint8_t Team) {
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Team[I] == Team && S.Type[I] == UnitMiner) return true;
+    return false;
+}
+// #145/#135: a deterministic, STATE-REACTIVE place+queue schedule the determinism-family tests
+// share — armies must spawn under the new match-start rules (open with only gold; forced first
+// camp; soldier buildings gated on the first miner UNIT). A PURE function of S (so two runs, and
+// the grid vs brute paths, stay bit-identical), emitted TEAM-0-FIRST (Execute's combined-batch
+// order). Per team, each tick: place the mining camp if missing; keep its miner queue topped up;
+// and once a miner UNIT exists (military unlocked), place a Rock building and keep ITS queue
+// topped up. The caller funds both teams so nothing is rejected for cost.
+static int32_t ArmyScript(const Sim& S, InputEvent* Out) {
     const Fixed T0Y = F(20), T1Y = F(WorldHeight.ToInt() - 20);
     int32_t N = 0;
-    if (Tick == 1) {
-        Out[N++] = InputEvent::Place(0, UnitMiner, F(17), T0Y);
-        Out[N++] = InputEvent::Place(1, UnitMiner, F(17), T1Y);
-    } else if (Tick == 3) {
-        Out[N++] = InputEvent::Place(0, UnitRock,    F(10), T0Y);
-        Out[N++] = InputEvent::Place(0, UnitScissor, F(24), T0Y);
-        Out[N++] = InputEvent::Place(1, UnitRock,    F(10), T1Y);
-        Out[N++] = InputEvent::Place(1, UnitScissor, F(24), T1Y);
-    } else if (Tick == 5) {
-        Out[N++] = InputEvent::Queue(0, 6, 20);
-        Out[N++] = InputEvent::Queue(0, 8, 20);
-        Out[N++] = InputEvent::Queue(0, 9, 20);
-        Out[N++] = InputEvent::Queue(1, 7, 20);
-        Out[N++] = InputEvent::Queue(1, 10, 20);
-        Out[N++] = InputEvent::Queue(1, 11, 20);
+    for (uint8_t T = 0; T < 2; ++T) {
+        const Fixed Y = T == 0 ? T0Y : T1Y;
+        const int32_t Camp = FindTeamBuilding(S, T, UnitMiner);
+        if (Camp < 0) { Out[N++] = InputEvent::Place(T, UnitMiner, F(17), Y); continue; }
+        if (S.Queue[Camp] < 4) Out[N++] = InputEvent::Queue(T, Camp, 4);   // keep miners flowing
+        if (HasMinerUnit(S, T)) {                                          // military unlocked
+            const int32_t Rock = FindTeamBuilding(S, T, UnitRock);
+            if (Rock < 0) Out[N++] = InputEvent::Place(T, UnitRock, F(10), Y);
+            else if (S.Queue[Rock] < 4) Out[N++] = InputEvent::Queue(T, Rock, 4);
+        }
     }
     return N;
 }
-// Step one scripted tick on S at loop index I (build the combined batch, apply it).
-static void ArmyStep(Sim& S, uint32_t I) {
+// Step one reactive tick on S (build the combined batch from S's state, apply it).
+static void ArmyStep(Sim& S, uint32_t /*I*/) {
     InputEvent Evs[MaxEventsPerTick];
-    const int32_t N = ArmyScript(I, Evs);
+    const int32_t N = ArmyScript(S, Evs);
     S.StepEvents(Evs, N);
 }
-// Fund both teams so the whole ArmyScript succeeds, and run it for Ticks ticks.
+// Fund both teams so the whole ArmyScript succeeds regardless of cost.
 static void FundForArmyScript(Sim& S) { S.Teams[0].Gold = 100000; S.Teams[1].Gold = 100000; }
 
 // ---- 1. Determinism: two independent runs, identical hash every tick ----
@@ -91,9 +93,9 @@ static void TestDeterminism() {
         if (A.StateHash() != B.StateHash()) { AllMatch = false; break; }
     }
     CHECK(AllMatch);
-    // The match should actually DO something over 600 ticks (buildings + spawned armies),
+    // The match should actually DO something over 600 ticks (buildings produced armies),
     // otherwise "deterministic" is trivially true over an empty sim.
-    CHECK(A.Count > StartMiners * 2);
+    CHECK(A.AliveCount(0) > 0 && A.AliveCount(1) > 0);
 }
 
 // A fresh sim replaying the same stream must reach the same final hash — the
@@ -186,7 +188,7 @@ static void TestGridEqualsBruteForce() {
         if (!Match) std::printf("  grid!=brute seed=%llu diverged at tick %d\n",
                                 static_cast<unsigned long long>(Seed), FirstDiverge);
         CHECK(Match);
-        CHECK(Grid.Count > StartMiners * 2);  // the match did something
+        CHECK(Grid.AliveCount(0) > 0 && Grid.AliveCount(1) > 0);  // the match did something
     }
 }
 
@@ -278,6 +280,15 @@ static int32_t MobileCount(const Sim& S, uint8_t Team) {
     for (int32_t I = 0; I < S.Count; ++I)
         if (S.IsAlive(I) && !S.IsBuilding(I) && S.Team[I] == Team) ++C;
     return C;
+}
+// #135: the match now opens with only gold (no start-miners, no camp drop-off). The economy
+// tests seed a minimal starter economy the way a placed camp would: a miner BUILDING (the only
+// deposit point now) at the old bottom/top camp spot + Carts miner units beside it, so gathering
+// and deposit work. Appends onto whatever is already in the SoA (grows S.Count).
+static void SeedStarterEconomy(Sim& S, uint8_t Team, int Carts) {
+    const Fixed Cx = CampX, Cy = Sim::CampY(Team);
+    PlaceBuilding(S, S.Count, Cx, Cy, Team, UnitMiner);   ++S.Count;
+    for (int K = 0; K < Carts; ++K) { PlaceUnit(S, S.Count, Cx + F(1 + K), Cy, Team, UnitMiner); ++S.Count; }
 }
 
 // Targeting (#98): an enemy CART shares the top priority with prey, so it's chosen over a
@@ -509,6 +520,27 @@ static void TestCartDepositsAtNearestMinerBuilding() {
     CHECK(S.PosX[2] > F(20));                           // went to the NEAR camp (x=26), not the far (x=8)
 }
 
+// #135/§12.4: with NO own miner building, a gold-carrying cart is STRANDED — it holds the gold
+// (there is no camp fallback now) and idles until a miner building exists, then deposits.
+static void TestCartStrandedWithoutMinerBuilding() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceUnit(S, 0, F(17), F(20), 0, UnitMiner);
+    S.Count = 1;
+    S.WorkerState[0] = WorkToCamp; S.Carry[0] = CarryCapacity; S.Target[0] = -1;
+    const int32_t Before = S.Teams[0].Gold;
+    for (int t = 0; t < 60; ++t) S.StepEvents(nullptr, 0);
+    CHECK(S.Carry[0] == CarryCapacity);   // still holding — nowhere to deposit
+    CHECK(S.Teams[0].Gold == Before);     // no gold credited (no camp fallback)
+    // Give the team a miner building right where the cart stands -> it resumes and deposits.
+    PlaceBuilding(S, 1, F(17), F(20), 0, UnitMiner);
+    S.Count = 2;
+    for (int t = 0; t < 60 && S.Carry[0] != 0; ++t) S.StepEvents(nullptr, 0);
+    CHECK(S.Carry[0] == 0);
+    CHECK(S.Teams[0].Gold == Before + CarryCapacity);  // stranded gold banked once a camp exists
+}
+
 // ---- #137: StepEvents — place + queue events mutate the sim, deterministically ----
 static int32_t FirstBuilding(const Sim& S) {
     for (int32_t I = 0; I < S.Count; ++I)
@@ -542,13 +574,14 @@ static void TestEventPlaceAndQueueApply() {
 }
 
 // Queue clamps to gold: a batch bigger than the wallet enqueues only what gold covers (partial).
+// Uses a miner building — the forced-first-building rule (#135) rejects a non-miner first camp.
 static void TestEventQueuePartialByGold() {
     static Sim S;
     S.Init(0);
     ClearField(S);
-    const int32_t RockCost = S.Units[UnitRock].Cost;
-    S.Teams[0].Gold = BuildingCostFor(S.Cv, UnitRock) + 2 * RockCost + 10;  // camp + exactly 2 rocks + change
-    InputEvent P = InputEvent::Place(0, UnitRock, F(17), F(10));
+    const int32_t MinerCost = S.Units[UnitMiner].Cost;
+    S.Teams[0].Gold = BuildingCostFor(S.Cv, UnitMiner) + 2 * MinerCost + 10;  // camp + exactly 2 miners + change
+    InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(10));
     S.StepEvents(&P, 1);
     const int32_t B = FirstBuilding(S);
     CHECK(B >= 0);
@@ -563,8 +596,8 @@ static void TestEventQueuePartialByGold() {
 static void TestStepEventsDeterministic() {
     auto Script = [](Sim& S) {
         S.Init(0x1234);
-        S.Teams[0].Gold = 1000;  // legacy StartGold can't afford a building; fund the placement
-        InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(20));  // slot 6 (0..5 = start miners)
+        S.Teams[0].Gold = 1000;  // fund the placement + a full queue
+        InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(20));  // slot 0 (match starts empty)
         S.StepEvents(&P, 1);
         const int32_t B = FirstBuilding(S);
         InputEvent Q = InputEvent::Queue(0, B, 10);
@@ -575,7 +608,7 @@ static void TestStepEventsDeterministic() {
     Script(A);
     Script(B);
     CHECK(A.StateHash() == B.StateHash());
-    CHECK(A.AliveCount(0) > StartMiners);  // the building produced additional miners
+    CHECK(A.AliveCount(0) > 0);  // the building produced miners from an empty start
 }
 
 // ---- 2. Win rule (spec §6, edge-proof) ----
@@ -624,6 +657,54 @@ static void TestRebuyIsNotLoss() {
     CHECK(S.Result == ResultOngoing);
 }
 
+// #135: a broke team (gold < cheapest) with 0 units is NOT lost while a PAID unit is still
+// building — the queued unit is coming (gold spent at enqueue). This guards the normal opening
+// (place camp -> queue miners -> go broke -> first miner pops) that the removed start-miners
+// used to mask; without the carve-out the win check froze the match on a spurious draw.
+static void TestPendingProductionNotLoss() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceBuilding(S, 0, F(17), F(10), 0, UnitMiner);  // team 0's camp
+    S.Count = 1;
+    S.Queue[0] = 1;                 // one miner PAID and building
+    S.Teams[0].Gold = 0;            // broke, 0 alive units
+    S.Teams[1].Gold = 1000;         // team 1 solvent, so it never also loses
+    S.StepEvents(nullptr, 0);
+    CHECK(S.Result == ResultOngoing);          // pending production saves it — not doomed
+    for (int t = 0; t < S.Units[UnitMiner].BuildTicks + 2; ++t) S.StepEvents(nullptr, 0);
+    CHECK(S.AliveCount(0) >= 1);               // the miner popped -> a real unit exists
+    CHECK(S.Result == ResultOngoing);
+}
+
+// #135 (refined): SOLDIER (non-miner) buildings are disabled until the team's first miner UNIT has
+// spawned — enforces the camp -> miners -> military opening. A miner CAMP is always placeable.
+static void TestSoldierBuildingGatedOnMinerUnit() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    S.Teams[0].Gold = 100000;
+    // No miner unit yet: a soldier building is a deterministic no-op (nothing placed, gold kept).
+    const int32_t Gold0 = S.Teams[0].Gold;
+    InputEvent Rock = InputEvent::Place(0, UnitRock, F(17), F(10));
+    S.StepEvents(&Rock, 1);
+    CHECK(FirstBuilding(S) < 0);
+    CHECK(S.Teams[0].Gold == Gold0);
+    // A miner CAMP IS allowed as the first building; but a soldier building is STILL blocked
+    // (a placed camp isn't a miner UNIT yet).
+    InputEvent Camp = InputEvent::Place(0, UnitMiner, F(17), F(10));
+    S.StepEvents(&Camp, 1);
+    CHECK(FindTeamBuilding(S, 0, UnitMiner) >= 0);
+    InputEvent Rock2 = InputEvent::Place(0, UnitRock, F(10), F(10));
+    S.StepEvents(&Rock2, 1);
+    CHECK(FindTeamBuilding(S, 0, UnitRock) < 0);
+    // Spawn a miner UNIT -> military unlocks and the soldier building places.
+    PlaceUnit(S, S.Count, F(24), F(10), 0, UnitMiner); ++S.Count;
+    InputEvent Rock3 = InputEvent::Place(0, UnitRock, F(10), F(10));
+    S.StepEvents(&Rock3, 1);
+    CHECK(FindTeamBuilding(S, 0, UnitRock) >= 0);
+}
+
 // ---- 5. Finite mines (#84) ----
 static void TestMineDepletesAndVanishes() {
     static Sim S;
@@ -632,6 +713,7 @@ static void TestMineDepletesAndVanishes() {
     // exactly that carry, and the mine must read as gone (gold 0) afterwards.
     for (int M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
     S.MineGold[0] = CarryCapacity;
+    SeedStarterEconomy(S, 0, 2);  // #135: a camp + carts for team 0 (team 1 gets none)
     const int32_t Before0 = S.Teams[0].Gold, Before1 = S.Teams[1].Gold;
     for (int I = 0; I < 400; ++I) S.StepEvents(nullptr, 0);
     CHECK(S.MineGold[0] == 0);
@@ -652,8 +734,9 @@ static void TestDepletedMinesStopEconomy() {
 static void TestEconomyGathersGold() {
     static Sim S;
     S.Init(0);
+    SeedStarterEconomy(S, 0, 3);  // #135: a camp + 3 carts (no start economy from Init now)
     const int32_t Before = S.Teams[0].Gold;
-    for (int I = 0; I < 300; ++I) S.StepEvents(nullptr, 0);  // idle: the 3 starting workers just gather
+    for (int I = 0; I < 300; ++I) S.StepEvents(nullptr, 0);  // carts gather from the home cluster
     CHECK(S.Teams[0].Gold > Before);  // at least one full round trip deposited
 }
 
@@ -704,6 +787,7 @@ int main() {
     TestSoldierTargetsEnemyBuildingByType();
     TestScissorDestroysPaperBuildingWithCounter();
     TestCartDepositsAtNearestMinerBuilding();
+    TestCartStrandedWithoutMinerBuilding();
     TestEventPlaceAndQueueApply();
     TestEventQueuePartialByGold();
     TestStepEventsDeterministic();
@@ -711,6 +795,8 @@ int main() {
     TestWipeoutLoses();
     TestBuildingsDoNotSaveFromLoss();
     TestRebuyIsNotLoss();
+    TestPendingProductionNotLoss();
+    TestSoldierBuildingGatedOnMinerUnit();
     TestMineDepletesAndVanishes();
     TestDepletedMinesStopEconomy();
     TestEconomyGathersGold();

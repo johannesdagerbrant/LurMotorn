@@ -397,9 +397,8 @@ void MoveToward(Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
 }
 // #134/§12.4: a gold-carrying cart deposits at the NEAREST own MINER BUILDING (fixed-point
 // distance, lowest-slot tie-break). Returns the building slot, or -1 if the team has none —
-// in which case the caller falls back to the legacy camp drop-off (kept until camps are
-// retired in the flip; post-flip a -1 means the gold is STRANDED until a miner building
-// exists, §12.4). Static buildings -> the scan is order-independent and grid==brute-safe.
+// in which case the caller STRANDS the gold (the cart holds it until a miner building exists
+// again, §12.4). Static buildings -> the scan is order-independent and grid==brute-safe.
 int32_t NearestMinerBuilding(const Sim& S, int32_t I, uint8_t Team) {
     int32_t Best = -1;
     int64_t BestD = INT64_MAX;
@@ -449,18 +448,15 @@ void WorkerSeek(Sim& S, int32_t I) {
             return;
         }
         case WorkToCamp: {
-            // #134/§12.4: head for the nearest own MINER BUILDING; fall back to the legacy
-            // camp if the team has none (transition — removed with camps in the flip).
+            // #135/§12.4: deposit ONLY at the nearest own MINER BUILDING (camps are gone). With
+            // none — the team's last miner building died while this cart carried gold — the gold
+            // is STRANDED: the cart holds it and idles here until a miner building exists again.
             const int32_t B = NearestMinerBuilding(S, I, S.Team[I]);
-            const bool AtBuilding = B >= 0;
-            const Fixed Tx = AtBuilding ? S.PosX[B] : CampX;
-            const Fixed Ty = AtBuilding ? S.PosY[B] : Sim::CampY(S.Team[I]);
-            // Deposit within reach: a building's footprint (its repulsion keeps soldiers out,
-            // but carts ignore separation, so they settle at the footprint edge), or one step
-            // for the point-like camp (exact arrival, snap — unchanged legacy behaviour).
-            const Fixed Reach = AtBuilding ? S.Cv.BuildingFootprint : S.Units[UnitMiner].Speed;
-            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= Reach) {
-                if (!AtBuilding) { S.PosX[I] = Tx; S.PosY[I] = Ty; }  // snap onto the camp only
+            if (B < 0) return;  // stranded: hold the carry, wait for a drop-off (no camp fallback)
+            const Fixed Tx = S.PosX[B], Ty = S.PosY[B];
+            // Deposit within the building's footprint (its repulsion keeps soldiers out, but
+            // carts ignore separation, so they settle at the footprint edge and bank there).
+            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= S.Cv.BuildingFootprint) {
                 S.DepositBuf[S.Team[I]] += S.Carry[I];  // credited in Economy (phase 6)
                 S.Carry[I] = 0; S.Target[I] = -1; S.WorkerState[I] = WorkToMine;
                 return;
@@ -663,13 +659,15 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
         }
 
         // --- Soldier: blend the neighbour sums into a desired velocity ---
-        // Seek goal + in-range test (targeting unchanged). No target -> march on the
-        // enemy camp line (#92) so fronts close instead of idling.
+        // Seek goal + in-range test (targeting unchanged). No target -> march on the ENEMY
+        // BASELINE (#92/#135: camps are gone) so fronts still close instead of idling: team 0
+        // pushes up to Y=WorldHeight, team 1 down to Y=0, both centred on the field.
         Fixed Tx, Ty;
         bool InRange = false;
         const int32_t T = S.Target[I];
         if (T < 0 || !S.IsAlive(T)) {
-            Tx = CampX; Ty = Sim::CampY(S.Team[I] ^ 1);
+            Tx = F(WorldWidth.ToInt(), 2);  // world-centre X
+            Ty = S.Team[I] == 0 ? WorldHeight : Fixed{0};
         } else {
             Tx = S.PosX[T]; Ty = S.PosY[T];
             InRange = Dist2(S.PosX[I], S.PosY[I], Tx, Ty) <= RangeSq(UnitTable[S.Type[I]].Range);
@@ -812,17 +810,28 @@ void Economy(Sim& S) {
     for (int T = 0; T < 2; ++T) { S.Teams[T].Gold += S.DepositBuf[T]; S.DepositBuf[T] = 0; }
 }
 
-// ---- Phase 7: win check (#136/§12.1, edge-proof) ----
+// A team with a PAID unit IN PRODUCTION (any alive building with Queue>0) is not doomed: gold is
+// deducted at ENQUEUE (ApplyQueue), so that unit will spawn regardless of the current wallet.
+// #135 exposed this — with the start-miners gone, a normal opening (place camp, queue miners)
+// drops gold below CheapestCost with 0 units for the ~30 ticks before the first miner pops, and
+// without this carve-out the win check would wrongly declare a loss/draw and freeze the match.
+bool HasPendingProduction(const Sim& S, uint8_t Team) {
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsBuilding(I) && S.Team[I] == Team && S.Queue[I] > 0) return true;
+    return false;
+}
+
+// ---- Phase 7: win check (#136/§12.1, edge-proof; refined by #135) ----
 // A team LOSES iff it has NO alive units AND cannot afford even the cheapest unit
-// (Gold < CheapestCost = a miner). BUILDINGS DO NOT ENTER THIS TEST: a building can't gather
-// (only miner UNITS mine) and can't produce without gold, so with no units and no rebuy money
-// the player can never make a unit or gold again — doomed, however many buildings stand. A
-// gold-carrying cart IS a unit (AliveCount counts it), so stranded-gold needs no special case.
-// Queues no longer enter: they live on buildings now, and a building can't build while broke.
+// (Gold < CheapestCost = a miner) AND has no PAID unit still building (see above). BUILDINGS DO
+// NOT otherwise enter: an idle building can't gather (only miner UNITS mine) and can't produce
+// without gold, so with no units, no in-flight production, and no rebuy money the player can
+// never make a unit or gold again — doomed, however many buildings stand. A gold-carrying cart
+// IS a unit (AliveCount counts it), so stranded-gold needs no special case.
 void WinCheck(Sim& S) {
     bool Lose[2];
     for (uint8_t T = 0; T < 2; ++T)
-        Lose[T] = S.AliveCount(T) == 0 && S.Teams[T].Gold < CheapestCost;
+        Lose[T] = S.AliveCount(T) == 0 && S.Teams[T].Gold < CheapestCost && !HasPendingProduction(S, T);
     if (Lose[0] && Lose[1]) S.Result = ResultDraw;  // both this tick -> draw (simultaneous damage makes it reachable)
     else if (Lose[0]) S.Result = ResultTeam1Wins;
     else if (Lose[1]) S.Result = ResultTeam0Wins;
@@ -833,6 +842,18 @@ void WinCheck(Sim& S) {
 // EventPlaceBuilding: validate (§5.1), deduct the placement cost, and drop a building slot.
 void ApplyPlace(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
     if (Type >= UnitCount) return;
+    // #135/§9: the opening is forced camp -> miners -> military. A miner CAMP is always placeable,
+    // but SOLDIER (non-miner) buildings are DISABLED until the team's first miner UNIT has spawned
+    // (a placed camp isn't enough — it must have produced a cart). The UI enforces this too; this
+    // is the defensive, deterministic sim-side guard — pure state, identical on both peers.
+    if (Type != UnitMiner) {
+        bool HasMinerUnit = false;
+        for (int32_t J = 0; J < S.Count; ++J)
+            if (S.IsAlive(J) && !S.IsBuilding(J) && S.Team[J] == Team && S.Type[J] == UnitMiner) {
+                HasMinerUnit = true; break;
+            }
+        if (!HasMinerUnit) return;
+    }
     if (!S.CanPlaceBuilding(Team, Type, X, Y)) return;   // invalid tile -> no-op (§5.1)
     const int32_t Cost = BuildingCostFor(S.Cv, Type);
     if (S.Teams[Team].Gold < Cost) return;               // unaffordable -> no-op
@@ -944,13 +965,11 @@ void Sim::Init(uint64_t InSeed) {
     FrontierT0 = Cv.InitialFrontier;
     FrontierT1 = WorldHeight - Cv.InitialFrontier;
     BuildMap(*this);
-    for (uint8_t T = 0; T < 2; ++T) {
-        Teams[T].Gold = Cv.StartingGold;  // #138/§12.6 opening gold (was the legacy StartGold)
-        // Start-miners spawn on the old camp ring (#145 keeps them as spawn geometry until #135
-        // removes the opening entirely); no SpawnCounter now — the ring slot is K itself.
-        for (int K = 0; K < StartMiners; ++K)
-            SpawnUnitAt(*this, T, UnitMiner, CampX + RingX[K % RingSlots], CampY(T) + RingY[K % RingSlots]);
-    }
+    // #135/§9: the match starts with ONLY gold — no start-miners, no start buildings. Each team
+    // must place its mining camp (the forced first building, ApplyPlace) to begin producing;
+    // gold flows once that camp's miners are out and mining. The pre-tick-0 opening is the
+    // placement, not a seeded economy.
+    for (uint8_t T = 0; T < 2; ++T) Teams[T].Gold = Cv.StartingGold;  // #138/§12.6 opening gold
 }
 
 void Sim::StepEvents(const InputEvent* Events, int32_t Count) {

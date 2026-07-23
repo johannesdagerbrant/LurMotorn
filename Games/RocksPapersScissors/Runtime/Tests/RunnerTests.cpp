@@ -82,8 +82,9 @@ static void TestInterpolationAlpha() {
 }
 
 // ---- Scripted EVENT source (deterministic, by tick number): #137 place + queue ----
-// Both teams place a mining camp early, then queue units at it (camp lands at slot 6/7:
-// slots 0..5 are the six start miners, team 0's place applies before team 1's).
+// Both teams place a mining camp early, then queue units at it. #135: the match opens empty
+// (no start-miners), so the camps land at slots 0 (team 0) / 1 (team 1) — team 0's place
+// applies before team 1's in the combined batch.
 static void ScriptInput(void* /*Ctx*/, const Sim&, uint32_t Tick, InputEvent* Out, int Cap,
                         int& Count) {
     Count = 0;
@@ -92,8 +93,8 @@ static void ScriptInput(void* /*Ctx*/, const Sim&, uint32_t Tick, InputEvent* Ou
         Out[Count++] = InputEvent::Place(0, UnitMiner, F(17), F(10));
         Out[Count++] = InputEvent::Place(1, UnitMiner, F(17), F(230));
     } else if (Tick == 25) {
-        Out[Count++] = InputEvent::Queue(0, 6, 10);
-        Out[Count++] = InputEvent::Queue(1, 7, 10);
+        Out[Count++] = InputEvent::Queue(0, 0, 10);
+        Out[Count++] = InputEvent::Queue(1, 1, 10);
     }
 }
 
@@ -128,7 +129,7 @@ static void TestRunnerMatchesSynchronous() {
 // ---- Smoke: the thread runs decoupled from any render loop and publishes snapshots ----
 static void TestRunnerPublishesSnapshots() {
     SimRunner* R = new SimRunner();
-    R->Start(0xABC, nullptr, nullptr);  // no input: the 3 starting workers just gather
+    R->Start(0xABC, nullptr, nullptr);  // no input: #135 opens with only gold, nothing placed
 
     Snapshot Snap;
     bool Got = false;
@@ -140,7 +141,7 @@ static void TestRunnerPublishesSnapshots() {
     R->Stop();
 
     CHECK(Got);
-    CHECK(Snap.Count == StartMiners * 2);  // 6 workers, none built yet this early
+    CHECK(Snap.Count == 0);  // empty pre-placement: no start-miners, no camp until one is placed
     CHECK(Snap.Tick >= 3);
     // Every live unit sits inside the world bounds.
     bool InBounds = true;
