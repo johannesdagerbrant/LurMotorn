@@ -246,6 +246,49 @@ void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, uint8_t& M0, ui
     M1 = C->Ai->DecideMask(S, Tick);
 }
 
+// #128: headless AI-vs-AI tier-strength harness. Because the AI is a pure InputFn over sim
+// state, a match is just a Sim loop driven by two AiControllers — no window, no thread. Runs
+// Matches seeded games to resolution (or a tick cap, then army-count tiebreak) and reports the
+// win tally: the cheap check that the tiers actually differ in strength before human playtests
+// (spec §8 slice 3). Tuned via the same rps.ai.* CVars (loaded from cvars.cfg here).
+int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Matches, int MaxTicks) {
+#if !LUR_SHIPPING
+    Lur::Core::LoadCVarConfig("rps-cvars.cfg");  // use the tuned AI knobs if present
+#endif
+    const char* Names[] = {"easy", "medium", "hard"};
+    Lur::Log::Info("AI-vs-AI: team0=%s vs team1=%s, %d matches, cap %d ticks",
+                   Names[static_cast<int>(TierA)], Names[static_cast<int>(TierB)], Matches, MaxTicks);
+    int Wins[3] = {0, 0, 0};  // [ongoing unused], team0, team1 -> index by EResult
+    int Draws = 0;
+    for (int M = 0; M < Matches; ++M) {
+        const uint64_t MatchSeed = BaseSeed + static_cast<uint64_t>(M);
+        Rps::Sim S;
+        S.Init(MatchSeed);
+        Rps::AiController Ai0, Ai1;
+        Ai0.Init(MatchSeed, 0, TierA);
+        Ai1.Init(MatchSeed, 1, TierB);
+        int T = 0;
+        for (; T < MaxTicks && S.Result == Rps::ResultOngoing; ++T) {
+            const uint8_t M0 = Ai0.DecideMask(S, S.Tick);
+            const uint8_t M1 = Ai1.DecideMask(S, S.Tick);
+            S.Step(M0, M1);
+        }
+        uint8_t Res = S.Result;
+        if (Res == Rps::ResultOngoing) {  // undecided at the cap -> stronger army wins
+            const int A0 = S.AliveCount(0), A1 = S.AliveCount(1);
+            Res = A0 > A1 ? Rps::ResultTeam0Wins : A1 > A0 ? Rps::ResultTeam1Wins : Rps::ResultDraw;
+        }
+        if (Res == Rps::ResultDraw) ++Draws; else ++Wins[Res];
+        Lur::Log::Info("  match %d (seed 0x%llx): result=%u ticks=%d army0=%d army1=%d",
+                       M, static_cast<unsigned long long>(MatchSeed), Res, T, S.AliveCount(0),
+                       S.AliveCount(1));
+    }
+    Lur::Log::Info("AI-vs-AI RESULT: team0(%s) %d wins | team1(%s) %d wins | %d draws",
+                   Names[static_cast<int>(TierA)], Wins[Rps::ResultTeam0Wins],
+                   Names[static_cast<int>(TierB)], Wins[Rps::ResultTeam1Wins], Draws);
+    return 0;
+}
+
 int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
             bool FoeOnly, Rps::EAiTier AiTier) {
     // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
@@ -479,17 +522,30 @@ int main(int argc, char** argv) {
     uint64_t Seed = 0x1234;
     int Stress = 0;
     Rps::EAiTier AiTier = Rps::EAiTier::Medium;  // solo opponent difficulty (#124)
+    bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
+    Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
+    int Matches = 9;
+    auto ParseTier = [](const std::string& T) {
+        return T == "easy" ? Rps::EAiTier::Easy : T == "hard" ? Rps::EAiTier::Hard
+                                                              : Rps::EAiTier::Medium;
+    };
     for (int I = 1; I < argc; ++I) {
         std::string A = argv[I];
         if (A == "--frames" && I + 1 < argc) MaxFrames = std::atoi(argv[++I]);
         else if (A == "--auto") Auto = true;
         else if (A == "--solo") Solo = true;
         else if (A == "--ai" && I + 1 < argc) {
-            const std::string T = argv[++I];
             Solo = true;
-            AiTier = T == "easy" ? Rps::EAiTier::Easy : T == "hard" ? Rps::EAiTier::Hard
-                                                                    : Rps::EAiTier::Medium;
+            AiTier = ParseTier(argv[++I]);
         }
+        else if (A == "--aivs" && I + 1 < argc) {  // "hard:easy" -> team0:team1
+            AiVs = true;
+            const std::string V = argv[++I];
+            const auto C = V.find(':');
+            AiVsA = ParseTier(V.substr(0, C));
+            AiVsB = ParseTier(C == std::string::npos ? std::string{} : V.substr(C + 1));
+        }
+        else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
         else if (A == "--nocombat") NoCombat = true;                     // pure-motion tuning (no kills)
         else if (A == "--autofoe") { Solo = true; Auto = true; FoeOnly = true; }  // you play, only the foe mashes
@@ -503,6 +559,7 @@ int main(int argc, char** argv) {
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
+    if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, /*MaxTicks*/ 6000);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, AiTier);
     return RunLoopback(Auto, MaxFrames, Seed);

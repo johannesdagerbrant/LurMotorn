@@ -106,12 +106,37 @@ static void TestTierReactionSpeed() {
     CHECK(Hard < Easy);
 }
 
+// Two AIs in one process (the #128 harness) must be deterministic: same seeds -> same match.
+static uint64_t RunAiVsAi(uint64_t Seed, EAiTier A, EAiTier B, int MaxTicks, uint8_t& OutResult) {
+    Sim S;
+    S.Init(Seed);
+    AiController Ai0, Ai1;
+    Ai0.Init(Seed, 0, A);
+    Ai1.Init(Seed, 1, B);
+    for (int T = 0; T < MaxTicks && S.Result == ResultOngoing; ++T) {
+        const uint8_t M0 = Ai0.DecideMask(S, S.Tick);
+        const uint8_t M1 = Ai1.DecideMask(S, S.Tick);
+        S.Step(M0, M1);
+    }
+    OutResult = S.Result;
+    return S.StateHash();
+}
+
+static void TestAiVsAiDeterminism() {
+    uint8_t R1 = 0, R2 = 0;
+    const uint64_t H1 = RunAiVsAi(0x1234, EAiTier::Hard, EAiTier::Easy, 500, R1);
+    const uint64_t H2 = RunAiVsAi(0x1234, EAiTier::Hard, EAiTier::Easy, 500, R2);
+    CHECK(H1 == H2);
+    CHECK(R1 == R2);
+}
+
 int main() {
     Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
     TestDeterminism();
     TestOpening();
     TestCounterChoice();
     TestTierReactionSpeed();
+    TestAiVsAiDeterminism();
     if (GFailures == 0) { std::printf("rps_ai_tests: ALL PASS\n"); return 0; }
     std::printf("rps_ai_tests: %d FAILURE(S)\n", GFailures);
     return 1;
