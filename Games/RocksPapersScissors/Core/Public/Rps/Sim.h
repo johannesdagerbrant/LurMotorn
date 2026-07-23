@@ -121,6 +121,13 @@ struct Sim {
     void DeriveUnits();                        // refresh Units[] from Cv (#122); call after any Cv (re)latch
     uint64_t StateHash() const;                // FNV-1a over pinned state (design §5)
 
+    // #133/§5.1: is a building of Type placeable at (X,Y) for Team? PURE function of the
+    // current (hashed) sim state — in-bounds, within the team's frontier, and no footprint
+    // overlap with an existing building or a live mine. Identical on both peers (no RNG),
+    // so applying a place event that fails this is a deterministic no-op. Also read by the
+    // view each frame for the ghost's valid/invalid blink (§4.1) — read-only, writes nothing.
+    bool CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const;
+
 #if LUR_INTERNAL
     // Dev-only stress scene (issue #75): bulk-spawn PerTeam soldiers spread across each
     // half of the field, to prove the tick budget (grid) + one-draw render hold at the

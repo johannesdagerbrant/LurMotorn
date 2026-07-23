@@ -239,6 +239,7 @@ static void PlaceUnit(Sim& S, int I, Fixed X, Fixed Y, uint8_t Team, uint8_t Typ
     S.Team[I] = Team; S.Type[I] = Type; S.Hp[I] = UnitTable[Type].MaxHp;
     S.Target[I] = -1; S.Cooldown[I] = 0; S.WorkerState[I] = WorkToMine;
     S.Carry[I] = 0; S.WorkerTimer[I] = 0;
+    S.Kind[I] = KindUnit; S.Queue[I] = 0; S.BuildProgress[I] = 0;  // #131: robust vs recycled slots
     S.AliveBits[I >> 6] |= (1ull << (I & 63));
 }
 static void ClearField(Sim& S) {
@@ -378,6 +379,70 @@ static void TestBuildingCountScalesThroughput() {
     for (int t = 1; t <= Bt; ++t) { Two.Step(0, 0); One.Step(0, 0); }
     CHECK(MobileCount(Two, 0) == 2);   // two buildings -> both units out in Bt ticks
     CHECK(MobileCount(One, 0) == 1);   // one building -> only the first, second still building
+}
+
+// ---- #133 placement validity (§5.1): pure predicate over the hashed sim state ----
+static void TestPlacementValidity() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);  // clears units + mines; frontier keeps its Init value
+    const Fixed Fp = S.Cv.BuildingFootprint;
+    // Clear field, inside the initial band, in-bounds -> valid.
+    CHECK(S.CanPlaceBuilding(0, UnitMiner, F(17), F(10)));
+    // Past the team-0 frontier (Y > FrontierT0) -> rejected.
+    CHECK(!S.CanPlaceBuilding(0, UnitMiner, F(17), S.FrontierT0 + F(1)));
+    // Footprint crosses the west edge -> out of bounds -> rejected.
+    CHECK(!S.CanPlaceBuilding(0, UnitMiner, Fp - F(1, 10), F(10)));
+    // Existing building: same spot and one-footprint-away both overlap; >2·Fp is clear.
+    PlaceBuilding(S, 0, F(10), F(10), 0, UnitMiner);
+    S.Count = 1;
+    CHECK(!S.CanPlaceBuilding(0, UnitRock, F(10), F(10)));
+    CHECK(!S.CanPlaceBuilding(0, UnitRock, F(10) + Fp, F(10)));
+    CHECK(S.CanPlaceBuilding(0, UnitRock, F(10) + Fp + Fp + F(1), F(10)));
+    // Live mine: footprint over it is rejected; clear of it is fine.
+    S.MineX[0] = F(20); S.MineY[0] = F(12); S.MineGold[0] = MineGoldCapacity;
+    CHECK(!S.CanPlaceBuilding(0, UnitRock, F(20), F(12)));
+    CHECK(S.CanPlaceBuilding(0, UnitRock, F(20), F(12) + Fp + F(1)));
+}
+
+// #133/§5.3: the frontier is a MONOTONIC high-water mark — it advances with a team's forward
+// units and never retreats when they die.
+static void TestFrontierMonotonicHighWater() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    CHECK(S.FrontierT0 == S.Cv.InitialFrontier);        // seeded at the initial band
+    PlaceUnit(S, 0, F(17), F(100), 0, UnitRock);        // a team-0 unit already past the line
+    S.Count = 1;
+    for (int t = 0; t < 10; ++t) S.Step(0, 0);          // it marches forward (up, toward enemy camp)
+    const Fixed Adv = S.FrontierT0;
+    CHECK(Adv >= F(100));                                // advanced to the unit's reach
+    CHECK(Adv > S.Cv.InitialFrontier);
+    S.AliveBits[0] &= ~1ull;                             // the forward unit dies
+    for (int t = 0; t < 10; ++t) S.Step(0, 0);
+    CHECK(S.FrontierT0 == Adv);                          // ground held — no retreat
+}
+
+// #133/§5.2: a building repels nearby units (they flow around it) and never moves itself.
+// Differential: the same unit drifts measurably farther from the building's axis WITH the
+// building present than without.
+static void TestBuildingRepelsUnits() {
+    auto Setup = [](Sim& S, bool WithBuilding) {
+        S.Init(0);
+        ClearField(S);
+        S.DisableCombat = true;
+        int N = 0;
+        if (WithBuilding) { PlaceBuilding(S, 0, F(15), F(20), 0, UnitScissor); N = 1; }
+        PlaceUnit(S, N, F(16), F(20), 0, UnitScissor);  // just east of the building's axis
+        S.Count = N + 1;
+        return N;
+    };
+    static Sim A, B;
+    const int Ia = Setup(A, true);
+    const int Ib = Setup(B, false);
+    for (int t = 0; t < 20; ++t) { A.Step(0, 0); B.Step(0, 0); }
+    CHECK(A.PosX[Ia] > B.PosX[Ib] + F(1, 2));           // building shoved the unit measurably east
+    CHECK(A.IsBuilding(0) && A.PosX[0] == F(15) && A.PosY[0] == F(20));  // the building never moved
 }
 
 // ---- 2. Win rule (spec §6, edge-proof) ----
@@ -560,6 +625,9 @@ int main() {
     TestBuildingSoaHashedAndCopyable();
     TestBuildingProducesFlatCadence();
     TestBuildingCountScalesThroughput();
+    TestPlacementValidity();
+    TestFrontierMonotonicHighWater();
+    TestBuildingRepelsUnits();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();

@@ -401,9 +401,10 @@ void TargetAcquire(Sim& S, const Grid& G) {
     // in slot order, preserving the deterministic first-come assignment.
     int32_t Occ[NumMines] = {};  // ~2 KB stack scratch — NOT static (two Sims may step on separate threads)
     for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J) && S.Type[J] == UnitMiner && S.Target[J] >= 0) ++Occ[S.Target[J]];
+        if (S.IsAlive(J) && !S.IsBuilding(J) && S.Type[J] == UnitMiner && S.Target[J] >= 0) ++Occ[S.Target[J]];
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
+        if (S.IsBuilding(I)) continue;  // #133: buildings don't acquire targets (they're targeted — #134)
         if (S.Type[I] == UnitMiner) {
             if (S.Target[I] < 0) {
                 const int32_t M = NearestFreeMine(S, I, Occ);  // nearest gold, prefer uncrowded
@@ -548,6 +549,15 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     if (J == I) return;
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
+    // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it (no
+    // pathfinding). Reuse the corrected separation falloff, its own radius/strength, on ALL
+    // buildings (friend or foe). Buildings carry no cohesion/alignment/flee/cart semantics,
+    // so short-circuit before the unit-affinity logic.
+    if (S.IsBuilding(J)) {
+        AddRepel(Ix, Iy, Jx, Jy, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength,
+                 A.SepX, A.SepY);
+        return;
+    }
     if (S.Team[J] == S.Team[I]) {
         AddRepel(Ix, Iy, Jx, Jy, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
         if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
@@ -660,6 +670,7 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
     Fixed StepX[MaxUnits], StepY[MaxUnits];
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
+        if (S.IsBuilding(I)) continue;  // #133: buildings never move (StepX/Y unread for them)
         FlockAcc A;
         if (S.UseBruteForce) GatherBrute(S, I, Threat, A);  // reads Pos + Δ — nothing has moved yet
         else GatherGrid(S, G, I, Threat, A);
@@ -764,9 +775,23 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
     // apply order is irrelevant to the result (order-independent).
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
+        if (S.IsBuilding(I)) continue;  // #133: buildings are static (Prev==Pos already)
         if (S.Type[I] == UnitMiner) WorkerSeek(S, I);
         S.PosX[I] = ClampAxis(S.PosX[I] + StepX[I], WorldWidth);
         S.PosY[I] = ClampAxis(S.PosY[I] + StepY[I], WorldHeight);
+    }
+}
+
+// ---- #133/§5.3 frontier high-water: extend each team's furthest-forward line to the most
+// advanced position any of its MOBILE units has reached this tick. Monotonic — never retreats,
+// so a lost forward push keeps the ground it earned. Team 0 advances up (max Y), team 1 down
+// (min Y). Reads post-Movement Pos, identical on both peers and the grid/brute paths, so it's
+// safe as hashed state. Gates forward placement (CanPlaceBuilding). ----
+void UpdateFrontier(Sim& S) {
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || S.IsBuilding(I)) continue;
+        if (S.Team[I] == 0) { if (S.PosY[I] > S.FrontierT0) S.FrontierT0 = S.PosY[I]; }
+        else                { if (S.PosY[I] < S.FrontierT1) S.FrontierT1 = S.PosY[I]; }
     }
 }
 
@@ -819,7 +844,34 @@ void Sim::DeriveUnits() {
     // #123: the flock gather radius = max of every radius tested in the soldier gather, so the
     // grid neighbour box always covers brute's reach (grid==brute) whatever the radii are set to.
     GatherR = Max(Max(Max(Cv.SepRadius, Cv.EnemySepRadius), Max(Cv.CohSameRadius, Cv.CohAllRadius)),
-                  Max(Max(Cv.AlignRadius, Cv.PredatorFleeRadius), Cv.InterposeRadius));
+                  Max(Max(Cv.AlignRadius, Cv.PredatorFleeRadius),
+                      Max(Cv.InterposeRadius, Cv.BuildingRepelRadius)));  // #133: cover building repel too
+}
+
+bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
+    (void)Type;  // one shared footprint for all building types (§12.2); Type reserved for later
+    const Fixed Fp = Cv.BuildingFootprint;
+    // In-bounds with the footprint margin (the whole footprint must sit inside the world rect).
+    if (X.Raw - Fp.Raw < 0 || X + Fp > WorldWidth) return false;
+    if (Y.Raw - Fp.Raw < 0 || Y + Fp > WorldHeight) return false;
+    // §5.3 frontier gate: you cannot build past your own high-water line.
+    if (Team == 0) { if (Y > FrontierT0) return false; }
+    else           { if (Y < FrontierT1) return false; }
+    // No overlap with another building: shared footprint -> centres must be >= 2·Fp apart.
+    const int64_t TwoFp = static_cast<int64_t>(Fp.Raw) + Fp.Raw;
+    const int64_t MinBB = TwoFp * TwoFp;
+    for (int32_t J = 0; J < Count; ++J) {
+        if (!IsAlive(J) || !IsBuilding(J)) continue;
+        if (Dist2(X, Y, PosX[J], PosY[J]) < MinBB) return false;
+    }
+    // No overlap with a LIVE mine (depleted mines are gone -> building over them is allowed):
+    // the footprint must not cover the mine point.
+    const int64_t MinBM = static_cast<int64_t>(Fp.Raw) * Fp.Raw;
+    for (int32_t M = 0; M < NumMines; ++M) {
+        if (MineGold[M] <= 0) continue;
+        if (Dist2(X, Y, MineX[M], MineY[M]) < MinBM) return false;
+    }
+    return true;
 }
 
 void Sim::Init(uint64_t InSeed) {
@@ -834,6 +886,11 @@ void Sim::Init(uint64_t InSeed) {
     // overrides (LockstepPeer), so two peers in one process hold independent Cv. Hashed.
     Cv = LatchCvs();
     DeriveUnits();  // #122: fill Units[] from the just-latched Cv before anything spawns
+    // #133/§5.3: seed each team's frontier at the world-space initial buildable depth (NOT
+    // pixel-derived). Team 0 builds up to CvInitialFrontier from its baseline (Y=0); team 1
+    // down to the same depth from the top (Y=WorldHeight). Advances from here as units push.
+    FrontierT0 = Cv.InitialFrontier;
+    FrontierT1 = WorldHeight - Cv.InitialFrontier;
     BuildMap(*this);
     for (uint8_t T = 0; T < 2; ++T) {
         Teams[T].Gold = StartGold;
@@ -875,6 +932,7 @@ void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
 
     { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(*this, G); }          // phase 2
     { LUR_TRACE_SCOPE("sim.move"); Movement(*this, G, Threat); }       // phase 3
+    UpdateFrontier(*this);        // phase 3b (#133): extend the per-team high-water build line
     { LUR_TRACE_SCOPE("sim.atk");  Attacks(*this); }           // phase 4
     Deaths(*this);                // phase 5
     Economy(*this);               // phase 6
