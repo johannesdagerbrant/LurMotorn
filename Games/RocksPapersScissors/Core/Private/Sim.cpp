@@ -442,10 +442,23 @@ void MoveToward(Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
     S.PosX[I] = S.PosX[I] + Sp * Dx / M;
     S.PosY[I] = S.PosY[I] + Sp * Dy / M;
 }
-bool Arrived(const Sim& S, int32_t I, Fixed Tx, Fixed Ty) {
-    const Fixed M = Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I]));
-    return M <= S.Units[S.Type[I]].Speed;
+// #134/§12.4: a gold-carrying cart deposits at the NEAREST own MINER BUILDING (fixed-point
+// distance, lowest-slot tie-break). Returns the building slot, or -1 if the team has none —
+// in which case the caller falls back to the legacy camp drop-off (kept until camps are
+// retired in the flip; post-flip a -1 means the gold is STRANDED until a miner building
+// exists, §12.4). Static buildings -> the scan is order-independent and grid==brute-safe.
+int32_t NearestMinerBuilding(const Sim& S, int32_t I, uint8_t Team) {
+    int32_t Best = -1;
+    int64_t BestD = INT64_MAX;
+    for (int32_t B = 0; B < S.Count; ++B) {
+        if (!S.IsAlive(B) || !S.IsBuilding(B)) continue;
+        if (S.Team[B] != Team || S.Type[B] != UnitMiner) continue;
+        const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.PosX[B], S.PosY[B]);
+        if (D < BestD) { BestD = D; Best = B; }  // strict < -> lowest slot wins ties
+    }
+    return Best;
 }
+
 void WorkerSeek(Sim& S, int32_t I) {
     switch (S.WorkerState[I]) {
         case WorkDig: {
@@ -483,9 +496,18 @@ void WorkerSeek(Sim& S, int32_t I) {
             return;
         }
         case WorkToCamp: {
-            const Fixed Tx = CampX, Ty = Sim::CampY(S.Team[I]);
-            if (Arrived(S, I, Tx, Ty)) {
-                S.PosX[I] = Tx; S.PosY[I] = Ty;
+            // #134/§12.4: head for the nearest own MINER BUILDING; fall back to the legacy
+            // camp if the team has none (transition — removed with camps in the flip).
+            const int32_t B = NearestMinerBuilding(S, I, S.Team[I]);
+            const bool AtBuilding = B >= 0;
+            const Fixed Tx = AtBuilding ? S.PosX[B] : CampX;
+            const Fixed Ty = AtBuilding ? S.PosY[B] : Sim::CampY(S.Team[I]);
+            // Deposit within reach: a building's footprint (its repulsion keeps soldiers out,
+            // but carts ignore separation, so they settle at the footprint edge), or one step
+            // for the point-like camp (exact arrival, snap — unchanged legacy behaviour).
+            const Fixed Reach = AtBuilding ? S.Cv.BuildingFootprint : S.Units[UnitMiner].Speed;
+            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= Reach) {
+                if (!AtBuilding) { S.PosX[I] = Tx; S.PosY[I] = Ty; }  // snap onto the camp only
                 S.DepositBuf[S.Team[I]] += S.Carry[I];  // credited in Economy (phase 6)
                 S.Carry[I] = 0; S.Target[I] = -1; S.WorkerState[I] = WorkToMine;
                 return;
@@ -801,13 +823,19 @@ void Attacks(Sim& S) {
     int32_t Dmg[MaxUnits];
     std::memset(Dmg, 0, sizeof(int32_t) * static_cast<size_t>(S.Count));
     for (int32_t I = 0; I < S.Count; ++I) {
-        if (!S.IsAlive(I) || S.Type[I] == UnitMiner) continue;  // workers ignore combat in v1 (spec §5)
+        // #134/§7: buildings do NOT fight back (production, not combat) — skip them as
+        // attackers BEFORE the Cooldown decrement (buildings reuse Cooldown as the #132
+        // spawn-ring counter, which the attack cooldown logic must not touch). They remain
+        // valid TARGETS below, taking damage like a stationary enemy unit of their Type.
+        if (!S.IsAlive(I) || S.IsBuilding(I) || S.Type[I] == UnitMiner) continue;  // workers ignore combat (spec §5)
         if (S.Cooldown[I] > 0) --S.Cooldown[I];
         if (S.Cooldown[I] > 0) continue;  // still cooling
         const int32_t T = S.Target[I];
         if (T < 0 || !S.IsAlive(T)) continue;
         if (Dist2(S.PosX[I], S.PosY[I], S.PosX[T], S.PosY[T]) > RangeSq(UnitTable[S.Type[I]].Range)) continue;
         int32_t D = S.Units[S.Type[I]].Attack;
+        // Counter bonus keys off the target's Type — for a building that is its PRODUCED type,
+        // so a Scissor hits a Paper building for the 3x counter (spec §7). Same code, no branch.
         if (UnitTable[S.Type[I]].Beats == S.Type[T]) D *= S.Cv.CounterMultiplier;
         Dmg[T] += D;
         S.Cooldown[I] = UnitTable[S.Type[I]].Cooldown;
@@ -817,6 +845,10 @@ void Attacks(Sim& S) {
 }
 
 // ---- Phase 5: deaths (clear the alive bit; slot kept, no compaction) ----
+// #134/§7: a BUILDING at Hp<=0 dies through this same path — its alive bit clears, so it
+// stops producing (ProductionBuildings skips dead slots -> its queue "evaporates") and stops
+// being a deposit drop-off (NearestMinerBuilding skips it). Stale Queue/BuildProgress on the
+// dead slot are inert and reset when the slot is recycled by SpawnUnitAt.
 void Deaths(Sim& S) {
     for (int32_t I = 0; I < S.Count; ++I)
         if (S.IsAlive(I) && S.Hp[I] <= 0) ClearAlive(S, I);

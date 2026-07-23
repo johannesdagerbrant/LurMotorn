@@ -445,6 +445,54 @@ static void TestBuildingRepelsUnits() {
     CHECK(A.IsBuilding(0) && A.PosX[0] == F(15) && A.PosY[0] == F(20));  // the building never moved
 }
 
+// ---- #134/§7: an enemy building is a valid target, scored as the unit type it produces ----
+static void TestSoldierTargetsEnemyBuildingByType() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceUnit(S, 0, F(17), F(20), 0, UnitScissor);   // Scissor beats Paper -> the building is prey
+    PlaceBuilding(S, 1, F(17), F(23), 1, UnitPaper); // enemy PAPER building
+    S.Count = 2;
+    S.Step(0, 0);
+    CHECK(S.Target[0] == 1);  // targeted the building as if a Paper unit
+}
+
+// #134/§7: a building takes damage like a stationary enemy unit of its Type — INCLUDING the
+// counter multiplier — and is destroyed at Hp<=0 (alive bit clears). Buildings never hit back.
+static void TestScissorDestroysPaperBuildingWithCounter() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceUnit(S, 0, F(17), F(20), 0, UnitScissor);
+    PlaceBuilding(S, 1, F(17), F(21), 1, UnitPaper);  // adjacent, inside Scissor range
+    S.Count = 2;
+    const int32_t Hp0 = S.Hp[1];
+    S.Step(0, 0);
+    // First engaged hit is counter-multiplied (Scissor beats Paper -> 3x).
+    CHECK(S.Hp[1] == Hp0 - S.Units[UnitScissor].Attack * S.Cv.CounterMultiplier);
+    CHECK(S.Hp[0] == UnitTable[UnitScissor].MaxHp);  // the building did NOT fight back
+    for (int t = 0; t < 800 && S.IsAlive(1); ++t) S.Step(0, 0);
+    CHECK(!S.IsAlive(1));  // economy/production building razed
+}
+
+// #134/§12.4: a gold-carrying cart deposits at the NEAREST own miner building (not the far
+// one), and the gold is credited to the team.
+static void TestCartDepositsAtNearestMinerBuilding() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    PlaceBuilding(S, 0, F(8),  F(20), 0, UnitMiner);  // far camp
+    PlaceBuilding(S, 1, F(26), F(20), 0, UnitMiner);  // near camp
+    PlaceUnit(S, 2, F(24), F(20), 0, UnitMiner);      // a cart right by the near camp
+    S.Count = 3;
+    S.WorkerState[2] = WorkToCamp; S.Carry[2] = CarryCapacity; S.Target[2] = -1;
+    const int32_t Before = S.Teams[0].Gold;
+    for (int t = 0; t < 100 && S.Carry[2] != 0; ++t) S.Step(0, 0);
+    CHECK(S.Carry[2] == 0);
+    CHECK(S.Teams[0].Gold == Before + CarryCapacity);  // banked at a miner building
+    CHECK(S.PosX[2] > F(20));                           // went to the NEAR camp (x=26), not the far (x=8)
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -628,6 +676,9 @@ int main() {
     TestPlacementValidity();
     TestFrontierMonotonicHighWater();
     TestBuildingRepelsUnits();
+    TestSoldierTargetsEnemyBuildingByType();
+    TestScissorDestroysPaperBuildingWithCounter();
+    TestCartDepositsAtNearestMinerBuilding();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestRebuyIsNotLoss();
