@@ -6,6 +6,7 @@
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Lur/Serialization/Varint.h"
+#include "Rps/Sim.h"  // InputEvent (#137)
 
 namespace Rps {
 
@@ -44,6 +45,46 @@ inline bool DecodeEvent(Lur::Serialization::BitReader& R, uint32_t& Delta, uint8
     Mask = static_cast<uint8_t>(R.ReadBits(4));
     Delta = Nib < EventDeltaInline ? Nib : static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
     return R.IsOk();
+}
+
+// ---- #137: input-EVENT batch codec (buildings rework). Replaces the 4-bit mask as the
+// per-tick input payload: most ticks carry ZERO events (a 1-byte varint 0 — slimmer than the
+// old mask), and a place/queue tap is a handful of bytes, occasionally. One MsgInput frame per
+// produced tick carries the local team's batch; the same codec serves the resync history and
+// the flight recorder (one batch per tick). Layout per batch:
+//   [varint count] then per event: [kind:1][team:1]
+//     place: [type:2][varint PosX.raw][varint PosY.raw]   (positions are >=0, in-bounds)
+//     queue: [varint slot][varint count]
+constexpr int MaxEventsPerTick = 16;  // a human can't issue more than a few taps per 100 ms tick
+
+inline void EncodeEventBatch(Lur::Serialization::BitWriter& W, const InputEvent* Evs, int Count) {
+    Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(Count));
+    for (int I = 0; I < Count; ++I) {
+        const InputEvent& E = Evs[I];
+        W.WriteBits(E.Kind & 1u, 1);
+        W.WriteBits(E.Team & 1u, 1);
+        if (E.Kind == EventPlaceBuilding) W.WriteBits(E.Type & 3u, 2);
+        Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(E.X));
+        Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(E.Y));
+    }
+}
+
+// Decode a batch into Out (capacity MaxOut). Returns the event count, or -1 on malformed /
+// hostile input (never traps — BitReader::IsOk + the count bound keep it total).
+inline int DecodeEventBatch(Lur::Serialization::BitReader& R, InputEvent* Out, int MaxOut) {
+    const uint32_t Count = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+    if (!R.IsOk() || Count > static_cast<uint32_t>(MaxOut)) return -1;
+    for (uint32_t I = 0; I < Count; ++I) {
+        InputEvent E{};
+        E.Kind = static_cast<uint8_t>(R.ReadBits(1));
+        E.Team = static_cast<uint8_t>(R.ReadBits(1));
+        if (E.Kind == EventPlaceBuilding) E.Type = static_cast<uint8_t>(R.ReadBits(2));
+        E.X = static_cast<int32_t>(Lur::Serialization::ReadVarUint(R));
+        E.Y = static_cast<int32_t>(Lur::Serialization::ReadVarUint(R));
+        if (!R.IsOk()) return -1;
+        Out[I] = E;
+    }
+    return R.IsOk() ? static_cast<int>(Count) : -1;
 }
 
 // ---- Resync: the SAME event codec, chunked for the cold-rejoin / blip path (design §4).

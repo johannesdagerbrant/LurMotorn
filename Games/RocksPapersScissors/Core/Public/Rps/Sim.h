@@ -12,6 +12,28 @@ using Lur::Sim::Fixed;
 enum EWorkerState : uint8_t { WorkToMine = 0, WorkDig = 1, WorkToCamp = 2 };
 enum EResult : uint8_t { ResultOngoing = 0, ResultTeam0Wins = 1, ResultTeam1Wins = 2, ResultDraw = 3 };
 
+// #137 (buildings rework): a tick-stamped player input event — the richer input unit that
+// REPLACES the old 4-bit press mask (the four buttons are now building drag-sources + per-
+// building queue taps, no longer instantaneous unit-queues). POD; applied in phase 0 of the
+// tick in a deterministic order on both peers. Two kinds:
+//   * EventPlaceBuilding — drop a building of Type (an EUnit) at world position (X,Y).
+//   * EventQueueUnits    — enqueue Count units at the building in slot Slot.
+enum EEventKind : uint8_t { EventPlaceBuilding = 0, EventQueueUnits = 1 };
+struct InputEvent {
+    uint8_t Kind = EventPlaceBuilding;  // EEventKind
+    uint8_t Team = 0;                   // which player (0/1) issued it
+    uint8_t Type = 0;                   // Place: produced unit type (EUnit). Queue: unused.
+    int32_t X = 0;                      // Place: PosX (Fixed raw). Queue: building slot.
+    int32_t Y = 0;                      // Place: PosY (Fixed raw). Queue: unit count.
+
+    static InputEvent Place(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
+        return {EventPlaceBuilding, Team, Type, X.Raw, Y.Raw};
+    }
+    static InputEvent Queue(uint8_t Team, int32_t Slot, int32_t Count) {
+        return {EventQueueUnits, Team, 0, Slot, Count};
+    }
+};
+
 // #131 (buildings rework): a slot is either a mobile UNIT or a static BUILDING. Buildings
 // live in the SAME per-unit SoA — a slot with Kind==KindBuilding reuses Hp/Team/Pos/AliveBits
 // with building meaning (Type = the unit type it PRODUCES; §7 targeting treats it as that
@@ -118,6 +140,10 @@ struct Sim {
     // ---- API ----
     void Init(uint64_t Seed);
     void Step(uint8_t Mask0, uint8_t Mask1);   // one 10 Hz tick — spec §6's 8 phases, in order
+    // #137: one tick driven by the tick's INPUT EVENT batch (both teams interleaved, applied in
+    // array order — deterministic on both peers). Replaces the mask on the wire/history/recorder;
+    // Step(mask) stays for the legacy camp path + old tests until the flip retires it.
+    void StepEvents(const InputEvent* Events, int32_t Count);
     void DeriveUnits();                        // refresh Units[] from Cv (#122); call after any Cv (re)latch
     uint64_t StateHash() const;                // FNV-1a over pinned state (design §5)
 

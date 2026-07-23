@@ -104,6 +104,50 @@ static void TestFuzzDecode() {
     CHECK(true);  // reaching here without a crash/hang is the assertion
 }
 
+// ---- #137: input-EVENT batch codec — round-trip place + queue events, and the empty batch ----
+static void TestEventBatchRoundTrip() {
+    InputEvent In[] = {
+        InputEvent::Place(0, UnitMiner, F(17), F(10)),
+        InputEvent::Queue(0, 6, 20),
+        InputEvent::Place(1, UnitScissor, F(8), F(230)),
+        InputEvent::Queue(1, 7, 1),
+    };
+    BitWriter W;
+    EncodeEventBatch(W, In, 4);
+    const std::vector<uint8_t>& Bytes = W.Finish();
+    BitReader R(Bytes.data(), Bytes.size());
+    InputEvent Out[MaxEventsPerTick];
+    const int N = DecodeEventBatch(R, Out, MaxEventsPerTick);
+    CHECK(N == 4);
+    for (int I = 0; I < 4; ++I) {
+        CHECK(Out[I].Kind == In[I].Kind && Out[I].Team == In[I].Team);
+        CHECK(Out[I].X == In[I].X && Out[I].Y == In[I].Y);
+        if (In[I].Kind == EventPlaceBuilding) CHECK(Out[I].Type == In[I].Type);
+    }
+    // The empty batch (the common idle tick) round-trips to zero and is tiny.
+    BitWriter We;
+    EncodeEventBatch(We, nullptr, 0);
+    CHECK(We.Finish().size() == 1);  // just the varint 0 count
+    BitReader Re(We.Finish().data(), We.Finish().size());
+    InputEvent None[MaxEventsPerTick];
+    CHECK(DecodeEventBatch(Re, None, MaxEventsPerTick) == 0);
+}
+
+// ---- #137: the batch decoder is TOTAL on hostile bytes (never traps, honours the cap) ----
+static void TestEventBatchFuzz() {
+    SplitMix64 Rng(0xB47C4);
+    for (int Iter = 0; Iter < 20000; ++Iter) {
+        uint8_t Buf[16];
+        const int N = 1 + static_cast<int>(Rng.NextBounded(16));
+        for (int I = 0; I < N; ++I) Buf[I] = static_cast<uint8_t>(Rng.NextBounded(256));
+        BitReader R(Buf, static_cast<size_t>(N));
+        InputEvent Out[MaxEventsPerTick];
+        const int Got = DecodeEventBatch(R, Out, MaxEventsPerTick);
+        CHECK(Got <= MaxEventsPerTick);  // never overruns the buffer
+    }
+    CHECK(true);  // no crash/hang == pass
+}
+
 // Replay a recorded/reassembled (mask0, mask1) stream into a fresh sim -> final hash.
 static uint64_t ReplayHash(uint64_t Seed, const std::vector<uint8_t>& M0,
                            const std::vector<uint8_t>& M1,
@@ -537,6 +581,8 @@ int main() {
     TestByteBudget();
     TestStreamAbsoluteTicks();
     TestFuzzDecode();
+    TestEventBatchRoundTrip();
+    TestEventBatchFuzz();
     TestResyncChunking();
     TestLockstepStaysInSync();
 #if LUR_INTERNAL

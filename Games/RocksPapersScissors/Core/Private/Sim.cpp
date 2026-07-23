@@ -875,6 +875,68 @@ void WinCheck(Sim& S) {
     else if (Lose[1]) S.Result = ResultTeam0Wins;
 }
 
+// ---- Phase 0 (#137): apply one input event. Both mutations are deterministic no-ops on an
+// invalid/unaffordable request (identical on both peers — pure functions of the hashed state). ----
+// EventPlaceBuilding: validate (§5.1), deduct the placement cost, and drop a building slot.
+void ApplyPlace(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
+    if (Type >= UnitCount) return;
+    if (!S.CanPlaceBuilding(Team, Type, X, Y)) return;   // invalid tile -> no-op (§5.1)
+    const int32_t Cost = BuildingCostFor(S.Cv, Type);
+    if (S.Teams[Team].Gold < Cost) return;               // unaffordable -> no-op
+    const int32_t I = AllocSlot(S);
+    LUR_ASSERT_MSG(I >= 0, "RPS: slot exhausted placing a building");
+    if (I < 0) return;
+    S.Teams[Team].Gold -= Cost;
+    S.PosX[I] = X;  S.PosY[I] = Y;  S.PrevX[I] = X;  S.PrevY[I] = Y;  // static -> Δ=0
+    S.Type[I] = Type;  S.Team[I] = Team;  S.Hp[I] = BuildingHpFor(S.Cv, Type);
+    S.Kind[I] = KindBuilding;  S.Queue[I] = 0;  S.BuildProgress[I] = 0;
+    S.Target[I] = -1;  S.Cooldown[I] = 0;   // Cooldown = the #132 per-building spawn-ring counter
+    S.WorkerState[I] = WorkToMine;  S.Carry[I] = 0;  S.WorkerTimer[I] = 0;
+    SetAlive(S, I);
+    if (I + 1 > S.Count) S.Count = I + 1;
+}
+// EventQueueUnits: enqueue up to Count units at an own building, clamped to the queue cap and
+// gold — a deterministic PARTIAL enqueue if gold runs out mid-batch (as many as gold covers).
+void ApplyQueue(Sim& S, uint8_t Team, int32_t Slot, int32_t Count) {
+    if (Slot < 0 || Slot >= S.Count) return;
+    if (!S.IsAlive(Slot) || !S.IsBuilding(Slot) || S.Team[Slot] != Team) return;
+    const uint8_t Ty = S.Type[Slot];
+    const int32_t UnitCost = S.Units[Ty].Cost;
+    const int32_t Cap = S.Cv.BuildingQueueMax;
+    for (int32_t K = 0; K < Count; ++K) {
+        if (S.Queue[Slot] >= Cap) break;             // queue full -> clamp
+        if (S.Teams[Team].Gold < UnitCost) break;    // out of gold -> partial enqueue
+        S.Teams[Team].Gold -= UnitCost;
+        ++S.Queue[Slot];
+    }
+}
+
+// The tick body shared by Step(mask) and StepEvents — everything after phase-0 input. Kept as
+// one function so the two entry points can never drift in phase order or content (spec §6).
+void PreTick(Sim& S) {
+    // Cv is per-Sim state (latched at Init + synced overrides, #112); only solo/desktop live
+    // tuning (#115) opts into re-latching from the globals so a --tune edit moves the sim.
+    if (S.LiveCvLatch) S.Cv = LatchCvs();
+    S.DeriveUnits();  // reflect this tick's Cv (Init latch, live-tune, or a synced override)
+}
+void RunTick(Sim& S) {
+    Production(S);            // phase 1 (legacy camp path — retired in the flip)
+    ProductionBuildings(S);   // phase 1 (#132): per-building production
+    Grid G;
+    { LUR_TRACE_SCOPE("sim.grid"); G.Build(S); }  // after production so spawns are bucketed
+    ThreatSet Threat;
+    if (S.UseBruteForce) BuildThreatBrute(S, Threat);
+    else BuildThreatGrid(S, G, Threat);
+    { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(S, G); }          // phase 2
+    { LUR_TRACE_SCOPE("sim.move"); Movement(S, G, Threat); }       // phase 3
+    UpdateFrontier(S);        // phase 3b (#133): extend the per-team high-water build line
+    { LUR_TRACE_SCOPE("sim.atk");  Attacks(S); }               // phase 4
+    Deaths(S);                // phase 5
+    Economy(S);               // phase 6
+    WinCheck(S);              // phase 7
+    ++S.Tick;                 // phase 8 (hash) is computed on demand via StateHash()
+}
+
 }  // namespace
 
 void Sim::DeriveUnits() {
@@ -939,43 +1001,24 @@ void Sim::Init(uint64_t InSeed) {
 void Sim::Step(uint8_t Mask0, uint8_t Mask1) {
     if (Result != ResultOngoing) return;  // match decided: freeze (still deterministic on both peers)
     LUR_TRACE_SCOPE("sim.step");           // pure observer — never reads back into sim state
-    // NB: Cv is NOT re-latched here — it is per-Sim state set at Init and mutated only at
-    // tick boundaries by synced overrides (#112), so it stays constant across this tick.
-    // Exception: solo/desktop live tuning (#115) opts into re-latching from the globals so
-    // a `--tune` edit moves the running sim — no peer means no desync risk.
-    if (LiveCvLatch) Cv = LatchCvs();
-    DeriveUnits();  // #122: reflect this tick's Cv (Init latch, live-tune, or a synced override)
-
-    // NOTE (slice B, #97): the bulk Prev=Pos copy is NO LONGER here. It moved INSIDE
-    // Movement, after the gather, so the gather can read Δ=Pos−Prev (last tick's
-    // velocity). Nothing between here and Movement reads Prev (grid + target acq read
-    // Pos), so removing it from the top is safe.
-    ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1
+    PreTick(*this);
+    ApplyInput(*this, 0, Mask0);  // phase 0: P0 then P1 (legacy mask path)
     ApplyInput(*this, 1, Mask1);
-    Production(*this);            // phase 1 (spawns) — grid must see the new units
-    ProductionBuildings(*this);   // phase 1 (#132): per-building production (no-op until buildings exist)
+    RunTick(*this);
+}
 
-    // Build the spatial grid AFTER production (so spawns are bucketed) but before any
-    // movement, capturing start-of-tick positions. Both target acq and the flock gather
-    // read it on Pos (nothing has moved yet), so the buckets stay consistent.
-    Grid G;
-    { LUR_TRACE_SCOPE("sim.grid"); G.Build(*this); }
-
-    // Guard-lite (#98): flag raiders (enemy soldiers near a team's miners); Movement's
-    // interpose steering reads the bits. Transient — never in Sim state or the hash. Same
-    // brute/grid split as the neighbour queries so the two paths stay equivalent.
-    ThreatSet Threat;  // ~0.5 KB stack scratch — NOT static (two Sims may step on separate threads)
-    if (UseBruteForce) BuildThreatBrute(*this, Threat);
-    else BuildThreatGrid(*this, G, Threat);
-
-    { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(*this, G); }          // phase 2
-    { LUR_TRACE_SCOPE("sim.move"); Movement(*this, G, Threat); }       // phase 3
-    UpdateFrontier(*this);        // phase 3b (#133): extend the per-team high-water build line
-    { LUR_TRACE_SCOPE("sim.atk");  Attacks(*this); }           // phase 4
-    Deaths(*this);                // phase 5
-    Economy(*this);               // phase 6
-    WinCheck(*this);              // phase 7
-    ++Tick;                       // phase 8 (hash) is computed on demand via StateHash()
+void Sim::StepEvents(const InputEvent* Events, int32_t Count) {
+    if (Result != ResultOngoing) return;
+    LUR_TRACE_SCOPE("sim.step");
+    PreTick(*this);
+    // Phase 0: apply the tick's events in array order — deterministic (both peers hold the
+    // identical ordered batch for this tick, so the mutations land in the same sequence).
+    for (int32_t I = 0; I < Count; ++I) {
+        const InputEvent& E = Events[I];
+        if (E.Kind == EventPlaceBuilding) ApplyPlace(*this, E.Team, E.Type, Fixed{E.X}, Fixed{E.Y});
+        else if (E.Kind == EventQueueUnits) ApplyQueue(*this, E.Team, E.X, E.Y);
+    }
+    RunTick(*this);
 }
 
 #if LUR_INTERNAL

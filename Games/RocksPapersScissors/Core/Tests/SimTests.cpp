@@ -493,6 +493,75 @@ static void TestCartDepositsAtNearestMinerBuilding() {
     CHECK(S.PosX[2] > F(20));                           // went to the NEAR camp (x=26), not the far (x=8)
 }
 
+// ---- #137: StepEvents — place + queue events mutate the sim, deterministically ----
+static int32_t FirstBuilding(const Sim& S) {
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsBuilding(I)) return I;
+    return -1;
+}
+
+static void TestEventPlaceAndQueueApply() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    S.Teams[0].Gold = 1000;
+    const int32_t PlaceCost = BuildingCostFor(S.Cv, UnitMiner);
+    InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(10));
+    S.StepEvents(&P, 1);
+    const int32_t B = FirstBuilding(S);
+    CHECK(B >= 0);
+    CHECK(S.Team[B] == 0 && S.Type[B] == UnitMiner && S.Kind[B] == KindBuilding);
+    CHECK(S.Teams[0].Gold == 1000 - PlaceCost);
+    // Queue 5 miners at it — gold deducted per unit.
+    const int32_t GoldPreQ = S.Teams[0].Gold;
+    InputEvent Q = InputEvent::Queue(0, B, 5);
+    S.StepEvents(&Q, 1);
+    CHECK(S.Queue[B] == 5);
+    CHECK(S.Teams[0].Gold == GoldPreQ - 5 * S.Units[UnitMiner].Cost);
+    // An INVALID place (past the frontier) is a deterministic no-op: no building, no gold spent.
+    const int32_t GoldPreBad = S.Teams[0].Gold;
+    InputEvent Bad = InputEvent::Place(0, UnitRock, F(17), S.FrontierT0 + F(5));
+    S.StepEvents(&Bad, 1);
+    CHECK(S.Teams[0].Gold == GoldPreBad);
+}
+
+// Queue clamps to gold: a batch bigger than the wallet enqueues only what gold covers (partial).
+static void TestEventQueuePartialByGold() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    const int32_t RockCost = S.Units[UnitRock].Cost;
+    S.Teams[0].Gold = BuildingCostFor(S.Cv, UnitRock) + 2 * RockCost + 10;  // camp + exactly 2 rocks + change
+    InputEvent P = InputEvent::Place(0, UnitRock, F(17), F(10));
+    S.StepEvents(&P, 1);
+    const int32_t B = FirstBuilding(S);
+    CHECK(B >= 0);
+    InputEvent Q = InputEvent::Queue(0, B, 5);  // ask for 5, afford 2
+    S.StepEvents(&Q, 1);
+    CHECK(S.Queue[B] == 2);
+    CHECK(S.Teams[0].Gold == 10);
+}
+
+// StepEvents is deterministic: two runs of the same event schedule hash identically, and the
+// placed building actually produces.
+static void TestStepEventsDeterministic() {
+    auto Script = [](Sim& S) {
+        S.Init(0x1234);
+        S.Teams[0].Gold = 1000;  // legacy StartGold can't afford a building; fund the placement
+        InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(20));  // slot 6 (0..5 = start miners)
+        S.StepEvents(&P, 1);
+        const int32_t B = FirstBuilding(S);
+        InputEvent Q = InputEvent::Queue(0, B, 10);
+        S.StepEvents(&Q, 1);
+        for (int t = 0; t < 300; ++t) S.StepEvents(nullptr, 0);  // idle ticks (empty batch)
+    };
+    static Sim A, B;
+    Script(A);
+    Script(B);
+    CHECK(A.StateHash() == B.StateHash());
+    CHECK(A.AliveCount(0) > StartMiners);  // the building produced additional miners
+}
+
 // ---- 2. Win rule (spec §6, edge-proof) ----
 static void TestMutualAnnihilationDraw() {
     static Sim S;
@@ -695,6 +764,9 @@ int main() {
     TestSoldierTargetsEnemyBuildingByType();
     TestScissorDestroysPaperBuildingWithCounter();
     TestCartDepositsAtNearestMinerBuilding();
+    TestEventPlaceAndQueueApply();
+    TestEventQueuePartialByGold();
+    TestStepEventsDeterministic();
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestBuildingsDoNotSaveFromLoss();
