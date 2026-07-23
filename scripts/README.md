@@ -11,6 +11,7 @@ for humans and future agents. Prefer these over ad-hoc commands.
 | `android-build.bat` | Build the Android debug APK (`assembleDebug`). |
 | `android-install.bat` | Install the APK onto a connected device/emulator (`installDebug`). |
 | `logcat.bat` | Tail the Android app's native log output (the `OnlyChess` tag). |
+| `gen-icon.ps1` | Turn an SVG into a cook-ready silhouette PNG (headless-Chromium rasterize + Pillow cleanup). `-Src author/name` fetches a game-icons.net icon (CC BY 3.0 — credit the author) or pass a local `.svg`; `-Name` sets the output. Then add it to the game's `LUR_COOK` marker + glyph enum and `build.ps1` re-cooks. (Helper: `icon_clean.py`.) |
 | `setup-ios-logging.bat` | One-time: install `pymobiledevice3` (reads a connected iPhone's syslog on Windows). |
 | `ios-syslog.bat` | Tail the iOS app's live syslog over USB (the `OnlyChess:` tag) — the iPhone counterpart of `logcat.bat`. |
 
