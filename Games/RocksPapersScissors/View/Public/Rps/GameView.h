@@ -63,8 +63,14 @@ public:
     // Which build plate (building type 0..3) is under (XPx,YPx), or -1. The main tests this on
     // a pointer-DOWN to decide whether a drag is a building placement (vs a camera pan).
     int PlateAt(float XPx, float YPx) const;
-    // Begin dragging building Type out of its plate; the ghost follows the pointer until release.
-    void BeginPlaceDrag(int Type);
+    // Begin dragging building Type out of its plate at pointer (XPx,YPx); the ghost follows the
+    // pointer from that spot until release (seeded here so it never flashes at a stale position).
+    void BeginPlaceDrag(int Type, float XPx, float YPx);
+
+    // #139/§9: show a just-placed building at world (Wx,Wy) view-only, before the sim reflects it
+    // (the pre-match camp waits for the opponent to ready; a normal placement waits out the input
+    // delay). Active=false clears it. Prevents "my camp is invisible until both players placed".
+    void SetPlacedPreview(int Type, float Wx, float Wy, bool Active);
     // Update the dragged ghost's screen position + whether the current drop is valid (the caller
     // computes validity from the authoritative sim: Sim::WouldAcceptPlace at the drop world pos).
     void UpdatePlaceDrag(float XPx, float YPx, bool Valid);
@@ -234,6 +240,10 @@ private:
     float GhostBlink_ = 0.0f;                    // invalid-blink clock (seconds)
     float SlideT_ = -1.0f;                       // >=0 while the ghost tweens back to its plate
     float SlideFromX_ = 0.0f, SlideFromY_ = 0.0f;
+    // #139 placed-preview: a committed building shown view-only until the sim reflects it.
+    int   PreviewType_ = -1;
+    float PreviewWx_ = 0.0f, PreviewWy_ = 0.0f;
+    bool  PreviewActive_ = false;
 
     bool Ready = false;
 };

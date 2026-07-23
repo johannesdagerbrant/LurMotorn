@@ -372,11 +372,16 @@ int GameView::PlateAt(float XPx, float YPx) const {
     return -1;
 }
 
-void GameView::BeginPlaceDrag(int Type) {
+void GameView::BeginPlaceDrag(int Type, float XPx, float YPx) {
     GhostType_ = Type;
     GhostDragging_ = true;
     GhostValid_ = false;
+    GhostXPx_ = XPx; GhostYPx_ = YPx;  // seed at the finger so frame 1 isn't at a stale spot
     SlideT_ = -1.0f;  // cancel any in-flight slide-back
+}
+
+void GameView::SetPlacedPreview(int Type, float Wx, float Wy, bool Active) {
+    PreviewType_ = Type; PreviewWx_ = Wx; PreviewWy_ = Wy; PreviewActive_ = Active;
 }
 
 void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
@@ -524,6 +529,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     }
     Renderer->DrawInstances(Quad, Instances, N, Alpha, AtlasMat);
 
+    // #139/§9: a just-placed building shown view-only until the sim reflects it — the pre-match
+    // camp appears the instant you drop it (not after the opponent readies), at the exact world
+    // spot the real building will land, so there's no jump when the match starts.
+    if (PreviewActive_ && PreviewType_ >= 0 && PreviewType_ < UnitCount) {
+        const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphCamp) : PreviewType_;
+        BlitGlyph(PG, TypeTintMat[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
+    }
+
     // Health bars on top of the units (sparse: only hurt units). Kept on the per-mesh
     // path — a second instanced draw is a later refinement.
     for (int32_t I = 0; I < Snap.Count; ++I) {
@@ -537,31 +550,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float BarY = Sy - UnitPx * 0.5f - 3.0f * HS;
         Blit(HealthBg, Sx, BarY, BarW, BarH);
         Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
-    }
-
-    // #139 placement ghost: while dragging, a footprint-sized silhouette follows the pointer —
-    // team-tinted when the drop is valid, blinking red when invalid (mirrors Sim::WouldAcceptPlace,
-    // evaluated by the caller). On an invalid release it slides back to its plate and vanishes.
-    GhostBlink_ += DtSec;
-    if (GhostType_ >= 0) {
-        float Gx = GhostXPx_, Gy = GhostYPx_;
-        if (!GhostDragging_ && SlideT_ >= 0.0f) {
-            SlideT_ += DtSec;
-            constexpr float Dur = 0.18f;
-            float K = SlideT_ / Dur; if (K > 1.0f) K = 1.0f;
-            K = 1.0f - (1.0f - K) * (1.0f - K);  // ease-out
-            const float* Rc = PlateRect[GhostType_];
-            Gx = SlideFromX_ + (Rc[0] + Rc[2] * 0.5f - SlideFromX_) * K;
-            Gy = SlideFromY_ + (Rc[1] + Rc[3] * 0.5f - SlideFromY_) * K;
-            if (SlideT_ >= Dur) { GhostType_ = -1; SlideT_ = -1.0f; }
-        }
-        if (GhostType_ >= 0) {
-            const Lur::Render::MaterialHandle GM =
-                (GhostDragging_ && !GhostValid_) ? GhostBadMat[std::sin(GhostBlink_ * 12.0f) > 0.0f ? 0 : 1]
-                                                 : GhostMat[My];
-            const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphCamp) : GhostType_;
-            BlitGlyph(GG, GM, Gx, Gy, BldgPx);
-        }
     }
 
     // Deposit juice (#85 playtest): "+N" floats where a miner banked its carry —
@@ -669,10 +657,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
              PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
-        // Button glyph in the LOCAL team's per-type tint (playtest 2026-07-20) — the
-        // plate previews the exact colour the spawned unit will wear, not a flat white.
-        BlitGlyph(Ty, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
-                  X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
+        // Button glyph is the BUILDING icon (miner = camp) in the LOCAL team's per-type tint —
+        // the exact icon that follows the finger and lands on the field (#139). While THIS plate
+        // is being dragged (or its ghost is sliding home), the icon has "left" the button, so it
+        // is hidden here; it reappears the instant a valid drop lands or the slide-back completes.
+        const int PlateGlyph = Ty == UnitMiner ? static_cast<int>(GlyphCamp) : Ty;
+        if (GhostType_ != Ty)
+            BlitGlyph(PlateGlyph, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
+                      X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
         BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
         std::snprintf(Buf, sizeof(Buf), "%d", Snap.Units[Ty].Cost);
         Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
@@ -695,6 +687,37 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             if (Bw > 0.5f)
                 Blit(GoldFlat, X + 6.0f * HS + Bw * 0.5f, PlateY + PlateH2 - 7.0f * HS, Bw,
                      5.0f * HS);
+        }
+    }
+
+    // #139 placement ghost: the building icon that "left" its plate follows the pointer — team-
+    // tinted when the drop is valid, blinking red when invalid (mirrors Sim::WouldAcceptPlace,
+    // evaluated by the caller). A valid release clears it (the real building + the refilled plate
+    // icon take over); an invalid release eases it back INTO the plate frame (shrinking to the
+    // button-icon size) and vanishes. Drawn here in the HUD layer so it rides over the field and
+    // its slide-back target (the plate) is known.
+    GhostBlink_ += DtSec;
+    if (GhostType_ >= 0) {
+        const float DragPx = FW(Snap.BuildingFootprint) * 2.0f * P;  // footprint-sized while dragging
+        const float ButtonPx = PlateW * 0.52f;
+        float Gx = GhostXPx_, Gy = GhostYPx_, GPx = DragPx;
+        if (!GhostDragging_ && SlideT_ >= 0.0f) {
+            SlideT_ += DtSec;
+            constexpr float Dur = 0.18f;
+            float K = SlideT_ / Dur; if (K > 1.0f) K = 1.0f;
+            K = 1.0f - (1.0f - K) * (1.0f - K);  // ease-out
+            const float* Rc = PlateRect[GhostType_];
+            Gx = SlideFromX_ + (Rc[0] + Rc[2] * 0.5f - SlideFromX_) * K;
+            Gy = SlideFromY_ + (Rc[1] + Rc[3] * 0.5f - SlideFromY_) * K;
+            GPx = DragPx + (ButtonPx - DragPx) * K;  // shrink into the button as it arrives
+            if (SlideT_ >= Dur) { GhostType_ = -1; SlideT_ = -1.0f; }
+        }
+        if (GhostType_ >= 0) {
+            const Lur::Render::MaterialHandle GM =
+                (GhostDragging_ && !GhostValid_) ? GhostBadMat[std::sin(GhostBlink_ * 12.0f) > 0.0f ? 0 : 1]
+                                                 : GhostMat[My];
+            const int GG = GhostType_ == UnitMiner ? static_cast<int>(GlyphCamp) : GhostType_;
+            BlitGlyph(GG, GM, Gx, Gy, GPx);
         }
     }
 

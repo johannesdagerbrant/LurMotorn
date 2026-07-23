@@ -117,6 +117,11 @@ public:
     // so play begins from tick 0 with both camps already in the identical sim state. The view
     // reads this for the pre-match camera / "waiting for opponent" state.
     bool MatchStarted() const { return MatchStarted_; }
+    // The local camp the player has placed but that isn't in the sim yet (pre-match, waiting for
+    // the opponent to ready). Lets the view show your camp the instant you drop it. HasLocalCamp
+    // stays true after the match starts, so gate the preview on !MatchStarted().
+    bool HasLocalCamp() const { return LocalReady_; }
+    const InputEvent& LocalCamp() const { return LocalCamp_; }
 
     // Flight recording (opt-in, off by default so it costs nothing): capture the
     // executed (mask0, mask1) per tick so a fresh Sim can replay the whole match to a

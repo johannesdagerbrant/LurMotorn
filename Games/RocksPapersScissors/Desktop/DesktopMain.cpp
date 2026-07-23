@@ -129,6 +129,15 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
     // the camp goes); free scrolling begins once the match starts (both camps placed).
     if (!P.Lp.MatchStarted()) P.Cam.Y = MinCam;
     else P.Cam.Update(DtSec, MaxCam, MinCam);
+    // #139: show the local camp the instant it's dropped (view-only), before the match starts and
+    // the sim reflects it — otherwise it looks invisible until the opponent readies too.
+    if (!P.Lp.MatchStarted() && P.Lp.HasLocalCamp()) {
+        const Rps::InputEvent& C = P.Lp.LocalCamp();
+        const float Inv = 1.0f / static_cast<float>(Rps::Fixed::One);
+        P.View.SetPlacedPreview(C.Type, static_cast<float>(C.X) * Inv, static_cast<float>(C.Y) * Inv, true);
+    } else {
+        P.View.SetPlacedPreview(0, 0.0f, 0.0f, false);
+    }
     P.View.Render(P.Renderer, P.Snap, P.Snap.AlphaAt(Now), P.Cam.Y, static_cast<float>(W),
                   static_cast<float>(H), P.Team == 1, DtSec);
 }
@@ -154,8 +163,13 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
     for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
         if (T.Phase == Lur::Input::ETouchPhase::Began) {
             const int Plate = P.View.PlateAt(T.XPx, T.YPx);
-            if (Plate >= 0) P.View.BeginPlaceDrag(Plate);  // start placing this building type
-            else P.Cam.Begin(T.YPx);
+            if (Plate >= 0) {
+                P.View.BeginPlaceDrag(Plate, T.XPx, T.YPx);  // seed at the finger (no frame-1 flash)
+                float Wx = 0, Wy = 0;
+                P.View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy));
+            } else {
+                P.Cam.Begin(T.YPx);
+            }
         } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
             if (P.View.IsPlacing()) {
                 float Wx = 0, Wy = 0;
