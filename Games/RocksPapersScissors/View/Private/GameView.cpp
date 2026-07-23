@@ -221,6 +221,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
     }
     GhostBadMat[0] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.85f});  // red, bright
     GhostBadMat[1] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.30f});  // red, dim
+    ProdBtnBg = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.62f});  // #140 translucent button
     MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
@@ -384,6 +385,18 @@ void GameView::SetPlacedPreview(int Type, float Wx, float Wy, bool Active) {
     PreviewType_ = Type; PreviewWx_ = Wx; PreviewWy_ = Wy; PreviewActive_ = Active;
 }
 
+int GameView::OnProductionButton(float XPx, float YPx, int32_t& OutSlot) const {
+    for (int B = 0; B < ProdBtnCount_; ++B)
+        for (int K = 0; K < ProdBtnPerBldg; ++K) {
+            const float* R = ProdBtns_[B].R[K];
+            if (R[2] > 0.0f && XPx >= R[0] && XPx <= R[0] + R[2] && YPx >= R[1] && YPx <= R[1] + R[3]) {
+                OutSlot = ProdBtns_[B].Slot;
+                return ProdMult[K];
+            }
+        }
+    return 0;
+}
+
 void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
     if (GhostType_ < 0) return;
     GhostXPx_ = XPx; GhostYPx_ = YPx; GhostValid_ = Valid;
@@ -487,7 +500,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const float UnitPx = 1.7f * P;
     uint32_t N = 0;
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
-    const float BldgPx = FW(Snap.BuildingFootprint) * 2.0f * P;  // #139: buildings read footprint-sized
+    const float BldgPx = FW(Snap.BuildingFootprint) * 2.7f * P;  // #139/#140: buildings read a bit bigger
+                                                                 //   than the footprint so the buttons fit
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
@@ -535,6 +549,82 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (PreviewActive_ && PreviewType_ >= 0 && PreviewType_ < UnitCount) {
         const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphCamp) : PreviewType_;
         BlitGlyph(PG, TypeTintMat[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
+    }
+
+    // #140 per-building UI, present on EVERY local building all the time. Each shows: a HEALTH bar
+    // ABOVE; two TALL x1/x5 buttons stacked to its LEFT, pulled IN so they overlap the icon a bit
+    // (semi-transparent, so the building reads through); and — while producing — an "N/max" queue
+    // count + next-unit PROGRESS bar BELOW. Buttons dim when unaffordable; their rects are captured
+    // for OnProductionButton (tapped on the input thread). All world-anchored, so they scroll along.
+    {
+        using Lur::Text::EHAlign;
+        using Lur::Text::EVAlign;
+        const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
+        const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
+        const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
+        const float Half = BldgPx * 0.5f;
+        const float Bw = 42.0f * HS, Bh = 36.0f * HS, BGap = 4.0f * HS;   // tall buttons: label over cost
+        ProdBtnCount_ = 0;
+        for (int32_t I = 0; I < Snap.Count; ++I) {
+            if (!Snap.IsAlive(I) || !Snap.IsBuilding(I)) continue;
+            const uint8_t Bty = Snap.Type[I];
+            const float Bx = SX(FW(Snap.PosX[I])), By = SY(FW(Snap.PosY[I]));
+            if (By < -Half - 60.0f * HS || By > HeightPx + Half + 60.0f * HS) continue;  // off-screen
+
+            // Health bar ABOVE the building (all buildings — read enemy siege progress too).
+            const int32_t MaxHp = Snap.BuildingMaxHp[Bty] > 0 ? Snap.BuildingMaxHp[Bty] : 1;
+            const float HFrac = std::min(1.0f, std::max(0.0f, static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp)));
+            const float HbW = BldgPx * 0.85f, HbH = 3.0f * HS, HbY = By - Half - 5.0f * HS;
+            Blit(HealthBg, Bx, HbY, HbW, HbH);
+            Blit(HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH);
+
+            if (Snap.Team[I] != My) continue;  // production controls: your buildings only
+
+            // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
+            if (Snap.Queue[I] > 0) {
+                const float QW = 34.0f * HS, RGap = 4.0f * HS;
+                const float RowY = By + Half + 8.0f * HS;
+                const float GroupL = Bx - BldgPx * 0.5f;
+                char QB[16];
+                std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
+                Text.Draw(Renderer, QB, GroupL, RowY - 7.0f * HS, QW, 14.0f * HS, 12.0f * HS, Ico,
+                          EHAlign::Right, EVAlign::Middle, false);
+                const int32_t Bt = Snap.Units[Bty].BuildTicks > 0 ? Snap.Units[Bty].BuildTicks : 1;
+                const float PFrac = std::min(1.0f, static_cast<float>(Snap.BuildProgress[I]) / static_cast<float>(Bt));
+                const float PbW = BldgPx - QW - RGap, PbH = 4.0f * HS;
+                const float PbX = GroupL + QW + RGap + PbW * 0.5f;
+                Blit(BarBg, PbX, RowY, PbW, PbH);
+                if (PbW * PFrac > 0.5f)
+                    Blit(GoldFlat, PbX - PbW * 0.5f + PbW * PFrac * 0.5f, RowY, PbW * PFrac, PbH);
+            }
+            // x1 / x5 buttons stacked vertically to the LEFT, pulled IN to overlap the icon a bit.
+            if (ProdBtnCount_ >= MaxProdButtons) continue;
+            ProdButtons& PB = ProdBtns_[ProdBtnCount_++];
+            PB.Slot = I;
+            const float StackH = ProdBtnPerBldg * Bh + (ProdBtnPerBldg - 1) * BGap;
+            const float BtnX = Bx - Half - Bw * 0.55f;  // overlaps the building's left edge
+            const float Top = By - StackH * 0.5f;
+            const int32_t UnitCost = Snap.Units[Bty].Cost;
+            for (int K = 0; K < ProdBtnPerBldg; ++K) {
+                const float BY = Top + static_cast<float>(K) * (Bh + BGap);
+                PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;
+                const int32_t Price = UnitCost * ProdMult[K];
+                const bool Afford = Snap.Gold[My] >= Price;
+                Blit(ProdBtnBg, BtnX + Bw * 0.5f, BY + Bh * 0.5f, Bw, Bh);  // semi-transparent plate
+                char L[8];
+                std::snprintf(L, sizeof(L), "x%d", ProdMult[K]);      // upper row: the multiplier
+                Text.Draw(Renderer, L, BtnX, BY + 3.0f * HS, Bw, Bh * 0.42f, 14.0f * HS,
+                          Afford ? Ico : DimC, EHAlign::Center, EVAlign::Middle, false);
+                const float LowY = BY + Bh * 0.68f;                   // lower row: coin LEFT of price
+                BlitGlyph(GlyphGold, Afford ? GoldIconMat : PlateIconDim,
+                          BtnX + Bw * 0.5f - 12.0f * HS, LowY, 12.0f * HS);
+                char PBuf[12];
+                std::snprintf(PBuf, sizeof(PBuf), "%d", Price);
+                Text.Draw(Renderer, PBuf, BtnX + Bw * 0.5f - 4.0f * HS, LowY - 7.0f * HS, Bw * 0.5f,
+                          14.0f * HS, 12.0f * HS, Afford ? GoldC : DimC, EHAlign::Left,
+                          EVAlign::Middle, false);
+            }
+        }
     }
 
     // Health bars on top of the units (sparse: only hurt units). Kept on the per-mesh
@@ -627,12 +717,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     ClockText.Draw(Renderer, Buf, WidthPx - Pad - 74.0f * HS, PanelY, 74.0f * HS, PanelH,
                    13.0f * HS, Ico, EHAlign::Right, EVAlign::Middle, false);
 
-    // Production plates: the icon IS the unit glyph; stack tag, cost, progress bar
-    // (which visibly accelerates with the stack — #84's pacing thesis on screen).
-    // Anchored above the OS bottom inset (Android nav bar / iOS home indicator).
-    // Grouping (#85 playtest): the miner plate stands apart with a GOLD frame under a
-    // gold-token header — "spawns gold gatherers" — while rock/paper/scissors share a
-    // backing strip under a crossed-swords header — "spawns warriors".
+    // Build plates (#139): each is a DRAG SOURCE — press-drag its building icon onto the field
+    // to place that building for its placement cost (units are then queued at the placed building
+    // via the per-building x1/x5/x20 buttons, #140). Anchored above the OS bottom inset.
+    // Grouping (#85 playtest): the miner (mining-camp) plate stands apart with a GOLD frame under a
+    // gold-token header — "gathers gold" — while rock/paper/scissors share a backing strip under a
+    // crossed-swords header — "produce warriors".
     const float Gap = 6.0f * HS;
     const float GroupGap = 4.0f * Gap;
     const float PlateW = (WidthPx - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
@@ -653,7 +743,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float X = Ty == 0 ? Pad : TrioX + static_cast<float>(Ty - 1) * (PlateW + Gap);
         PlateRect[Ty][0] = X; PlateRect[Ty][1] = PlateY;
         PlateRect[Ty][2] = PlateW; PlateRect[Ty][3] = PlateH2;
-        const bool Afford = Snap.Gold[My] >= Snap.Units[Ty].Cost;
+        // The plate is a DRAG SOURCE to PLACE a building (#139), so its price is the building
+        // PLACEMENT cost and affordability reads against that (not the unit cost — units are
+        // queued at the placed building via its x1/x5/x20 buttons, #140).
+        const bool Afford = Snap.Gold[My] >= Snap.BuildingCost[Ty];
         Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
              PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
@@ -666,28 +759,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             BlitGlyph(PlateGlyph, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
                       X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
         BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
-        std::snprintf(Buf, sizeof(Buf), "%d", Snap.Units[Ty].Cost);
+        std::snprintf(Buf, sizeof(Buf), "%d", Snap.BuildingCost[Ty]);
         Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
                   13.0f * HS, Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
-        const int32_t QN = Snap.QueueCount[My][Ty];
-        if (QN > 0) {
-            Blit(GoldFlat, X + PlateW - 14.0f * HS, PlateY + 9.0f * HS, 26.0f * HS, 16.0f * HS);
-            std::snprintf(Buf, sizeof(Buf), "%dx", QN);
-            Text.Draw(Renderer, Buf, X + PlateW - 27.0f * HS, PlateY + 1.0f * HS, 26.0f * HS,
-                      16.0f * HS, 12.0f * HS, {Srgb(0x14), Srgb(0x16), Srgb(0x1A), 1.0f},
-                      EHAlign::Center, EVAlign::Middle, false);
-        }
-        const float BarW = PlateW - 12.0f * HS;
-        Blit(BarBg, X + PlateW * 0.5f, PlateY + PlateH2 - 7.0f * HS, BarW, 5.0f * HS);
-        if (QN > 0) {
-            float Frac = static_cast<float>(Snap.BuildProgress[My][Ty]) /
-                         static_cast<float>(Snap.Units[Ty].BuildTicks);
-            if (Frac > 1.0f) Frac = 1.0f;
-            const float Bw = BarW * Frac;
-            if (Bw > 0.5f)
-                Blit(GoldFlat, X + 6.0f * HS + Bw * 0.5f, PlateY + PlateH2 - 7.0f * HS, Bw,
-                     5.0f * HS);
-        }
     }
 
     // #139 placement ghost: the building icon that "left" its plate follows the pointer — team-

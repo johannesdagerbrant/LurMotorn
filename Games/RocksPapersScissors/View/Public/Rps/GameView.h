@@ -71,6 +71,11 @@ public:
     // (the pre-match camp waits for the opponent to ready; a normal placement waits out the input
     // delay). Active=false clears it. Prevents "my camp is invisible until both players placed".
     void SetPlacedPreview(int Type, float Wx, float Wy, bool Active);
+
+    // #140 per-building production: hit-test a tap against the x1/x5 buttons drawn over EVERY local
+    // building this frame. Returns the batch COUNT (1/5) and sets OutSlot to the building's sim
+    // slot, or 0 if the tap missed. The main routes a hit to QueueLocalEvent(Queue).
+    int OnProductionButton(float XPx, float YPx, int32_t& OutSlot) const;
     // Update the dragged ghost's screen position + whether the current drop is valid (the caller
     // computes validity from the authoritative sim: Sim::WouldAcceptPlace at the drop world pos).
     void UpdatePlaceDrag(float XPx, float YPx, bool Valid);
@@ -146,6 +151,7 @@ private:
     // alpha steps) while the drop is invalid. Materials are immutable, so the blink walks a LUT.
     Lur::Render::MaterialHandle GhostMat[2] = {};
     Lur::Render::MaterialHandle GhostBadMat[2] = {};
+    Lur::Render::MaterialHandle ProdBtnBg = 0;    // #140 semi-transparent production-button plate
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
     Lur::Render::MaterialHandle HealthBg = 0;
     Lur::Render::MaterialHandle HealthFg = 0;
@@ -244,6 +250,15 @@ private:
     int   PreviewType_ = -1;
     float PreviewWx_ = 0.0f, PreviewWy_ = 0.0f;
     bool  PreviewActive_ = false;
+
+    // #140 per-building x1/x5 buttons — rects captured each Render (over the local team's
+    // buildings) so a tap on the input thread can hit-test them. Slot is the building's sim slot.
+    static constexpr int ProdBtnPerBldg = 2;
+    struct ProdButtons { int32_t Slot = -1; float R[ProdBtnPerBldg][4] = {}; };
+    static constexpr int MaxProdButtons = 128;
+    static constexpr int ProdMult[ProdBtnPerBldg] = {1, 5};
+    ProdButtons ProdBtns_[MaxProdButtons];
+    int ProdBtnCount_ = 0;
 
     bool Ready = false;
 };

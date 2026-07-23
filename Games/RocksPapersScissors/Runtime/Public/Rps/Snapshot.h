@@ -30,6 +30,8 @@ struct Snapshot {
     uint8_t  Kind[MaxUnits];    // #139 EKind — KindBuilding renders as a placed building, not a unit
     int32_t  Hp[MaxUnits];
     int32_t  Carry[MaxUnits];   // miner gold in hand — the view's deposit-flash edge
+    int32_t  Queue[MaxUnits];   // #140 per-building units queued (0 for units) — the N in "N/max"
+    int32_t  BuildProgress[MaxUnits];  // #140 per-building next-unit progress (ticks) — the progress bar
     uint64_t AliveBits[(MaxUnits + 63) / 64];
 
     // Mine positions (constant after Init, carried here so the view needs nothing
@@ -48,12 +50,8 @@ struct Snapshot {
     uint32_t Tick = 0;
     uint8_t  Result = 0;              // EResult
     int32_t  Gold[2] = {};
-    // Per-team, per-produced-type queue totals for the HUD — now AGGREGATED over that team's
-    // buildings (#132/#145: production is per-building; there are no per-team camp queues). Sum
-    // of Queue across a team's buildings of each type; BuildProgress is the max in-flight bar.
-    int32_t  QueueCount[2][UnitCount] = {};
-    int32_t  BuildProgress[2][UnitCount] = {};
     int32_t  AliveCount[2] = {};
+    int32_t  BuildingQueueMax = 0;   // #140 shared per-building queue cap (the "max" in "N/max")
 
     // Live per-type stats (#122): the sim's Cv-derived Units[] (cost/hp/speed/damage/build),
     // so the HUD's cost label, affordability, build bar, and health-bar scale track a tuned
@@ -61,6 +59,11 @@ struct Snapshot {
     // so a PRE-MATCH / unpublished snapshot still shows real costs, not zeros — a live match
     // overwrites it from the latched (and synced) Sim::Units in CaptureFrom.
     UnitStats Units[UnitCount];
+    // #139/#140: gold to PLACE a building of each type + the building's max HP (distinct from the
+    // unit cost/HP in Units[]), so the plates show the placement price and buildings get a health
+    // bar scaled to building HP.
+    int32_t BuildingCost[UnitCount] = {};
+    int32_t BuildingMaxHp[UnitCount] = {};
 
     Snapshot() { std::memcpy(Units, UnitTable, sizeof(Units)); }
 
@@ -83,6 +86,8 @@ struct Snapshot {
         std::memcpy(Kind, S.Kind, N);
         std::memcpy(Hp, S.Hp, sizeof(int32_t) * N);
         std::memcpy(Carry, S.Carry, sizeof(int32_t) * N);
+        std::memcpy(Queue, S.Queue, sizeof(int32_t) * N);                  // #140 per-building queue
+        std::memcpy(BuildProgress, S.BuildProgress, sizeof(int32_t) * N);  // #140 per-building progress
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
         std::memcpy(MineX, S.MineX, sizeof(Fixed) * NumMines);
         std::memcpy(MineY, S.MineY, sizeof(Fixed) * NumMines);
@@ -94,19 +99,14 @@ struct Snapshot {
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
             Gold[T] = S.Teams[T].Gold;
-            for (int K = 0; K < UnitCount; ++K) { QueueCount[T][K] = 0; BuildProgress[T][K] = 0; }
             AliveCount[T] = S.AliveCount(static_cast<uint8_t>(T));
         }
-        // Aggregate per-building queues into the per-type HUD totals (#145): sum queued units,
-        // keep the furthest-along build bar per type. Buildings share the [0,Count) slot space.
-        for (int32_t I = 0; I < S.Count; ++I) {
-            if (!S.IsAlive(I) || !S.IsBuilding(I)) continue;
-            const int T = S.Team[I], K = S.Type[I];
-            if (T < 0 || T >= 2 || K < 0 || K >= UnitCount) continue;
-            QueueCount[T][K] += S.Queue[I];
-            if (S.BuildProgress[I] > BuildProgress[T][K]) BuildProgress[T][K] = S.BuildProgress[I];
-        }
+        BuildingQueueMax = S.Cv.BuildingQueueMax;
         std::memcpy(Units, S.Units, sizeof(Units));  // #122: live per-type stats for the HUD
+        for (int K = 0; K < UnitCount; ++K) {
+            BuildingCost[K] = BuildingCostFor(S.Cv, static_cast<uint8_t>(K));   // #139/#140 placement price
+            BuildingMaxHp[K] = BuildingHpFor(S.Cv, static_cast<uint8_t>(K));    // #140 building health-bar scale
+        }
         PublishNs = InPublishNs;
         StepNs = InStepNs;
     }

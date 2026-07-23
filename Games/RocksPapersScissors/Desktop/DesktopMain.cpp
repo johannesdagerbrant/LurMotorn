@@ -194,7 +194,12 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
                 P.View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
             } else {
                 P.Cam.End();
-                if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);  // HUD/selector
+                if (T.Phase == Lur::Input::ETouchPhase::Ended && P.View.OnTap(T.XPx, T.YPx) == -1) {
+                    // Not the HUD/selector -> maybe a per-building x1/x5 button (#140).
+                    int32_t Slot = -1;
+                    const int Cnt = P.View.OnProductionButton(T.XPx, T.YPx, Slot);
+                    if (Cnt > 0) P.Lp.QueueLocalEvent(Rps::InputEvent::Queue(P.Team, Slot, Cnt));
+                }
             }
         }
     }
