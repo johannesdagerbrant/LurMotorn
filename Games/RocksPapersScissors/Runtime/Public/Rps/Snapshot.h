@@ -126,6 +126,33 @@ struct Snapshot {
         return false;
     }
 
+    // #148 magnetic placement: snap a desired drop (Dx,Dy world) to the NEAREST valid build spot
+    // within Radius world units (≈ the building icon size), so placement isn't pixel-perfect
+    // tedious. Returns true + the snapped (Ox,Oy) — the desired point itself when it's already
+    // valid; false (and Ox/Oy = desired) when nothing valid is within the radius, so the caller
+    // blinks red there. View-side only: the resulting Fixed travels on the wire and ApplyPlace
+    // re-validates, so a snapped point the sim later rejects is a safe no-op.
+    bool SnapToValidPlace(uint8_t Team, uint8_t Type, float Dx, float Dy, float Radius,
+                          float& Ox, float& Oy) const {
+        auto Fx = [](float V) {
+            return Fixed{static_cast<int32_t>(V * static_cast<float>(Fixed::One) + (V < 0 ? -0.5f : 0.5f))};
+        };
+        if (WouldAcceptPlace(Team, Type, Fx(Dx), Fx(Dy))) { Ox = Dx; Oy = Dy; return true; }
+        // 8 compass directions × expanding rings; the smallest ring that lands a valid spot wins,
+        // so the snap is to the nearest valid location within the icon-size radius.
+        static constexpr float UX[8] = {1.f, 0.7071068f, 0.f, -0.7071068f, -1.f, -0.7071068f, 0.f, 0.7071068f};
+        static constexpr float UY[8] = {0.f, 0.7071068f, 1.f, 0.7071068f, 0.f, -0.7071068f, -1.f, -0.7071068f};
+        constexpr int Rings = 4;
+        for (int R = 1; R <= Rings; ++R) {
+            const float Rr = Radius * static_cast<float>(R) / static_cast<float>(Rings);
+            for (int D = 0; D < 8; ++D) {
+                const float Cx = Dx + UX[D] * Rr, Cy = Dy + UY[D] * Rr;
+                if (WouldAcceptPlace(Team, Type, Fx(Cx), Fx(Cy))) { Ox = Cx; Oy = Cy; return true; }
+            }
+        }
+        Ox = Dx; Oy = Dy; return false;
+    }
+
     // int64 squared distance on Fixed raws (matches Sim.cpp's Dist2) — overflow-safe.
     static int64_t Dist2Raw(Fixed Ax, Fixed Ay, Fixed Bx, Fixed By) {
         const int64_t Dx = static_cast<int64_t>(Ax.Raw) - Bx.Raw;

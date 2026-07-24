@@ -459,6 +459,29 @@ void GameView::ScreenToWorld(float XPx, float YPx, float CameraY, float WidthPx,
     OutWy = FlipY ? FW(WorldHeight) - Fy : Fy;
 }
 
+void GameView::WorldToScreen(float Wx, float Wy, float CameraY, float WidthPx, float HeightPx,
+                             bool FlipY, float& OutXPx, float& OutYPx) const {
+    const float P = Ppu(WidthPx);
+    OutXPx = Wx * P;
+    const float Fy = FlipY ? FW(WorldHeight) - Wy : Wy;   // undo the per-player flip
+    OutYPx = HeightPx - (Fy - CameraY) * P;               // inverse of ScreenToWorld's Fy step
+}
+
+bool GameView::ResolvePlacement(float DesXPx, float DesYPx, float CameraY, float WidthPx,
+                                float HeightPx, bool FlipY, const Snapshot& Snap, uint8_t Team,
+                                float& OutWx, float& OutWy, float& OutGhostXPx,
+                                float& OutGhostYPx) const {
+    float Dx = 0.0f, Dy = 0.0f;
+    ScreenToWorld(DesXPx, DesYPx, CameraY, WidthPx, HeightPx, FlipY, Dx, Dy);
+    // Snap radius ≈ the building's on-field icon size (footprint diameter, world units).
+    const float Radius = FW(Snap.BuildingFootprint) * 2.0f;
+    const bool Valid = Snap.SnapToValidPlace(Team, static_cast<uint8_t>(GhostType_), Dx, Dy, Radius,
+                                             OutWx, OutWy);
+    if (Valid) WorldToScreen(OutWx, OutWy, CameraY, WidthPx, HeightPx, FlipY, OutGhostXPx, OutGhostYPx);
+    else { OutGhostXPx = DesXPx; OutGhostYPx = DesYPx; }  // no valid spot -> red blink at the finger-offset
+    return Valid;
+}
+
 void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, float CameraY,
                       float WidthPx, float HeightPx, bool FlipY, float DtSec) {
     if (!Ready) return;
@@ -900,9 +923,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         }
     }
 
-    // #143 placement hand: loop a pointing hand from the miner plate up into the buildable band,
-    // demoing the first camp placement — until you place one (no local building in the sim yet AND
-    // no pending placed-preview). Reuses the alpha-stepped pointer materials from the scroll hint.
+    // #143 placement hand: loop a pointing hand that CARRIES the mining-camp icon from the miner
+    // plate toward the nearest gold MINE, demoing the first camp placement — until you place one (no
+    // local building yet AND no pending preview). The camp icon + hand fade in together at the plate,
+    // travel up, and fade out near the mine; the loop teaches "drag the camp onto gold to mine it",
+    // not "drag it to the base". Reuses the alpha-stepped atlas material from the scroll hint.
     {
         bool HasLocalBuilding = false;
         for (int32_t I = 0; I < Snap.Count; ++I)
@@ -917,14 +942,26 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const float t = std::fmod(OnbHandT_, Period) / Period;   // 0..1 loop
             const float* MpR = PlateRect[UnitMiner];
             const float Sx = MpR[0] + MpR[2] * 0.5f, Sy = MpR[1] + MpR[3] * 0.5f;  // miner plate centre
-            const float Ex = WidthPx * 0.5f, Ey = HeightPx * 0.46f;               // up into the field
+            // End near the nearest LIVE mine above the plate (screen space), so the demo points at
+            // gold — not at the base. Fall back to up-the-field if every near mine is depleted.
+            float Ex = WidthPx * 0.5f, Ey = HeightPx * 0.42f;
+            float BestD = 1.0e30f;
+            for (int M = 0; M < NumMines; ++M) {
+                if (Snap.MineGold[M] <= 0) continue;
+                const float Mx = SX(FW(Snap.MineX[M])), My2 = SY(FW(Snap.MineY[M]));
+                if (My2 > Sy - 40.0f * HS) continue;               // only mines above the plate
+                const float D = (Mx - Sx) * (Mx - Sx) + (My2 - Sy) * (My2 - Sy);
+                if (D < BestD) { BestD = D; Ex = Mx; Ey = My2; }
+            }
             const float E = t * t * (3.0f - 2.0f * t);                            // smoothstep ease
             const float Hx = Sx + (Ex - Sx) * E, Hy = Sy + (Ey - Sy) * E;
             const float A = t < 0.15f ? t / 0.15f : (t > 0.8f ? (1.0f - t) / 0.2f : 1.0f);  // fade ends
             int Step = static_cast<int>(A * HintAlphaSteps) - 1;
             if (Step < 0) Step = 0;
             if (Step >= HintAlphaSteps) Step = HintAlphaSteps - 1;
-            BlitGlyph(GlyphPointer, HintPointer[Step], Hx, Hy, 46.0f * HS);
+            // Carried mining-camp icon (fades with the hand), with the pointer just off its corner.
+            BlitGlyph(GlyphMineCamp, HintPointer[Step], Hx, Hy, 40.0f * HS);
+            BlitGlyph(GlyphPointer, HintPointer[Step], Hx + 13.0f * HS, Hy + 16.0f * HS, 40.0f * HS);
         } else {
             OnbHandT_ = 0.0f;
         }

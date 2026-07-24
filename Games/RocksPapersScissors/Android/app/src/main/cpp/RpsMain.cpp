@@ -195,14 +195,15 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // mirror of the sim's predicate), so the red/valid blink can't disagree with the sim.
     const bool Live = S->Linked.load(std::memory_order_acquire);
     const uint8_t MyTeam = S->LinkedTeam.load(std::memory_order_relaxed);
-    auto DragValidity = [&](float XPx, float YPx, float& Wx, float& Wy) -> bool {
-        S->View.ScreenToWorld(XPx, YPx, S->Cam.Y, W, H, MyTeam == 1, Wx, Wy);
-        return S->Snap.WouldAcceptPlace(MyTeam, static_cast<uint8_t>(S->View.PlacingType()),
-                                        WorldToFixed(Wx), WorldToFixed(Wy));
+    // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid spot
+    // within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where to draw
+    // the ghost (Gsx,Gsy — snapped when valid, else the offset point for the red blink).
+    auto Resolve = [&](float DesX, float DesY, float& Wx, float& Wy, float& Gsx, float& Gsy) -> bool {
+        return S->View.ResolvePlacement(DesX, DesY, S->Cam.Y, W, H, MyTeam == 1, S->Snap, MyTeam,
+                                        Wx, Wy, Gsx, Gsy);
     };
     // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb doesn't
-    // hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so the
-    // building lands where you SEE it (above-left of the finger), not under your thumb.
+    // hide it (the desired point handed to Resolve; snapping refines from there).
     const float GhostOffPx = (static_cast<float>(S->Snap.BuildingFootprint.Raw) /
                               static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu(W);
     const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
@@ -213,9 +214,10 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             S->TwoFingerActive = false;
             const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
             if (Plate >= 0) {
-                S->View.BeginPlaceDrag(Plate, GhX, GhY);  // seed at the offset spot (no frame-1 flash)
-                float Wx = 0.0f, Wy = 0.0f;
-                S->View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
+                S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
+                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
+                const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
+                S->View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
             } else {
                 S->Cam.Begin(Y);
             }
@@ -226,8 +228,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
             if (S->View.IsPlacing()) {
-                float Wx = 0.0f, Wy = 0.0f;
-                S->View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
+                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
+                const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
+                S->View.UpdatePlaceDrag(Gsx, Gsy, V);
             } else if (Count == 1) {
                 S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
             }
@@ -238,8 +241,8 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             // A placement in progress commits (valid drop -> Place event) or slides back.
             if (S->View.IsPlacing()) {
                 bool Placed = false;
-                float Wx = 0.0f, Wy = 0.0f;
-                if (DragValidity(GhX, GhY, Wx, Wy)) {
+                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
+                if (Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy)) {
                     RouteLocalEvent(S, Rps::InputEvent::Place(MyTeam,
                                         static_cast<uint8_t>(S->View.PlacingType()),
                                         WorldToFixed(Wx), WorldToFixed(Wy)));

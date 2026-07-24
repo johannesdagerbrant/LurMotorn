@@ -88,6 +88,19 @@ public:
     // world position (for the place event + validity). Pure function of the passed view params.
     void ScreenToWorld(float XPx, float YPx, float CameraY, float WidthPx, float HeightPx,
                        bool FlipY, float& OutWx, float& OutWy) const;
+    // Forward transform (world -> screen pixel), the inverse of ScreenToWorld — used to place the
+    // ghost at a SNAPPED world position (#148). Pure function of the passed view params.
+    void WorldToScreen(float Wx, float Wy, float CameraY, float WidthPx, float HeightPx,
+                       bool FlipY, float& OutXPx, float& OutYPx) const;
+    // #148 magnetic placement: resolve a desired pointer position (DesXPx,DesYPx, already thumb-
+    // offset) into a placement. Screen->world, snap to the nearest valid spot within ~the icon size
+    // (Snapshot::SnapToValidPlace), and report BOTH the snapped world drop (OutWx,OutWy — feed a
+    // valid release's Place event) AND where to draw the ghost (OutGhostXPx/YPx — the snapped spot
+    // when valid, else the desired point for the red blink). Returns validity. One home for the
+    // desktop/Android/iOS mains so the feel can't drift.
+    bool ResolvePlacement(float DesXPx, float DesYPx, float CameraY, float WidthPx, float HeightPx,
+                          bool FlipY, const Snapshot& Snap, uint8_t Team,
+                          float& OutWx, float& OutWy, float& OutGhostXPx, float& OutGhostYPx) const;
 
     // One-shot: the AI tier (0=Easy,1=Medium,2=Hard) just chosen from the opponent selector,
     // or -1 if none since the last call. The main polls this to (re)start a single-player match

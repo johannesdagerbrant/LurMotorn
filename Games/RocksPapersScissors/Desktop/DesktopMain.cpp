@@ -431,14 +431,13 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
         const float GhostOffPx = (static_cast<float>(Snap.BuildingFootprint.Raw) /
                                   static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu();
-        // #139 drag-to-place: pointer pixel -> world drop, validity asked against the published
-        // snapshot's WouldAcceptPlace (the render-thread mirror of Sim's predicate), so the ghost's
-        // valid/invalid blink can never disagree with what the sim will accept. You are team 0.
-        auto DragValidity = [&](float XPx, float YPx, float& Wx, float& Wy) -> bool {
-            View.ScreenToWorld(XPx, YPx, Cam.Y, static_cast<float>(W), static_cast<float>(H),
-                               /*FlipY=*/false, Wx, Wy);
-            return Snap.WouldAcceptPlace(0, static_cast<uint8_t>(View.PlacingType()),
-                                         WorldToFixed(Wx), WorldToFixed(Wy));
+        // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid
+        // spot within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where
+        // to draw the ghost (Gsx,Gsy — the snapped spot when valid, else the offset point for the red
+        // blink). You are team 0. One home in GameView so desktop/Android/iOS feel identical.
+        auto Resolve = [&](float DesX, float DesY, float& Wx, float& Wy, float& Gsx, float& Gsy) -> bool {
+            return View.ResolvePlacement(DesX, DesY, Cam.Y, static_cast<float>(W), static_cast<float>(H),
+                                         /*FlipY=*/false, Snap, /*Team*/ 0, Wx, Wy, Gsx, Gsy);
         };
         for (uint32_t Vk : Win.TakeKeys()) (void)Vk;  // keys no longer drive units (#137b: events)
         for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
@@ -467,16 +466,18 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             if (T.Phase == Lur::Input::ETouchPhase::Began) {
                 const int Plate = View.PlateAt(T.XPx, T.YPx);  // plate hit-test at the real finger
                 if (Plate >= 0) {
-                    View.BeginPlaceDrag(Plate, GhX, GhY);  // seed at the offset spot (no frame-1 flash)
-                    float Wx = 0, Wy = 0;
-                    View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
+                    View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
+                    float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+                    const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
+                    View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
                 } else {
                     Cam.Begin(T.YPx);
                 }
             } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
                 if (View.IsPlacing()) {
-                    float Wx = 0, Wy = 0;
-                    View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
+                    float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+                    const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
+                    View.UpdatePlaceDrag(Gsx, Gsy, V);
                 } else {
                     Cam.Move(T.YPx, Ppu());
                 }
@@ -485,8 +486,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 if (View.IsPlacing()) {
                     bool Placed = false;
                     if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                        float Wx = 0, Wy = 0;
-                        if (DragValidity(GhX, GhY, Wx, Wy)) {
+                        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+                        if (Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy)) {
                             Human.Push(Rps::InputEvent::Place(0, static_cast<uint8_t>(View.PlacingType()),
                                                              WorldToFixed(Wx), WorldToFixed(Wy)));
                             Placed = true;
