@@ -90,9 +90,19 @@ public:
                        bool FlipY, float& OutWx, float& OutWy) const;
 
     // One-shot: the AI tier (0=Easy,1=Medium,2=Hard) just chosen from the opponent selector,
-    // or -1 if none since the last call. The main polls this to start a single-player match
-    // (#127). Reused on desktop + phone.
+    // or -1 if none since the last call. The main polls this to (re)start a single-player match
+    // (#127/#2 — picking a tier at ANY time starts a fresh match). Reused on desktop + phone.
     int TakeAiTier() { const int T = AiTierPicked_; AiTierPicked_ = -1; return T; }
+    // #2 one-shot: the LINKED-opponent row was chosen — the main switches from the AI match to the
+    // peer (lockstep) match. True only when a peer is actually linked (the row is otherwise absent).
+    bool TakePeerPick() { const bool P = PeerRowPicked_; PeerRowPicked_ = false; return P; }
+    // #2 per-opponent SESSION score shown at each selector row's right end ("W-L-D"). The main
+    // updates these when a match resolves; persistence across launches rides the #15-20 save work.
+    void SetAiScore(int Tier, int W, int L, int D);
+    void SetPeerScore(int W, int L, int D);
+    // #2: a peer linked while an AI match is running — blink "opponent link established" on the
+    // opponent bar (the player can then pick the linked row to switch). One-shot; view times it out.
+    void NotifyPeerLinked();
 #if !LUR_SHIPPING
     // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
     // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
@@ -206,6 +216,11 @@ private:
     bool Linked = false;
     bool SelectorDirty = true;            // rebuild items when link state changes
     int  AiTierPicked_ = -1;              // #127: AI tier chosen from the selector (one-shot via TakeAiTier)
+    bool PeerRowPicked_ = false;          // #2: linked-opponent row chosen (one-shot via TakePeerPick)
+    // #2 per-opponent session score ("W-L-D"), shown at each row's right end.
+    int  AiScoreW_[3] = {}, AiScoreL_[3] = {}, AiScoreD_[3] = {};
+    int  PeerScoreW_ = 0, PeerScoreL_ = 0, PeerScoreD_ = 0;
+    float PeerLinkBannerT_ = 0.0f;        // #2 "opponent link established" blink countdown (seconds)
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap

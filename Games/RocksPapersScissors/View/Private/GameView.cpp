@@ -309,34 +309,51 @@ void GameView::SetLinked(bool InLinked) {
 }
 
 void GameView::RefreshSelector() {
-    // The live BLE/loopback peer + the local hot-seat, then a "vs AI" section with the three
-    // single-player tiers (#127). The AI rows are always present (no peer/radio needed to
-    // practice), so the game is playable solo out of the box. Real peer enumeration (chess's
-    // OpponentRegistry pattern) rides the RPS persistence work — #85's follow-up.
-    Lur::Hud::DropdownItem Items[6];
-    Items[0].Label = Linked ? "Linked peer" : "Searching...";
-    Items[0].Lead = Lur::Hud::ELeadStyle::Dot;
-    Items[0].LeadFill = Linked ? Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f}
-                               : Color{Srgb(0x5B), Srgb(0x67), Srgb(0x70), 1.0f};
-    Items[1].Label = "Same device";
-    Items[1].Lead = Lur::Hud::ELeadStyle::Split;
-    // Non-selectable section header, then Easy/Medium/Hard (indices 3,4,5 -> tier 0,1,2). The
-    // dot encodes the tier (green/amber/red), reusing the peer-row status dot.
-    Items[2].Label = "vs AI";
-    Items[2].Header = true;
-    Items[3].Label = "Easy";
-    Items[3].Lead = Lur::Hud::ELeadStyle::Dot;
-    Items[3].LeadFill = Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f};
-    Items[4].Label = "Medium";
-    Items[4].Lead = Lur::Hud::ELeadStyle::Dot;
-    Items[4].LeadFill = Color{Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f};
-    Items[5].Label = "Hard";
-    Items[5].Lead = Lur::Hud::ELeadStyle::Dot;
-    Items[5].LeadFill = Color{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};
-    Selector.SetItems(Items, 6);
-    Selector.SetSelected(0);
+    // #2: the opponent list is the three AI tiers, plus a LINKED-opponent row WHEN a peer is
+    // connected — no "searching" placeholder (a peer is either linked or simply not listed) and no
+    // hot-seat row: it's an AI or a linked opponent. Each row shows its session "W-L-D" score at
+    // the right end. Picking any row (re)starts/switches to that match immediately (the main polls
+    // TakeAiTier / TakePeerPick). Persistent peer enumeration + cross-launch scores ride #15-20.
+    const char* Names[3] = {"Easy", "Medium", "Hard"};
+    const Color Dots[3] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
+                           {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
+                           {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f}};
+    Lur::Hud::DropdownItem Items[4];
+    char Buf[24];
+    int N = 0;
+    for (int T = 0; T < 3; ++T, ++N) {
+        Items[N].Label = Names[T];
+        Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
+        Items[N].LeadFill = Dots[T];
+        std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", AiScoreW_[T], AiScoreL_[T], AiScoreD_[T]);
+        Items[N].Trailing = Buf;
+    }
+    if (Linked) {
+        Items[N].Label = "Linked opponent";
+        Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
+        Items[N].LeadFill = Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f};
+        std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
+        Items[N].Trailing = Buf;
+        ++N;
+    }
+    const int Prev = Selector.Selected();
+    Selector.SetItems(Items, N);
+    Selector.SetSelected(Prev >= 0 && Prev < N ? Prev : 0);  // preserve the active row across rebuilds
     SelectorDirty = false;
 }
+
+void GameView::SetAiScore(int Tier, int W, int L, int D) {
+    if (Tier < 0 || Tier > 2) return;
+    if (AiScoreW_[Tier] == W && AiScoreL_[Tier] == L && AiScoreD_[Tier] == D) return;
+    AiScoreW_[Tier] = W; AiScoreL_[Tier] = L; AiScoreD_[Tier] = D;
+    SelectorDirty = true;
+}
+void GameView::SetPeerScore(int W, int L, int D) {
+    if (PeerScoreW_ == W && PeerScoreL_ == L && PeerScoreD_ == D) return;
+    PeerScoreW_ = W; PeerScoreL_ = L; PeerScoreD_ = D;
+    SelectorDirty = true;
+}
+void GameView::NotifyPeerLinked() { PeerLinkBannerT_ = 4.0f; }  // #2: blink the bar for ~4 s
 
 #if !LUR_SHIPPING
 namespace {
@@ -376,7 +393,8 @@ int GameView::OnTap(float XPx, float YPx) {
         // (#85 follow-up). TookSelection() is the one-shot latch.
         if (Selector.TookSelection()) {
             const int Sel = Selector.Selected();
-            if (Sel >= 3 && Sel <= 5) AiTierPicked_ = Sel - 3;
+            if (Sel >= 0 && Sel <= 2) AiTierPicked_ = Sel;            // #2: an AI tier -> (re)start solo
+            else if (Sel == 3 && Linked) PeerRowPicked_ = true;       // #2: the linked opponent -> switch
         }
         return -2;
     }
@@ -1024,6 +1042,18 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // The opponent dropdown draws LAST so its open list overlays the panel.
     Selector.Draw(Renderer, "Opponent", Pad, TopInsetPx + 4.0f * HS, WidthPx - 2.0f * Pad,
                   24.0f * HS);
+
+    // #2: "opponent link established" — a peer linked while an AI match was running. Blink a green
+    // line just under the opponent bar for a few seconds (the player can pick the "Linked opponent"
+    // row to switch). Time it out here; NotifyPeerLinked() (main, on the link edge) re-arms it.
+    if (PeerLinkBannerT_ > 0.0f) {
+        PeerLinkBannerT_ -= DtSec;
+        const float Blink = 0.5f + 0.5f * std::sin(PeerLinkBannerT_ * 8.0f);  // ~1.3 Hz throb
+        const Color LinkC{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), Blink};
+        Text.Draw(Renderer, "opponent link established", Pad, TopInsetPx + 30.0f * HS,
+                  WidthPx - 2.0f * Pad, 16.0f * HS, 12.0f * HS, LinkC, EHAlign::Center,
+                  EVAlign::Middle, false);
+    }
 
 #if !LUR_SHIPPING
     // ---- The CONSOLE (#114) — one tool, ONE UI on both platforms ----

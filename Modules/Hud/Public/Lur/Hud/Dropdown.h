@@ -21,6 +21,7 @@ enum class ELeadStyle : uint8_t { None, Dot, Split };
 struct DropdownItem {
     std::string        Label;                 // primary line (e.g. a GUID)
     std::string        Sublabel;              // secondary line (e.g. "moved 2m ago")
+    std::string        Trailing;              // right-aligned trailing text (e.g. a "W-L-D" score)
     ELeadStyle         Lead = ELeadStyle::Dot;
     Lur::Render::Color LeadFill{};            // status-dot fill
     bool               Ring = false;          // draw the "attention" ring

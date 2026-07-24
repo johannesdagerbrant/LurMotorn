@@ -211,6 +211,11 @@ void Dropdown::DrawRowContent(Lur::Render::IRenderer* R, int ItemIndex,
         Text.Draw(R, It.Label.c_str(), TextX, Y, TextW, RowH,
                   RowH * 0.40f, LCol, EHAlign::Left, EVAlign::Middle, false);
     }
+    // Right-aligned trailing text (e.g. a per-opponent "W-L-D" score) — sits at the row's right edge.
+    if (!It.Trailing.empty()) {
+        Text.Draw(R, It.Trailing.c_str(), X, Y, W - Pad, RowH,
+                  RowH * 0.32f, SubCol, EHAlign::Right, EVAlign::Middle, false);
+    }
 }
 
 void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
