@@ -1,13 +1,15 @@
-# RocksPapersScissors desktop build (Phase 1, slice 0) — VS-free, MinGW-w64 g++, links
-# the installed Vulkan SDK. Builds the shared engine + RPS with a real Win32 window +
+# RocksPapersScissors desktop build (Phase 1) — VS-free, MinGW-w64 g++, links the
+# installed Vulkan SDK. Builds the shared engine + RPS with a real Win32 window +
 # Vulkan surface, so the RTS runs on the PC (the fast iteration loop).
 #
-#   Run:  powershell -ExecutionPolicy Bypass -File scripts\rps-desktop-build.ps1 [-Run] [-Auto]
+#   Run:  powershell -ExecutionPolicy Bypass -File scripts\rps-desktop-build.ps1 [-Run] [-Auto] [-Solo] [-Ai <tier>]
 #
-# In the window: keys 1-4 queue units for YOU (bottom), 5-8 for the FOE (top); drag to
-# pan the camera. -Auto random-presses both sides so combat appears without typing.
+# In the window: DRAG a building off a bottom plate onto the field to place it (ghost
+# blinks red where invalid); tap a building's x1/x5 button to queue units; drag elsewhere
+# to pan the camera. Defaults to the two-window loopback; -Solo runs one window vs the AI
+# (team 1) with you on team 0, -Ai picks easy|medium|hard. -Auto is the (legacy) soak.
 # Requires the host toolchain (see build.ps1) plus the Vulkan SDK (VULKAN_SDK set).
-param([switch]$Run, [switch]$Auto)
+param([switch]$Run, [switch]$Auto, [switch]$Solo, [string]$Ai = 'medium')
 $ErrorActionPreference = 'Stop'
 
 $env:Path = [System.Environment]::GetEnvironmentVariable('Path', 'Machine') + ';' +
@@ -35,5 +37,7 @@ $exe = Join-Path $build 'Games/RocksPapersScissors/Desktop/onlyrps_desktop.exe'
 Write-Host "`nRPS desktop build green: $exe" -ForegroundColor Green
 
 if ($Run) {
-    if ($Auto) { & $exe --auto } else { & $exe }
+    if ($Solo)      { & $exe --solo --ai $Ai }
+    elseif ($Auto)  { & $exe --auto }
+    else            { & $exe }
 }

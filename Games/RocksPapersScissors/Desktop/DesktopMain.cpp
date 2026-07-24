@@ -35,6 +35,7 @@
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/SimRunner.h"
+#include "Rps/SoloInput.h"
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 #include "WindowsBleTransport.h"  // #101-E: PC becomes a real BLE opponent to the phone
@@ -276,28 +277,28 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
 
 // ------------------------------------------------------------------ single-window solo (slice 0)
 
-struct SoloInputs {
-    std::atomic<uint8_t> P0{0};
-    std::atomic<uint8_t> P1{0};
-};
-void SampleSolo(void* Ctx, const Rps::Sim&, uint32_t, Rps::InputEvent*, int, int& Count) {
-    // #137b: the solo human's place/queue EVENTS arrive with the drag-place UI (#139/#140);
-    // until then solo has no local input (the SimRunner just advances the sim).
-    (void)Ctx;
-    Count = 0;
+// #139/#140: the solo human plays team 0 — its place/queue events are produced by the drag-place
+// UI on the render thread and drained here on the sim thread (SoloInputInbox, the LockstepPeer's
+// inbox re-used for the peerless solo path).
+void SampleSolo(void* Ctx, const Rps::Sim&, uint32_t, Rps::InputEvent* Out, int Cap, int& Count) {
+    Count = static_cast<Rps::SoloInputInbox*>(Ctx)->Drain(Out, Cap);
 }
 
 // Human (team 0) vs the single-player AI (team 1). The AI reads the sim on the sim thread —
 // right before StepEvents — so its board read is race-free (#124).
 struct SoloAiCtx {
-    SoloInputs* In;
+    Rps::SoloInputInbox* Human;
     Rps::AiController* Ai;
 };
 void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, Rps::InputEvent* Out, int Cap,
                     int& Count) {
     SoloAiCtx* C = static_cast<SoloAiCtx*>(Ctx);
-    Count = 0;
-    C->Ai->DecideEvents(S, Tick, Out, Cap, Count);  // team-1 AI; human (team 0) input joins in #139/#140
+    // Human (team 0) events first — team-0-before-team-1 is the Execute order both peers use — then
+    // the AI (team 1) fills whatever budget remains this tick.
+    Count = C->Human->Drain(Out, Cap);
+    int AiCount = 0;
+    C->Ai->DecideEvents(S, Tick, Out + Count, Cap - Count, AiCount);
+    Count += AiCount;
 }
 
 // #128: headless AI-vs-AI tier-strength harness. Because the AI is a pure InputFn over sim
@@ -379,9 +380,10 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     Lur::Log::Info("dev console: press the key left of '1' (backtick/paragraph) to open; click cvars to edit");
 #endif
 
-    SoloInputs In;
-    // Default solo opponent is the AI (team 1); you play team 0 (#124). --auto (soak) and
-    // --flockdemo (stress) keep the old random/idle P1 instead.
+    // You play team 0; drag-place buildings + tap x1/x5 to queue (#139/#140). Events go into the
+    // inbox on this (render/input) thread and are drained by the sim thread's InputFn. Default solo
+    // opponent is the AI (team 1, #124); --auto (soak) / --flockdemo (stress) run without an AI.
+    Rps::SoloInputInbox Human;
     Rps::AiController Ai;
     const bool UseAi = !Auto && !FlockDemo;
     if (UseAi) {
@@ -389,10 +391,10 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         const char* Names[] = {"easy", "medium", "hard"};
         Lur::Log::Info("solo opponent: AI (%s)", Names[static_cast<int>(AiTier)]);
     }
-    SoloAiCtx AiCtx{&In, &Ai};
+    SoloAiCtx AiCtx{&Human, &Ai};
     auto Runner = std::make_unique<Rps::SimRunner>();
     Runner->Start(Seed, UseAi ? &SampleSoloVsAi : &SampleSolo,
-                  UseAi ? static_cast<void*>(&AiCtx) : static_cast<void*>(&In),
+                  UseAi ? static_cast<void*>(&AiCtx) : static_cast<void*>(&Human),
                   static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
 
     Rps::CameraScroll Cam;
@@ -400,22 +402,33 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 #if !LUR_SHIPPING
     float DevDragY = 0.0f, DevDragMoved = 0.0f;  // drag-to-scroll the console (# 121)
 #endif
-    Lur::Sim::SplitMix64 Rng(Seed ^ 0xA11CE);
-    uint64_t AutoAccumNs = 0, PrevNs = NowNs();
+    uint64_t PrevNs = NowNs();
     static Rps::Snapshot Snap;
     int Frame = 0;
+    (void)Auto; (void)FoeOnly;  // #137b: the mask-based --auto/--autofoe soak retired (event soak = #144+)
 
     while (Win.PumpEvents()) {
         const uint64_t Now = NowNs();
         const uint64_t ElapsedNs = Now - PrevNs;
         PrevNs = Now;
+        int W = 0, H = 0;
+        Win.GetSize(&W, &H);
+        // Latest sim state for BOTH the drag-place ghost validity and the render below (a full
+        // ~90 KB copy each frame — fine on desktop; the phone consumes only on a new tick).
+        const bool HaveSnap = Runner->LatestSnapshot(Snap);
 #if !LUR_SHIPPING
         if (Win.TakeConsoleToggle()) View.SetDevOverlayOpen(!View.DevOverlayOpen());  // § key
 #endif
-        for (uint32_t Vk : Win.TakeKeys()) {
-            if (Vk >= 0x31 && Vk <= 0x34) In.P0.fetch_or(static_cast<uint8_t>(1u << (Vk - 0x31)));
-            else if (Vk >= 0x35 && Vk <= 0x38) In.P1.fetch_or(static_cast<uint8_t>(1u << (Vk - 0x35)));
-        }
+        // #139 drag-to-place: pointer pixel -> world drop, validity asked against the published
+        // snapshot's WouldAcceptPlace (the render-thread mirror of Sim's predicate), so the ghost's
+        // valid/invalid blink can never disagree with what the sim will accept. You are team 0.
+        auto DragValidity = [&](float XPx, float YPx, float& Wx, float& Wy) -> bool {
+            View.ScreenToWorld(XPx, YPx, Cam.Y, static_cast<float>(W), static_cast<float>(H),
+                               /*FlipY=*/false, Wx, Wy);
+            return Snap.WouldAcceptPlace(0, static_cast<uint8_t>(View.PlacingType()),
+                                         WorldToFixed(Wx), WorldToFixed(Wy));
+        };
+        for (uint32_t Vk : Win.TakeKeys()) (void)Vk;  // keys no longer drive units (#137b: events)
         for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
 #if !LUR_SHIPPING
             // When the console is open it eats pointer input (no camera pan under it); a click
@@ -435,44 +448,60 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 continue;
             }
 #endif
-            if (T.Phase == Lur::Input::ETouchPhase::Began) Cam.Begin(T.YPx);
-            else if (T.Phase == Lur::Input::ETouchPhase::Moved) Cam.Move(T.YPx, Ppu());
-            else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                     T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-                Cam.End();
-                if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                    const int Plate = View.OnTap(T.XPx, T.YPx);
-                    if (Plate >= 0) In.P0.fetch_or(static_cast<uint8_t>(1u << Plate));
+            // #139/#140 mirror of the loopback's HandlePeerInput: a pointer-down on a build plate
+            // starts a drag-to-place (ghost follows, valid release emits a Place event); any other
+            // drag pans the camera; a tap on a building's x1/x5 button queues units.
+            if (T.Phase == Lur::Input::ETouchPhase::Began) {
+                const int Plate = View.PlateAt(T.XPx, T.YPx);
+                if (Plate >= 0) {
+                    View.BeginPlaceDrag(Plate, T.XPx, T.YPx);  // seed at the finger (no frame-1 flash)
+                    float Wx = 0, Wy = 0;
+                    View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(T.XPx, T.YPx, Wx, Wy));
+                } else {
+                    Cam.Begin(T.YPx);
+                }
+            } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
+                if (View.IsPlacing()) {
+                    float Wx = 0, Wy = 0;
+                    View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(T.XPx, T.YPx, Wx, Wy));
+                } else {
+                    Cam.Move(T.YPx, Ppu());
+                }
+            } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
+                       T.Phase == Lur::Input::ETouchPhase::Cancelled) {
+                if (View.IsPlacing()) {
+                    bool Placed = false;
+                    if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                        float Wx = 0, Wy = 0;
+                        if (DragValidity(T.XPx, T.YPx, Wx, Wy)) {
+                            Human.Push(Rps::InputEvent::Place(0, static_cast<uint8_t>(View.PlacingType()),
+                                                             WorldToFixed(Wx), WorldToFixed(Wy)));
+                            Placed = true;
+                        }
+                    }
+                    View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
+                } else {
+                    Cam.End();
+                    if (T.Phase == Lur::Input::ETouchPhase::Ended && View.OnTap(T.XPx, T.YPx) == -1) {
+                        // Not the HUD/selector -> maybe a per-building x1/x5 button (#140).
+                        int32_t Slot = -1;
+                        const int Cnt = View.OnProductionButton(T.XPx, T.YPx, Slot);
+                        if (Cnt > 0) Human.Push(Rps::InputEvent::Queue(0, Slot, Cnt));
+                    }
                 }
             }
         }
-#if LUR_INTERNAL
-        if (Auto) {
-            AutoAccumNs += ElapsedNs;
-            if (AutoAccumNs > 200'000'000ull) {
-                AutoAccumNs = 0;
-                if (!FoeOnly) In.P0.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));  // you: manual if FoeOnly
-                In.P1.fetch_or(static_cast<uint8_t>(1u << Rng.NextBounded(4)));                // the opponent always mashes
-            }
-        }
-#else
-        (void)Auto;
-#endif
-        if (Runner->LatestSnapshot(Snap)) {
-            int W = 0, H = 0;
-            Win.GetSize(&W, &H);
+        if (HaveSnap && W > 0 && H > 0) {
             const float GameW = static_cast<float>(W);
-            if (W > 0 && H > 0) {
-                const float VisibleH = static_cast<float>(H) / Ppu();
-                const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-                const float MaxCam = FieldMax + View.TopHudWorldUnits(GameW);
-                const float MinCam = -View.BottomHudWorldUnits(GameW);
-                if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
-                Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
-                View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, GameW,
-                            static_cast<float>(H), /*FlipY=*/false,
-                            static_cast<float>(ElapsedNs) / 1.0e9f);  // solo = team-0 view
-            }
+            const float VisibleH = static_cast<float>(H) / Ppu();
+            const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
+            const float MaxCam = FieldMax + View.TopHudWorldUnits(GameW);
+            const float MinCam = -View.BottomHudWorldUnits(GameW);
+            if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
+            Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
+            View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, GameW,
+                        static_cast<float>(H), /*FlipY=*/false,
+                        static_cast<float>(ElapsedNs) / 1.0e9f);  // solo = team-0 view
         }
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
             Lur::Log::Info("rendered %d frames headless (tick %u) - exiting", Frame,
