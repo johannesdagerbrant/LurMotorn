@@ -64,6 +64,7 @@ struct Snapshot {
     // bar scaled to building HP.
     int32_t BuildingCost[UnitCount] = {};
     int32_t BuildingMaxHp[UnitCount] = {};
+    int32_t HomeBaseMaxHp = 0;   // #146: the HQ's max HP (Type is UnitNone, so not in BuildingMaxHp[])
 
     Snapshot() { std::memcpy(Units, UnitTable, sizeof(Units)); }
 
@@ -107,12 +108,15 @@ struct Snapshot {
             BuildingCost[K] = BuildingCostFor(S.Cv, static_cast<uint8_t>(K));   // #139/#140 placement price
             BuildingMaxHp[K] = BuildingHpFor(S.Cv, static_cast<uint8_t>(K));    // #140 building health-bar scale
         }
+        HomeBaseMaxHp = S.Cv.HomeBaseHp;   // #146 HQ health-bar scale
         PublishNs = InPublishNs;
         StepNs = InStepNs;
     }
 
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
-    bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }  // #139
+    // #139/#146: any static structure (producing building OR the home base) — matches Sim::IsBuilding.
+    bool IsBuilding(int32_t I) const { return Kind[I] != KindUnit; }
+    bool IsHomeBase(int32_t I) const { return Kind[I] == KindHomeBase; }  // #146 the HQ
 
     // int64 squared distance on Fixed raws (matches Sim.cpp's Dist2) — overflow-safe.
     static int64_t Dist2Raw(Fixed Ax, Fixed Ay, Fixed Bx, Fixed By) {

@@ -141,7 +141,11 @@ static void TestRunnerPublishesSnapshots() {
     R->Stop();
 
     CHECK(Got);
-    CHECK(Snap.Count == 0);  // empty pre-placement: no start-miners, no camp until one is placed
+    CHECK(Snap.Count == 2);  // #146: only the two auto-placed HOME BASES — no start-miners, no camp yet
+    int32_t Homes = 0;
+    for (int32_t I = 0; I < Snap.Count; ++I)
+        if (Snap.IsAlive(I) && Snap.IsHomeBase(I)) ++Homes;
+    CHECK(Homes == 2);  // one HQ per team, present from tick 0
     CHECK(Snap.Tick >= 3);
     // Every live unit sits inside the world bounds.
     bool InBounds = true;

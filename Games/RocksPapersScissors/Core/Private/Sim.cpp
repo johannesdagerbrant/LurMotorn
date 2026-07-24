@@ -247,10 +247,16 @@ void AddThreat(const Sim& S, int32_t M, int32_t J, ThreatSet& T) {
     if (S.Type[J] == UnitMiner || S.Team[J] == S.Team[M]) return;  // only enemy warriors raid
     if (ChebRaw(S, M, J) <= GuardAlertRaw) T.Set(J);
 }
+// A protected asset raises the raider alert: a miner-type slot (cart or camp, the original set) or
+// (#146) the HOME BASE. Enemy soldiers within GuardAlertR of one are flagged so friendly defenders
+// interpose to screen it. (Type==UnitMiner preserves the pre-#146 set verbatim; home base is added.)
+bool IsGuardedAsset(const Sim& S, int32_t M) {
+    return S.Type[M] == UnitMiner || S.IsHomeBase(M);
+}
 void BuildThreatBrute(const Sim& S, ThreatSet& T) {
     T.Clear();
     for (int32_t M = 0; M < S.Count; ++M) {
-        if (!S.IsAlive(M) || S.Type[M] != UnitMiner) continue;
+        if (!S.IsAlive(M) || !IsGuardedAsset(S, M)) continue;
         for (int32_t J = 0; J < S.Count; ++J)
             if (S.IsAlive(J)) AddThreat(S, M, J, T);
     }
@@ -260,7 +266,7 @@ void BuildThreatBrute(const Sim& S, ThreatSet& T) {
 void BuildThreatGrid(const Sim& S, const Grid& G, ThreatSet& T) {
     T.Clear();
     for (int32_t M = 0; M < S.Count; ++M) {
-        if (!S.IsAlive(M) || S.Type[M] != UnitMiner) continue;
+        if (!S.IsAlive(M) || !IsGuardedAsset(S, M)) continue;
         const int32_t Cx0 = CellX(S.PosX[M] - GuardAlertR), Cx1 = CellX(S.PosX[M] + GuardAlertR);
         const int32_t Cy0 = CellY(S.PosY[M] - GuardAlertR), Cy1 = CellY(S.PosY[M] + GuardAlertR);
         for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
@@ -274,7 +280,10 @@ void BuildThreatGrid(const Sim& S, const Grid& G, ThreatSet& T) {
 
 TargetScore ScoreOf(const Sim& S, int32_t I, int32_t J) {
     const int64_t D = ChebRaw(S, I, J);
-    return {D / TargetBandRaw, TargetPrefer(S.Type[I], S.Type[J]), D, J};
+    // #146: the enemy HOME BASE is PREY to every soldier (no RPS counter) — top target tier,
+    // regardless of the attacker's type. Its Type is UnitNone, so score it by Kind, not TargetPrefer.
+    const int32_t Prefer = S.IsHomeBase(J) ? 0 : TargetPrefer(S.Type[I], S.Type[J]);
+    return {D / TargetBandRaw, Prefer, D, J};
 }
 int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
     int32_t Best = -1;
@@ -527,6 +536,12 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     if (S.IsBuilding(J)) {
         AddRepel(Ix, Iy, Jx, Jy, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength,
                  A.SepX, A.SepY);
+        // #146: a friendly HOME BASE is a protected asset like a cart — a defender that also sees a
+        // raider steers to screen it (reuses the #98 interpose accumulator, so no new force/tuning).
+        if (S.IsHomeBase(J) && S.Team[J] == S.Team[I] &&
+            Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
+            A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;
+        }
         return;
     }
     if (S.Team[J] == S.Team[I]) {
@@ -829,9 +844,21 @@ bool HasPendingProduction(const Sim& S, uint8_t Team) {
 // never make a unit or gold again — doomed, however many buildings stand. A gold-carrying cart
 // IS a unit (AliveCount counts it), so stranded-gold needs no special case.
 void WinCheck(Sim& S) {
+    // #146: the DECISIVE condition — a team whose HOME BASE is destroyed loses at once (the killing
+    // blow). Both bases stand from Init, so this can't false-fire pre-match. The old economic
+    // exhaustion (no units + can't rebuy + nothing queued) stays only as a STALEMATE net (both
+    // sides mined out with no army/base contact), so a starved match still resolves.
+    bool HomeAlive[2] = {false, false};
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsHomeBase(I)) HomeAlive[S.Team[I]] = true;
+    // Only apply the home-base rule in a real match — one where home bases exist (Init places both).
+    // Synthetic/degenerate fields with NO home base (unit-tests' ClearField scenarios) fall back to
+    // the economic net alone, so a base-less test sim never trips a spurious loss/draw.
+    const bool AnyHome = HomeAlive[0] || HomeAlive[1];
     bool Lose[2];
     for (uint8_t T = 0; T < 2; ++T)
-        Lose[T] = S.AliveCount(T) == 0 && S.Teams[T].Gold < CheapestCost && !HasPendingProduction(S, T);
+        Lose[T] = (AnyHome && !HomeAlive[T])  // home base razed = decisive loss
+               || (S.AliveCount(T) == 0 && S.Teams[T].Gold < CheapestCost && !HasPendingProduction(S, T));
     if (Lose[0] && Lose[1]) S.Result = ResultDraw;  // both this tick -> draw (simultaneous damage makes it reachable)
     else if (Lose[0]) S.Result = ResultTeam1Wins;
     else if (Lose[1]) S.Result = ResultTeam0Wins;
@@ -860,6 +887,7 @@ void ApplyPlace(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
 void ApplyQueue(Sim& S, uint8_t Team, int32_t Slot, int32_t Count) {
     if (Slot < 0 || Slot >= S.Count) return;
     if (!S.IsAlive(Slot) || !S.IsBuilding(Slot) || S.Team[Slot] != Team) return;
+    if (S.IsHomeBase(Slot)) return;  // #146: the HQ produces nothing (Type is UnitNone — no Units[] index)
     const uint8_t Ty = S.Type[Slot];
     const int32_t UnitCost = S.Units[Ty].Cost;
     const int32_t Cap = S.Cv.BuildingQueueMax;
@@ -869,6 +897,25 @@ void ApplyQueue(Sim& S, uint8_t Team, int32_t Slot, int32_t Count) {
         S.Teams[Team].Gold -= UnitCost;
         ++S.Queue[Slot];
     }
+}
+
+// #146: auto-place a team's HOME BASE (the HQ) at its baseline centre. Inert structure — no
+// production/gathering/attack — with Cv.HomeBaseHp and Type=UnitNone (produces nothing). Called
+// twice at Init (slots 0/1). Destroying it wins the match (WinCheck).
+void SpawnHomeBase(Sim& S, uint8_t Team) {
+    const int32_t I = AllocSlot(S);
+    LUR_ASSERT_MSG(I >= 0, "RPS: slot exhausted placing a home base");
+    if (I < 0) return;
+    const Fixed X = CampX, Y = Sim::CampY(Team);
+    S.PosX[I] = X;  S.PosY[I] = Y;  S.PrevX[I] = X;  S.PrevY[I] = Y;  // static -> Δ=0
+    S.Hp[I] = S.Cv.HomeBaseHp;
+    S.Type[I] = UnitNone;          // produces nothing (never indexes Units[]; targeting is prey by Kind)
+    S.Team[I] = Team;
+    S.Kind[I] = KindHomeBase;
+    S.Target[I] = -1;  S.Cooldown[I] = 0;  S.Queue[I] = 0;  S.BuildProgress[I] = 0;
+    S.WorkerState[I] = WorkToMine;  S.Carry[I] = 0;  S.WorkerTimer[I] = 0;
+    SetAlive(S, I);
+    if (I + 1 > S.Count) S.Count = I + 1;
 }
 
 // The tick body shared by Step(mask) and StepEvents — everything after phase-0 input. Kept as
@@ -971,6 +1018,10 @@ void Sim::Init(uint64_t InSeed) {
     FrontierT0 = Cv.InitialFrontier;
     FrontierT1 = WorldHeight - Cv.InitialFrontier;
     BuildMap(*this);
+    // #146: each team's HOME BASE (the HQ) is placed at its baseline centre before tick 0 (slots
+    // 0/1). It's the win target — destroy the enemy's to win. Auto-placed (never dragged), so it's
+    // there from the first frame while the player still drags mining camps to build the economy.
+    for (uint8_t T = 0; T < 2; ++T) SpawnHomeBase(*this, T);
     // #135/§9: the match starts with ONLY gold — no start-miners, no start buildings. Each team
     // must place its mining camp (the forced first building, ApplyPlace) to begin producing;
     // gold flows once that camp's miners are out and mining. The pre-tick-0 opening is the

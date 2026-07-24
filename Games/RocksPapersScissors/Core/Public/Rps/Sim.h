@@ -41,7 +41,11 @@ constexpr int MaxEventsPerTick = 16;
 // live in the SAME per-unit SoA — a slot with Kind==KindBuilding reuses Hp/Team/Pos/AliveBits
 // with building meaning (Type = the unit type it PRODUCES; §7 targeting treats it as that
 // type). KindUnit==0 so a zero-initialised (or legacy) slot is a unit by default.
-enum EKind : uint8_t { KindUnit = 0, KindBuilding = 1 };
+// #146: KindHomeBase is the HQ — a static structure like a building (repelled around, targetable,
+// footprint-blocking, no army count) but INERT (no production/gathering/attack) and prey to every
+// enemy soldier. Type is UnitNone (it produces nothing); Hp = Cv.HomeBaseHp. IsBuilding() is true
+// for BOTH structure kinds (all the "static structure" logic applies); IsHomeBase() singles it out.
+enum EKind : uint8_t { KindUnit = 0, KindBuilding = 1, KindHomeBase = 2 };
 
 // Per-team economy state. Production is per-BUILDING now (#132: Queue/BuildProgress live on
 // the SoA slot), so this slimmed to just the team's gold — the parallel per-type camp queues
@@ -169,7 +173,10 @@ struct Sim {
 
     // ---- Read helpers (tests / view) ----
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
-    bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }   // #131
+    // #131/#146: any static structure (producing building OR the home base) — the "not a mobile
+    // unit" test all the structure logic (repel, no-target-acquire, footprint, no army count) uses.
+    bool IsBuilding(int32_t I) const { return Kind[I] != KindUnit; }
+    bool IsHomeBase(int32_t I) const { return Kind[I] == KindHomeBase; }   // #146 the HQ
     int32_t AliveCount(uint8_t TeamId) const;
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }
 };

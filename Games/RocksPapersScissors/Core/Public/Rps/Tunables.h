@@ -113,6 +113,12 @@ LUR_CVAR_T(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFla
 LUR_CVAR_T(CvPaperBuildingCost,   "rps.unit.paper.building_cost",   150, CVarFlagAffectsGameplay, "Gold to place a Paper building");
 LUR_CVAR_T(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
 LUR_CVAR_T(CvScissorBuildingCost, "rps.unit.scissor.building_cost", 150, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+// Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
+// gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
+// (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
+// match — the decisive killing blow that replaced the slow economic-exhaustion win. Tanky by
+// design: HP well above any other building (placeholder ~3x the toughest combat building).
+LUR_CVAR_T(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
 LUR_CVAR_T(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
 LUR_CVAR_T(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
@@ -409,6 +415,7 @@ LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
     IX(PaperBuildingCost,       CvPaperBuildingCost)       \
     IX(ScissorBuildingHp,       CvScissorBuildingHp)       \
     IX(ScissorBuildingCost,     CvScissorBuildingCost)     \
+    IX(HomeBaseHp,              CvHomeBaseHp)              \
     IX(BuildingQueueMax,        CvBuildingQueueMax)        \
     FX(BuildingFootprint,       CvBuildingFootprint)       \
     FX(BuildingRepelRadius,     CvBuildingRepelRadius)     \

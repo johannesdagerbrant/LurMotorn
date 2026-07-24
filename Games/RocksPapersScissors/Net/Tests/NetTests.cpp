@@ -80,7 +80,7 @@ static void TestEventBatchFuzz() {
 // lands at slot 0 (team 0) / 1 (team 1) — the combined batch applies team 0's place before team 1's.
 static void DriveInput(LockstepPeer& P, uint8_t Team, int TickIdx) {
     if (TickIdx == 3)
-        P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, F(17), Team == 0 ? F(10) : F(230)));
+        P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, F(17), Team == 0 ? F(14) : F(226)));  // clear of the home base (#146)
     else if (TickIdx == 15)
         P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
 }
@@ -112,8 +112,8 @@ static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
 // (its "ready"), the camps are exchanged, and the match starts from tick 0 with both camps in.
 // Tests that don't otherwise place a camp call this so the clock actually starts.
 static void PlaceCampsAndStart(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(10)));
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(230)));
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));  // clear of the home base (#146)
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));  // clear of the home base (#146)
     for (int I = 0; I < 4 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
@@ -158,7 +158,7 @@ static void TestLockstepReadyGate() {
     B.Init(0x135, 1, Enqueue, &Qb);
 
     // Only A readies (places its camp): the match must NOT start; both clocks hold at tick 0.
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(10)));
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));  // clear of the home base (#146)
     for (int I = 0; I < 10; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
     }
@@ -166,7 +166,7 @@ static void TestLockstepReadyGate() {
     CHECK(A.ExecTick() == 0 && B.ExecTick() == 0);
 
     // B readies too -> both camps in -> the match starts and runs bit-identical.
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(230)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));  // clear of the home base (#146)
     for (int I = 0; I < 40; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
         CHECK(!A.Desynced() && !B.Desynced());

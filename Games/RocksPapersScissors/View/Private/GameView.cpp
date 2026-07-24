@@ -552,19 +552,25 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
         const bool Bldg = Snap.IsBuilding(I);  // #139: buildings are static, footprint-sized entities
+        const bool Home = Snap.IsHomeBase(I);  // #146: the HQ (Type is UnitNone — colour/glyph by Kind)
         if (Tm == My && !Bldg) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }  // buildings aren't army
         // ABSOLUTE team colours (playtest: the players sit together and compare
         // screens — team 0 is blue and team 1 red on BOTH phones, so a unit looks
         // the same wherever you see it), now a UNIQUE per-type shade of that team hue
         // so composition reads by colour as well as glyph. HUD numbers stay viewer-relative.
-        const Color C = TeamTypeTint[Tm][Ty];
+        // #146: the home base wears the base team hue (its Type would index out of the per-type table).
+        const Color C = Home ? TeamTint[Tm] : TeamTypeTint[Tm][Ty];
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
-        // A miner BUILDING wears the camp glyph; other buildings their (bigger) type glyph.
-        const int Glyph = Bldg && Ty == UnitMiner ? static_cast<int>(GlyphMineCamp) : static_cast<int>(Ty);
-        D.Size = Bldg ? BldgPx : (Ty == UnitMiner ? UnitPx * 1.5f : UnitPx);  // carts read bigger (playtest)
+        // The HOME BASE wears the (distinct) camp/fortress glyph, bigger; a miner BUILDING wears the
+        // mine-camp glyph; other buildings their (bigger) type glyph; units their type glyph.
+        const int Glyph = Home ? static_cast<int>(GlyphCamp)
+                               : (Bldg && Ty == UnitMiner ? static_cast<int>(GlyphMineCamp)
+                                                          : static_cast<int>(Ty));
+        D.Size = Home ? BldgPx * 1.6f
+                      : (Bldg ? BldgPx : (Ty == UnitMiner ? UnitPx * 1.5f : UnitPx));  // carts read bigger (playtest)
         D.U0 = static_cast<float>(Glyph) / static_cast<float>(GlyphCount); D.V0 = 0.0f;
         D.U1 = static_cast<float>(Glyph + 1) / static_cast<float>(GlyphCount); D.V1 = 1.0f;
         // Facing (soldiers only; carts + buildings stay upright): the glyph's TOP points along the
@@ -619,17 +625,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         bool FirstLocalSeen = false;   // the first (lowest-slot) local building = the camp
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I) || !Snap.IsBuilding(I)) continue;
+            const bool Home = Snap.IsHomeBase(I);         // #146: the HQ — health bar only, no production
             const uint8_t Bty = Snap.Type[I];
+            const float BSize = Home ? BldgPx * 1.6f : BldgPx;   // matches the instanced-draw size
+            const float BHalf = BSize * 0.5f;
             const float Bx = SX(FW(Snap.PosX[I])), By = SY(FW(Snap.PosY[I]));
-            if (By < -Half - 60.0f * HS || By > HeightPx + Half + 60.0f * HS) continue;  // off-screen
+            if (By < -BHalf - 60.0f * HS || By > HeightPx + BHalf + 60.0f * HS) continue;  // off-screen
 
-            // Health bar ABOVE the building (all buildings — read enemy siege progress too).
-            const int32_t MaxHp = Snap.BuildingMaxHp[Bty] > 0 ? Snap.BuildingMaxHp[Bty] : 1;
+            // Health bar ABOVE the structure (all — read enemy siege progress too; the HOME BASE bar
+            // is the win meter). Scale to the right max: the home base has its own HP, not a per-type one.
+            const int32_t MaxHp = Home ? (Snap.HomeBaseMaxHp > 0 ? Snap.HomeBaseMaxHp : 1)
+                                       : (Snap.BuildingMaxHp[Bty] > 0 ? Snap.BuildingMaxHp[Bty] : 1);
             const float HFrac = std::min(1.0f, std::max(0.0f, static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp)));
-            const float HbW = BldgPx * 0.85f, HbH = 3.0f * HS, HbY = By - Half - 5.0f * HS;
+            const float HbW = BSize * 0.85f, HbH = 3.0f * HS, HbY = By - BHalf - 5.0f * HS;
             Blit(HealthBg, Bx, HbY, HbW, HbH);
             Blit(HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH);
 
+            if (Home) continue;                // #146: the HQ produces nothing — no x1/x5 buttons/queue
             if (Snap.Team[I] != My) continue;  // production controls: your buildings only
             // #143: the FIRST building (the camp) teaches production — its buttons pulse until
             // anything is queued anywhere on it, then it's taught for the rest of the session.
@@ -663,12 +675,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const float BtnX = Bx - Half + BldgPx * 0.05f;   // just inside the icon's left edge
             const float Top = By - StackH * 0.5f;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
-            // #143 production pulse throb (the first camp only, until taught): the buttons THEMSELVES
-            // animate — scale up + brighten + saturate on the beat, walking the pulse-plate LUT.
-            const float Throb = Pulse ? 0.5f + 0.5f * std::sin(PulseT_ * 6.0f) : 0.0f;
-            const float PulseK = 1.0f + 0.16f * Throb;
-            const int PulseStep = Pulse ? static_cast<int>(Throb * (PulseSteps - 1) + 0.5f) : 0;
+            // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
+            // throbs — right after the first camp x5 is unaffordable, so pulsing it would beg for a
+            // buy the player can't make. The plate + "x1"/price brighten on the beat; the gold COIN
+            // stays gold always (it reads as the currency, not a flashing element).
             for (int K = 0; K < ProdBtnPerBldg; ++K) {
+                const bool BtnPulse = Pulse && K == 0;   // x1 only (x5 too dear at the first camp)
+                const float Throb = BtnPulse ? 0.5f + 0.5f * std::sin(PulseT_ * 6.0f) : 0.0f;
+                const float PulseK = 1.0f + 0.16f * Throb;
+                const int PulseStep = BtnPulse ? static_cast<int>(Throb * (PulseSteps - 1) + 0.5f) : 0;
                 const float BY = Top + static_cast<float>(K) * (Bh + BGap);
                 PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 const int32_t Price = UnitCost * ProdMult[K];
@@ -677,8 +692,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float Cx = BtnX + Bw * 0.5f, Cy = BY + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
                 // Plate: opacity-only throb (base colour), else the normal translucent plate.
-                Blit(Pulse ? PulsePlate[PulseStep] : ProdBtnBg, Cx, Cy, bw, bh);
-                // Text + coin glow toward crystal-clear white on the beat (afford colours only).
+                Blit(BtnPulse ? PulsePlate[PulseStep] : ProdBtnBg, Cx, Cy, bw, bh);
+                // Text glows toward crystal-clear white on the beat (afford colours only).
                 auto Glow = [&](Color C) -> Color {
                     return {C.R + (1.0f - C.R) * Throb, C.G + (1.0f - C.G) * Throb,
                             C.B + (1.0f - C.B) * Throb, 1.0f};
@@ -688,8 +703,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 Text.Draw(Renderer, L, bx, by2 + 3.0f * HS * PulseK, bw, bh * 0.42f, 14.0f * HS * PulseK,
                           Afford ? Glow(Ico) : DimC, EHAlign::Center, EVAlign::Middle, false);
                 const float LowY = by2 + bh * 0.68f;                  // lower row: coin LEFT of price
-                const Lur::Render::MaterialHandle CoinMat =
-                    Afford ? (Pulse ? CoinGlow[PulseStep] : GoldIconMat) : PlateIconDim;
+                const Lur::Render::MaterialHandle CoinMat = Afford ? GoldIconMat : PlateIconDim;  // coin stays gold
                 BlitGlyph(GlyphGold, CoinMat, Cx - 12.0f * HS * PulseK, LowY, 12.0f * HS * PulseK);
                 char PBuf[12];
                 std::snprintf(PBuf, sizeof(PBuf), "%d", Price);
@@ -874,7 +888,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     {
         bool HasLocalBuilding = false;
         for (int32_t I = 0; I < Snap.Count; ++I)
-            if (Snap.IsAlive(I) && Snap.IsBuilding(I) && Snap.Team[I] == My) { HasLocalBuilding = true; break; }
+            // #146: the auto-placed HOME BASE doesn't count — the hand teaches placing the first
+            // mining CAMP, which is still the player's first real building.
+            if (Snap.IsAlive(I) && Snap.IsBuilding(I) && !Snap.IsHomeBase(I) && Snap.Team[I] == My) {
+                HasLocalBuilding = true; break;
+            }
         if (!HasLocalBuilding && !PreviewActive_) {
             OnbHandT_ += DtSec;
             const float Period = 1.7f;

@@ -29,8 +29,10 @@ static int GFailures = 0;
 // Clear a team's alive bits — sets up win-rule edge states that are otherwise
 // tedious to reach through play. Sim state is public POD on purpose.
 static void KillTeam(Sim& S, uint8_t Team) {
+    // #146: wipe the ARMY, not the HQ — the win-rule tests below exercise the economic net
+    // (wiped + broke), which presumes the home base still stands (razing it is its own decisive rule).
     for (int32_t I = 0; I < S.Count; ++I)
-        if (S.Team[I] == Team) S.AliveBits[I >> 6] &= ~(1ull << (I & 63));
+        if (S.Team[I] == Team && !S.IsHomeBase(I)) S.AliveBits[I >> 6] &= ~(1ull << (I & 63));
 }
 
 // First alive building of (Team, Type), or -1; and whether the team has an alive miner UNIT.
@@ -212,6 +214,7 @@ static void TestSameTypeCohesionContracts() {
         S.PrevX[K] = S.PosX[K]; S.PrevY[K] = S.PosY[K];
         S.Hp[K] = UnitTable[UnitPaper].MaxHp;
         S.Type[K] = UnitPaper; S.Team[K] = 0; S.Target[K] = -1;
+        S.Kind[K] = KindUnit;   // #146: slots 0/1 held home bases from Init — reset or they'd stay static
         S.AliveBits[K >> 6] |= (1ull << (K & 63));
     }
     S.Count = 6;
@@ -544,7 +547,7 @@ static void TestCartStrandedWithoutMinerBuilding() {
 // ---- #137: StepEvents — place + queue events mutate the sim, deterministically ----
 static int32_t FirstBuilding(const Sim& S) {
     for (int32_t I = 0; I < S.Count; ++I)
-        if (S.IsAlive(I) && S.IsBuilding(I)) return I;
+        if (S.IsAlive(I) && S.IsBuilding(I) && !S.IsHomeBase(I)) return I;  // #146: skip the HQ
     return -1;
 }
 
@@ -646,6 +649,24 @@ static void TestBuildingsDoNotSaveFromLoss() {
     S.StepEvents(nullptr, 0);
     CHECK(S.AliveCount(0) == 0);          // buildings are not counted as units
     CHECK(S.Result == ResultTeam1Wins);   // team 0 loses despite its buildings
+}
+
+// #146: destroying a team's HOME BASE wins the match at once — the decisive blow, independent of
+// that team's army or gold (the old economic rule required both to run dry). Uses a real Init sim
+// (both home bases present), gives the loser a big army + wallet so ONLY the base falling can end it.
+static void TestHomeBaseDestroyedWins() {
+    static Sim S;
+    S.Init(0);
+    S.Teams[0].Gold = 1000;                                   // solvent...
+    PlaceUnit(S, S.Count, F(17), F(20), 0, UnitRock); ++S.Count;  // ...and has an army
+    int32_t Hb = -1;
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsHomeBase(I) && S.Team[I] == 0) { Hb = I; break; }
+    CHECK(Hb >= 0);
+    S.Hp[Hb] = 0;                 // razed — Deaths clears it, WinCheck sees no team-0 home base
+    S.StepEvents(nullptr, 0);
+    CHECK(!S.IsAlive(Hb));
+    CHECK(S.Result == ResultTeam1Wins);  // team 0 lost the instant its base fell, army/gold notwithstanding
 }
 
 static void TestRebuyIsNotLoss() {
@@ -794,6 +815,7 @@ int main() {
     TestMutualAnnihilationDraw();
     TestWipeoutLoses();
     TestBuildingsDoNotSaveFromLoss();
+    TestHomeBaseDestroyedWins();
     TestRebuyIsNotLoss();
     TestPendingProductionNotLoss();
     TestSoldierBuildingGatedOnMinerUnit();
