@@ -412,8 +412,12 @@ void android_main(android_app* App) {
                 PeerEverReady = true;
                 State.PeerLinked.store(true, std::memory_order_release);  // glue: View.SetLinked + blink
             }
-            // Player picked the Linked-opponent row -> leave solo and enter the peer match this iter.
-            if (State.SwitchToLinked.exchange(false, std::memory_order_acq_rel) && PeerReady) {
+            // AUTO-switch solo -> linked the instant a peer's session is ready, so BOTH peers enter
+            // lockstep within ~a frame of the same Session-ready edge — exactly the proven direct-link
+            // timing. (The manual "Linked opponent" tap drifted the two Lp.Init calls SECONDS apart:
+            // the peer that switched first ran lockstep alone, so the tick-10 anchor desynced. #147)
+            (void)State.SwitchToLinked.exchange(false, std::memory_order_acq_rel);  // pick no longer required
+            if (SoloRunning && PeerReady) {
                 SoloRunning = false;
                 State.SoloActive.store(false, std::memory_order_release);
             }

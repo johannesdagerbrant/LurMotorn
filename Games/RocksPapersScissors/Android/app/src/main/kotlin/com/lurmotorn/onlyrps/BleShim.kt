@@ -559,7 +559,11 @@ class BleShim(private val context: Context) {
             val readPeerId = characteristic.value ?: ByteArray(0)
             rememberPeer(readPeerId)   // cache for the fast cached-role reconnect next time
             val role = nativeDecideRole(deviceId, readPeerId)
-            Log.i(TAG, "read peer id: mine=${deviceId.size}B peer=${readPeerId.size}B -> " +
+            // Log the actual id STRINGS (they're ASCII hex) so a role-tie-break disagreement is
+            // diagnosable from the log — a both-peripheral deadlock means the two sides compared
+            // different bytes (#147 follow-up).
+            Log.i(TAG, "read peer id: mine=${String(deviceId, Charsets.US_ASCII)} " +
+                "peer=${String(readPeerId, Charsets.US_ASCII)} -> " +
                 if (role == ROLE_CENTRAL) "CENTRAL (keep link)" else "PERIPHERAL (defer)")
             if (role == ROLE_CENTRAL) {
                 enableNotifications(gatt)   // we keep this connection as the live link

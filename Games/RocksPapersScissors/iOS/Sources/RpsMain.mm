@@ -302,8 +302,11 @@ Rps::Fixed WorldToFixed(float Wv) {
         _View.SetLinked(true);       // adds the Linked-opponent row (green dot)
         _View.NotifyPeerLinked();    // blink the bar
     }
-    // Player picked the Linked-opponent row -> leave solo, enter the peer match below this iter.
-    if (_SwitchToLinked && PeerReady) { _SwitchToLinked = false; _SoloActive = false; _Team = 0; }
+    // AUTO-switch solo -> linked the instant the peer's session is ready, so BOTH peers enter
+    // lockstep within ~a frame of the same Session-ready edge (the proven direct-link timing). The
+    // manual tap drifted the two Lp.Init calls seconds apart -> the tick-10 anchor desynced (#147).
+    _SwitchToLinked = false;  // pick no longer required
+    if (_SoloActive && PeerReady) { _SoloActive = false; _Team = 0; }
 
     if (_SoloActive) {
         _SoloAccumNs += ElapsedNs;
