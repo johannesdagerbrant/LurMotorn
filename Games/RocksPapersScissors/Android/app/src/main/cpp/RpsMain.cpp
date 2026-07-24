@@ -32,6 +32,7 @@
 #include "Rps/AiController.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/Snapshot.h"
+#include "Rps/SoloInput.h"
 #include "Rps/Tunables.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyRps", __VA_ARGS__)
@@ -56,6 +57,12 @@ float Ppu(float WidthPx) {
 }
 float WorldHeightF() {
     return static_cast<float>(Rps::WorldHeight.Raw) / static_cast<float>(Rps::Fixed::One);
+}
+// View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
+// over the wire, so no float crosses the determinism boundary — both peers apply the same Fixed.
+Rps::Fixed WorldToFixed(float W) {
+    if (W < 0.0f) W = 0.0f;
+    return Rps::Fixed{static_cast<int32_t>(W * static_cast<float>(Rps::Fixed::One) + 0.5f)};
 }
 
 // Threading (#91): a dedicated SIM thread owns Session + Lp (pumps BLE, ticks the
@@ -94,17 +101,27 @@ struct AppState {
 
     // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
     // an AI row is picked; the sim thread starts the match, ticks it at 10 Hz, and publishes to
-    // the same Mailbox. Human is team 0; SoloHumanMask carries the human's presses. Additive —
-    // when no AI row is picked the normal peer path is untouched.
+    // the same Mailbox. Human is team 0; SoloIn carries the human's place/queue EVENTS (#139/#140,
+    // the drag-place UI, replacing the retired press mask). Additive — when no AI row is picked the
+    // normal peer path is untouched.
     std::atomic<int>     SoloAiTier{-1};    // glue -> sim: -1 none, else EAiTier ordinal
     std::atomic<bool>    SoloActive{false}; // sim -> glue: solo match running (tap routing)
-    std::atomic<uint8_t> SoloHumanMask{0};  // glue -> sim: the human's presses (OR-accumulated)
+    Rps::SoloInputInbox  SoloIn;            // glue -> sim: the human's place/queue events (thread-safe)
     Rps::Sim             SoloSim;           // SIM only (after SoloActive)
     Rps::AiController    SoloAi;            // SIM only
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
+}
+
+// #139/#140: route a local place/queue event (produced on the GLUE thread by the drag-place UI)
+// to whichever sim is live. Solo -> the thread-safe SoloIn inbox (drained by the sim thread's
+// solo tick); linked -> LockstepPeer::QueueLocalEvent (its own glue->sim inbox, #91). Both are
+// safe off the sim thread. SoloActive implies Linked, so it's checked first.
+void RouteLocalEvent(AppState* S, const Rps::InputEvent& E) {
+    if (S->SoloActive.load(std::memory_order_acquire)) S->SoloIn.Push(E);
+    else if (S->Linked.load(std::memory_order_acquire)) S->Lp.QueueLocalEvent(E);
 }
 
 #if LUR_INTERNAL
@@ -150,33 +167,76 @@ void HandleCmd(android_app* App, int32_t Cmd) {
     }
 }
 
-// Touch: taps go to the HUD first (production plates + opponent selector — the view
-// owns the hit rects, #85); a drag in the play area pans the camera (design §9).
-// View-only camera; plate presses -> the lockstep input stream.
+// Touch (#139/#140, mirror of the desktop HandlePeerInput): once a match is live (solo vs the AI,
+// or linked vs a peer) a pointer-down on a build plate starts a drag-to-place — the ghost follows
+// the finger, blinking red where the drop is invalid, and a valid release emits a Place event; any
+// other drag pans the camera (design §9); a tap on a building's x1/x5 button queues units. Taps
+// still reach the HUD first (opponent selector + dev console). View/camera are glue-only; unit
+// input crosses to the sim via RouteLocalEvent (solo inbox / Lp inbox).
 int32_t HandleInput(android_app* App, AInputEvent* Event) {
     auto* S = static_cast<AppState*>(App->userData);
     if (S == nullptr || !S->Ready || App->window == nullptr) return 0;
     if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
     const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
+    const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
     const float X = AMotionEvent_getX(Event, 0);
     const float Y = AMotionEvent_getY(Event, 0);
     const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
     const size_t Count = AMotionEvent_getPointerCount(Event);
+
+    // A match is live once SoloActive (vs AI) or Linked (vs a peer). You play LinkedTeam (0 in
+    // solo). Ghost validity is the render-thread WouldAcceptPlace over the last snapshot (the
+    // mirror of the sim's predicate), so the red/valid blink can't disagree with the sim.
+    const bool Live = S->Linked.load(std::memory_order_acquire);
+    const uint8_t MyTeam = S->LinkedTeam.load(std::memory_order_relaxed);
+    auto DragValidity = [&](float XPx, float YPx, float& Wx, float& Wy) -> bool {
+        S->View.ScreenToWorld(XPx, YPx, S->Cam.Y, W, H, MyTeam == 1, Wx, Wy);
+        return S->Snap.WouldAcceptPlace(MyTeam, static_cast<uint8_t>(S->View.PlacingType()),
+                                        WorldToFixed(Wx), WorldToFixed(Wy));
+    };
+
     switch (Action) {
-        case AMOTION_EVENT_ACTION_DOWN:
-            S->Cam.Begin(Y);
+        case AMOTION_EVENT_ACTION_DOWN: {
             S->DownX = X; S->DownY = Y;
             S->TwoFingerActive = false;
+            const int Plate = Live ? S->View.PlateAt(X, Y) : -1;
+            if (Plate >= 0) {
+                S->View.BeginPlaceDrag(Plate, X, Y);  // seed at the finger (no frame-1 flash)
+                float Wx = 0.0f, Wy = 0.0f;
+                S->View.UpdatePlaceDrag(X, Y, DragValidity(X, Y, Wx, Wy));
+            } else {
+                S->Cam.Begin(Y);
+            }
             return 1;
+        }
         case AMOTION_EVENT_ACTION_POINTER_DOWN:  // a second finger landed
             if (Count == 2) { S->TwoFingerActive = true; S->TwoDownNs = NowNs(); }
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
-            if (Count == 1) S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
+            if (S->View.IsPlacing()) {
+                float Wx = 0.0f, Wy = 0.0f;
+                S->View.UpdatePlaceDrag(X, Y, DragValidity(X, Y, Wx, Wy));
+            } else if (Count == 1) {
+                S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
+            }
             return 1;
         case AMOTION_EVENT_ACTION_POINTER_UP:
             return 1;  // the whole gesture is decided at ACTION_UP (last finger up)
         case AMOTION_EVENT_ACTION_UP: {
+            // A placement in progress commits (valid drop -> Place event) or slides back.
+            if (S->View.IsPlacing()) {
+                bool Placed = false;
+                float Wx = 0.0f, Wy = 0.0f;
+                if (DragValidity(X, Y, Wx, Wy)) {
+                    RouteLocalEvent(S, Rps::InputEvent::Place(MyTeam,
+                                        static_cast<uint8_t>(S->View.PlacingType()),
+                                        WorldToFixed(Wx), WorldToFixed(Wy)));
+                    Placed = true;
+                }
+                S->View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
+                S->TwoFingerActive = false;
+                return 1;
+            }
             S->Cam.End();
 #if !LUR_SHIPPING
             // Two-finger TRIPLE-tap opens the CVar view (dev-only; won't fire during normal
@@ -198,15 +258,17 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
 #if !LUR_SHIPPING
                 S->View.DevTap(X, Y);  // dev CVar-browser tap (no-op when hidden / off a row)
 #endif
-                // Always route to the View so the opponent selector works pre-match (the AI rows
-                // are how a solo match starts, #127). A production plate goes to whichever sim is
-                // live: the solo AI sim, else the linked peer.
-                S->View.OnTap(X, Y);            // View: glue-only (HUD/selector taps)
-                // #137b: unit input (solo AND linked) is now place/queue EVENTS. The plate-press
-                // mask is retired; drags/taps route to QueueLocalEvent with the drag-place UI in
-                // #139/#140. (The AI row selection below still starts a solo match.)
-                const int Tier = S->View.TakeAiTier();  // an AI row was picked -> start solo (#127)
-                if (Tier >= 0) S->SoloAiTier.store(Tier, std::memory_order_release);
+                // The opponent selector works pre-match (the AI rows start a solo match, #127).
+                const int Hit = S->View.OnTap(X, Y);     // -2 selector consumed, 0..3 plate, -1 world
+                const int Tier = S->View.TakeAiTier();   // an AI row was picked -> start solo (#127)
+                if (Tier >= 0) {
+                    S->SoloAiTier.store(Tier, std::memory_order_release);
+                } else if (Live && Hit == -1) {
+                    // Not the HUD/selector -> maybe a per-building x1/x5 queue button (#140).
+                    int32_t Slot = -1;
+                    const int Cnt = S->View.OnProductionButton(X, Y, Slot);
+                    if (Cnt > 0) RouteLocalEvent(S, Rps::InputEvent::Queue(MyTeam, Slot, Cnt));
+                }
             }
             S->TwoFingerActive = false;
             return 1;
@@ -312,12 +374,14 @@ void android_main(android_app* App) {
                 SoloAccumNs += ElapsedNs;
                 while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from the service loop
                     SoloAccumNs -= kStepNs;
-                    // #137b: AI (team 1) emits events; the human's (team 0) place/queue events
-                    // arrive with the drag-place UI in #139/#140 (SoloHumanMask retired).
+                    // #139/#140: the human (team 0) place/queue events drained first (team-0-before-
+                    // team-1 is the Execute order), then the AI (team 1) fills the remaining budget.
                     Rps::InputEvent Evs[Rps::MaxEventsPerTick];
-                    int Count = 0;
-                    State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs,
-                                              Rps::MaxEventsPerTick, Count);
+                    int Count = State.SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
+                    int AiCount = 0;
+                    State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Count,
+                                              Rps::MaxEventsPerTick - Count, AiCount);
+                    Count += AiCount;
                     State.SoloSim.StepEvents(Evs, Count);
                 }
                 const uint32_t T = State.SoloSim.Tick;
