@@ -906,7 +906,11 @@ void SpawnHomeBase(Sim& S, uint8_t Team) {
     const int32_t I = AllocSlot(S);
     LUR_ASSERT_MSG(I >= 0, "RPS: slot exhausted placing a home base");
     if (I < 0) return;
-    const Fixed X = CampX, Y = Sim::CampY(Team);
+    // #146/feedback: sit the HQ ~3/4 up the buildable band (which corresponds to the locked bottom
+    // camera view) — above the two low gold clusters, clear of the bottom plates — not jammed at
+    // the baseline. Depth measured from each team's end, so it's symmetric.
+    const Fixed Depth = S.Cv.InitialFrontier * F(3, 4);
+    const Fixed X = CampX, Y = Team == 0 ? Depth : WorldHeight - Depth;
     S.PosX[I] = X;  S.PosY[I] = Y;  S.PrevX[I] = X;  S.PrevY[I] = Y;  // static -> Δ=0
     S.Hp[I] = S.Cv.HomeBaseHp;
     S.Type[I] = UnitNone;          // produces nothing (never indexes Units[]; targeting is prey by Kind)
@@ -1075,6 +1079,13 @@ void Sim::StressFill(int32_t PerTeam) {
     }
 }
 #endif
+
+bool Sim::HasMinerCamp(uint8_t TeamId) const {
+    for (int32_t I = 0; I < Count; ++I)
+        if (IsAlive(I) && IsBuilding(I) && !IsHomeBase(I) && Team[I] == TeamId && Type[I] == UnitMiner)
+            return true;
+    return false;
+}
 
 int32_t Sim::AliveCount(uint8_t TeamId) const {
     // #136: alive MOBILE units only — buildings are separate entities and never count as army

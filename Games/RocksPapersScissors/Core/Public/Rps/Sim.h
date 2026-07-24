@@ -178,6 +178,9 @@ struct Sim {
     bool IsBuilding(int32_t I) const { return Kind[I] != KindUnit; }
     bool IsHomeBase(int32_t I) const { return Kind[I] == KindHomeBase; }   // #146 the HQ
     int32_t AliveCount(uint8_t TeamId) const;
+    // Has this team placed its first mining CAMP (a miner building that isn't the HQ)? Solo gates
+    // the AI on the human's opening — the AI holds until the player commits their first camp.
+    bool HasMinerCamp(uint8_t TeamId) const;
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }
 };
 

@@ -204,7 +204,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so the
     // building lands where you SEE it (above-left of the finger), not under your thumb.
     const float GhostOffPx = (static_cast<float>(S->Snap.BuildingFootprint.Raw) /
-                              static_cast<float>(Rps::Fixed::One)) * 2.0f * Ppu(W);
+                              static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu(W);
     const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
 
     switch (Action) {
@@ -423,10 +423,14 @@ void android_main(android_app* App) {
                     // team-1 is the Execute order), then the AI (team 1) fills the remaining budget.
                     Rps::InputEvent Evs[Rps::MaxEventsPerTick];
                     int Count = State.SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
-                    int AiCount = 0;
-                    State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Count,
-                                              Rps::MaxEventsPerTick - Count, AiCount);
-                    Count += AiCount;
+                    // The AI holds until the human commits its first mining camp (feedback) — no
+                    // building a lead while the player is still placing their opening camp.
+                    if (State.SoloSim.HasMinerCamp(0)) {
+                        int AiCount = 0;
+                        State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Count,
+                                                  Rps::MaxEventsPerTick - Count, AiCount);
+                        Count += AiCount;
+                    }
                     State.SoloSim.StepEvents(Evs, Count);
                 }
                 const uint32_t T = State.SoloSim.Tick;
@@ -576,7 +580,12 @@ void android_main(android_app* App) {
             const float MaxCam = FieldMax + State.View.TopHudWorldUnits(W);
             const float MinCam = -State.View.BottomHudWorldUnits(W);
             if (!State.CamInit) { State.Cam.Y = MinCam; State.CamInit = true; }
-            State.Cam.Update(DtSec, MaxCam, MinCam);  // momentum + clamp
+            // Camera LOCKED at the baseline until the local team places its first mining camp; a
+            // fresh match (no camp yet) therefore snaps the view back to the bottom. Free scroll after.
+            if (!State.Snap.HasMinerCamp(State.LinkedTeam.load(std::memory_order_relaxed)))
+                State.Cam.Y = MinCam;
+            else
+                State.Cam.Update(DtSec, MaxCam, MinCam);  // momentum + clamp
 
             // Always render — before the first published snapshot, State.Snap is the
             // default (empty) sim, which draws the field + HUD (the menu). Gating on a

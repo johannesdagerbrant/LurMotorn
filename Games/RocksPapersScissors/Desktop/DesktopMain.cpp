@@ -294,11 +294,14 @@ void SampleSoloVsAi(void* Ctx, const Rps::Sim& S, uint32_t Tick, Rps::InputEvent
                     int& Count) {
     SoloAiCtx* C = static_cast<SoloAiCtx*>(Ctx);
     // Human (team 0) events first — team-0-before-team-1 is the Execute order both peers use — then
-    // the AI (team 1) fills whatever budget remains this tick.
+    // the AI (team 1) fills whatever budget remains this tick. The AI HOLDS until the human commits
+    // its first mining camp (feedback), so it doesn't build a lead while you're still setting up.
     Count = C->Human->Drain(Out, Cap);
-    int AiCount = 0;
-    C->Ai->DecideEvents(S, Tick, Out + Count, Cap - Count, AiCount);
-    Count += AiCount;
+    if (S.HasMinerCamp(0)) {
+        int AiCount = 0;
+        C->Ai->DecideEvents(S, Tick, Out + Count, Cap - Count, AiCount);
+        Count += AiCount;
+    }
 }
 
 // #128: headless AI-vs-AI tier-strength harness. Because the AI is a pure InputFn over sim
@@ -427,7 +430,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         // doesn't hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so
         // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
         const float GhostOffPx = (static_cast<float>(Snap.BuildingFootprint.Raw) /
-                                  static_cast<float>(Rps::Fixed::One)) * 2.0f * Ppu();
+                                  static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu();
         // #139 drag-to-place: pointer pixel -> world drop, validity asked against the published
         // snapshot's WouldAcceptPlace (the render-thread mirror of Sim's predicate), so the ghost's
         // valid/invalid blink can never disagree with what the sim will accept. You are team 0.
@@ -528,7 +531,10 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             const float MaxCam = FieldMax + View.TopHudWorldUnits(GameW);
             const float MinCam = -View.BottomHudWorldUnits(GameW);
             if (!CamInit) { Cam.Y = MinCam; CamInit = true; }
-            Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
+            // Camera LOCKED at the baseline until you place your first mining camp; a fresh match
+            // (no camp yet) therefore snaps the view back to the bottom. Free scroll after.
+            if (!Snap.HasMinerCamp(0)) Cam.Y = MinCam;
+            else Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);
             View.Render(Renderer, Snap, Snap.AlphaAt(Now), Cam.Y, GameW,
                         static_cast<float>(H), /*FlipY=*/false,
                         static_cast<float>(ElapsedNs) / 1.0e9f);  // solo = team-0 view

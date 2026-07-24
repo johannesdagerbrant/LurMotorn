@@ -117,6 +117,14 @@ struct Snapshot {
     // #139/#146: any static structure (producing building OR the home base) — matches Sim::IsBuilding.
     bool IsBuilding(int32_t I) const { return Kind[I] != KindUnit; }
     bool IsHomeBase(int32_t I) const { return Kind[I] == KindHomeBase; }  // #146 the HQ
+    // Has this team placed its first mining CAMP (not the HQ)? The mains lock the camera at the
+    // baseline until the local team commits its first camp (mirrors Sim::HasMinerCamp).
+    bool HasMinerCamp(uint8_t T) const {
+        for (int32_t I = 0; I < Count; ++I)
+            if (IsAlive(I) && IsBuilding(I) && !IsHomeBase(I) && Team[I] == T && Type[I] == UnitMiner)
+                return true;
+        return false;
+    }
 
     // int64 squared distance on Fixed raws (matches Sim.cpp's Dist2) — overflow-safe.
     static int64_t Dist2Raw(Fixed Ax, Fixed Ay, Fixed Bx, Fixed By) {
