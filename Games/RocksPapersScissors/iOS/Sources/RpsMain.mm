@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
@@ -22,6 +23,7 @@
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Ble.h"
+#include "Rps/AiController.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
@@ -53,14 +55,6 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 Rps::Fixed WorldToFixed(float Wv) {
     if (Wv < 0.0f) Wv = 0.0f;
     return Rps::Fixed{static_cast<int32_t>(Wv * static_cast<float>(Rps::Fixed::One) + 0.5f)};
-}
-// #139 drag-place validity: pointer pixel -> world drop, asked against the published snapshot's
-// WouldAcceptPlace (the render-thread mirror of Sim's predicate). Fills Wx/Wy with the world drop.
-bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YPx, float CamY,
-                float W, float H, uint8_t Team, float& Wx, float& Wy) {
-    V.ScreenToWorld(XPx, YPx, CamY, W, H, Team == 1, Wx, Wy);
-    return Snap.WouldAcceptPlace(Team, static_cast<uint8_t>(V.PlacingType()),
-                                 WorldToFixed(Wx), WorldToFixed(Wy));
 }
 }  // namespace
 
@@ -110,6 +104,19 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     // #2 session score vs the linked peer (session-scoped) + a one-shot tally latch.
     int _PeerW, _PeerL, _PeerD;
     bool _Scored;
+    // #2/#127 solo-vs-AI on iOS (single-threaded — the solo sim ticks in renderFrame). Mirrors the
+    // Android session: auto-start Easy, a selector pick (re)starts a tier, a peer link offers a switch.
+    Rps::Sim _SoloSim;
+    Rps::AiController _SoloAi;
+    bool _SoloActive;
+    int _SoloTier;
+    uint64_t _SoloAccumNs;
+    bool _SoloScored;
+    std::vector<Rps::InputEvent> _SoloPending;  // human events queued (main thread), drained per tick
+    int _PendingTier;          // one-shot selector pick -> (re)start solo (-1 = none)
+    bool _SwitchToLinked;      // selector: switch from solo to the linked peer
+    bool _PeerEverReady;       // rising-edge latch for the peer-link notice
+    int _AiW[3], _AiL[3], _AiD[3];
 }
 
 - (void)loadView {
@@ -152,6 +159,10 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     _Session.SetResyncHandler([Lp] { Lp->BeginResync(); });
     _Session.Start(_Transport, _DeviceId);
     os_log(OS_LOG_DEFAULT, "OnlyRps: session started (device id %zuB)", _DeviceId.size());
+
+    // #2: open straight into a match vs the Easy AI (renderFrame consumes this on its first tick).
+    // The player can pick another tier — or the linked opponent — from the selector at any time.
+    _PendingTier = static_cast<int>(Rps::EAiTier::Easy);
 }
 
 - (void)viewDidLayoutSubviews {
@@ -269,24 +280,73 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
 
-    _Session.Tick(ElapsedNs);  // pump the BLE inbox + handshake/liveness
-    if (!_Started && _Session.IsReady()) {
-        const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
-        _Team = Team;  // per-player view flip
-        _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
-        _Started = true;
-        _View.SetLinked(true);  // opponent selector: green dot (#85)
-        os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
+    // #2/#127: consume a selector tier pick -> (re)start a solo AI match at once (even mid-match).
+    // App-open sets Easy, so a match is live immediately (the empty pre-match sim that showed no
+    // base/mines/frontier is gone).
+    if (_PendingTier >= 0) {
+        _SoloSim.Init(kMatchSeed);
+        _SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(_PendingTier));
+        _SoloActive = true; _SoloTier = _PendingTier; _SoloScored = false;
+        _SoloAccumNs = 0; _LastTick = 0xFFFFFFFFu; _Started = false; _Team = 0; _CamInit = false;
+        _SoloPending.clear();
+        os_log(OS_LOG_DEFAULT, "OnlyRps: solo AI match (re)started (tier %d)", _PendingTier);
+        _PendingTier = -1;
     }
-    if (_Started) _Lp.Tick(ElapsedNs);
-    // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
-    if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
-        _Scored = true;
-        const uint8_t R = _Lp.GetSim().Result;
-        if (R == Rps::ResultDraw) ++_PeerD;
-        else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
-        else ++_PeerL;
-        _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
+
+    // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake — that
+    // raises the "opponent link established" notice + the Linked-opponent row.
+    _Session.Tick(ElapsedNs);
+    const bool PeerReady = _Session.IsReady();
+    if (PeerReady && !_PeerEverReady) {
+        _PeerEverReady = true;
+        _View.SetLinked(true);       // adds the Linked-opponent row (green dot)
+        _View.NotifyPeerLinked();    // blink the bar
+    }
+    // Player picked the Linked-opponent row -> leave solo, enter the peer match below this iter.
+    if (_SwitchToLinked && PeerReady) { _SwitchToLinked = false; _SoloActive = false; _Team = 0; }
+
+    if (_SoloActive) {
+        _SoloAccumNs += ElapsedNs;
+        while (_SoloAccumNs >= kStepNs) {   // fixed 10 Hz
+            _SoloAccumNs -= kStepNs;
+            Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+            int Count = 0;
+            for (const Rps::InputEvent& E : _SoloPending)
+                if (Count < Rps::MaxEventsPerTick) Evs[Count++] = E;
+            _SoloPending.clear();
+            // The AI holds until the human commits its first mining camp (feedback).
+            if (_SoloSim.HasMinerCamp(0)) {
+                int AiCount = 0;
+                _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Count, Rps::MaxEventsPerTick - Count, AiCount);
+                Count += AiCount;
+            }
+            _SoloSim.StepEvents(Evs, Count);
+        }
+        if (!_SoloScored && _SoloSim.Result != Rps::ResultOngoing && _SoloTier >= 0) {
+            _SoloScored = true;
+            if (_SoloSim.Result == Rps::ResultTeam0Wins) ++_AiW[_SoloTier];
+            else if (_SoloSim.Result == Rps::ResultTeam1Wins) ++_AiL[_SoloTier];
+            else ++_AiD[_SoloTier];
+            _View.SetAiScore(_SoloTier, _AiW[_SoloTier], _AiL[_SoloTier], _AiD[_SoloTier]);
+        }
+    } else {
+        if (!_Started && PeerReady) {
+            const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
+            _Team = Team;  // per-player view flip
+            _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
+            _Started = true; _Scored = false;
+            os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
+        }
+        if (_Started) _Lp.Tick(ElapsedNs);
+        // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
+        if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
+            _Scored = true;
+            const uint8_t R = _Lp.GetSim().Result;
+            if (R == Rps::ResultDraw) ++_PeerD;
+            else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
+            else ++_PeerL;
+            _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
+        }
     }
 
 #if LUR_INTERNAL
@@ -314,16 +374,18 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
                self.view.layer.superlayer != nil ? 1 : 0,
                (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
     }
-    if (_Started) {
+    if (_Started || _SoloActive) {
         DiagAccumNs += ElapsedNs;
         if (DiagAccumNs > 2'000'000'000ull) {
             DiagAccumNs = 0;
             // presented= distinguishes "rendering but invisible" from a dead swapchain
             // (issue #73): black screen + advancing count = compositor problem; stuck
             // count = the renderer itself isn't presenting.
-            os_log(OS_LOG_DEFAULT, "OnlyRps: LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u",
-                   _Lp.ExecTick(), _Lp.GetSim().AliveCount(0), _Lp.GetSim().AliveCount(1),
-                   _Lp.Desynced() ? 1 : 0, _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u);
+            const Rps::Sim& DS = _SoloActive ? _SoloSim : _Lp.GetSim();
+            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d presented=%u",
+                   _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
+                   _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
+                   _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u);
         }
     }
 #endif
@@ -332,8 +394,9 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float H = static_cast<float>(Layer.drawableSize.height);
     const uint64_t Stamp = NowNs();
-    if (_Lp.ExecTick() != _LastTick) { _LastTick = _Lp.ExecTick(); _TickLandedNs = Stamp; }
-    _Snap.CaptureFrom(_Lp.GetSim(), _TickLandedNs, kStepNs);
+    const Rps::Sim& ActiveSim = _SoloActive ? _SoloSim : _Lp.GetSim();  // #127 solo or #76 linked
+    if (ActiveSim.Tick != _LastTick) { _LastTick = ActiveSim.Tick; _TickLandedNs = Stamp; }
+    _Snap.CaptureFrom(ActiveSim, _TickLandedNs, kStepNs);
     const float VisibleH = H / Ppu(W);
     const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
     // OS safe areas (#85 feedback): notch/status bar above the HUD, home indicator
@@ -359,6 +422,12 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
 - (float)ghostOffPxForWidth:(float)W {
     return static_cast<float>(_Snap.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
 }
+// Route a local place/queue event to whichever match is live: the solo sim's pending queue (drained
+// in renderFrame's solo tick) or the linked peer's inbox. Single-threaded, so both are safe here.
+- (void)placeLocal:(Rps::InputEvent)E {
+    if (_SoloActive) _SoloPending.push_back(E);
+    else if (_Started) _Lp.QueueLocalEvent(E);
+}
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
     CAMetalLayer* Layer = [self metalLayer];
@@ -368,12 +437,14 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     _DownX = X; _DownY = Y;
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float Off = [self ghostOffPxForWidth:W];
-    const int Plate = _Started ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
+    const bool Live = _SoloActive || _Started;
+    const int Plate = Live ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
     if (Plate >= 0) {
-        _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // seed at the offset spot (no frame-1 flash)
+        _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // sets the ghost type; seed at the offset spot
         const float H = static_cast<float>(Layer.drawableSize.height);
-        float Wx = 0, Wy = 0;
-        _View.UpdatePlaceDrag(X - Off, Y - Off, GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy));
+        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
+        _View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot (#148)
     } else {
         _Cam.Begin(Y);
     }
@@ -387,8 +458,9 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
-        float Wx = 0, Wy = 0;
-        _View.UpdatePlaceDrag(X - Off, Y - Off, GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy));
+        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
+        _View.UpdatePlaceDrag(Gsx, Gsy, V);
     } else {
         _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
     }
@@ -403,10 +475,10 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
         bool Placed = false;
-        float Wx = 0, Wy = 0;
-        if (GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy)) {
-            _Lp.QueueLocalEvent(Rps::InputEvent::Place(_Team, static_cast<uint8_t>(_View.PlacingType()),
-                                                       WorldToFixed(Wx), WorldToFixed(Wy)));
+        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
+        if (_View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy)) {
+            [self placeLocal:Rps::InputEvent::Place(_Team, static_cast<uint8_t>(_View.PlacingType()),
+                                                    WorldToFixed(Wx), WorldToFixed(Wy))];
             Placed = true;
         }
         _View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
@@ -415,13 +487,19 @@ bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YP
     _Cam.End();
     const bool Tap = (X - _DownX) * (X - _DownX) + (Y - _DownY) * (Y - _DownY) < (24.0f * 24.0f);
     if (Tap) {
-        // The opponent selector consumes its own taps; a plate tap does nothing (drag to place); a
-        // world tap may hit a building's x1/x5 queue button.
+        // The opponent selector consumes its own taps; an AI row (re)starts solo, the linked row
+        // switches to the peer; a plate tap does nothing (drag to place); a world tap may hit a
+        // building's x1/x5 queue button.
         const int Hit = _View.OnTap(X, Y);
-        if (_Started && Hit == -1) {
+        const int Tier = _View.TakeAiTier();
+        if (Tier >= 0) {
+            _PendingTier = Tier;                                   // (re)start solo at this tier (#2)
+        } else if (_View.TakePeerPick()) {
+            _SwitchToLinked = true;                                // switch to the linked peer (#2)
+        } else if ((_SoloActive || _Started) && Hit == -1) {
             int32_t Slot = -1;
             const int Cnt = _View.OnProductionButton(X, Y, Slot);
-            if (Cnt > 0) _Lp.QueueLocalEvent(Rps::InputEvent::Queue(_Team, Slot, Cnt));
+            if (Cnt > 0) [self placeLocal:Rps::InputEvent::Queue(_Team, Slot, Cnt)];
         }
     }
 }
