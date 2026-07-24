@@ -48,6 +48,20 @@ float WorldHeightF() {
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
 }
+// View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
+// over the wire, so no float crosses the determinism boundary.
+Rps::Fixed WorldToFixed(float Wv) {
+    if (Wv < 0.0f) Wv = 0.0f;
+    return Rps::Fixed{static_cast<int32_t>(Wv * static_cast<float>(Rps::Fixed::One) + 0.5f)};
+}
+// #139 drag-place validity: pointer pixel -> world drop, asked against the published snapshot's
+// WouldAcceptPlace (the render-thread mirror of Sim's predicate). Fills Wx/Wy with the world drop.
+bool GhostValid(Rps::GameView& V, const Rps::Snapshot& Snap, float XPx, float YPx, float CamY,
+                float W, float H, uint8_t Team, float& Wx, float& Wy) {
+    V.ScreenToWorld(XPx, YPx, CamY, W, H, Team == 1, Wx, Wy);
+    return Snap.WouldAcceptPlace(Team, static_cast<uint8_t>(V.PlacingType()),
+                                 WorldToFixed(Wx), WorldToFixed(Wy));
+}
 }  // namespace
 
 // A Metal-backed view: its backing layer is a CAMetalLayer, which MoltenVK turns into
@@ -93,6 +107,9 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     // proven by 898999b).
     bool _InitWhileInactive;
     bool _BecameActive;
+    // #2 session score vs the linked peer (session-scoped) + a one-shot tally latch.
+    int _PeerW, _PeerL, _PeerD;
+    bool _Scored;
 }
 
 - (void)loadView {
@@ -262,6 +279,15 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
         os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
     }
     if (_Started) _Lp.Tick(ElapsedNs);
+    // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
+    if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
+        _Scored = true;
+        const uint8_t R = _Lp.GetSim().Result;
+        if (R == Rps::ResultDraw) ++_PeerD;
+        else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
+        else ++_PeerL;
+        _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
+    }
 
 #if LUR_INTERNAL
     // Dev build: log the lockstep tick/desync every ~2 s so sync is observable from
@@ -318,41 +344,85 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
     const float MaxCam = FieldMax + _View.TopHudWorldUnits(W);
     const float MinCam = -_View.BottomHudWorldUnits(W);
     if (!_CamInit) { _Cam.Y = MinCam; _CamInit = true; }
-    _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
+    // Camera LOCKED at the baseline until you place your first mining camp (feedback) — free scroll after.
+    if (!_Snap.HasMinerCamp(_Team)) _Cam.Y = MinCam;
+    else _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
     _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1,
                  static_cast<float>(ElapsedNs) / 1.0e9f);
 }
 
-// Touch: the bottom strip is the 4 production buttons; a drag above pans the camera (§9).
+// Touch (#139/#140, mirror of the desktop/Android mains): a touch-down on a build plate starts a
+// drag-to-place (the ghost follows the finger, lifted up-left of it by ~its size so the thumb
+// doesn't hide it; a valid release emits a Place event); any other drag pans the camera; a tap on
+// a building's x1/x5 button queues units. Single-threaded here, so Lp.QueueLocalEvent is called
+// directly. Placement is gated on _Started (a live match). You play _Team.
+- (float)ghostOffPxForWidth:(float)W {
+    return static_cast<float>(_Snap.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
+}
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
-    const CGFloat S = [self metalLayer].contentsScale;
+    CAMetalLayer* Layer = [self metalLayer];
+    const CGFloat S = Layer.contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
-    _Cam.Begin(static_cast<float>(P.y * S));
-    _DownX = static_cast<float>(P.x * S); _DownY = static_cast<float>(P.y * S);
+    const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
+    _DownX = X; _DownY = Y;
+    const float W = static_cast<float>(Layer.drawableSize.width);
+    const float Off = [self ghostOffPxForWidth:W];
+    const int Plate = _Started ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
+    if (Plate >= 0) {
+        _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // seed at the offset spot (no frame-1 flash)
+        const float H = static_cast<float>(Layer.drawableSize.height);
+        float Wx = 0, Wy = 0;
+        _View.UpdatePlaceDrag(X - Off, Y - Off, GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy));
+    } else {
+        _Cam.Begin(Y);
+    }
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat S = Layer.contentsScale;
-    const float Y = static_cast<float>([touches.anyObject locationInView:self.view].y * S);
-    _Cam.Move(Y, Ppu(static_cast<float>(Layer.drawableSize.width)));  // content-drag
+    const CGPoint P = [touches.anyObject locationInView:self.view];
+    const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
+    const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+    if (_View.IsPlacing()) {
+        const float Off = [self ghostOffPxForWidth:W];
+        float Wx = 0, Wy = 0;
+        _View.UpdatePlaceDrag(X - Off, Y - Off, GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy));
+    } else {
+        _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
+    }
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
-    _Cam.End();
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat S = Layer.contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
-    (void)W; (void)H;
+    if (_View.IsPlacing()) {
+        const float Off = [self ghostOffPxForWidth:W];
+        bool Placed = false;
+        float Wx = 0, Wy = 0;
+        if (GhostValid(_View, _Snap, X - Off, Y - Off, _Cam.Y, W, H, _Team, Wx, Wy)) {
+            _Lp.QueueLocalEvent(Rps::InputEvent::Place(_Team, static_cast<uint8_t>(_View.PlacingType()),
+                                                       WorldToFixed(Wx), WorldToFixed(Wy)));
+            Placed = true;
+        }
+        _View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
+        return;
+    }
+    _Cam.End();
     const bool Tap = (X - _DownX) * (X - _DownX) + (Y - _DownY) * (Y - _DownY) < (24.0f * 24.0f);
-    if (Tap && _Started) {
-        // HUD first (#85): production plates press units; the opponent selector
-        // consumes its own taps; world taps do nothing (drag pans).
-        const int Plate = _View.OnTap(X, Y);
-        if (Plate >= 0) _Lp.SetLocalMask(static_cast<uint8_t>(1u << Plate));
+    if (Tap) {
+        // The opponent selector consumes its own taps; a plate tap does nothing (drag to place); a
+        // world tap may hit a building's x1/x5 queue button.
+        const int Hit = _View.OnTap(X, Y);
+        if (_Started && Hit == -1) {
+            int32_t Slot = -1;
+            const int Cnt = _View.OnProductionButton(X, Y, Slot);
+            if (Cnt > 0) _Lp.QueueLocalEvent(Rps::InputEvent::Queue(_Team, Slot, Cnt));
+        }
     }
 }
 @end
