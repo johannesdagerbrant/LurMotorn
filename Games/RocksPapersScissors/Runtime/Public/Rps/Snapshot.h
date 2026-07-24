@@ -114,6 +114,60 @@ struct Snapshot {
     bool IsAlive(int32_t I) const { return (AliveBits[I >> 6] >> (I & 63)) & 1ull; }
     bool IsBuilding(int32_t I) const { return Kind[I] == KindBuilding; }  // #139
 
+    // int64 squared distance on Fixed raws (matches Sim.cpp's Dist2) — overflow-safe.
+    static int64_t Dist2Raw(Fixed Ax, Fixed Ay, Fixed Bx, Fixed By) {
+        const int64_t Dx = static_cast<int64_t>(Ax.Raw) - Bx.Raw;
+        const int64_t Dy = static_cast<int64_t>(Ay.Raw) - By.Raw;
+        return Dx * Dx + Dy * Dy;
+    }
+
+    // #139 RENDER-THREAD mirror of Sim::WouldAcceptPlace / Sim::CanPlaceBuilding. The SimRunner
+    // ticks the sim on its own thread, so the drag-place ghost's valid/invalid blink (evaluated on
+    // the render thread) can't call the live Sim; this reproduces the identical predicate over the
+    // published snapshot fields, so the preview can never disagree with what the sim accepts. MUST
+    // stay in lockstep with Sim::WouldAcceptPlace/CanPlaceBuilding (change both together).
+    bool WouldAcceptPlace(uint8_t PlaceTeam, uint8_t PlaceType, Fixed X, Fixed Y) const {
+        if (PlaceType >= UnitCount || PlaceTeam > 1) return false;
+        // §9 opening gate: a miner CAMP is always placeable, but SOLDIER (non-miner) buildings are
+        // disabled until the team's first miner UNIT has spawned (a placed camp isn't enough).
+        if (PlaceType != UnitMiner) {
+            bool HasMinerUnit = false;
+            for (int32_t J = 0; J < Count; ++J)
+                if (IsAlive(J) && !IsBuilding(J) && Team[J] == PlaceTeam && Type[J] == UnitMiner) {
+                    HasMinerUnit = true; break;
+                }
+            if (!HasMinerUnit) return false;
+        }
+        if (!CanPlaceBuilding(PlaceTeam, PlaceType, X, Y)) return false;  // spatial validity (§5.1)
+        return Gold[PlaceTeam] >= BuildingCost[PlaceType];                // affordable
+    }
+
+    // Spatial-only placement validity — the snapshot mirror of Sim::CanPlaceBuilding (§5.1/§5.3).
+    bool CanPlaceBuilding(uint8_t PlaceTeam, uint8_t PlaceType, Fixed X, Fixed Y) const {
+        (void)PlaceType;  // one shared footprint for all building types (§12.2)
+        const Fixed Fp = BuildingFootprint;
+        const Fixed Edge = Fp * F(3, 2);  // ~1.5x footprint keeps the whole icon on-map (matches Sim)
+        if (X.Raw - Edge.Raw < 0 || X + Edge > WorldWidth) return false;
+        if (Y.Raw - Edge.Raw < 0 || Y + Edge > WorldHeight) return false;
+        // §5.3 frontier gate: you cannot build past your own high-water line.
+        if (PlaceTeam == 0) { if (Y > FrontierT0) return false; }
+        else                { if (Y < FrontierT1) return false; }
+        // No overlap with another building: shared footprint -> centres must be >= 2·Fp apart.
+        const int64_t TwoFp = static_cast<int64_t>(Fp.Raw) + Fp.Raw;
+        const int64_t MinBB = TwoFp * TwoFp;
+        for (int32_t J = 0; J < Count; ++J) {
+            if (!IsAlive(J) || !IsBuilding(J)) continue;
+            if (Dist2Raw(X, Y, PosX[J], PosY[J]) < MinBB) return false;
+        }
+        // No overlap with a LIVE mine (depleted mines are gone -> allowed to build over them).
+        const int64_t MinBM = static_cast<int64_t>(Fp.Raw) * Fp.Raw;
+        for (int32_t M = 0; M < NumMines; ++M) {
+            if (MineGold[M] <= 0) continue;
+            if (Dist2Raw(X, Y, MineX[M], MineY[M]) < MinBM) return false;
+        }
+        return true;
+    }
+
     // Fixed-timestep interpolation factor at render time NowNs. Clamps to [0,1] — no
     // extrapolation: if the next tick is late (sim stalled), it holds at Pos, which is
     // exactly the "freeze gracefully" behaviour the netcode wants at the ceiling.
