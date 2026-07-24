@@ -104,11 +104,17 @@ struct AppState {
     // the same Mailbox. Human is team 0; SoloIn carries the human's place/queue EVENTS (#139/#140,
     // the drag-place UI, replacing the retired press mask). Additive — when no AI row is picked the
     // normal peer path is untouched.
-    std::atomic<int>     SoloAiTier{-1};    // glue -> sim: -1 none, else EAiTier ordinal
+    std::atomic<int>     SoloAiTier{-1};    // glue -> sim: one-shot AI tier pick -> (re)start solo
     std::atomic<bool>    SoloActive{false}; // sim -> glue: solo match running (tap routing)
     Rps::SoloInputInbox  SoloIn;            // glue -> sim: the human's place/queue events (thread-safe)
     Rps::Sim             SoloSim;           // SIM only (after SoloActive)
     Rps::AiController    SoloAi;            // SIM only
+    // #2 session state machine: a real peer linking, switching from the AI match to the peer, and
+    // the per-opponent W-L-D shown in the selector (session-scoped; cross-launch persistence = #15-20).
+    std::atomic<bool>    PeerLinked{false};   // sim -> glue: a real peer connected (row + blink)
+    std::atomic<bool>    SwitchToLinked{false};  // glue -> sim: player picked the linked-opponent row
+    std::atomic<int>     AiWins_[3]{}, AiLosses_[3]{}, AiDraws_[3]{};  // vs each AI tier
+    std::atomic<int>     PeerWins_{0}, PeerLosses_{0}, PeerDraws_{0};  // vs the linked peer
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
@@ -194,16 +200,22 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         return S->Snap.WouldAcceptPlace(MyTeam, static_cast<uint8_t>(S->View.PlacingType()),
                                         WorldToFixed(Wx), WorldToFixed(Wy));
     };
+    // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb doesn't
+    // hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so the
+    // building lands where you SEE it (above-left of the finger), not under your thumb.
+    const float GhostOffPx = (static_cast<float>(S->Snap.BuildingFootprint.Raw) /
+                              static_cast<float>(Rps::Fixed::One)) * 2.0f * Ppu(W);
+    const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
 
     switch (Action) {
         case AMOTION_EVENT_ACTION_DOWN: {
             S->DownX = X; S->DownY = Y;
             S->TwoFingerActive = false;
-            const int Plate = Live ? S->View.PlateAt(X, Y) : -1;
+            const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
             if (Plate >= 0) {
-                S->View.BeginPlaceDrag(Plate, X, Y);  // seed at the finger (no frame-1 flash)
+                S->View.BeginPlaceDrag(Plate, GhX, GhY);  // seed at the offset spot (no frame-1 flash)
                 float Wx = 0.0f, Wy = 0.0f;
-                S->View.UpdatePlaceDrag(X, Y, DragValidity(X, Y, Wx, Wy));
+                S->View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
             } else {
                 S->Cam.Begin(Y);
             }
@@ -215,7 +227,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_MOVE:
             if (S->View.IsPlacing()) {
                 float Wx = 0.0f, Wy = 0.0f;
-                S->View.UpdatePlaceDrag(X, Y, DragValidity(X, Y, Wx, Wy));
+                S->View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
             } else if (Count == 1) {
                 S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
             }
@@ -227,7 +239,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             if (S->View.IsPlacing()) {
                 bool Placed = false;
                 float Wx = 0.0f, Wy = 0.0f;
-                if (DragValidity(X, Y, Wx, Wy)) {
+                if (DragValidity(GhX, GhY, Wx, Wy)) {
                     RouteLocalEvent(S, Rps::InputEvent::Place(MyTeam,
                                         static_cast<uint8_t>(S->View.PlacingType()),
                                         WorldToFixed(Wx), WorldToFixed(Wy)));
@@ -260,9 +272,11 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
 #endif
                 // The opponent selector works pre-match (the AI rows start a solo match, #127).
                 const int Hit = S->View.OnTap(X, Y);     // -2 selector consumed, 0..3 plate, -1 world
-                const int Tier = S->View.TakeAiTier();   // an AI row was picked -> start solo (#127)
+                const int Tier = S->View.TakeAiTier();   // an AI row was picked -> (re)start solo (#127/#2)
                 if (Tier >= 0) {
                     S->SoloAiTier.store(Tier, std::memory_order_release);
+                } else if (S->View.TakePeerPick()) {     // #2: linked-opponent row -> switch to the peer match
+                    S->SwitchToLinked.store(true, std::memory_order_release);
                 } else if (Live && Hit == -1) {
                     // Not the HUD/selector -> maybe a per-building x1/x5 queue button (#140).
                     int32_t Slot = -1;
@@ -335,6 +349,10 @@ void android_main(android_app* App) {
     State.View.SetCvCommitHook(&OnCvarCommit, &State);
 #endif
 
+    // #2: open straight into a match vs the Easy AI (the one-shot the sim thread consumes on its
+    // first iteration). The player can pick another tier — or the linked opponent — any time.
+    State.SoloAiTier.store(static_cast<int>(Rps::EAiTier::Easy), std::memory_order_release);
+
     // ---- SIM thread (#91): owns Session + Lp; pumps BLE, ticks the sim, publishes
     // snapshots. Runs the datagram-driven service loop OFF the render/input thread. ----
     std::thread SimThread([&State] {
@@ -342,6 +360,10 @@ void android_main(android_app* App) {
         uint32_t LastPubTick = 0xFFFFFFFFu;
         bool SoloRunning = false;          // #127 solo AI match active (sim thread)
         uint64_t SoloAccumNs = 0;          //   fixed-timestep accumulator for the local sim
+        int  SoloTier_ = -1;               // #2 current solo tier (score attribution)
+        bool SoloScored = false;           // #2 this solo match's result already tallied
+        bool LinkedScored = false;         // #2 this linked match's result already tallied
+        bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
 #if LUR_INTERNAL
         uint64_t DiagAccumNs = 0, AutoAccumNs = 0;
         // Dev-only autospam (#101): debug.lur.autoplay=1 (set before launch) floods our own
@@ -358,18 +380,41 @@ void android_main(android_app* App) {
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
             PrevTime = Now;
 
-            // ---- Solo AI match (#127): local Sim + AiController, no peer. Once a tier is
-            // picked it owns the tick + publish and the peer path below is skipped. ----
-            const int SoloTier = State.SoloAiTier.load(std::memory_order_acquire);
-            if (SoloTier >= 0 && !SoloRunning && !State.Started) {
+            // ---- Solo AI match (#127/#2): a local Sim + AiController, no peer. Picking ANY AI tier
+            // (re)starts a fresh match AT ONCE — even mid-match — via the one-shot SoloAiTier the
+            // glue sets on each selector pick. App-open stores Easy, so a match is live immediately. ----
+            const int NewTier = State.SoloAiTier.exchange(-1, std::memory_order_acq_rel);
+            if (NewTier >= 0) {
                 State.SoloSim.Init(kMatchSeed);
-                State.SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier));
-                SoloRunning = true;
+                State.SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(NewTier));
+                SoloRunning = true;  SoloTier_ = NewTier;  SoloScored = false;
+                SoloAccumNs = 0;  LastPubTick = 0xFFFFFFFFu;
+                State.Started = false;                                  // drop any linked match — solo takes over
                 State.SoloActive.store(true, std::memory_order_release);
-                State.LinkedTeam.store(0, std::memory_order_relaxed);  // you are team 0 (no view flip)
-                State.Linked.store(true, std::memory_order_release);   // glue: View.SetLinked + render HUD
-                LOGI("solo AI match started (tier %d)", SoloTier);
+                State.LinkedTeam.store(0, std::memory_order_relaxed);   // you are team 0 (no view flip)
+                State.Linked.store(true, std::memory_order_release);
+                State.Mailbox.Back().CaptureFrom(State.SoloSim, NowNs(), kStepNs);  // publish tick 0 now
+                State.Mailbox.Publish();
+                State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
+                LOGI("solo AI match (re)started (tier %d)", NewTier);
             }
+
+            // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake —
+            // that's what raises the "opponent link established" notice + the Linked-opponent row. Lp
+            // stays uninitialised until we actually enter the peer match, and no MsgInput flows until
+            // both peers do, so this only advances the Session-level handshake here.
+            State.Session.Tick(ElapsedNs);
+            const bool PeerReady = State.Session.IsReady();
+            if (PeerReady && !PeerEverReady) {
+                PeerEverReady = true;
+                State.PeerLinked.store(true, std::memory_order_release);  // glue: View.SetLinked + blink
+            }
+            // Player picked the Linked-opponent row -> leave solo and enter the peer match this iter.
+            if (State.SwitchToLinked.exchange(false, std::memory_order_acq_rel) && PeerReady) {
+                SoloRunning = false;
+                State.SoloActive.store(false, std::memory_order_release);
+            }
+
             if (SoloRunning) {
                 SoloAccumNs += ElapsedNs;
                 while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from the service loop
@@ -391,13 +436,18 @@ void android_main(android_app* App) {
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
                 }
+                // #2: tally the result ONCE (you are team 0: team-0 win = W, team-1 win = L, draw = D).
+                if (!SoloScored && State.SoloSim.Result != Rps::ResultOngoing && SoloTier_ >= 0) {
+                    SoloScored = true;
+                    if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
+                    else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
+                    else State.AiDraws_[SoloTier_].fetch_add(1);
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                continue;  // solo owns the loop; skip Session/Lp
+                continue;  // solo owns the loop; skip Lp
             }
 
-            State.Session.Tick(ElapsedNs);  // drain the BLE EventInbox + handshake/liveness
-
-            if (!State.Started && State.Session.IsReady()) {
+            if (!State.Started && PeerReady) {
                 // Team from GUID order (both phones derive it identically; smaller = team 0).
                 const uint8_t Team = State.DeviceId < State.Session.GetPeerGuid() ? 0 : 1;
                 State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Session);
@@ -418,8 +468,9 @@ void android_main(android_app* App) {
                 State.Lp.SendCvarSync();
 #endif
                 State.Started = true;
+                LinkedScored = false;  // #2 tally this match's result once
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);
-                State.Linked.store(true, std::memory_order_release);  // glue applies View.SetLinked + flip
+                State.Linked.store(true, std::memory_order_release);  // glue applies the view flip
                 LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
             }
 #if LUR_INTERNAL
@@ -438,6 +489,16 @@ void android_main(android_app* App) {
                       State.Mailbox.Back().CaptureFrom(State.Lp.GetSim(), NowNs(), kStepNs); }
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
+                }
+                // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
+                if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {
+                    LinkedScored = true;
+                    const uint8_t Me = State.LinkedTeam.load(std::memory_order_relaxed);
+                    const uint8_t R = State.Lp.GetSim().Result;
+                    if (R == Rps::ResultDraw) State.PeerDraws_.fetch_add(1);
+                    else if ((R == Rps::ResultTeam0Wins && Me == 0) || (R == Rps::ResultTeam1Wins && Me == 1))
+                        State.PeerWins_.fetch_add(1);
+                    else State.PeerLosses_.fetch_add(1);
                 }
             }
 #if LUR_INTERNAL
@@ -488,10 +549,22 @@ void android_main(android_app* App) {
             const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
             const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
 
-            if (!ViewLinkedApplied && State.Linked.load(std::memory_order_acquire)) {
-                State.View.SetLinked(true);  // opponent selector green dot (#85)
+            // #2: the Linked-opponent ROW + "opponent link established" blink appear only when a real
+            // PEER connects (not for a solo match). Fire once on the rising edge.
+            if (!ViewLinkedApplied && State.PeerLinked.load(std::memory_order_acquire)) {
+                State.View.SetLinked(true);       // adds the Linked-opponent row (green dot)
+                State.View.NotifyPeerLinked();    // blink the bar
                 ViewLinkedApplied = true;
             }
+            // #2: push the per-opponent SESSION scores to the selector (no-op when unchanged, so this
+            // only rebuilds the list on a real change).
+            for (int T = 0; T < 3; ++T)
+                State.View.SetAiScore(T, State.AiWins_[T].load(std::memory_order_relaxed),
+                                      State.AiLosses_[T].load(std::memory_order_relaxed),
+                                      State.AiDraws_[T].load(std::memory_order_relaxed));
+            State.View.SetPeerScore(State.PeerWins_.load(std::memory_order_relaxed),
+                                    State.PeerLosses_.load(std::memory_order_relaxed),
+                                    State.PeerDraws_.load(std::memory_order_relaxed));
             // Copy the latest published tick out only when it CHANGED — between ticks we
             // re-render the held snapshot with a fresh alpha (deletes the per-frame copy).
             const uint32_t Pub = State.PublishedTick.load(std::memory_order_acquire);

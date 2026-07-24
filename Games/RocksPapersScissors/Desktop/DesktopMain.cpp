@@ -406,6 +406,10 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     static Rps::Snapshot Snap;
     int Frame = 0;
     (void)Auto; (void)FoeOnly;  // #137b: the mask-based --auto/--autofoe soak retired (event soak = #144+)
+    // #2 session W-L-D per AI tier (desktop has no peer row); the current match's tier + a scored latch.
+    int SW[3] = {}, SL[3] = {}, SD[3] = {};
+    int CurTier = static_cast<int>(AiTier);
+    bool Scored = false;
 
     while (Win.PumpEvents()) {
         const uint64_t Now = NowNs();
@@ -419,6 +423,11 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 #if !LUR_SHIPPING
         if (Win.TakeConsoleToggle()) View.SetDevOverlayOpen(!View.DevOverlayOpen());  // § key
 #endif
+        // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb
+        // doesn't hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so
+        // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
+        const float GhostOffPx = (static_cast<float>(Snap.BuildingFootprint.Raw) /
+                                  static_cast<float>(Rps::Fixed::One)) * 2.0f * Ppu();
         // #139 drag-to-place: pointer pixel -> world drop, validity asked against the published
         // snapshot's WouldAcceptPlace (the render-thread mirror of Sim's predicate), so the ghost's
         // valid/invalid blink can never disagree with what the sim will accept. You are team 0.
@@ -451,19 +460,20 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             // #139/#140 mirror of the loopback's HandlePeerInput: a pointer-down on a build plate
             // starts a drag-to-place (ghost follows, valid release emits a Place event); any other
             // drag pans the camera; a tap on a building's x1/x5 button queues units.
+            const float GhX = T.XPx - GhostOffPx, GhY = T.YPx - GhostOffPx;  // #1 offset placement point
             if (T.Phase == Lur::Input::ETouchPhase::Began) {
-                const int Plate = View.PlateAt(T.XPx, T.YPx);
+                const int Plate = View.PlateAt(T.XPx, T.YPx);  // plate hit-test at the real finger
                 if (Plate >= 0) {
-                    View.BeginPlaceDrag(Plate, T.XPx, T.YPx);  // seed at the finger (no frame-1 flash)
+                    View.BeginPlaceDrag(Plate, GhX, GhY);  // seed at the offset spot (no frame-1 flash)
                     float Wx = 0, Wy = 0;
-                    View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(T.XPx, T.YPx, Wx, Wy));
+                    View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
                 } else {
                     Cam.Begin(T.YPx);
                 }
             } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
                 if (View.IsPlacing()) {
                     float Wx = 0, Wy = 0;
-                    View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(T.XPx, T.YPx, Wx, Wy));
+                    View.UpdatePlaceDrag(GhX, GhY, DragValidity(GhX, GhY, Wx, Wy));
                 } else {
                     Cam.Move(T.YPx, Ppu());
                 }
@@ -473,7 +483,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                     bool Placed = false;
                     if (T.Phase == Lur::Input::ETouchPhase::Ended) {
                         float Wx = 0, Wy = 0;
-                        if (DragValidity(T.XPx, T.YPx, Wx, Wy)) {
+                        if (DragValidity(GhX, GhY, Wx, Wy)) {
                             Human.Push(Rps::InputEvent::Place(0, static_cast<uint8_t>(View.PlacingType()),
                                                              WorldToFixed(Wx), WorldToFixed(Wy)));
                             Placed = true;
@@ -491,6 +501,26 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 }
             }
         }
+        // #2: picking an AI tier from the selector (re)starts a fresh match at that difficulty at
+        // ANY time; each tier keeps a session W-L-D shown in its row.
+        if (const int NewTier = View.TakeAiTier(); NewTier >= 0) {
+            CurTier = NewTier; Scored = false;
+            Ai.Init(Seed, /*team*/ 1, static_cast<Rps::EAiTier>(NewTier));
+            Runner->Stop();
+            Runner->Start(Seed, &SampleSoloVsAi, &AiCtx, static_cast<uint32_t>(Stress < 0 ? 0 : Stress),
+                          NoCombat);
+            CamInit = false;
+            const char* Names[] = {"easy", "medium", "hard"};
+            Lur::Log::Info("solo AI match restarted (%s)", Names[NewTier]);
+        }
+        // Tally the match result once it resolves, then keep the selector rows' scores current.
+        if (!Scored && HaveSnap && Snap.Result != Rps::ResultOngoing) {
+            Scored = true;
+            if (Snap.Result == Rps::ResultTeam0Wins) ++SW[CurTier];
+            else if (Snap.Result == Rps::ResultTeam1Wins) ++SL[CurTier];
+            else ++SD[CurTier];
+        }
+        for (int T = 0; T < 3; ++T) View.SetAiScore(T, SW[T], SL[T], SD[T]);
         if (HaveSnap && W > 0 && H > 0) {
             const float GameW = static_cast<float>(W);
             const float VisibleH = static_cast<float>(H) / Ppu();
