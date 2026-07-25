@@ -430,6 +430,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     bool CamInit = false;
 #if !LUR_SHIPPING
     float DevDragY = 0.0f, DevDragMoved = 0.0f;  // drag-to-scroll the console (# 121)
+    bool MiniDrag = false;                       // #106 dragging the minimap scrollbar
 #endif
     uint64_t PrevNs = NowNs();
     static Rps::Snapshot Snap;
@@ -489,6 +490,15 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             // starts a drag-to-place (ghost follows, valid release emits a Place event); any other
             // drag pans the camera; a tap on a building's x1/x5 button queues units.
             const float GhX = T.XPx - GhostOffPx, GhY = T.YPx - GhostOffPx;  // #1 offset placement point
+            // #106: the minimap strip owns its gesture — press jumps the view to that row, the
+            // pointer then drags it. Ahead of the plates and the world, like the rest of the HUD.
+            if (T.Phase == Lur::Input::ETouchPhase::Began) MiniDrag = View.MinimapAt(T.XPx, T.YPx);
+            if (MiniDrag) {
+                if (T.Phase == Lur::Input::ETouchPhase::Ended ||
+                    T.Phase == Lur::Input::ETouchPhase::Cancelled) MiniDrag = false;
+                else Cam.JumpTo(View.MinimapCameraY(T.YPx));
+                continue;
+            }
             if (T.Phase == Lur::Input::ETouchPhase::Began) {
                 const int Plate = View.PlateAt(T.XPx, T.YPx);  // plate hit-test at the real finger
                 if (Plate >= 0) {
@@ -497,6 +507,9 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                     const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
                     View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
                 } else {
+                    // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on
+                    // release (below), so a press that turns into a camera pan queues nothing.
+                    View.PressProductionButton(T.XPx, T.YPx);
                     Cam.Begin(T.YPx);
                 }
             } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {

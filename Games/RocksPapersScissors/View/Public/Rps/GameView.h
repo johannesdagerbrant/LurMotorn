@@ -87,10 +87,27 @@ public:
     // delay). Active=false clears it. Prevents "my camp is invisible until both players placed".
     void SetPlacedPreview(int Type, float Wx, float Wy, bool Active);
 
+    // ---- #106 minimap-as-scrollbar ----
+    // Is (XPx,YPx) on the minimap strip? The rect is touch-widened past the drawn strip (a 12px
+    // ribbon is a mouse target, not a finger one). Test this BEFORE the plates/world on a
+    // pointer-down: the strip is HUD and owns its gesture.
+    bool MinimapAt(float XPx, float YPx) const;
+    // The camera Y that centres the view on the field row under strip pixel YPx — the inverse of
+    // the strip mapping Render draws with. Same (possibly flipped) space as CameraScroll::Y, so the
+    // caller just feeds it to CameraScroll::JumpTo; clamping stays CameraScroll's job.
+    float MinimapCameraY(float YPx) const;
+
     // #140 per-building production: hit-test a tap against the x1/x5 buttons drawn over EVERY local
     // building this frame. Returns the batch COUNT (1/5) and sets OutSlot to the building's sim
     // slot, or 0 if the tap missed. The main routes a hit to QueueLocalEvent(Queue).
     int OnProductionButton(float XPx, float YPx, int32_t& OutSlot) const;
+    // #107 press feedback: acknowledge a production-button press on the pointer-DOWN, the frame it
+    // happens — the enqueue itself cannot be that fast (1 tick solo, InputDelayTicks in lockstep,
+    // both load-bearing), so the BUTTON has to say "heard you" locally. Call this from the mains'
+    // down/began path; the commit stays on the release via OnProductionButton, so a press that
+    // turns into a camera drag still doesn't queue anything. Returns true if a button was hit.
+    // Safe from the input thread (the stamp is atomic; Draw picks it up).
+    bool PressProductionButton(float XPx, float YPx);
     // Update the dragged ghost's screen position + whether the current drop is valid (the caller
     // computes validity from the authoritative sim: Sim::WouldAcceptPlace at the drop world pos).
     void UpdatePlaceDrag(float XPx, float YPx, bool Valid);
@@ -197,6 +214,7 @@ private:
     // text colour glows toward white in code. The throb walks these step LUTs.
     static constexpr int PulseSteps = 5;
     Lur::Render::MaterialHandle PulsePlate[PulseSteps] = {};  // base-colour plate, rising alpha
+    Lur::Render::MaterialHandle PressPlate[PulseSteps] = {};  // #107 LIGHT plate, rising alpha
     Lur::Render::MaterialHandle CoinGlow[PulseSteps] = {};    // gold coin -> white glow
     Lur::Render::MaterialHandle FrontierMat[2] = {};  // #141 per-team build-frontier dotted line
     // Flat-colour materials (BaseColor 0 = white, Tint = the colour).
@@ -260,6 +278,14 @@ private:
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap
+    // #106 minimap strip: its TOUCH rect + the mapping constants, captured each Render so a
+    // pointer-down can hit-test the strip and invert strip-Y back into a camera position. Same
+    // thread discipline as PlateRect (written in Render, read by the main's input path).
+    float MiniRect_[4] = {};              // touch rect {x,y,w,h} (wider than the drawn ribbon)
+    float MiniBottomPx_ = 0.0f;           // pixel the strip maps world-Y 0 to
+    float MiniHeightPx_ = 0.0f;           // strip height in pixels (world height maps across it)
+    float MiniWorldH_ = 0.0f;             // world height spanned by the strip
+    float MiniVisH_ = 0.0f;               // world units visible on screen (to centre the jump)
     // §9 opening gate: this plate's building type isn't unlocked yet, so it draws greyed and is NOT
     // a drag source (PlateAt / OnTap skip it). Refreshed from the snapshot each Draw.
     bool  PlateLocked[4] = {};
@@ -334,6 +360,15 @@ private:
     static constexpr int ProdMult[ProdBtnPerBldg] = {1, 5};
     ProdButtons ProdBtns_[MaxProdButtons];
     int ProdBtnCount_ = 0;
+    // #107 press feedback. The press is stamped on the INPUT thread (Android/iOS) and consumed by
+    // the render thread, so the hand-off is atomic — same discipline as DevTap/DevScroll. One slot
+    // is enough: a finger presses one button at a time, and a second press just restarts the flash.
+    std::atomic<int32_t> PressSlot_{-1};      // input -> render: building slot pressed
+    std::atomic<int32_t> PressBtn_{-1};       //   ... and which button of its stack (0=x1, 1=x5)
+    std::atomic<bool>    PressPending_{false};
+    static constexpr float PressFlashSec = 0.13f;   // long enough to see, short enough to feel crisp
+    int32_t FlashSlot_ = -1, FlashBtn_ = -1;  // render-thread only, latched from the atomics
+    float   FlashT_ = 0.0f;                   // counts down PressFlashSec -> 0
 
     bool Ready = false;
 };

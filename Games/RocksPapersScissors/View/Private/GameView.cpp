@@ -234,6 +234,11 @@ void GameView::CreateResources(IRenderer* Renderer) {
         PulsePlate[I] = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.40f + 0.58f * F});
         const Color G{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};  // gold -> white
         CoinGlow[I] = AtlasTinted({G.R + (1.0f - G.R) * F, G.G + (1.0f - G.G) * F, G.B + (1.0f - G.B) * F, 1.0f});
+        // #107 press LUT: a press must be unmistakable, so unlike the pulse (which only breathes in
+        // opacity on the SAME dark plate) the pressed plate goes LIGHT — the panel-light grey at a
+        // rising alpha. Its own LUT, because materials are immutable and the pulse's dark base could
+        // never read as "I got your touch" against a dark button.
+        PressPlate[I] = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.30f + 0.65f * F});
     }
     // #139 placement ghost: a translucent team-tinted silhouette while the drop is valid, and a
     // blinking red one while invalid (two alpha steps the blink alternates — materials are immutable).
@@ -439,6 +444,19 @@ int GameView::OnTap(float XPx, float YPx) {
     return -1;
 }
 
+bool GameView::MinimapAt(float XPx, float YPx) const {
+    if (!Ready || MiniRect_[2] <= 0.0f || MiniRect_[3] <= 0.0f) return false;
+    return XPx >= MiniRect_[0] && XPx <= MiniRect_[0] + MiniRect_[2] &&
+           YPx >= MiniRect_[1] && YPx <= MiniRect_[1] + MiniRect_[3];
+}
+
+float GameView::MinimapCameraY(float YPx) const {
+    if (MiniHeightPx_ <= 0.0f) return 0.0f;
+    // Invert Render's MapFy: Py = Bottom - (Fy / WorldH) * StripH  ->  Fy = (Bottom - Py) * WorldH / StripH.
+    const float Fy = (MiniBottomPx_ - YPx) * MiniWorldH_ / MiniHeightPx_;
+    return Fy - MiniVisH_ * 0.5f;  // the grabbed row lands mid-screen, not at the bottom edge
+}
+
 int GameView::PlateAt(float XPx, float YPx) const {
     if (!Ready) return -1;
     for (int Ty = 0; Ty < 4; ++Ty) {
@@ -473,6 +491,20 @@ int GameView::OnProductionButton(float XPx, float YPx, int32_t& OutSlot) const {
             }
         }
     return 0;
+}
+
+bool GameView::PressProductionButton(float XPx, float YPx) {
+    for (int B = 0; B < ProdBtnCount_; ++B)
+        for (int K = 0; K < ProdBtnPerBldg; ++K) {
+            const float* R = ProdBtns_[B].R[K];
+            if (R[2] > 0.0f && XPx >= R[0] && XPx <= R[0] + R[2] && YPx >= R[1] && YPx <= R[1] + R[3]) {
+                PressSlot_.store(ProdBtns_[B].Slot, std::memory_order_relaxed);
+                PressBtn_.store(K, std::memory_order_relaxed);
+                PressPending_.store(true, std::memory_order_release);  // publishes both stores
+                return true;
+            }
+        }
+    return false;
 }
 
 void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
@@ -699,6 +731,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Bh = (BldgPx * 0.90f - BGap) * 0.5f;     // two stacked, inside the icon height
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
+        // #107: latch a press stamped by the input thread, else age the flash out. Reading it here
+        // (once per frame, before the buttons draw) means the acknowledgement lands on the SAME
+        // frame as the touch — the queue itself still waits out the input delay, as it must.
+        if (PressPending_.exchange(false, std::memory_order_acquire)) {
+            FlashSlot_ = PressSlot_.load(std::memory_order_relaxed);
+            FlashBtn_ = PressBtn_.load(std::memory_order_relaxed);
+            FlashT_ = PressFlashSec;
+        } else if (FlashT_ > 0.0f) {
+            FlashT_ = std::max(0.0f, FlashT_ - DtSec);
+        }
 
         // #139/feedback: your committed camp while the opponent hasn't placed theirs yet. It is NOT
         // in the sim (both camps land together as tick 0's input), so without this the field read as
@@ -772,8 +814,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             for (int K = 0; K < ProdBtnPerBldg; ++K) {
                 const bool BtnPulse = Pulse && K == 0;   // x1 only (x5 too dear at the first camp)
                 const float Throb = BtnPulse ? 0.5f + 0.5f * std::sin(PulseT_ * 6.0f) : 0.0f;
-                const float PulseK = 1.0f + 0.16f * Throb;
-                const int PulseStep = BtnPulse ? static_cast<int>(Throb * (PulseSteps - 1) + 0.5f) : 0;
+                // #107 press flash: this button was just pressed -> DEPRESS it (scale in, against
+                // the pulse's scale out) and flash the plate bright. 1 at the touch, 0 when spent.
+                const float Press = (FlashT_ > 0.0f && FlashSlot_ == I && FlashBtn_ == K)
+                                        ? FlashT_ / PressFlashSec : 0.0f;
+                const float PulseK = (1.0f + 0.16f * Throb) * (1.0f - 0.18f * Press);
+                const float Lift = Press > Throb ? Press : Throb;   // brightness: the stronger of the two
+                const int PulseStep = static_cast<int>(Lift * (PulseSteps - 1) + 0.5f);
                 const float BY = Top + static_cast<float>(K) * (Bh + BGap);
                 PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 const int32_t Price = UnitCost * ProdMult[K];
@@ -782,9 +829,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float Cx = BtnX + Bw * 0.5f, Cy = BY + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
                 // Plate: opacity-only throb (base colour), else the normal translucent plate.
-                Blit(BtnPulse ? PulsePlate[PulseStep] : ProdBtnBg, Cx, Cy, bw, bh);
-                // Text glows toward crystal-clear white on the beat (afford colours only).
+                // A press wins over the pulse: LIGHT plate (#107) beats the dark breathing one (#143).
+                Blit(Press > 0.0f ? PressPlate[PulseStep]
+                                  : (BtnPulse ? PulsePlate[PulseStep] : ProdBtnBg), Cx, Cy, bw, bh);
+                // Text glows toward crystal-clear white on the beat; on a press the plate goes light
+                // under it, so the label DARKENS instead (that inversion is what reads as "pushed in").
                 auto Glow = [&](Color C) -> Color {
+                    if (Press > 0.0f) return {C.R * (1.0f - 0.8f * Press), C.G * (1.0f - 0.8f * Press),
+                                              C.B * (1.0f - 0.8f * Press), 1.0f};
                     return {C.R + (1.0f - C.R) * Throb, C.G + (1.0f - C.G) * Throb,
                             C.B + (1.0f - C.B) * Throb, 1.0f};
                 };
@@ -1060,6 +1112,18 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             return StripX + 1.5f + (Wx / FW(WorldWidth)) * (StripW - 3.0f);
         };
         const float VisH = HeightPx / P;
+        // #106: publish the strip's geometry for the input path — the touch rect is widened to the
+        // LEFT (the ribbon hugs the screen edge, so there is nowhere to grow right) to a finger-
+        // sized target, and the mapping constants let MinimapCameraY invert MapFy exactly.
+        const float MiniTouchW = 44.0f * HS;
+        MiniRect_[0] = StripX + StripW - MiniTouchW;
+        MiniRect_[1] = StripY;
+        MiniRect_[2] = MiniTouchW;
+        MiniRect_[3] = StripH;
+        MiniBottomPx_ = StripB;
+        MiniHeightPx_ = StripH;
+        MiniWorldH_ = WH;
+        MiniVisH_ = VisH;
         float WinTop = MapFy(CameraY + VisH), WinBot = MapFy(CameraY);
         if (WinTop < StripY) WinTop = StripY;
         if (WinBot > StripB) WinBot = StripB;
@@ -1082,10 +1146,17 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             D.U0 = 0.0f; D.V0 = 0.0f; D.U1 = 0.0f; D.V1 = 0.0f;  // flat material: no atlas
             D.FaceX = 0.0f; D.FaceY = 0.0f;                      // dots never rotate (reused scratch)
         };
-        const Color MiniGold{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 0.9f};
-        for (int T = 0; T < NumMines; ++T)
-            if (Snap.MineGold[T] > 0)
-                Dot(MapX(FW(Snap.MineX[T])), MapFy(FlipW(FW(Snap.MineY[T]))), 2.6f * HS, MiniGold);
+        // #104 z-order: TWO layered passes, armies first and live gold ON TOP. Gold is the
+        // decision layer — where the remaining income is tells you where to send miners, and
+        // late-game it is what the match turns on — so an army marching over a mine must not
+        // erase it. The gold pip stays bigger than a unit dot (2.6 vs 2.0) and fully opaque, so
+        // it reads as a crisp pip inside a unit blob rather than hiding under it.
+        //
+        // Separate draws rather than one append-ordered batch on purpose: the scratch holds
+        // MaxUnits instances, so a full field (4096 alive) would otherwise starve whichever
+        // layer appends LAST — i.e. exactly the mines this fixes. Two instanced draws of the
+        // same material is a rounding error next to that.
+        //
         // Units + buildings (#139: camps are placed entities now, no fixed camp dots). A building
         // reads as a bigger dot in the owner's base team colour so the two bases stand out.
         for (int32_t I = 0; I < Snap.Count; ++I) {
@@ -1094,6 +1165,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Dot(MapX(FW(Snap.PosX[I])), MapFy(FlipW(FW(Snap.PosY[I]))), Bldg ? 3.4f * HS : 2.0f * HS,
                 Bldg ? TeamTint[Snap.Team[I]] : TeamTypeTint[Snap.Team[I]][Snap.Type[I]]);
         }
+        Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
+        // Live gold, on top.
+        const Color MiniGold{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
+        M = 0;
+        for (int T = 0; T < NumMines; ++T)
+            if (Snap.MineGold[T] > 0)
+                Dot(MapX(FW(Snap.MineX[T])), MapFy(FlipW(FW(Snap.MineY[T]))), 2.6f * HS, MiniGold);
         Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
     }
 

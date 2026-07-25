@@ -13,6 +13,7 @@
 #include <sys/system_properties.h>  // debug.lur.autoplay — dev-only stress autospam (#101)
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -97,6 +98,8 @@ struct AppState {
     uint64_t LastTwoTapNs = 0;
     int TwoTapCount = 0;
     bool TwoFingerActive = false;
+    float DevDragY = 0.0f, DevDragMoved = 0.0f;    // #150 console drag-scroll (glue)
+    bool MiniDrag = false;                         // #106 dragging the minimap scrollbar (glue)
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
 
     // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
@@ -197,6 +200,35 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
     const size_t Count = AMotionEvent_getPointerCount(Event);
 
+#if !LUR_SHIPPING
+    // #150: while the console is open it OWNS the pointer — a drag ANYWHERE scrolls the cvar list,
+    // and a release that barely moved is a DevTap the overlay hit-tests (rows + numpad + the
+    // top-left X that closes it). Swallowing the gesture is the whole point: the console sits on
+    // top of a LIVE match, so a scroll must not leak through and pan the camera or start a
+    // building drag. Same gesture model as DesktopMain.cpp, so one console behaves identically on
+    // both — the drag slop is looser here because a finger jitters where a mouse doesn't.
+    if (S->View.DevOverlayOpen()) {
+        constexpr float DevTapSlopPx = 12.0f;
+        switch (Action) {
+            case AMOTION_EVENT_ACTION_DOWN:
+                S->DevDragY = Y;
+                S->DevDragMoved = 0.0f;
+                break;
+            case AMOTION_EVENT_ACTION_MOVE:
+                S->View.DevScroll(S->DevDragY - Y);  // thread-safe: an atomic the render thread drains
+                S->DevDragMoved += std::fabs(S->DevDragY - Y);
+                S->DevDragY = Y;
+                break;
+            case AMOTION_EVENT_ACTION_UP:
+                if (S->DevDragMoved < DevTapSlopPx) S->View.DevTap(X, Y);
+                break;
+            default:
+                break;  // extra fingers / cancel: consumed, but no gameplay side effect
+        }
+        return 1;
+    }
+#endif
+
     // A match is live once SoloActive (vs AI) or Linked (vs a peer). You play LinkedTeam (0 in
     // solo). Ghost validity is the render-thread WouldAcceptPlace over the last snapshot (the
     // mirror of the sim's predicate), so the red/valid blink can't disagree with the sim.
@@ -219,6 +251,14 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_DOWN: {
             S->DownX = X; S->DownY = Y;
             S->TwoFingerActive = false;
+            // #106: the minimap strip owns its gesture — press jumps the view to that row and the
+            // finger then drags it (a tap IS a teleport, a drag IS a fast-scroll). Tested before the
+            // plates and the world, and cleared here so a cancelled strip drag can't get stuck on.
+            S->MiniDrag = S->View.MinimapAt(X, Y);
+            if (S->MiniDrag) {
+                S->Cam.JumpTo(S->View.MinimapCameraY(Y));
+                return 1;
+            }
             const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
             if (Plate >= 0) {
                 S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
@@ -226,6 +266,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
                 S->View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
             } else {
+                // #107: a press on an x1/x5 button lights up NOW (the enqueue still commits on
+                // release, below, so a press that turns into a pan queues nothing).
+                S->View.PressProductionButton(X, Y);
                 S->Cam.Begin(Y);
             }
             return 1;
@@ -234,7 +277,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             if (Count == 2) { S->TwoFingerActive = true; S->TwoDownNs = NowNs(); }
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
-            if (S->View.IsPlacing()) {
+            if (S->MiniDrag) {
+                S->Cam.JumpTo(S->View.MinimapCameraY(Y));  // #106 the view tracks the finger
+            } else if (S->View.IsPlacing()) {
                 float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
                 const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
                 S->View.UpdatePlaceDrag(Gsx, Gsy, V);
@@ -245,6 +290,11 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_POINTER_UP:
             return 1;  // the whole gesture is decided at ACTION_UP (last finger up)
         case AMOTION_EVENT_ACTION_UP: {
+            if (S->MiniDrag) {  // #106: the strip consumed the whole gesture — no tap, no placement
+                S->MiniDrag = false;
+                S->TwoFingerActive = false;
+                return 1;
+            }
             // A placement in progress commits (valid drop -> Place event) or slides back.
             if (S->View.IsPlacing()) {
                 bool Placed = false;
@@ -277,9 +327,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
 #endif
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
             if (Tap && !S->TwoFingerActive) {
-#if !LUR_SHIPPING
-                S->View.DevTap(X, Y);  // dev CVar-browser tap (no-op when hidden / off a row)
-#endif
+                // (No DevTap here: an open console returns at the top of HandleInput — #150.)
                 // The opponent selector works pre-match (the AI rows start a solo match, #127).
                 const int Hit = S->View.OnTap(X, Y);     // -2 selector consumed, 0..3 plate, -1 world
                 const int Tier = S->View.TakeAiTier();   // an AI row was picked -> (re)start solo (#127/#2)
@@ -582,6 +630,9 @@ void android_main(android_app* App) {
     // Session/Lp/Sim (except Lp.SetLocalMask, atomic). ----
     bool ViewLinkedApplied = false;
     auto FramePrev = std::chrono::steady_clock::now();
+#if !LUR_SHIPPING
+    int ConsolePropCountdown = 1;   // frames until the next debug.lur.console poll
+#endif
     while (!App->destroyRequested) {
         // WAIT-EARLY, SAMPLE-LATE: spend the GPU fence-wait idle up front, BEFORE polling
         // input, so the touch we render is the freshest possible for this present (cuts
@@ -608,6 +659,22 @@ void android_main(android_app* App) {
             const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
             const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
 
+#if !LUR_SHIPPING
+            // Dev hook: `adb shell setprop debug.lur.console 1` opens the CVar console, 0 closes it —
+            // polled, so it toggles live. Exists because the console's real gesture is a TWO-finger
+            // triple-tap and `adb shell input` cannot inject multi-touch (nor can we write evdev
+            // directly: Samsung's SELinux denies /dev/input writes even to group `input`). Without
+            // this the console is unreachable from an automated on-device check. Same family as
+            // debug.lur.autoplay; compiled out of Shipping.
+            if (--ConsolePropCountdown <= 0) {
+                ConsolePropCountdown = 30;  // ~twice a second at 60 fps — a poll, not a per-frame cost
+                char ConsoleV[PROP_VALUE_MAX] = {};
+                if (__system_property_get("debug.lur.console", ConsoleV) > 0) {
+                    const bool Want = ConsoleV[0] == '1';
+                    if (Want != State.View.DevOverlayOpen()) State.View.SetDevOverlayOpen(Want);
+                }
+            }
+#endif
             // #2: the Linked-opponent ROW + "opponent link established" blink appear only when a real
             // PEER connects (not for a solo match). Fire once on the rising edge.
             if (!ViewLinkedApplied && State.PeerLinked.load(std::memory_order_acquire)) {
