@@ -361,7 +361,11 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 //                 OW  WT  ST  PR  CA  JI HY  AL  SR
 LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 50);
 LUR_AI_TIER(Medium, "medium", 4,  8,  20, 2, 20, 6,  2, 15, 60);
-LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
+// Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
+// player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
+// worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
+// that made the human's flood possible. Target/ratio now follow the human's shape.
+LUR_AI_TIER(Hard,   "hard",   5, 45,  0,  1, 5,  2,  1, 10, 55);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -374,14 +378,13 @@ LUR_AI_TIER(Hard,   "hard",   5, 10,  0,  1, 5,  2,  1, 10, 70);
 // snowball), but the AI only ever placed a building of a type when it owned NONE — so it was capped
 // at one per type, four total, and by six minutes it was banking 17k-26k gold it could never spend
 // while its army sat at 15-42 (measured with --aidiag). Capacity is the lever it was missing.
-// Measured, and the two goals FIGHT — leaving it at 4 on purpose. Deeper queues do convert the
-// leftover gold into army (at depth 6 a 4-minute match ends on ~2k banked instead of ~10k), but
-// they also commit that gold to a TYPE, and a deep queue of the wrong type is dead weight. That
-// punishes exactly the tier that re-counters fastest: at depth 6 `hard` (cadence 5) went from
-// beating easy 7-3 to LOSING 0-10 to both easy and medium, because easy (cadence 50) commits once
-// and rides it out. A correct ladder is worth more than a smaller hoard, so 4 stands until the
-// deep-queue-vs-fast-recounter interaction is designed rather than tuned around.
-LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 4, CVarFlagAffectsGameplay,
+// 8, measured — and the trade-off is real, so it is a knee, not a maximum. Deeper queues convert
+// banked gold into army (a 170s match ends on ~18k instead of ~32k), but they also commit gold to a
+// TYPE, and a deep queue of the wrong type is dead weight — which penalises the tier that
+// re-counters fastest. Measured against opponents that play DIFFERENTLY (a mirror match hides this
+// entirely, since both sides pay the same penalty): hard beats easy 8-2 at depth 8, but only 6-4 at
+// 12. Before batching existed, depth 6 alone was enough to send hard 0-10.
+LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 8, CVarFlagAffectsGameplay,
          "Units the AI keeps queued per building before it wants more capacity");
 LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffectsGameplay,
          "Gold needed to add a building, as a percent of its cost (200 = can afford two)");

@@ -211,14 +211,35 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const int32_t Gold = S.Teams[MyTeam_].Gold;
     const int32_t Depth = S.Cv.AiQueueDepth > 0 ? S.Cv.AiQueueDepth : 1;
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
-    const bool Saturated = Cap_.Owned > 0 && Cap_.Queue >= Depth;
     const bool CanAffordAnother = Gold >= Price * Factor / 100;   // Price <= a few thousand: no overflow
-    if ((Cap_.Owned == 0 && Gold >= Price) || (Saturated && CanAffordAnother)) {
+    // EXPAND on SURPLUS, not on saturation. The earlier saturation test (all buildings already
+    // carrying Depth work) could never fire, because queueing drains faster than a
+    // one-decision-per-tick AI refills — so it never concluded it needed capacity and sat on its
+    // gold. Idle gold is the honest signal, and it is what a human acts on: a recorded human win had
+    // 21 buildings to the AI's 8 (2026-07-25 flight recordings, #144).
+    if (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother) {
         Fixed X, Y;
-        if (AiPlaceSpot(S, MyTeam_, Want, X, Y))
+        if (AiPlaceSpot(S, MyTeam_, Want, X, Y)) {
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
-    } else if (Cap_.Slot >= 0 && Cap_.Queue < Depth) {
-        Out[Count++] = InputEvent::Queue(MyTeam_, Cap_.Slot, 1);
+            return;
+        }
+        // No legal spot (frontier/space) — fall through and put the gold into units instead.
+    }
+    // QUEUE IN A BATCH — top the building up to Depth in ONE event, which is what the x1/x5 plate
+    // does for a human. This was hardcoded to 1, and it was the single biggest gap in the recorded
+    // matches: the human queued 956 units in 192 decisions (x5 on 191 of them) while the AI queued
+    // 204 in 204 decisions. Worse than the ratio suggests, it left the AI's OWN buildings idle —
+    // 8 buildings could produce ~5.3 units/s but it only ever asked for ~1.2/s.
+    // Bounded by what it can pay for and by the building's queue cap; the sim re-checks both
+    // deterministically, so an over-ask is a safe no-op rather than a cheat.
+    if (Cap_.Slot >= 0 && Cap_.Queue < Depth) {
+        const int32_t UnitCost = S.Units[Want].Cost > 0 ? S.Units[Want].Cost : 1;
+        int32_t N = Depth - Cap_.Queue;
+        const int32_t Room = S.Cv.BuildingQueueMax - Cap_.Queue;
+        if (N > Room) N = Room;
+        const int32_t Affordable = Gold / UnitCost;
+        if (N > Affordable) N = Affordable;
+        if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Cap_.Slot, N);
     }
 }
 
