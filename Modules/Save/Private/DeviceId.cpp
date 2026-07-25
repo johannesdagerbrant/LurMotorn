@@ -9,14 +9,8 @@ std::string LoadOrCreateDeviceId(Store& S) {
     // Reuse an existing, well-formed id verbatim — the whole point is stability
     // across restarts.
     const std::vector<uint8_t> Existing = S.Load(DeviceIdKey);
-    if (Existing.size() == DeviceIdHexLen) {
-        bool AllHex = true;
-        for (uint8_t C : Existing) {
-            const bool Hex = (C >= '0' && C <= '9') || (C >= 'a' && C <= 'f');
-            if (!Hex) { AllHex = false; break; }
-        }
-        if (AllHex) return std::string(Existing.begin(), Existing.end());
-    }
+    const std::string Stored(Existing.begin(), Existing.end());
+    if (IsValidDeviceId(Stored)) return Stored;  // "well-formed" == what the BLE tie-break demands
 
     // Generate 128 random bits from the platform entropy source (std::random_device
     // is a non-deterministic hardware/OS source on Android and iOS alike — this is

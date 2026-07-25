@@ -143,6 +143,15 @@ struct Sim {
 
     // ---- API ----
     void Init(uint64_t Seed);
+    // #147: the same fresh-match Init, but from an EXPLICIT Cv instead of latching the global
+    // CVars. Several hashed initial values are DERIVED from Cv at Init (FrontierT0/T1 from
+    // InitialFrontier, opening Gold from StartingGold, the home base's Y from InitialFrontier),
+    // so assigning Cv after the fact is not enough to make two peers agree — the derived values
+    // stay at each peer's pre-sync value and the first anchor desyncs with no units on the field.
+    // The lockstep peer calls this pre-tick-0 with the MERGED cvar set so every derived value
+    // comes from the same Cv on both peers. InCv is BY VALUE: it may alias this Sim's own Cv,
+    // which the value-init at the top of the function wipes.
+    void InitWithCvs(uint64_t Seed, CvSnapshot InCv);
     // One 10 Hz tick driven by the tick's INPUT EVENT batch (both teams interleaved, applied in
     // array order — deterministic on both peers) — spec §6's 8 phases, in order. The 4-bit press
     // mask + Step(mask0,mask1) it replaced is gone (#145): production is now spatial (buildings).

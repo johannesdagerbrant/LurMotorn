@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 
+#include "Lur/Core/CVar.h"         // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/CVarConfig.h"  // #115: persist tuned cvars across runs
 #include "Lur/Core/Log.h"
 #include "Lur/Net/Session.h"
@@ -106,6 +107,16 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
                          [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgAnchor, D, N); });
     P.Session.SetHandler(Rps::MsgResyncChunk,
                          [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
+#if LUR_INTERNAL
+    // #147/#112: the workbench must carry the SAME message set as a phone, or a bug in the
+    // cvar-sync / fingerprint path is invisible in the two-window loopback (its whole point).
+    P.Session.SetHandler(Rps::MsgCvar,
+                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgCvar, D, N); });
+    P.Session.SetHandler(Rps::MsgCvarSync,
+                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgCvarSync, D, N); });
+    P.Session.SetHandler(Rps::MsgFingerprint,
+                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgFingerprint, D, N); });
+#endif
     // On a reconnect (blip or cold rejoin), offer our history so the peer that's behind
     // rebuilds and both resume in lockstep (proven by rps_net_tests; fires on the phones
     // over real BLE — the loopback never actually disconnects).
@@ -242,6 +253,21 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
             B->Team = BTeam;
             A->Lp.Init(Seed, ATeam, SendViaSession, &A->Session);
             B->Lp.Init(Seed, BTeam, SendViaSession, &B->Session);
+#if LUR_INTERNAL
+            // #147/#112: same exchange a phone does. Both windows share this process's globals, so
+            // the merged set is a no-op here — but running the real path keeps it exercised.
+            A->Lp.SendFingerprint();
+            B->Lp.SendFingerprint();
+            Lur::Core::CVarRegistry::ForEach([&A, &B](Lur::Core::ICVar* C) {
+                if (!C->AffectsGameplay() || !C->Overridden()) return;
+                const int Id = Rps::GameplayIdForName(C->Name());
+                if (Id < 0) return;
+                A->Lp.SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(), C->EditWallMs());
+                B->Lp.SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(), C->EditWallMs());
+            });
+            A->Lp.SendCvarSync();
+            B->Lp.SendCvarSync();
+#endif
             A->View.SetLinked(true);
             B->View.SetLinked(true);
             Started = true;
@@ -579,6 +605,18 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
                        [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgAnchor, D, N); });
     Session.SetHandler(Rps::MsgResyncChunk,
                        [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
+#if LUR_INTERNAL
+    // #147: the gameplay-CVar sync + build fingerprint (#112) were wired on the Android peer only,
+    // so this rig peer DROPPED the phone's MsgCvarSync and never sent its own — and the desktop
+    // DOES load rps-cvars.cfg (above), so a tuned PC vs an untuned phone simulated different Cv
+    // and desynced at the first anchor. Both halves of the exchange must exist on every peer.
+    Session.SetHandler(Rps::MsgCvar,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgCvar, D, N); });
+    Session.SetHandler(Rps::MsgCvarSync,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgCvarSync, D, N); });
+    Session.SetHandler(Rps::MsgFingerprint,
+                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgFingerprint, D, N); });
+#endif
     Session.SetResyncHandler([&Lp] { Lp.BeginResync(); });
     Session.Start(&Ble, Guid);
     Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", Guid.c_str());
@@ -599,6 +637,17 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
         if (!Started && Session.IsReady()) {
             const uint8_t Team = Guid < Session.GetPeerGuid() ? 0 : 1;
             Lp.Init(Seed, Team, SendViaSession, &Session);
+#if LUR_INTERNAL
+            // #147/#112: refuse a mismatched build, then exchange our (persisted rps-cvars.cfg)
+            // override set so both peers converge on ONE merged Cv before tick 0.
+            Lp.SendFingerprint();
+            Lur::Core::CVarRegistry::ForEach([&Lp](Lur::Core::ICVar* C) {
+                if (!C->AffectsGameplay() || !C->Overridden()) return;
+                const int Id = Rps::GameplayIdForName(C->Name());
+                if (Id >= 0) Lp.SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(), C->EditWallMs());
+            });
+            Lp.SendCvarSync();
+#endif
             Started = true;
             Lur::Log::Info("linked - lockstep started (team %d, peer %.8s)", Team,
                            Session.GetPeerGuid().c_str());

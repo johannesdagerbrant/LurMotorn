@@ -1008,13 +1008,20 @@ void Sim::Init(uint64_t InSeed) {
 #if !LUR_SHIPPING
     Lur::Core::CVarEnterMain();  // Init always runs post-main; arm the no-read-before-main guard (dev-only)
 #endif
-    *this = Sim{};  // value-init: zeroes every array/field (Init-time, not the hot path)
-    Seed = InSeed;
     // #112: latch the AffectsGameplay CVars into per-Sim state ONCE, at match start, from
     // the current (default, or solo-console) global values. Thereafter Cv is authoritative
     // Sim state — constant within a tick and mutated ONLY at tick boundaries by synced
     // overrides (LockstepPeer), so two peers in one process hold independent Cv. Hashed.
-    Cv = LatchCvs();
+    InitWithCvs(InSeed, LatchCvs());
+}
+
+// #147: the whole of Init downstream of the Cv latch — every initial value DERIVED from Cv is
+// built here, so re-running this with a different Cv rebuilds them all. Nothing in here may read
+// the global CVars (that is Init's job above), or the peer sync could not converge it.
+void Sim::InitWithCvs(uint64_t InSeed, CvSnapshot InCv) {
+    *this = Sim{};  // value-init: zeroes every array/field (Init-time, not the hot path)
+    Seed = InSeed;
+    Cv = InCv;
     DeriveUnits();  // #122: fill Units[] from the just-latched Cv before anything spawns
     // #133/§5.3: seed each team's frontier at the world-space initial buildable depth (NOT
     // pixel-derived). Team 0 builds up to CvInitialFrontier from its baseline (Y=0); team 1

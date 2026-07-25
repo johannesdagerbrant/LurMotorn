@@ -96,4 +96,48 @@ inline EBleRole DecideBleRole(std::string_view LocalId, std::string_view PeerId)
     return LocalId < PeerId ? EBleRole::Peripheral : EBleRole::Central;
 }
 
+// Is a dev pin currently forcing this device's role? (Always false in Shipping — there is no
+// pin.) Callers use this to leave a deliberately pinned configuration alone, and to LOG that
+// the pin is why a role looks wrong: the pin outlives the app (an Android system prop survives
+// until reboot; the iOS marker until deleted), so a stale one from an earlier rig session is a
+// prime suspect whenever the roles come out wrong — and silence made that undiagnosable (#146).
+inline bool IsBleRolePinned() {
+#if LUR_INTERNAL
+    return GBleRoleOverride >= 0;
+#else
+    return false;
+#endif
+}
+
+// #146 deadlock breaker.
+//
+// DecideBleRole is a total order, so two HEALTHY peers always get OPPOSITE answers and exactly
+// one of them is Central. Observed on hardware (Android<->iPhone), they didn't: BOTH settled on
+// Peripheral, so nobody ever connected and the link never formed — an endless "link not up".
+// That state is unrecoverable by retrying, because retrying re-runs the same comparison and
+// reaches the same answer; the #79 rediscovery watchdog loops forever on it.
+//
+// Whatever made the two sides disagree (a bad device-id read on one side, a stale dev role pin,
+// an id that isn't what the peer thinks it is), the *shape* of the deadlock is always the same
+// and is locally detectable: we connected out, were told "you are the peripheral", deferred —
+// and no peer ever came to claim Central. Do that a couple of times fruitlessly and the
+// tie-break has forfeited its credibility: stop believing it and take Central ourselves. The
+// peer, by its own decision, is a peripheral and is advertising, so a central is exactly what's
+// missing. Worst case (we were right all along and the peer is merely slow) we connect to a
+// willing peripheral — which is a working link either way.
+//
+// Deliberate exception: an explicit dev pin is never broken. The dev rig pins Android=Peripheral
+// against its central-only Windows peer, and force-taking Central there would break the rig
+// instead of fixing it. A stale pin is diagnosed from the log (IsBleRolePinned), not overridden.
+inline constexpr int BleMaxPeripheralDefers = 2;
+
+inline EBleRole DecideBleRoleBreaking(std::string_view LocalId, std::string_view PeerId,
+                                      int FruitlessDefers) {
+    const EBleRole Role = DecideBleRole(LocalId, PeerId);
+    if (Role == EBleRole::Peripheral && FruitlessDefers >= BleMaxPeripheralDefers &&
+        !IsBleRolePinned())
+        return EBleRole::Central;  // breaker: the tie-break has failed us; somebody must connect
+    return Role;
+}
+
 } // namespace Lur::Transport

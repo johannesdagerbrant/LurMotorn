@@ -266,6 +266,76 @@ static void TestCvarSyncMatchStartMerge() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 }
 
+// ---- #147: the peers boot with DIFFERENT persisted cvars (the on-device case: the Android had
+// a stale rps-cvars.cfg, the iPhone none). The merged set must land on both peers AND re-derive
+// the Cv-DEPENDENT initial state Sim::Init bakes (frontier high-water, opening gold, home-base Y)
+// — assigning Cv alone left those at each peer's pre-sync value and desynced at the first anchor
+// with no units on the field. Also pins the baseline: overlaying the merged set must start from
+// the COMPILE-TIME defaults, not from whatever this peer's globals happen to hold. ----
+static void TestCvarSyncRederivesInitState() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    const Fixed   FrontDefault = CvInitialFrontier.Default();
+    const Fixed   AlignDefault = CvWAlign.Default();
+    CHECK(GoldDefault != 400 && FrontDefault != F(60));  // the test values must actually differ
+
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    // Peer A boots with the persisted overrides live in the globals — exactly what
+    // LoadCVarConfig leaves behind — so its Sim::Init bakes Gold/Frontier/HQ-Y from THEM.
+    CvStartingGold.Set(400);
+    CvInitialFrontier.Set(F(60));
+    CvWAlign.Set(F(2));
+    A.Init(0xF00D, 0, Enqueue, &Qa);
+    A.SeedGameplayCvar(CvIdStartingGold,    400,        500);
+    A.SeedGameplayCvar(CvIdInitialFrontier, F(60).Raw,  500);
+    A.SeedGameplayCvar(CvIdWAlign,          F(2).Raw,   70);
+    // Peer B boots clean (no cvars.cfg) — the globals are back at the compile-time defaults.
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+    CvWAlign.Set(F(5));                     // B has its OWN WAlign, same wall-clock -> tie
+    B.Init(0xF00D, 1, Enqueue, &Qb);
+    B.SeedGameplayCvar(CvIdWAlign, F(5).Raw, 70);
+    CvWAlign.Set(AlignDefault);             // and B's global is reverted before the sync lands
+
+    // Before the sync, the two peers genuinely disagree — that IS the bug being fixed.
+    CHECK(A.GetSim().StateHash() != B.GetSim().StateHash());
+
+    A.SendCvarSync();
+    B.SendCvarSync();
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+
+    // Both converged on the merged Cv...
+    CHECK(A.GetSim().Cv.StartingGold == 400    && B.GetSim().Cv.StartingGold == 400);
+    CHECK(A.GetSim().Cv.InitialFrontier == F(60) && B.GetSim().Cv.InitialFrontier == F(60));
+    // ...including the wall-clock TIE, which resolves to the compile-time default on BOTH — the
+    // baseline check: overlaying onto local globals would have left A on 2 and B on 5.
+    CHECK(A.GetSim().Cv.WAlign == AlignDefault && B.GetSim().Cv.WAlign == AlignDefault);
+    // ...and the Init-DERIVED state was rebuilt from it on both peers (the #147 fix).
+    CHECK(A.GetSim().Teams[0].Gold == 400 && B.GetSim().Teams[0].Gold == 400);
+    CHECK(A.GetSim().FrontierT0 == F(60) && B.GetSim().FrontierT0 == F(60));
+    CHECK(A.GetSim().FrontierT1 == WorldHeight - F(60) && B.GetSim().FrontierT1 == A.GetSim().FrontierT1);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // covers the home base's Y too
+
+    // And a real match on the merged set stays bit-identical through several anchors (tick 10 is
+    // where the on-device desync fired).
+    for (int I = 0; I < 60; ++I) {
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.ExecTick() > 10);  // the anchor that fired on-device was actually crossed
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    CvStartingGold.Set(GoldDefault);        // leave the globals as we found them
+    CvInitialFrontier.Set(FrontDefault);
+    CvWAlign.Set(AlignDefault);
+}
+
 // ---- #112: build-fingerprint gate — identical builds pass, a mismatch is refused ----
 static void TestBuildFingerprintGate() {
     Outbox Qa, Qb;
@@ -531,6 +601,7 @@ int main() {
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();
+    TestCvarSyncRederivesInitState();
     TestBuildFingerprintGate();
 #endif
     TestLockstepExecuteCapBounded();

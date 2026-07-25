@@ -199,8 +199,25 @@ void LockstepPeer::MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs) {
 }
 
 void LockstepPeer::ApplyActiveCvars() {
-    TheSim.Cv = LatchCvs();  // reset to the compile-time defaults...
-    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(TheSim.Cv, Id, V.Raw);  // ...then overlay
+    // #147: baseline = the COMPILE-TIME defaults, NOT LatchCvs(). The merged set is expressed
+    // relative to the defaults ("absent" and "tie" both mean default), so overlaying it onto the
+    // local globals kept this peer's own persisted rps-cvars.cfg value for every unmerged id —
+    // the two peers then held different Cv despite a "successful" sync.
+    CvSnapshot Merged = DefaultCvs();
+    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(Merged, Id, V.Raw);  // ...then overlay
+    // #147: several HASHED initial values are DERIVED from Cv inside Sim::Init (each team's
+    // frontier high-water, the opening gold, the home base's Y). Assigning Cv leaves those at the
+    // value baked from this peer's PRE-sync Cv, so two peers whose persisted cvars differed
+    // desynced at the very first anchor with no units on the field. Re-run Init from the merged
+    // Cv instead, so every derived value comes from the same input on both peers.
+    //
+    // Safe because this only ever runs pre-tick-0: the transport is reliable+ordered and each
+    // peer sends MsgCvarSync (at Init) BEFORE its camp on MsgInput, so a peer's sync always
+    // lands before PeerReady_ — i.e. before the match can start. The mid-match branch exists
+    // only so a hypothetical late sync degrades to the old behaviour instead of wiping a live
+    // match; the anchor hash would then flag it.
+    if (!MatchStarted_ && TheSim.Tick == 0) TheSim.InitWithCvs(TheSim.Seed, Merged);
+    else                                    TheSim.Cv = Merged;
 }
 
 void LockstepPeer::SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs) {

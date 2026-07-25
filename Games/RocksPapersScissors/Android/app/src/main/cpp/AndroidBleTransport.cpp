@@ -116,30 +116,57 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
     g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
 }
 
-// --- JNI: the shared, cross-platform role tie-break (single source of truth). ---
+namespace {
+std::string JBytesToString(JNIEnv* Env, jbyteArray Arr) {
+    const jsize Len = Env->GetArrayLength(Arr);
+    std::string S(static_cast<std::size_t>(Len), '\0');
+    Env->GetByteArrayRegion(Arr, 0, Len, reinterpret_cast<jbyte*>(S.data()));
+    return S;
+}
+#if LUR_INTERNAL
+// Re-read the dev role pin on EVERY decision, so `adb shell setprop debug.lur.role
+// central|peripheral` takes effect on the next (re)launch/discovery without a reinstall;
+// empty = auto. Returns whether a pin is now in force, so the caller can say so out loud —
+// the prop survives until reboot, and a stale one from an earlier rig run is the first thing
+// to suspect when the roles come out wrong (#146).
+bool RefreshRolePin() {
+    char Prop[PROP_VALUE_MAX] = {};
+    __system_property_get("debug.lur.role", Prop);
+    if (std::strcmp(Prop, "central") == 0)         SetBleRoleOverride(EBleRole::Central);
+    else if (std::strcmp(Prop, "peripheral") == 0) SetBleRoleOverride(EBleRole::Peripheral);
+    else                                           ClearBleRoleOverride();
+    if (IsBleRolePinned())
+        LOGI("BLE role PINNED by debug.lur.role=%s (dev override; `setprop debug.lur.role \"\"` "
+             "to restore the auto tie-break)", Prop);
+    return IsBleRolePinned();
+}
+#endif
+}  // namespace
+
+// --- JNI: the shared, cross-platform role tie-break (single source of truth). Defers is how
+// many times we have already connected out, been told "you're the peripheral" and deferred
+// with no peer ever claiming Central — at the threshold the shared breaker takes Central so a
+// both-Peripheral state cannot deadlock (#146). ---
 extern "C" JNIEXPORT jint JNICALL
 Java_com_lurmotorn_onlyrps_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
-                                                      jbyteArray LocalId, jbyteArray PeerId) {
+                                                      jbyteArray LocalId, jbyteArray PeerId,
+                                                      jint Defers) {
 #if LUR_INTERNAL
-    // Dev role override (issue: test BOTH role configs on one device pair). Read the
-    // prop on every decision so `adb shell setprop debug.lur.role central|peripheral`
-    // takes effect on the next (re)launch/discovery without a reinstall; empty = auto.
-    {
-        char Prop[PROP_VALUE_MAX] = {};
-        __system_property_get("debug.lur.role", Prop);
-        if (std::strcmp(Prop, "central") == 0)         SetBleRoleOverride(EBleRole::Central);
-        else if (std::strcmp(Prop, "peripheral") == 0) SetBleRoleOverride(EBleRole::Peripheral);
-        else                                           ClearBleRoleOverride();
-    }
+    RefreshRolePin();
 #endif
-    const jsize LocalLen = Env->GetArrayLength(LocalId);
-    const jsize PeerLen  = Env->GetArrayLength(PeerId);
-    std::string Local(static_cast<std::size_t>(LocalLen), '\0');
-    std::string Peer(static_cast<std::size_t>(PeerLen), '\0');
-    Env->GetByteArrayRegion(LocalId, 0, LocalLen, reinterpret_cast<jbyte*>(Local.data()));
-    Env->GetByteArrayRegion(PeerId, 0, PeerLen, reinterpret_cast<jbyte*>(Peer.data()));
+    const std::string Local = JBytesToString(Env, LocalId);
+    const std::string Peer  = JBytesToString(Env, PeerId);
     // EBleRole::Peripheral == 0, Central == 1 (matches BleShim's constants).
-    return static_cast<jint>(DecideBleRole(Local, Peer));
+    return static_cast<jint>(DecideBleRoleBreaking(Local, Peer, static_cast<int>(Defers)));
+}
+
+// --- JNI: is a device id read off the peer well-formed (32 lowercase hex)? A failed/truncated
+// GATT read yields bytes that are not an id, and deciding a role from those is what produced
+// the both-Peripheral deadlock — so the shim retries the read instead of trusting it (#146). ---
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_lurmotorn_onlyrps_BleShim_nativeIsValidDeviceId(JNIEnv* Env, jobject /*Self*/,
+                                                           jbyteArray Id) {
+    return Lur::Save::IsValidDeviceId(JBytesToString(Env, Id)) ? JNI_TRUE : JNI_FALSE;
 }
 
 // --- JNI: the persistent device id (issue #17), sourced from the engine's shared

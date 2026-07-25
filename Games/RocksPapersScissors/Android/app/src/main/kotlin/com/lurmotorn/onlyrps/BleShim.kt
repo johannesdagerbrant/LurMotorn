@@ -66,6 +66,9 @@ class BleShim(private val context: Context) {
 
         private const val ROLE_PERIPHERAL = 0
         private const val ROLE_CENTRAL = 1
+        // Mirrors Lur::Transport::BleMaxPeripheralDefers. LOG-ONLY: C++ owns the actual
+        // breaker decision (nativeDecideRole), this just labels the line that reports it.
+        private const val MAX_FRUITLESS_DEFERS = 2
 
         init {
             // Same .so NativeActivity loads (android.app.lib_name = "onlyrps").
@@ -78,7 +81,14 @@ class BleShim(private val context: Context) {
     private external fun nativeOnConnected(asPeripheral: Boolean)
     private external fun nativeOnDisconnected()
     private external fun nativeOnReceived(bytes: ByteArray)
-    private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray): Int
+    /** The shared role tie-break. [fruitlessDefers] is how many times we have already deferred
+     *  to Peripheral without a peer ever claiming Central; at the threshold C++ breaks the tie
+     *  in favour of Central so a both-Peripheral state cannot deadlock (#146). */
+    private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray, fruitlessDefers: Int): Int
+    /** Is a device id read off the peer well-formed (32 lowercase hex)? A failed or truncated
+     *  GATT read yields bytes that are not an id, and a role decided from those is one the peer
+     *  cannot mirror — the deadlock's mechanism (#146). */
+    private external fun nativeIsValidDeviceId(id: ByteArray): Boolean
     private external fun nativeLoadOrCreateDeviceId(dir: String): ByteArray
     private external fun nativeLoadPeerId(dir: String): ByteArray
     private external fun nativeSavePeerId(dir: String, bytes: ByteArray)
@@ -100,6 +110,12 @@ class BleShim(private val context: Context) {
         peerId = id
         try { nativeSavePeerId(context.filesDir.absolutePath, id) } catch (_: Exception) {}
     }
+
+    /** #146: how many times we have connected out, been told "you are the peripheral", and
+     *  deferred — with no peer ever arriving to claim Central. Reset the moment a link forms.
+     *  Past the threshold the tie-break has forfeited its credibility and we take Central
+     *  ourselves, so two peers that both computed Peripheral can't stall forever. */
+    private var fruitlessDefers = 0
 
     private var advertiser: BluetoothLeAdvertiser? = null
     private var scanner: BluetoothLeScanner? = null
@@ -244,7 +260,7 @@ class BleShim(private val context: Context) {
      *  dance (advertise + scan + connect + in-band tie-break). */
     private fun startDiscovery() {
         if (peerId.isNotEmpty()) {
-            if (nativeDecideRole(deviceId, peerId) == ROLE_PERIPHERAL) {
+            if (nativeDecideRole(deviceId, peerId, fruitlessDefers) == ROLE_PERIPHERAL) {
                 decidedPeripheral = true          // known peripheral: never connect out
                 Log.i(TAG, "cached role: PERIPHERAL — advertise + serve, no scan")
                 startAdvertising()
@@ -324,6 +340,7 @@ class BleShim(private val context: Context) {
     private fun onLinked(asPeripheral: Boolean) {
         if (linked) return
         linked = true
+        fruitlessDefers = 0   // #146: a defer that produced a link was not fruitless
         watchdogHandler.removeCallbacks(discoveryWatchdog)  // #79: link up, stop watching
         stopScanning()
         stopAdvertising()
@@ -557,20 +574,36 @@ class BleShim(private val context: Context) {
         ) {
             if (characteristic.uuid != DEVICE_ID_UUID) return
             val readPeerId = characteristic.value ?: ByteArray(0)
+            // #146: a role settled from a BAD read is a role the peer cannot mirror — and two
+            // peers that both land on Peripheral deadlock with nobody central. A non-SUCCESS
+            // status leaves characteristic.value stale (or null), so never decide from it:
+            // treat the READ as the failure it is and retry from discovery.
+            if (status != BluetoothGatt.GATT_SUCCESS || !nativeIsValidDeviceId(readPeerId)) {
+                Log.i(TAG, "central: bad device-id read (status=$status, ${readPeerId.size}B) " +
+                    "-> not deciding a role; retrying discovery")
+                dropClient(gatt, rescan = true)
+                return
+            }
             rememberPeer(readPeerId)   // cache for the fast cached-role reconnect next time
-            val role = nativeDecideRole(deviceId, readPeerId)
+            val role = nativeDecideRole(deviceId, readPeerId, fruitlessDefers)
             // Log the actual id STRINGS (they're ASCII hex) so a role-tie-break disagreement is
             // diagnosable from the log — a both-peripheral deadlock means the two sides compared
-            // different bytes (#147 follow-up).
+            // different bytes (#146).
             Log.i(TAG, "read peer id: mine=${String(deviceId, Charsets.US_ASCII)} " +
-                "peer=${String(readPeerId, Charsets.US_ASCII)} -> " +
+                "peer=${String(readPeerId, Charsets.US_ASCII)} defers=$fruitlessDefers -> " +
                 if (role == ROLE_CENTRAL) "CENTRAL (keep link)" else "PERIPHERAL (defer)")
             if (role == ROLE_CENTRAL) {
+                // #146: this is also where the breaker lands — past the defer threshold C++
+                // returns Central even though the raw compare said Peripheral, so say so.
+                if (fruitlessDefers >= MAX_FRUITLESS_DEFERS)
+                    Log.i(TAG, "role tie-break BROKEN after $fruitlessDefers fruitless defers " +
+                        "-> forcing CENTRAL (nobody was connecting; #146)")
                 enableNotifications(gatt)   // we keep this connection as the live link
             } else {
                 // We should be the peripheral: drop this connection and let the peer
                 // (the canonical central) connect to our server instead.
                 decidedPeripheral = true
+                ++fruitlessDefers          // #146: cleared by onLinked; counts unanswered defers
                 stopScanning()
                 startAdvertising()  // ensure findable even if we began in cached-central mode
                 dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer

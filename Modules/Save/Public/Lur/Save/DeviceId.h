@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <string_view>
 #include "Lur/Save/Store.h"
 
 namespace Lur::Save {
@@ -17,6 +18,23 @@ inline constexpr const char* PeerIdKey = "peer-id";
 
 // The GUID is 128 random bits rendered as 32 lowercase hex characters.
 inline constexpr std::size_t DeviceIdHexLen = 32;
+
+// Is this string a well-formed device id (exactly DeviceIdHexLen lowercase hex chars)?
+//
+// The BLE role tie-break compares OUR id against one READ OFF THE PEER over GATT, and that
+// read has failure modes that all look like "some bytes arrived": a failed read leaves the
+// characteristic holding a stale value, a long read that mishandles its offset arrives
+// truncated or shifted, a non-LurMotorn responder returns something else entirely. Feeding
+// any of those to DecideBleRole yields a role decision that the PEER cannot mirror — and two
+// peers that both decide Peripheral deadlock with nobody central (issue #146). So a read is
+// only usable for the tie-break if it is shaped like a device id; otherwise treat the read
+// itself as failed and retry, rather than settling a role from garbage.
+inline bool IsValidDeviceId(std::string_view Id) {
+    if (Id.size() != DeviceIdHexLen) return false;
+    for (const char C : Id)
+        if (!((C >= '0' && C <= '9') || (C >= 'a' && C <= 'f'))) return false;
+    return true;
+}
 
 // Return this install's persistent device identity, generating it once on first
 // call and returning the SAME value on every call thereafter (issue #17).

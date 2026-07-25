@@ -7,6 +7,7 @@ add_executable(transport_tests TransportTests.cpp)
 target_link_libraries(transport_tests PRIVATE
     lur::transport
     lur::serialization
+    lur::save        # #146: IsValidDeviceId — the device-id shape the role tie-break demands
     chess::core
     Threads::Threads)
 target_compile_features(transport_tests PRIVATE cxx_std_20)

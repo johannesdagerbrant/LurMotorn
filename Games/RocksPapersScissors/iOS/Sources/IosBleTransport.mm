@@ -128,6 +128,12 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _Connecting;        // an outgoing central attempt is mid-flight
     bool _DecidedPeripheral; // we settled as peripheral; stop connecting out
 
+    // #146: how many times we have connected out, been told "you are the peripheral", and
+    // deferred — with NO peer ever arriving to claim Central. Cleared the moment a link forms.
+    // Past BleMaxPeripheralDefers the shared breaker (DecideBleRoleBreaking) hands us Central
+    // instead, so two peers that both computed Peripheral cannot stall each other forever.
+    int _FruitlessDefers;
+
     // Send flow control (issue #72). CoreBluetooth drops a writeWithoutResponse /
     // updateValue when its transmit queue is full; unpaced autoplay bursts then lost
     // moves (and resync payloads), wedging the game. We queue datagrams and drain them
@@ -157,6 +163,7 @@ static void SaveIosPeerId(const std::string& Id) {
         _DeviceIdUuid = MakeUuid(BleDeviceIdCharacteristicUuid);
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
+        _FruitlessDefers = 0;
 
 #if LUR_INTERNAL
         // Dev role override (rig-pushed Documents/role = "central"|"peripheral"):
@@ -170,7 +177,12 @@ static void SaveIosPeerId(const std::string& Id) {
             if ([Role isEqualToString:@"central"])         SetBleRoleOverride(EBleRole::Central);
             else if ([Role isEqualToString:@"peripheral"]) SetBleRoleOverride(EBleRole::Peripheral);
             else                                           ClearBleRoleOverride();
-            if (Role.length) NSLog(@"OnlyRps BLE: dev role override = %@", Role);
+            // #146: say it LOUDLY — the marker outlives the app, so a stale one from an earlier
+            // rig run is the first suspect whenever the roles come out wrong, and it also
+            // suppresses the deadlock breaker (a pin is a deliberate choice, never overridden).
+            if (IsBleRolePinned())
+                NSLog(@"OnlyRps BLE: role PINNED by Documents/role = %@ (dev override; delete the "
+                      @"marker to restore the auto tie-break)", Role);
         }
 #endif
 
@@ -252,6 +264,7 @@ static void SaveIosPeerId(const std::string& Id) {
 }
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
+    _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
     [_DiscoveryWatchdog invalidate];
     _DiscoveryWatchdog = nil;
     [_Central stopScan];
@@ -399,20 +412,40 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
         // Got the peer's device id -> run the shared tie-break.
         NSData* V = characteristic.value;
         std::string PeerId(V ? static_cast<const char*>(V.bytes) : "", V ? V.length : 0);
-        if (!PeerId.empty() && PeerId != _PeerId) {   // cache for the fast cached-role reconnect
+        // #146: a role settled from a BAD read is a role the peer cannot mirror — and two peers
+        // that both land on Peripheral deadlock with nobody central. An errored read leaves a
+        // stale/absent value, so never decide from it: treat the READ as the failure and retry.
+        if (error != nil || !Lur::Save::IsValidDeviceId(PeerId)) {
+            NSLog(@"OnlyRps BLE: bad device-id read (err=%@, %zuB) - not deciding a role; "
+                  @"retrying discovery", error, PeerId.size());
+            [_Central cancelPeripheralConnection:peripheral];
+            [self armDiscoveryWatchdog];
+            return;
+        }
+        if (PeerId != _PeerId) {   // cache for the fast cached-role reconnect
             _PeerId = PeerId;
             _HaveCachedRole = true;
             _CachedPeripheral = (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
             SaveIosPeerId(_PeerId);
         }
-        const EBleRole Role = DecideBleRole(_LocalId, PeerId);
-        NSLog(@"OnlyRps BLE: role decided = %s",
-              Role == EBleRole::Peripheral ? "Peripheral" : "Central");
+        const EBleRole Role = DecideBleRoleBreaking(_LocalId, PeerId, _FruitlessDefers);
+        // Log both id STRINGS (they're ASCII hex): a both-Peripheral deadlock means the two
+        // sides compared DIFFERENT bytes, which is only diagnosable if each side prints what
+        // it actually compared (#146).
+        NSLog(@"OnlyRps BLE: role decided = %s (mine=%s peer=%s defers=%d)",
+              Role == EBleRole::Peripheral ? "Peripheral" : "Central",
+              _LocalId.c_str(), PeerId.c_str(), _FruitlessDefers);
         if (Role == EBleRole::Central && _RemoteDatagram) {
+            if (_FruitlessDefers >= BleMaxPeripheralDefers)
+                NSLog(@"OnlyRps BLE: role tie-break BROKEN after %d fruitless defers -> forcing "
+                      @"Central (nobody was connecting; #146)", _FruitlessDefers);
             [peripheral setNotifyValue:YES forCharacteristic:_RemoteDatagram];  // keep this link
         } else {
             // We should be the peripheral: drop this connection, let the peer connect to us.
             _DecidedPeripheral = true;
+            // #146: cleared by onLinked; counts UNANSWERED defers only — a Central decision that
+            // lands here (no datagram characteristic) is a broken peer, not a tie-break failure.
+            if (Role == EBleRole::Peripheral) ++_FruitlessDefers;
             [_Central stopScan];
             [self advertiseService];  // ensure findable even if we began in cached-central mode
             [_Central cancelPeripheralConnection:peripheral];

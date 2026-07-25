@@ -448,6 +448,27 @@ inline CvSnapshot LatchCvs() {
     return S;
 }
 
+// #147: the COMPILE-TIME defaults, ignoring every local override (a persisted rps-cvars.cfg,
+// a console tweak). The peer cvar-sync's merge resolver is defined RELATIVE to the defaults —
+// an id absent from the merged set means "default", and a wall-clock tie resolves to "default"
+// — so the baseline both peers overlay the merged set onto must be the defaults, never each
+// peer's own (differently overridden) globals. Overlaying onto LatchCvs() silently kept the
+// local value for every unmerged id, which is one half of the #147 desync.
+// In Shipping the globals ARE the defaults (a CVar holds nothing else), so it folds to LatchCvs.
+inline CvSnapshot DefaultCvs() {
+#if LUR_SHIPPING
+    return LatchCvs();
+#else
+    CvSnapshot S;
+#define FX(Name, Cv) S.Name = Cv.Default();
+#define IX(Name, Cv) S.Name = Cv.Default();
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+    return S;
+#endif
+}
+
 // Derive the per-type UnitStats the sim + HUD read from a latched snapshot: the compile-time
 // table for the fixed fields (range/cooldown/beats), overlaid with the tunable CVars (#122).
 // Shared by Sim::DeriveUnits (from the sim's latched Cv) and the pre-match HUD (straight from

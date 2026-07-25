@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "Lur/Save/DeviceId.h"   // #146: the device-id shape the role tie-break demands
 #include "Lur/Transport/BleProtocol.h"
 #include "Lur/Transport/EventInbox.h"
 #include "Lur/Transport/Loopback.h"
@@ -53,6 +54,55 @@ static void TestRoleTieBreakIsDeterministic() {
     CHECK(DecideBleRole("x", "y") == DecideBleRole("x", "y"));
     CHECK(DecideBleRole("device-9", "device-10") == EBleRole::Central);   // "9" > "1"
     CHECK(DecideBleRole("device-10", "device-9") == EBleRole::Peripheral);
+}
+
+// #146: the tie-break DEADLOCK BREAKER. A healthy pair never needs it — but on hardware both
+// an Android and an iPhone once decided Peripheral, so nobody connected and the link never came
+// up (a state retrying can't escape: the same comparison gives the same answer forever). After
+// BleMaxPeripheralDefers fruitless defers the loser stops believing the tie-break and takes
+// Central, which is the one role that was missing.
+static void TestRoleBreakerEscapesBothPeripheral() {
+    const std::string_view Small = "7ef0ddb8", Large = "87f01c50";  // the on-device pair (#146)
+    // Healthy: the breaker changes NOTHING while the pair still disagrees productively.
+    for (int Defers = 0; Defers <= BleMaxPeripheralDefers + 1; ++Defers)
+        CHECK(DecideBleRoleBreaking(Large, Small, Defers) == EBleRole::Central);
+    // The peripheral side holds its role while defers are still plausible...
+    for (int Defers = 0; Defers < BleMaxPeripheralDefers; ++Defers)
+        CHECK(DecideBleRoleBreaking(Small, Large, Defers) == EBleRole::Peripheral);
+    // ...and takes Central once they're not, so the deadlock cannot persist.
+    CHECK(DecideBleRoleBreaking(Small, Large, BleMaxPeripheralDefers) == EBleRole::Central);
+    CHECK(DecideBleRoleBreaking(Small, Large, BleMaxPeripheralDefers + 5) == EBleRole::Central);
+}
+
+#if LUR_INTERNAL
+// #146: a DELIBERATE dev pin is never broken — the rig pins Android=Peripheral against its
+// central-only Windows peer, so force-taking Central there would break the rig, not fix it.
+// (A stale pin is meant to be diagnosed from the log via IsBleRolePinned instead.)
+static void TestRoleBreakerRespectsDevPin() {
+    CHECK(!IsBleRolePinned());
+    SetBleRoleOverride(EBleRole::Peripheral);
+    CHECK(IsBleRolePinned());
+    CHECK(DecideBleRoleBreaking("a", "b", BleMaxPeripheralDefers + 10) == EBleRole::Peripheral);
+    ClearBleRoleOverride();
+    CHECK(!IsBleRolePinned());
+    // Pin cleared -> the breaker is live again.
+    CHECK(DecideBleRoleBreaking("a", "b", BleMaxPeripheralDefers) == EBleRole::Central);
+}
+#endif
+
+// #146: only a well-formed device id may settle a role. A failed GATT read leaves a stale or
+// empty value behind, and a long read with a mishandled offset arrives truncated — deciding
+// from any of those produces a role the peer cannot mirror, i.e. the deadlock.
+static void TestDeviceIdValidation() {
+    const std::string Good = "7ef0ddb8c41a4f0e9b2d5a3c8e7f1024";
+    CHECK(Good.size() == Lur::Save::DeviceIdHexLen);
+    CHECK(Lur::Save::IsValidDeviceId(Good));
+    CHECK(!Lur::Save::IsValidDeviceId(""));                        // failed read -> nothing
+    CHECK(!Lur::Save::IsValidDeviceId(Good.substr(0, 22)));        // default-MTU truncation
+    CHECK(!Lur::Save::IsValidDeviceId(Good.substr(10)));           // long read, offset mishandled
+    CHECK(!Lur::Save::IsValidDeviceId(Good + "0"));                // too long
+    CHECK(!Lur::Save::IsValidDeviceId("7EF0DDB8C41A4F0E9B2D5A3C8E7F1024"));  // uppercase: not ours
+    CHECK(!Lur::Save::IsValidDeviceId("7ef0ddb8c41a4f0e9b2d5a3c8e7f10zz"));  // non-hex
 }
 
 // One datagram Sent on A is delivered byte-for-byte to B's receiver, both ways.
@@ -236,6 +286,11 @@ static void TestInboxThreadedHandoff() {
 int main() {
     TestRoleTieBreakIsOpposite();
     TestRoleTieBreakIsDeterministic();
+    TestRoleBreakerEscapesBothPeripheral();
+#if LUR_INTERNAL
+    TestRoleBreakerRespectsDevPin();
+#endif
+    TestDeviceIdValidation();
     TestLoopbackRoundtrip();
     TestMoveRoundtripsOverTransport();
     TestProtocolConstants();

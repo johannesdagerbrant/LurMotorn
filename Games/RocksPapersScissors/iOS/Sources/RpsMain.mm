@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -156,6 +157,18 @@ Rps::Fixed WorldToFixed(float Wv) {
                         [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgAnchor, D, N); });
     _Session.SetHandler(Rps::MsgResyncChunk,
                         [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgResyncChunk, D, N); });
+#if LUR_INTERNAL
+    // #147: the dev-only gameplay-CVar sync + build fingerprint (#112). These were wired on the
+    // ANDROID peer only, so an iPhone silently DROPPED the Android's MsgCvarSync — the two peers
+    // then simulated on different Cv (and different Cv-derived initial state) and desynced at the
+    // first anchor. A sync is worthless one-sided; every peer must both send and accept it.
+    _Session.SetHandler(Rps::MsgCvar,
+                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgCvar, D, N); });
+    _Session.SetHandler(Rps::MsgCvarSync,
+                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgCvarSync, D, N); });
+    _Session.SetHandler(Rps::MsgFingerprint,
+                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgFingerprint, D, N); });
+#endif
     _Session.SetResyncHandler([Lp] { Lp->BeginResync(); });
     _Session.Start(_Transport, _DeviceId);
     os_log(OS_LOG_DEFAULT, "OnlyRps: session started (device id %zuB)", _DeviceId.size());
@@ -337,6 +350,21 @@ Rps::Fixed WorldToFixed(float Wv) {
             const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
             _Team = Team;  // per-player view flip
             _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
+#if LUR_INTERNAL
+            // #147/#112: refuse a mismatched build, and exchange our gameplay-CVar override set
+            // so both peers converge on ONE merged set (and one Init-derived state) before tick 0.
+            // iOS has no on-device cvars.cfg today, so the seed loop is normally a no-op — but the
+            // SEND is not: an empty set is still this peer's half of the exchange, and the loop is
+            // in place for the day iOS gets on-device tuning.
+            Rps::LockstepPeer* Lp = &_Lp;   // ObjC method: no `this` to capture, take the ivar's address
+            Lp->SendFingerprint();
+            Lur::Core::CVarRegistry::ForEach([Lp](Lur::Core::ICVar* C) {
+                if (!C->AffectsGameplay() || !C->Overridden()) return;
+                const int Id = Rps::GameplayIdForName(C->Name());
+                if (Id >= 0) Lp->SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(), C->EditWallMs());
+            });
+            Lp->SendCvarSync();
+#endif
             _Started = true; _Scored = false;
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
