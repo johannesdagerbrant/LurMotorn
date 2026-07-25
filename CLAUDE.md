@@ -111,6 +111,29 @@ pipeline passes `-DLUR_CONFIG=Shipping`. Out-of-tree app targets (the Android/iO
 engine tree's `add_compile_definitions`, so they re-apply the derived `LUR_*` cache vars to their own
 target — see `Games/Chess/Android/app/src/main/cpp/CMakeLists.txt`.
 
+### `LUR_AGENT` — assistant-only instrumentation, never in a build someone plays
+
+**Anything built so an assistant can drive or observe the app is `#if LUR_AGENT`, not
+`#if LUR_INTERNAL`.** `LUR_AGENT` is a separate axis, **off in every config including
+`Development`**, opted into with `-DLUR_AGENT=ON` and force-zeroed in `Shipping`.
+
+Why it can't be `LUR_INTERNAL`: **the build a player plays IS `Development`** — that is where the dev
+console and the tunable CVars live, and those exist *for the player*. So "dev-only" does not mean
+"absent while playing", and gating harness scaffolding there put it in the player's hands. It bit us
+concretely (playtest 2026-07-25): an agent hook that opened the console from a system property was
+`LUR_INTERNAL`, a stale `setprop` was left on the device, and it then fought the player's own
+two-finger gesture — the game felt remote-controlled.
+
+What belongs behind it: remote control of any kind (system-property hooks, injected input, forced
+state), and automatic capture that writes files during someone's session (the RPS match flight
+recorder). What does *not*: desktop-only harnesses (`--aivs`, `--aidiag`, `--replay`) that a player
+never runs, and tooling meant for a human developer at the keyboard.
+
+Two rules for handing a build over: build it **without** `-DLUR_AGENT` so the code is *absent*
+rather than idle, and **leave no device state behind** — clear properties and capture files, because
+"inert by default" is not the same as "not there". Configuring with the flag on prints a CMake
+warning naming the hazard.
+
 **`LUR_CONFIG` is the single dial — it drives optimization too, not just the macros (issue #89).**
 `EngineFlags.cmake` derives `CMAKE_BUILD_TYPE` from it (the *Opt* column above), so
 `Development`/`Shipping` are **optimized** and only `Debugging` is `-O0`. Never hardcode

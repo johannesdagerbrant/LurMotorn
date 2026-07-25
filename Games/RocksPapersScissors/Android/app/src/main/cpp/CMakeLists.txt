@@ -57,6 +57,10 @@ target_compile_definitions(onlyrps PRIVATE
     LUR_ASSERTS=${LUR_ASSERTS}
     LUR_SLOW=${LUR_SLOW}
     LUR_TRACE=${LUR_TRACE}
+    # Assistant-only remote control / capture. Off unless the build was explicitly configured
+    # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none of
+    # it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
+    LUR_AGENT=${LUR_AGENT_ON}
     # Distinct per-game BLE service UUID (matches the Kotlin BleShim SERVICE_UUID and
     # the iOS build) so RPS never cross-links a chess phone.
     "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")

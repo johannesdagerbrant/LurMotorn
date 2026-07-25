@@ -414,19 +414,23 @@ void android_main(android_app* App) {
         uint32_t LinkedScoredIdx = 0xFFFFFFFFu;  // #149 which Lp match LinkedScored refers to
         bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
         bool PrevPeerReady = false;        // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
-#if LUR_INTERNAL
-        // #144 flight recorder for solo matches: one file per match under the app's data dir,
-        // pulled off the device with `run-as`. Dev-only; a failure to open is logged and ignored.
+#if LUR_AGENT
+        // #144 flight recorder for solo matches: one file per match under the app's data dir, pulled
+        // off the device with `run-as`. ASSISTANT-ONLY (LUR_AGENT): it exists so a session can be
+        // replayed and analysed afterwards, and it writes files while someone is playing — so it must
+        // be absent from any build handed over for play, not merely dormant in it.
         Rps::MatchRecorder SoloRec;
         int SoloMatchNo = 0;
         uint64_t RecCensusNs = 0;
         auto SoloRecPath = [&State](int No) {
             return State.DataDir + "/rps-match-" + std::to_string(No) + ".rec";
         };
+#endif
+#if LUR_INTERNAL
+        // Developer-facing (stays LUR_INTERNAL, so a dev build a human drives still has it):
+        // the periodic LOCKSTEP diagnostic line, and the #101 autospam that a HUMAN opts into
+        // with debug.lur.autoplay=1 before launch.
         uint64_t DiagAccumNs = 0, AutoAccumNs = 0;
-        // Dev-only autospam (#101): debug.lur.autoplay=1 (set before launch) floods our own
-        // team with random plates incl. miners, so a PC-vs-phone match with BOTH ends armed
-        // maxes units. Off by default — phones are for human playtesting.
         char AutoV[PROP_VALUE_MAX] = {};
         const bool AutoPlay = (__system_property_get("debug.lur.autoplay", AutoV) > 0 && AutoV[0] == '1');
         if (AutoPlay) LOGI("autoplay ENABLED (debug.lur.autoplay=1): auto-spamming miners+soldiers");
@@ -455,7 +459,7 @@ void android_main(android_app* App) {
                 State.Mailbox.Publish();
                 State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
                 LOGI("solo AI match (re)started (tier %d)", NewTier);
-#if LUR_INTERNAL
+#if LUR_AGENT
                 SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, NewTier, /*human*/ 0);
                 RecCensusNs = 0;
 #endif
@@ -503,7 +507,7 @@ void android_main(android_app* App) {
                 if (State.SoloSim.Result != Rps::ResultOngoing) {
                     if (!SoloScored && SoloTier_ >= 0) {
                         SoloScored = true;
-#if LUR_INTERNAL
+#if LUR_AGENT
                         SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
                                        static_cast<int>(State.SoloAi.CounterEnemy()));
                         SoloRec.End(State.SoloSim);   // finalise: complete + replayable from here
@@ -526,7 +530,7 @@ void android_main(android_app* App) {
                         LastPubTick = 0xFFFFFFFFu;
                         LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
                              static_cast<unsigned long long>(NextSeed));
-#if LUR_INTERNAL
+#if LUR_AGENT
                         SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, SoloTier_, 0);
                         RecCensusNs = 0;
 #endif
@@ -566,7 +570,7 @@ void android_main(android_app* App) {
                         State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Kept,
                                                   Rps::MaxEventsPerTick - Kept, AiCount);
                         State.SoloSim.StepEvents(Evs, Kept + AiCount);
-#if LUR_INTERNAL
+#if LUR_AGENT
                         SoloRec.Events(State.SoloSim.Tick - 1, Evs, Kept + AiCount);
 #endif
                     }
@@ -587,7 +591,7 @@ void android_main(android_app* App) {
                         Count += AiCount;
                     }
                     State.SoloSim.StepEvents(Evs, Count);
-#if LUR_INTERNAL
+#if LUR_AGENT
                     // #144 flight recorder: the COMBINED batch, recorded at the tick it was applied
                     // on, so a dev machine can replay this match bit-for-bit (Rps::ReplayMatch).
                     SoloRec.Events(State.SoloSim.Tick - 1, Evs, Count);
@@ -600,7 +604,7 @@ void android_main(android_app* App) {
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
                 }
-#if LUR_INTERNAL
+#if LUR_AGENT
                 // #144 telemetry: a census every 2s into BOTH the recording and logcat, so the match
                 // is readable live (adb logcat -s OnlyRps) and replayable afterwards. The AI's own
                 // state + countered type go in it: a recording that shows only what it BUILT can't
@@ -739,7 +743,7 @@ void android_main(android_app* App) {
     // Session/Lp/Sim (except Lp.SetLocalMask, atomic). ----
     bool ViewLinkedApplied = false;
     auto FramePrev = std::chrono::steady_clock::now();
-#if LUR_INTERNAL
+#if LUR_AGENT
     int ConsolePropCountdown = 1;         // frames until the next debug.lur.console poll
     char ConsolePropLast[PROP_VALUE_MAX] = {};   // last value seen, so we act on CHANGES only
     bool ConsolePropSeeded = false;              // first read is a baseline, never an action
@@ -770,16 +774,17 @@ void android_main(android_app* App) {
             const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
             const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
 
-#if LUR_INTERNAL
-            // Dev hook: `adb shell setprop debug.lur.console 1` opens the CVar console, 0 closes it —
-            // polled, so it toggles live. Exists because the console's real gesture is a TWO-finger
-            // triple-tap and `adb shell input` cannot inject multi-touch (nor can we write evdev
-            // directly: Samsung's SELinux denies /dev/input writes even to group `input`). Without
-            // this the console is unreachable from an automated on-device check.
+#if LUR_AGENT
+            // ASSISTANT-ONLY hook: `adb shell setprop debug.lur.console 1` opens the CVar console, 0
+            // closes it. It exists because the console's real gesture is a two-finger triple-tap,
+            // which `adb shell input` cannot inject (nor can we write evdev directly: Samsung's
+            // SELinux denies /dev/input writes even to group `input`), so without it the console is
+            // unreachable from an automated on-device check.
             //
-            // LUR_INTERNAL, not merely !LUR_SHIPPING: this is a REMOTE-CONTROL surface, not console
-            // plumbing — anything a player must never reach belongs behind the same gate as the
-            // autoplayer and debug.lur.autoplay, its nearest neighbour.
+            // LUR_AGENT, not LUR_INTERNAL: this is REMOTE CONTROL over the player's input, and
+            // LUR_INTERNAL is on in Development — the configuration that gets played. Gating it there
+            // is how a stale `setprop` ended up fighting a real two-finger tap. Compiled out of any
+            // build not configured with -DLUR_AGENT=ON, so there is nothing left to misbehave.
             // EDGE-triggered, not a standing order. Acting on the property's VALUE every poll made it
             // authoritative, so a leftover `debug.lur.console 0` slammed the console shut twice a
             // second and the two-finger triple-tap could never win — the console "closed immediately"

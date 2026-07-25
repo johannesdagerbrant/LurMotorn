@@ -30,6 +30,24 @@
 #                      (never touches sim state) — issue #101. The off-ladder
 #                      "profiling = shipping + stats" build is -DLUR_CONFIG=Shipping
 #                      -DLUR_TRACE=1.
+#   LUR_AGENT      1 = AGENT-ONLY instrumentation: remote control and automatic
+#                      capture that exist so an assistant can drive and observe the
+#                      app without hands. OFF IN EVERY CONFIG, INCLUDING DEVELOPMENT
+#                      — opt in with -DLUR_AGENT=ON, and never in a build handed to a
+#                      player.
+#
+#                      Why this exists as its own axis (playtest feedback 2026-07-25):
+#                      LUR_INTERNAL is NOT a sufficient gate for it, because the build
+#                      a player actually plays IS Development — that is where the dev
+#                      console and the tunable CVars live, and those are FOR the player.
+#                      An affordance that lets the harness open the console, or that
+#                      writes capture files during someone's session, is a different
+#                      category: it can override real input and make the game feel like
+#                      it is being driven from outside. So it gets a switch that is off
+#                      unless explicitly asked for.
+#
+#                      Rule: if it was built for the ASSISTANT rather than for the
+#                      player or the developer at the keyboard, it is #if LUR_AGENT.
 #
 # These are defined for the whole engine (all modules + chess) via
 # add_compile_definitions below. App targets that live OUTSIDE this tree's scope
@@ -44,6 +62,11 @@ set_property(CACHE LUR_CONFIG PROPERTY STRINGS Shipping Development Debugging)
 # host unit-test loop (build.ps1), which wants fast COMPILES, not fast code
 # (correctness, not speed). See the optimization-axis block below.
 option(LUR_FAST "Force -O0 for a fast compile loop, independent of LUR_CONFIG" OFF)
+
+# Agent-only instrumentation (see the header comment). Deliberately NOT derived from
+# LUR_CONFIG: it must stay off in Development, which is the configuration a player plays.
+# A build handed over for play is built without this, so the code is absent, not merely idle.
+option(LUR_AGENT "Compile in assistant-only remote control / capture (never for a player)" OFF)
 
 if(LUR_CONFIG STREQUAL "Shipping")
     set(_lur_shipping 1)
@@ -74,6 +97,14 @@ if(DEFINED LUR_TRACE)
     set(_lur_trace ${LUR_TRACE})
 endif()
 
+# Agent instrumentation is a hard 0 unless explicitly requested, and a Shipping build can never
+# carry it whatever was asked for — belt and braces, since the whole point is that it cannot leak.
+if(LUR_AGENT AND NOT _lur_shipping)
+    set(_lur_agent 1)
+else()
+    set(_lur_agent 0)
+endif()
+
 # Publish the derived values as cache vars so out-of-tree app targets (Android/iOS
 # mains) can apply the same macros to themselves after add_subdirectory(root).
 set(LUR_SHIPPING ${_lur_shipping} CACHE INTERNAL "derived from LUR_CONFIG")
@@ -81,6 +112,7 @@ set(LUR_INTERNAL ${_lur_internal} CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_ASSERTS  ${_lur_asserts}  CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_SLOW     ${_lur_slow}     CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_TRACE    ${_lur_trace}    CACHE INTERNAL "derived from LUR_CONFIG (issue #101)")
+set(LUR_AGENT_ON ${_lur_agent}    CACHE INTERNAL "assistant-only instrumentation (opt-in, never for a player)")
 
 # Apply to this scope + every target added under it (all engine modules + chess,
 # and the Desktop app — all root subdirs added after this include).
@@ -89,11 +121,16 @@ add_compile_definitions(
     LUR_INTERNAL=${_lur_internal}
     LUR_ASSERTS=${_lur_asserts}
     LUR_SLOW=${_lur_slow}
-    LUR_TRACE=${_lur_trace})
+    LUR_TRACE=${_lur_trace}
+    LUR_AGENT=${_lur_agent})
 
 message(STATUS "LurMotorn config: ${LUR_CONFIG} "
         "(SHIPPING=${_lur_shipping} INTERNAL=${_lur_internal} ASSERTS=${_lur_asserts} "
-        "SLOW=${_lur_slow} TRACE=${_lur_trace})")
+        "SLOW=${_lur_slow} TRACE=${_lur_trace} AGENT=${_lur_agent})")
+if(_lur_agent)
+    message(WARNING "LUR_AGENT=1: assistant-only remote control/capture is COMPILED IN. "
+            "This build must not be handed to a player.")
+endif()
 
 # ── Build fingerprint (issue #112, Addendum C.3) ─────────────────────────────
 # git commit + dirty flag, baked in so two peers can refuse to connect on a build
