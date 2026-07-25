@@ -5,7 +5,10 @@
 # that duplication is Phase 4's raw material (GameHost/IGame), not a mistake.
 add_library(rps_core
     Core/Private/Sim.cpp
-    Core/Private/AiController.cpp)
+    Core/Private/AiController.cpp
+    # Dev-only single-player flight recorder (#144 tooling): compiles to nothing outside
+    # LUR_INTERNAL, so Shipping links an empty translation unit.
+    Core/Private/MatchRecord.cpp)
 
 target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
 # lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT;

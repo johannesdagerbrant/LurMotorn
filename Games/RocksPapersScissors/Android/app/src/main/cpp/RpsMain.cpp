@@ -31,6 +31,7 @@
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/AiController.h"
+#include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
 #include "Rps/LockstepPeer.h"
 #include "Rps/Snapshot.h"
 #include "Rps/SoloInput.h"
@@ -80,6 +81,7 @@ struct AppState {
     Rps::LockstepPeer Lp;                        // SIM only; glue touches ONLY SetLocalMask (atomic)
     std::string DeviceId;
     std::string CvarsPath;                       // set once at startup (glue), then read-only
+    std::string DataDir;                         // app-private dir (#144 match recordings live here)
     bool Started = false;                        // SIM only
 
     // sim <-> glue hand-off (the whole cross-thread surface):
@@ -365,6 +367,7 @@ void android_main(android_app* App) {
     App->onInputEvent = HandleInput;
 
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
+    State.DataDir = DataDir != nullptr ? DataDir : ".";
     Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
     State.DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
 
@@ -426,6 +429,14 @@ void android_main(android_app* App) {
         bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
         bool PrevPeerReady = false;        // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
 #if LUR_INTERNAL
+        // #144 flight recorder for solo matches: one file per match under the app's data dir,
+        // pulled off the device with `run-as`. Dev-only; a failure to open is logged and ignored.
+        Rps::MatchRecorder SoloRec;
+        int SoloMatchNo = 0;
+        uint64_t RecCensusNs = 0;
+        auto SoloRecPath = [&State](int No) {
+            return State.DataDir + "/rps-match-" + std::to_string(No) + ".rec";
+        };
         uint64_t DiagAccumNs = 0, AutoAccumNs = 0;
         // Dev-only autospam (#101): debug.lur.autoplay=1 (set before launch) floods our own
         // team with random plates incl. miners, so a PC-vs-phone match with BOTH ends armed
@@ -458,6 +469,10 @@ void android_main(android_app* App) {
                 State.Mailbox.Publish();
                 State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
                 LOGI("solo AI match (re)started (tier %d)", NewTier);
+#if LUR_INTERNAL
+                SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, NewTier, /*human*/ 0);
+                RecCensusNs = 0;
+#endif
             }
 
             // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake —
@@ -510,6 +525,11 @@ void android_main(android_app* App) {
                         Count += AiCount;
                     }
                     State.SoloSim.StepEvents(Evs, Count);
+#if LUR_INTERNAL
+                    // #144 flight recorder: the COMBINED batch, recorded at the tick it was applied
+                    // on, so a dev machine can replay this match bit-for-bit (Rps::ReplayMatch).
+                    SoloRec.Events(State.SoloSim.Tick - 1, Evs, Count);
+#endif
                 }
                 const uint32_t T = State.SoloSim.Tick;
                 if (T != LastPubTick) {
@@ -518,9 +538,41 @@ void android_main(android_app* App) {
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
                 }
+#if LUR_INTERNAL
+                // #144 telemetry: a census every 2s into BOTH the recording and logcat, so the match
+                // is readable live (adb logcat -s OnlyRps) and replayable afterwards. The AI's own
+                // state + countered type go in it: a recording that shows only what it BUILT can't
+                // distinguish "mis-countered" from "production-bound".
+                RecCensusNs += ElapsedNs;
+                if (RecCensusNs >= 2'000'000'000ull) {
+                    RecCensusNs = 0;
+                    const int AiSt = static_cast<int>(State.SoloAi.State());
+                    const int AiCt = static_cast<int>(State.SoloAi.CounterEnemy());
+                    SoloRec.Census(State.SoloSim, /*human*/ 0, AiSt, AiCt);
+                    int32_t W[2] = {0, 0}, So[2] = {0, 0}, B[2] = {0, 0};
+                    for (int32_t I = 0; I < State.SoloSim.Count; ++I) {
+                        if (!State.SoloSim.IsAlive(I)) continue;
+                        const int T2 = State.SoloSim.Team[I] & 1;
+                        if (State.SoloSim.IsBuilding(I)) { if (!State.SoloSim.IsHomeBase(I)) ++B[T2]; }
+                        else if (State.SoloSim.Type[I] == Rps::UnitMiner) ++W[T2];
+                        else ++So[T2];
+                    }
+                    LOGI("REC t=%u you: g=%d w=%d s=%d b=%d | ai: g=%d w=%d s=%d b=%d state=%d ctr=%d",
+                         State.SoloSim.Tick, State.SoloSim.Teams[0].Gold, W[0], So[0], B[0],
+                         State.SoloSim.Teams[1].Gold, W[1], So[1], B[1], AiSt, AiCt);
+                }
+#endif
                 // #2: tally the result ONCE (you are team 0: team-0 win = W, team-1 win = L, draw = D).
                 if (!SoloScored && State.SoloSim.Result != Rps::ResultOngoing && SoloTier_ >= 0) {
                     SoloScored = true;
+#if LUR_INTERNAL
+                    SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
+                                   static_cast<int>(State.SoloAi.CounterEnemy()));
+                    SoloRec.End(State.SoloSim);   // finalise: the file is complete + replayable now
+                    LOGI("REC match %d finished: result=%u tick=%u -> %s", SoloMatchNo,
+                         static_cast<unsigned>(State.SoloSim.Result), State.SoloSim.Tick,
+                         SoloRecPath(SoloMatchNo).c_str());
+#endif
                     if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
                     else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
                     else State.AiDraws_[SoloTier_].fetch_add(1);
@@ -539,6 +591,10 @@ void android_main(android_app* App) {
                         LastPubTick = 0xFFFFFFFFu;
                         LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
                              static_cast<unsigned long long>(NextSeed));
+#if LUR_INTERNAL
+                        SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, SoloTier_, 0);
+                        RecCensusNs = 0;
+#endif
                     }
                 } else {
                     SoloPostNs = 0;

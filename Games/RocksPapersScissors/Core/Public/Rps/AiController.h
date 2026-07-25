@@ -48,8 +48,14 @@ public:
 
     EAiTier Tier() const { return Tier_; }
 
-private:
     enum class EState : uint8_t { Opening, Building, Reacting, AllIn };
+    // Read-only windows into the decision, for the match recorder / telemetry (#144). Without these
+    // a recording shows WHAT the AI built but not WHY — and "hard mis-counters" vs "hard is
+    // production-bound" are different bugs with different fixes.
+    EState  State() const { return State_; }
+    uint8_t CounterEnemy() const { return CounterEnemy_; }   // enemy type being countered, or UnitNone
+
+private:
 
     // Delayed/fuzzed enemy-composition mirror: a ring of past TRUE soldier counts (per type),
     // recorded every tick; on a reaction tick the AI reads the entry from now-staleness and

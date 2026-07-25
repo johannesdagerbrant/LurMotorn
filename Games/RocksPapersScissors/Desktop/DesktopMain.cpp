@@ -32,6 +32,7 @@
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Loopback.h"
 #include "Rps/AiController.h"
+#include "Rps/MatchRecord.h"   // #144: --replay a device recording
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
@@ -450,6 +451,62 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
     return 0;
 }
 
+#if LUR_INTERNAL
+// #144: read back a match recorded on a device (Rps::MatchRecorder) and print it. The sim is
+// deterministic and the recording carries the seed + the exact latched CVar set, so the replay is
+// the same match bit-for-bit — the census below is the ACTUAL game that was played, not a model of
+// it. Prints the recorded live census (which carries the AI's state + countered type, unavailable
+// after the fact) alongside a replayed one at the same cadence, then the event profile: what each
+// side spent its decisions on, which is where a human's edge over the AI shows up.
+int RunReplay(const char* Path, int EveryTicks) {
+    const Rps::MatchRecording R = Rps::LoadMatchRecording(Path);
+    if (!R.Ok) {
+        Lur::Log::Error("replay: %s is not a valid recording", Path);
+        return 1;
+    }
+    const char* Tiers[] = {"easy", "medium", "hard"};
+    Lur::Log::Info("replay %s: seed=%llx tier=%s human=team%u events=%zu census=%zu end=tick %u result=%d",
+                   Path, static_cast<unsigned long long>(R.Seed),
+                   R.Tier >= 0 && R.Tier < 3 ? Tiers[R.Tier] : "?", static_cast<unsigned>(R.HumanTeam),
+                   R.Events.size(), R.Census.size(), R.EndTick, R.Result);
+    Lur::Log::Info("  build: %s", R.BuildFp.c_str());
+
+    auto S = std::make_unique<Rps::Sim>();
+    const uint64_t Hash = Rps::ReplayMatch(R, *S);
+    Lur::Log::Info("  replayed to tick %u, hash %016llx", S->Tick, static_cast<unsigned long long>(Hash));
+
+    // The recorded census: the live truth, including the AI's internals.
+    const char* States[] = {"open", "build", "react", "allin"};
+    const char* Types[] = {"miner", "rock", "paper", "scissor"};
+    Lur::Log::Info("  tick |  you: gold  wrk  sol  bld |   ai: gold  wrk  sol  bld | ai state / countering");
+    for (const Rps::RecordedCensus& C : R.Census) {
+        if (EveryTicks > 0 && C.Tick % static_cast<uint32_t>(EveryTicks) >= 20) continue;  // thin it out
+        const char* St = C.AiState >= 0 && C.AiState < 4 ? States[C.AiState] : "?";
+        const char* Ct = C.AiCounter >= 0 && C.AiCounter < 4 ? Types[C.AiCounter] : "none";
+        Lur::Log::Info("%6u | %10d %4d %4d %4d | %10d %4d %4d %4d | %-5s %s", C.Tick, C.Gold[0],
+                       C.Workers[0], C.Soldiers[0], C.Buildings[0], C.Gold[1], C.Workers[1],
+                       C.Soldiers[1], C.Buildings[1], St, Ct);
+    }
+    // Decision profile per side: placements by type + queue volume. A human who wins with far fewer
+    // decisions is exploiting something structural, not out-clicking the AI.
+    int32_t Places[2][4] = {}, Queues[2][2] = {};   // [team][type], [team][{batches, units}]
+    for (const Rps::RecordedEvent& E : R.Events) {
+        const int T = E.Event.Team & 1;
+        if (E.Event.Kind == Rps::EventPlaceBuilding) {
+            if (E.Event.Type < 4) ++Places[T][E.Event.Type];
+        } else {
+            ++Queues[T][0];
+            Queues[T][1] += E.Event.Y;   // Queue packs the count in Y
+        }
+    }
+    for (int T = 0; T < 2; ++T)
+        Lur::Log::Info("  %s placed camp=%d rock=%d paper=%d scissor=%d | queued %d batches / %d units",
+                       T == R.HumanTeam ? "you" : "ai ", Places[T][0], Places[T][1], Places[T][2],
+                       Places[T][3], Queues[T][0], Queues[T][1]);
+    return 0;
+}
+#endif
+
 int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
             bool FoeOnly, Rps::EAiTier AiTier) {
     // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
@@ -798,6 +855,7 @@ int main(int argc, char** argv) {
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
     bool AiDiag = false;                         // #152 headless AI milestone/census diagnostic
     int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
+    const char* ReplayPath = nullptr;            // #144 --replay <file>: read a device recording
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
     int Matches = 9;
     int MaxTicks = 6000;
@@ -826,6 +884,7 @@ int main(int argc, char** argv) {
             AiTier = ParseTier(argv[++I]);
         }
         else if (A == "--every" && I + 1 < argc) DiagEvery = std::atoi(argv[++I]);
+        else if (A == "--replay" && I + 1 < argc) ReplayPath = argv[++I];  // #144 read a device recording
         else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
         else if (A == "--maxticks" && I + 1 < argc) MaxTicks = std::atoi(argv[++I]);
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
@@ -841,6 +900,9 @@ int main(int argc, char** argv) {
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
+#if LUR_INTERNAL
+    if (ReplayPath != nullptr) return RunReplay(ReplayPath, DiagEvery);
+#endif
     if (AiDiag) return RunAiDiag(AiTier, Seed, MaxTicks, DiagEvery);
     if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);

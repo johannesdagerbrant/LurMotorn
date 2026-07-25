@@ -7,6 +7,7 @@
 
 #include "Lur/Core/CVar.h"
 #include "Rps/AiController.h"
+#include "Rps/MatchRecord.h"
 #include "Rps/Sim.h"
 #include "Rps/Tunables.h"
 
@@ -163,6 +164,92 @@ static void TestAiVsAiDeterminism() {
     CHECK(R1 == R2);
 }
 
+// ---- #144: the AI must buy CAPACITY, not bank gold ----
+// The defect this guards: the AI used to place a building of a type only when it owned NONE, so it
+// was capped at four buildings (one per type) while #132 made throughput scale with building COUNT.
+// Income then compounded past the ceiling forever — 17k-26k gold banked with a 15-42 unit army.
+// Asserted as PROPERTIES (grew past the old cap, and did not end up rich-and-idle), not as exact
+// numbers, so balance tuning doesn't churn the test.
+static void TestAiExpandsCapacity() {
+    Sim S;
+    S.Init(0x144);
+    AiController Ai0, Ai1;
+    Ai0.Init(0x144, 0, EAiTier::Medium);
+    Ai1.Init(0x144, 1, EAiTier::Medium);
+    for (int T = 0; T < 2400 && S.Result == ResultOngoing; ++T) {
+        InputEvent E0[MaxEventsPerTick], E1[MaxEventsPerTick];
+        const int C0 = AiTick(Ai0, S, S.Tick, E0);
+        const int C1 = AiTick(Ai1, S, S.Tick, E1);
+        InputEvent Comb[2 * MaxEventsPerTick];
+        int NC = 0;
+        for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];
+        for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+        S.StepEvents(Comb, NC);
+    }
+    int32_t Buildings = 0, Units = 0, PerType[4] = {};
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || S.Team[I] != 0) continue;
+        if (S.IsBuilding(I)) {
+            if (S.IsHomeBase(I)) continue;
+            ++Buildings;
+            if (S.Type[I] < 4) ++PerType[S.Type[I]];
+        } else {
+            ++Units;
+        }
+    }
+    CHECK(Buildings > 4);        // the old hard cap was one building per type
+    CHECK(PerType[UnitMiner] > 1);  // it expands the economy, not just the army
+    CHECK(Units > 60);           // capacity actually became army (was 15-42 for a whole match)
+    // Not sitting on a fortune it cannot spend: gold below the price of the cheapest building it
+    // could add would be over-strict (it saves up between placements), so bound it generously —
+    // the failure being caught is a five-figure hoard, not thrift.
+    CHECK(S.Teams[0].Gold < 20000);
+}
+
+#if LUR_INTERNAL
+// ---- #144: a recording must replay to a BIT-IDENTICAL match, or it is not evidence ----
+// The whole value of the flight recorder is that the file IS the match: seed + latched CVar set +
+// every tick's combined event batch, replayed through the same deterministic sim (design §1's
+// replay law). If the hash differed, every conclusion drawn from a recording would be a guess.
+static void TestMatchRecordingReplaysIdentically() {
+    const char* Path = "rps_test_recording.rec";
+    Sim Live;
+    Live.Init(0x1440);
+    AiController Ai0, Ai1;
+    Ai0.Init(0x1440, 0, EAiTier::Hard);
+    Ai1.Init(0x1440, 1, EAiTier::Easy);
+    MatchRecorder Rec;
+    CHECK(Rec.Begin(Path, Live, static_cast<int>(EAiTier::Easy), /*human*/ 0));
+    for (int T = 0; T < 400 && Live.Result == ResultOngoing; ++T) {
+        InputEvent E0[MaxEventsPerTick], E1[MaxEventsPerTick];
+        const int C0 = AiTick(Ai0, Live, Live.Tick, E0);
+        const int C1 = AiTick(Ai1, Live, Live.Tick, E1);
+        InputEvent Comb[2 * MaxEventsPerTick];
+        int NC = 0;
+        for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];
+        for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+        const uint32_t At = Live.Tick;      // the tick these events are applied ON
+        Live.StepEvents(Comb, NC);
+        Rec.Events(At, Comb, NC);
+        if (At % 100 == 0) Rec.Census(Live, 0, static_cast<int>(Ai1.State()), Ai1.CounterEnemy());
+    }
+    const uint64_t LiveHash = Live.StateHash();
+    const uint32_t LiveTick = Live.Tick;
+    Rec.End(Live);
+
+    const MatchRecording R = LoadMatchRecording(Path);
+    CHECK(R.Ok);
+    CHECK(R.Seed == 0x1440 && R.EndTick == LiveTick);
+    CHECK(!R.Events.empty() && !R.Census.empty());
+    Sim Replayed;
+    const uint64_t ReplayHash = ReplayMatch(R, Replayed);
+    CHECK(Replayed.Tick == LiveTick);
+    CHECK(ReplayHash == LiveHash);        // the file is the match
+    CHECK(Replayed.Result == Live.Result);
+    std::remove(Path);
+}
+#endif
+
 int main() {
     Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
     TestDeterminism();
@@ -170,6 +257,10 @@ int main() {
     TestCounterChoice();
     TestTierReactionSpeed();
     TestAiVsAiDeterminism();
+    TestAiExpandsCapacity();
+#if LUR_INTERNAL
+    TestMatchRecordingReplaysIdentically();
+#endif
     if (GFailures == 0) { std::printf("rps_ai_tests: ALL PASS\n"); return 0; }
     std::printf("rps_ai_tests: %d FAILURE(S)\n", GFailures);
     return 1;
