@@ -1,6 +1,7 @@
 #include "Rps/SimRunner.h"
 
 #include <chrono>
+#include <thread>
 
 namespace Rps {
 namespace {
@@ -17,9 +18,10 @@ uint64_t NowNs() {
 }  // namespace
 
 void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t StressPerTeam,
-                      bool DisableCombat) {
+                      bool DisableCombat, int InPreMatchTeam) {
     Input = InInput;
     Ctx = InCtx;
+    PreMatchTeam = InPreMatchTeam;
     TheSim.Init(Seed);
 #if LUR_INTERNAL
     if (StressPerTeam > 0) TheSim.StressFill(static_cast<int32_t>(StressPerTeam));
@@ -54,6 +56,32 @@ void SimRunner::ThreadMain() {
         // (slice 1/2: pump the transport here — this is the ~1 kHz service point that
         //  collapses the local polling latency #69 measured. Slice 0 has no transport.)
 
+        // Pre-match hold (see Start): the clock is not advanced at all, so the wait is DROPPED rather
+        // than banked. Each iteration still asks the input layer for a batch, but applies it only if
+        // it carries an acceptable opening camp for the gated team — so the match begins on the
+        // player's placement, with the AI's own first move in that same tick, and an invalid drop
+        // cannot start the clock.
+        if (PreMatchTeam >= 0 && !TheSim.HasMinerCamp(static_cast<uint8_t>(PreMatchTeam))) {
+            InputEvent Evs[MaxEventsPerTick];
+            int Count = 0;
+            if (Input) Input(Ctx, TheSim, TheSim.Tick, Evs, MaxEventsPerTick, Count);
+            bool Opens = false;
+            for (int I = 0; I < Count; ++I) {
+                const InputEvent& E = Evs[I];
+                if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner &&
+                    E.Team == static_cast<uint8_t>(PreMatchTeam) &&
+                    TheSim.CanPlaceBuilding(E.Team, E.Type, Fixed{E.X}, Fixed{E.Y}))
+                    Opens = true;
+            }
+            if (Opens) {
+                TheSim.StepEvents(Evs, Count);
+                Mailbox.Back().CaptureFrom(TheSim, NowNs(), Clock.GetStepNs());
+                Mailbox.Publish();
+                PublishedTickCounter.store(TheSim.Tick, std::memory_order_release);
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            continue;
+        }
         const uint32_t Owed = Clock.AdvancePreserving(Elapsed, MaxTicksPerService);
         for (uint32_t K = 0; K < Owed; ++K) {
             InputEvent Evs[MaxEventsPerTick];

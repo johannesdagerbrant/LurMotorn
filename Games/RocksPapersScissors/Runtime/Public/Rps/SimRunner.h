@@ -39,8 +39,14 @@ public:
     // Spawn the sim thread. Init(Seed) runs on the caller before the thread starts.
     // StressPerTeam > 0 (LUR_INTERNAL) bulk-spawns that many soldiers per side first —
     // the #75 stress scene (tick budget + one-draw render at the raised cap).
+    // PreMatchTeam >= 0 arms the PRE-MATCH HOLD (#139's ready gate, for solo): the clock does not
+    // run and nothing is stepped until a tick's input batch contains an ACCEPTABLE opening mining
+    // camp for that team — then the whole batch applies at tick 0, the human's camp and the AI's
+    // together, exactly as two lockstep peers begin. Elapsed time while held is dropped, not banked,
+    // so no catch-up burst follows. -1 (default) = no gate, which is what the stress/flock scenes
+    // need: they have no camp and would never tick.
     void Start(uint64_t Seed, InputFn Input, void* Ctx, uint32_t StressPerTeam = 0,
-               bool DisableCombat = false);
+               bool DisableCombat = false, int PreMatchTeam = -1);
 
     // Signal the thread to finish the current iteration and join. Idempotent.
     void Stop();
@@ -72,6 +78,7 @@ private:
 
     InputFn Input = nullptr;
     void* Ctx = nullptr;
+    int PreMatchTeam = -1;   // >=0: hold the clock until this team's opening camp lands (see Start)
 };
 
 } // namespace Rps

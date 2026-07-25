@@ -724,11 +724,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
-        // The two x1/x5 buttons are a SLIM column hugging the icon's LEFT edge, INSIDE it (semi-
-        // transparent so the icon reads through) — so they never stick out past the screen edge.
-        const float BGap = 3.0f * HS;
-        const float Bw = BldgPx * 0.42f;                     // slim
-        const float Bh = (BldgPx * 0.90f - BGap) * 0.5f;     // two stacked, inside the icon height
+        // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of BIG squares under the price,
+        // not a slim stacked column. Sized in absolute HS units rather than as a fraction of the
+        // building icon, because what matters is the size of a thumb, not the size of the art: at
+        // 44*HS these are ~123 px on a 450-dpi phone, comfortably past the ~48 dp tap target, where
+        // the old slim column was under half that and genuinely fidgety.
+        const float BGap = 6.0f * HS;
+        const float Bw = 44.0f * HS;
+        const float Bh = 40.0f * HS;
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
         // #107: latch a press stamped by the input thread, else age the flash out. Reading it here
@@ -799,14 +802,29 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 if (PbW * PFrac > 0.5f)
                     Blit(GoldFlat, PbX - PbW * 0.5f + PbW * PFrac * 0.5f, RowY, PbW * PFrac, PbH);
             }
-            // x1 / x5 buttons: a slim column hugging the LEFT inside edge of the icon, stacked.
+            // Playtest 2026-07-25: the cost is stated ONCE, centred above the icon, as the price of
+            // ONE unit — it used to be repeated inside every button as that button's total, which
+            // made the plates wordy AND small. The buttons below it then carry only the multiplier,
+            // so they can be big: a pair side by side, sized for a thumb rather than a mouse.
             if (ProdBtnCount_ >= MaxProdButtons) continue;
             ProdButtons& PB = ProdBtns_[ProdBtnCount_++];
             PB.Slot = I;
-            const float StackH = ProdBtnPerBldg * Bh + (ProdBtnPerBldg - 1) * BGap;
-            const float BtnX = Bx - Half + BldgPx * 0.05f;   // just inside the icon's left edge
-            const float Top = By - StackH * 0.5f;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
+            const bool AffordOne = Snap.Gold[My] >= UnitCost;
+            // Unit price: coin + number, centred over the building.
+            {
+                const float CostY = By - BHalf - 22.0f * HS;
+                const float Cs = 20.0f * HS;                     // coin size
+                char CBuf[12];
+                std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
+                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 20.0f * HS, CostY, Cs);
+                Text.Draw(Renderer, CBuf, Bx - 8.0f * HS, CostY - 11.0f * HS, 48.0f * HS, 22.0f * HS,
+                          19.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left, EVAlign::Middle, false);
+            }
+            // The x1 / x5 pair: a horizontal row directly under the cost, each button a big square.
+            const float RowW = ProdBtnPerBldg * Bw + (ProdBtnPerBldg - 1) * BGap;
+            const float RowLeft = Bx - RowW * 0.5f;
+            const float Top = By - BHalf + 2.0f * HS;
             // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
             // throbs — right after the first camp x5 is unaffordable, so pulsing it would beg for a
             // buy the player can't make. The plate + "x1"/price brighten on the beat; the gold COIN
@@ -821,12 +839,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float PulseK = (1.0f + 0.16f * Throb) * (1.0f - 0.18f * Press);
                 const float Lift = Press > Throb ? Press : Throb;   // brightness: the stronger of the two
                 const int PulseStep = static_cast<int>(Lift * (PulseSteps - 1) + 0.5f);
-                const float BY = Top + static_cast<float>(K) * (Bh + BGap);
-                PB.R[K][0] = BtnX; PB.R[K][1] = BY; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
+                const float BX = RowLeft + static_cast<float>(K) * (Bw + BGap);
+                PB.R[K][0] = BX; PB.R[K][1] = Top; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
-                const float Cx = BtnX + Bw * 0.5f, Cy = BY + Bh * 0.5f;
+                const float Cx = BX + Bw * 0.5f, Cy = Top + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
                 // Plate: opacity-only throb (base colour), else the normal translucent plate.
                 // A press wins over the pulse: LIGHT plate (#107) beats the dark breathing one (#143).
@@ -840,18 +858,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     return {C.R + (1.0f - C.R) * Throb, C.G + (1.0f - C.G) * Throb,
                             C.B + (1.0f - C.B) * Throb, 1.0f};
                 };
+                // The multiplier is now the button's WHOLE content, so it gets the whole plate: one
+                // big glyph, centred, instead of a two-line label crammed into a slim column.
                 char L[8];
-                std::snprintf(L, sizeof(L), "x%d", ProdMult[K]);      // upper row: the multiplier
-                Text.Draw(Renderer, L, bx, by2 + 3.0f * HS * PulseK, bw, bh * 0.42f, 14.0f * HS * PulseK,
+                std::snprintf(L, sizeof(L), "x%d", ProdMult[K]);
+                Text.Draw(Renderer, L, bx, by2, bw, bh, 26.0f * HS * PulseK,
                           Afford ? Glow(Ico) : DimC, EHAlign::Center, EVAlign::Middle, false);
-                const float LowY = by2 + bh * 0.68f;                  // lower row: coin LEFT of price
-                const Lur::Render::MaterialHandle CoinMat = Afford ? GoldIconMat : PlateIconDim;  // coin stays gold
-                BlitGlyph(GlyphGold, CoinMat, Cx - 12.0f * HS * PulseK, LowY, 12.0f * HS * PulseK);
-                char PBuf[12];
-                std::snprintf(PBuf, sizeof(PBuf), "%d", Price);
-                Text.Draw(Renderer, PBuf, Cx - 4.0f * HS * PulseK, LowY - 7.0f * HS * PulseK, bw * 0.5f,
-                          14.0f * HS * PulseK, 12.0f * HS * PulseK, Afford ? Glow(GoldC) : DimC,
-                          EHAlign::Left, EVAlign::Middle, false);
             }
         }
     }

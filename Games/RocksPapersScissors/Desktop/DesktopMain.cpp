@@ -547,9 +547,12 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     }
     SoloAiCtx AiCtx{&Human, &Ai};
     auto Runner = std::make_unique<Rps::SimRunner>();
+    // PreMatchTeam 0 = hold the clock until YOU place your opening camp, like a linked match
+    // (#139/#149). Not for the stress/flock scenes: they have no camp and would never tick.
+    const int SoloGate = (Stress > 0 || FlockDemo) ? -1 : 0;
     Runner->Start(Seed, UseAi ? &SampleSoloVsAi : &SampleSolo,
                   UseAi ? static_cast<void*>(&AiCtx) : static_cast<void*>(&Human),
-                  static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
+                  static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat, SoloGate);
 
     Rps::CameraScroll Cam;
     bool CamInit = false;
@@ -677,7 +680,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             Ai.Init(Seed, /*team*/ 1, static_cast<Rps::EAiTier>(NewTier));
             Runner->Stop();
             Runner->Start(Seed, &SampleSoloVsAi, &AiCtx, static_cast<uint32_t>(Stress < 0 ? 0 : Stress),
-                          NoCombat);
+                          NoCombat, SoloGate);
             CamInit = false;
             const char* Names[] = {"easy", "medium", "hard"};
             Lur::Log::Info("solo AI match restarted (%s)", Names[NewTier]);
@@ -701,7 +704,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 Ai.Init(Seed, /*team*/ 1, static_cast<Rps::EAiTier>(CurTier));
                 Runner->Stop();
                 Runner->Start(Seed, &SampleSoloVsAi, &AiCtx,
-                              static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
+                              static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat, SoloGate);
                 CamInit = false;
                 Lur::Log::Info("solo: next match begins (seed 0x%llx)",
                                static_cast<unsigned long long>(Seed));

@@ -770,17 +770,32 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
     }
 }
 
-// ---- #133/§5.3 frontier high-water: extend each team's furthest-forward line to the most
-// advanced position any of its MOBILE units has reached this tick. Monotonic — never retreats,
-// so a lost forward push keeps the ground it earned. Team 0 advances up (max Y), team 1 down
-// (min Y). Reads post-Movement Pos, identical on both peers and the grid/brute paths, so it's
-// safe as hashed state. Gates forward placement (CanPlaceBuilding). ----
+// ---- §5.3 frontier: each team's buildable depth is where its FRONTMOST LIVE PRESENCE stands —
+// any alive unit OR building. Team 0 advances up (max Y), team 1 down (min Y). Recomputed from
+// scratch every tick from post-Movement Pos, so it is identical on both peers and on the grid/brute
+// paths, and safe as hashed state. Gates forward placement (CanPlaceBuilding).
+//
+// NOT a monotonic high-water mark any more (playtest decision, 2026-07-25). It used to only ever
+// extend, which meant ground once touched was yours forever: a raid that died the instant it
+// arrived still bought permanent building rights deep in enemy territory, and there was no way to
+// take that back. Now the line FOLLOWS your frontmost survivor, so killing whatever is furthest
+// forward pushes the enemy's build line back with it — territory becomes contestable, and forward
+// buildings are worth what they cost (they hold ground precisely because they are presence, and an
+// enemy must destroy them to reclaim it).
+//
+// The floor is the OPENING frontier: you can be pushed back to your starting depth, never behind
+// it. Without that floor a team wiped down to its home base could not rebuild at all, which turns a
+// bad fight into an unrecoverable one and takes the comeback out of the game.
 void UpdateFrontier(Sim& S) {
+    Fixed F0 = S.Cv.InitialFrontier;                 // floors, not seeds
+    Fixed F1 = WorldHeight - S.Cv.InitialFrontier;
     for (int32_t I = 0; I < S.Count; ++I) {
-        if (!S.IsAlive(I) || S.IsBuilding(I)) continue;
-        if (S.Team[I] == 0) { if (S.PosY[I] > S.FrontierT0) S.FrontierT0 = S.PosY[I]; }
-        else                { if (S.PosY[I] < S.FrontierT1) S.FrontierT1 = S.PosY[I]; }
+        if (!S.IsAlive(I)) continue;
+        if (S.Team[I] == 0) { if (S.PosY[I] > F0) F0 = S.PosY[I]; }
+        else                { if (S.PosY[I] < F1) F1 = S.PosY[I]; }
     }
+    S.FrontierT0 = F0;
+    S.FrontierT1 = F1;
 }
 
 // ---- Phase 4: attacks (damage buffered, applied SIMULTANEOUSLY) ----

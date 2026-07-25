@@ -435,22 +435,40 @@ static void TestPlacementValidity() {
     CHECK(S.CanPlaceBuilding(0, UnitRock, F(20), F(12) + Fp + F(1)));
 }
 
-// #133/§5.3: the frontier is a MONOTONIC high-water mark — it advances with a team's forward
-// units and never retreats when they die.
-static void TestFrontierMonotonicHighWater() {
+// §5.3 (playtest decision 2026-07-25, replacing #133's monotonic high-water): the frontier tracks a
+// team's FRONTMOST LIVE PRESENCE — unit or building — so killing whatever is furthest forward pushes
+// that team's build line back with it. Floored at the opening frontier so a beaten team can still
+// rebuild.
+static void TestFrontierFollowsFrontmostSurvivor() {
     static Sim S;
     S.Init(0);
     ClearField(S);
-    CHECK(S.FrontierT0 == S.Cv.InitialFrontier);        // seeded at the initial band
+    CHECK(S.FrontierT0 == S.Cv.InitialFrontier);        // starts at the opening band
     PlaceUnit(S, 0, F(17), F(100), 0, UnitRock);        // a team-0 unit already past the line
-    S.Count = 1;
-    for (int t = 0; t < 10; ++t) S.StepEvents(nullptr, 0);          // it marches forward (up, toward enemy camp)
+    PlaceUnit(S, 1, F(20), F(60), 0, UnitRock);         // ...and one of ours behind it
+    S.Count = 2;
+    for (int t = 0; t < 10; ++t) S.StepEvents(nullptr, 0);          // both march forward (up)
     const Fixed Adv = S.FrontierT0;
-    CHECK(Adv >= F(100));                                // advanced to the unit's reach
-    CHECK(Adv > S.Cv.InitialFrontier);
-    S.AliveBits[0] &= ~1ull;                             // the forward unit dies
-    for (int t = 0; t < 10; ++t) S.StepEvents(nullptr, 0);
-    CHECK(S.FrontierT0 == Adv);                          // ground held — no retreat
+    CHECK(Adv >= F(100));                                // advanced to the leader's reach
+    const Fixed Second = S.PosY[1];
+    CHECK(Second < Adv);
+    S.AliveBits[0] &= ~1ull;                             // the FORWARD unit dies
+    S.StepEvents(nullptr, 0);
+    CHECK(S.FrontierT0 < Adv);                           // the line gave ground...
+    CHECK(S.FrontierT0 >= Second);                       // ...back to the next survivor (which also moved)
+    // Everything dies: the line falls back to the opening depth and no further, so the team can
+    // still rebuild.
+    S.AliveBits[0] = 0;
+    S.StepEvents(nullptr, 0);
+    CHECK(S.FrontierT0 == S.Cv.InitialFrontier);
+    // A BUILDING is presence too: a forward building holds the line with no units at all.
+    PlaceBuilding(S, 2, F(17), F(90), 0, UnitRock);
+    S.Count = 3;
+    S.StepEvents(nullptr, 0);
+    CHECK(S.FrontierT0 >= F(90));                        // held by the building alone
+    S.AliveBits[0] &= ~(1ull << 2);                      // raze it -> the ground is reclaimed
+    S.StepEvents(nullptr, 0);
+    CHECK(S.FrontierT0 == S.Cv.InitialFrontier);
 }
 
 // #133/§5.2: a building repels nearby units (they flow around it) and never moves itself.
@@ -803,7 +821,7 @@ int main() {
     TestBuildingProducesFlatCadence();
     TestBuildingCountScalesThroughput();
     TestPlacementValidity();
-    TestFrontierMonotonicHighWater();
+    TestFrontierFollowsFrontmostSurvivor();
     TestBuildingRepelsUnits();
     TestSoldierTargetsEnemyBuildingByType();
     TestScissorDestroysPaperBuildingWithCounter();

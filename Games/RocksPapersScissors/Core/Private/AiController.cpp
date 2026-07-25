@@ -76,6 +76,105 @@ bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY)
         }
     return false;
 }
+
+// ---- #144 slice 3: SPATIAL placement (position is a decision, not an afterthought) ----
+// A recorded human win (2026-07-25) was won on geography: they planted camps ON distant mine
+// clusters and put soldier buildings AT the front line, while the AI stacked every building on its
+// own baseline in the AiPlaceSpot grid above. Two consequences, both large:
+//   * Carts deposit at the NEAREST OWN miner building (Sim §12.4), so a camp beside a mine is a
+//     short round trip and a camp at home is a long one. Camp position IS income.
+//   * A soldier walks from where it spawns, so home-built soldiers arrive at the fight late and in
+//     a trickle, and counters that arrive late don't counter anything.
+//
+// Both fixed by placing NEAR A TARGET instead of at the first free grid cell: a deterministic ring
+// search outward from the target, taking the first spot the sim accepts. Rings are integer offsets
+// in world units, ordered nearest-first; everything stays Fixed/integer so placement remains
+// hash-safe and identical on both peers.
+bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed TargetY, Fixed& OX,
+                 Fixed& OY) {
+    // Offsets ordered by (roughly) increasing distance. Deliberately coarse — the footprint is a few
+    // units, so finer steps would just retry overlapping spots.
+    static const int32_t Dx[] = {0,  3, -3, 0,  0,  3, -3,  3, -3, 6, -6, 0,  0,  6, -6,  6, -6,
+                                 9, -9, 0,  0,  9, -9, 12, -12, 0,   0, 12, -12};
+    static const int32_t Dy[] = {0,  0,  0, 3, -3,  3,  3, -3, -3, 0,  0, 6, -6,  6,  6, -6, -6,
+                                 0,  0,  9, -9,  9, -9, 0,   0, 12, -12, 12, -12};
+    constexpr int32_t Ring = static_cast<int32_t>(sizeof(Dx) / sizeof(Dx[0]));
+    const int32_t Tx = TargetX.ToInt(), Ty = TargetY.ToInt();
+    for (int32_t I = 0; I < Ring; ++I) {
+        const int32_t X = Tx + Dx[I], Y = Ty + Dy[I];
+        if (X < 2 || X > WorldWidth.ToInt() - 2 || Y < 2 || Y > WorldHeight.ToInt() - 2) continue;
+        if (S.CanPlaceBuilding(Team, Type, F(X), F(Y))) { OX = F(X); OY = F(Y); return true; }
+    }
+    return false;
+}
+
+// The mine worth expanding to: a live deposit that is NOT already served by one of our camps, lies
+// inside our buildable depth, and is the FURTHEST FORWARD such deposit — so the economy creeps
+// toward the enemy as the frontier earns ground, instead of re-mining the home cluster.
+//
+// The "inside our frontier" filter is not an optimisation, it is the whole difference between this
+// working and not: every mine starts with identical gold, so a richest-first search just took the
+// lowest INDEX, which is often a deposit on the enemy's half — permanently unbuildable, so the AI
+// proposed an illegal spot every time and never expanded its economy at all.
+bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
+    constexpr int32_t ServedRadius = 18;   // world units; a cluster's own spread is smaller than this
+    const Fixed Limit = Team == 0 ? S.FrontierT0 : S.FrontierT1;
+    int32_t Best = -1;
+    Fixed BestY{0};
+    for (int32_t M = 0; M < NumMines; ++M) {
+        if (S.MineGold[M] <= 0) continue;
+        // Must be inside our own buildable depth, or the placement can only ever be refused.
+        if (Team == 0 ? S.MineY[M] > Limit : S.MineY[M] < Limit) continue;
+        bool Served = false;
+        for (int32_t I = 0; I < S.Count && !Served; ++I) {
+            if (!S.IsAlive(I) || !S.IsBuilding(I) || S.Team[I] != Team) continue;
+            if (S.Type[I] != UnitMiner || S.IsHomeBase(I)) continue;
+            const int32_t Ddx = (S.PosX[I] - S.MineX[M]).ToInt();
+            const int32_t Ddy = (S.PosY[I] - S.MineY[M]).ToInt();
+            const int32_t Adx = Ddx < 0 ? -Ddx : Ddx, Ady = Ddy < 0 ? -Ddy : Ddy;
+            if (Adx <= ServedRadius && Ady <= ServedRadius) Served = true;   // Chebyshev, like the grid
+        }
+        if (Served) continue;
+        // Furthest forward wins (team 0 = larger Y). First index wins a tie, so it stays deterministic.
+        const bool Ahead = Best < 0 || (Team == 0 ? S.MineY[M] > BestY : S.MineY[M] < BestY);
+        if (Ahead) { BestY = S.MineY[M]; Best = M; }
+    }
+    if (Best < 0) return false;
+    OX = S.MineX[Best];
+    OY = S.MineY[Best];
+    return true;
+}
+
+// Where to build for the fight: JUST BEHIND our own leading edge, on the flank the enemy army is
+// coming down. Not at the enemy's centroid — aiming there plants buildings inside their army and
+// they are razed as fast as they go up (measured: the AI's building count fell over a match instead
+// of rising). Our frontier is where our frontmost survivor stands, so a spot a short way behind it
+// is close to the fighting AND covered by our own units — which is where the recorded human win put
+// them (their soldier buildings sat 45-80 units short of the enemy base, never at it).
+//
+// The enemy centroid still chooses the X: same distance from the fight, but on the correct side of
+// the map.
+constexpr int32_t FrontSetback = 8;   // world units behind the leading edge
+void AiFrontTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
+    const uint8_t Foe = static_cast<uint8_t>(1 - Team);
+    int64_t Sx = 0, Sy = 0;
+    int32_t N = 0;
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || S.IsBuilding(I) || S.Team[I] != Foe) continue;
+        if (S.Type[I] == UnitMiner) continue;          // aim at their ARMY, not their economy
+        Sx += S.PosX[I].Raw;
+        Sy += S.PosY[I].Raw;
+        ++N;
+    }
+    const Fixed Frontier = Team == 0 ? S.FrontierT0 : S.FrontierT1;
+    // A setback behind our leading edge, floored at the opening depth so the early game doesn't aim
+    // behind the baseline.
+    const Fixed Floor = Team == 0 ? S.Cv.InitialFrontier : WorldHeight - S.Cv.InitialFrontier;
+    const Fixed Back = Team == 0 ? Frontier - F(FrontSetback) : Frontier + F(FrontSetback);
+    OY = Team == 0 ? (Back > Floor ? Back : Floor) : (Back < Floor ? Back : Floor);
+    OX = N == 0 ? Fixed{WorldWidth.Raw / 2} : Fixed{static_cast<int32_t>(Sx / N)};
+    (void)Sy;   // the enemy's Y picks nothing: we build behind OUR line, not at theirs
+}
 }  // namespace
 
 void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
@@ -186,8 +285,13 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     if (Cap < 1) return;
     // 1. The forced first building is a mining camp: until one exists, that's the only action.
     if (SurveyType(S, MyTeam_, UnitMiner).Owned == 0) {
-        Fixed X, Y;
-        if (AiPlaceSpot(S, MyTeam_, UnitMiner, X, Y))
+        // The OPENING camp goes on a mine if one is reachable — carts deposit at the nearest own
+        // camp, so a camp beside gold is a short round trip from the first tick. Falls back to the
+        // home grid if no mine is placeable yet (frontier).
+        Fixed X, Y, Mx, My;
+        if (AiBestMineTarget(S, MyTeam_, Mx, My) && AiPlaceNear(S, MyTeam_, UnitMiner, Mx, My, X, Y))
+            Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
+        else if (AiPlaceSpot(S, MyTeam_, UnitMiner, X, Y))
             Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
         return;
     }
@@ -218,12 +322,28 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // gold. Idle gold is the honest signal, and it is what a human acts on: a recorded human win had
     // 21 buildings to the AI's 8 (2026-07-25 flight recordings, #144).
     if (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother) {
-        Fixed X, Y;
-        if (AiPlaceSpot(S, MyTeam_, Want, X, Y)) {
+        // WHERE matters as much as whether (#144 slice 3, from the recorded human win):
+        //   * a mining camp goes ON the richest unworked mine — that is what makes cart trips short
+        //     and captures the map's economy instead of re-mining the home cluster;
+        //   * a soldier building goes AT THE FRONT, as close to the enemy army as our own frontier
+        //     allows, so the counters it produces spawn where the fighting already is rather than
+        //     walking the length of the map to arrive in a trickle.
+        // Each falls back to the home grid if the target has no legal spot (frontier, overlap, mine).
+        Fixed X, Y, Tx, Ty;
+        bool Have = false;
+        if (Want == UnitMiner) {
+            if (AiBestMineTarget(S, MyTeam_, Tx, Ty))
+                Have = AiPlaceNear(S, MyTeam_, Want, Tx, Ty, X, Y);
+        } else {
+            AiFrontTarget(S, MyTeam_, Tx, Ty);
+            Have = AiPlaceNear(S, MyTeam_, Want, Tx, Ty, X, Y);
+        }
+        if (!Have) Have = AiPlaceSpot(S, MyTeam_, Want, X, Y);
+        if (Have) {
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
             return;
         }
-        // No legal spot (frontier/space) — fall through and put the gold into units instead.
+        // No legal spot anywhere — fall through and put the gold into units instead.
     }
     // QUEUE IN A BATCH — top the building up to Depth in ONE event, which is what the x1/x5 plate
     // does for a human. This was hardcoded to 1, and it was the single biggest gap in the recorded

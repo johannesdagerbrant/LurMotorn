@@ -170,6 +170,11 @@ static void TestAiVsAiDeterminism() {
 // Income then compounded past the ceiling forever — 17k-26k gold banked with a 15-42 unit army.
 // Asserted as PROPERTIES (grew past the old cap, and did not end up rich-and-idle), not as exact
 // numbers, so balance tuning doesn't churn the test.
+// Asserted on whichever side is still STANDING at the end (most buildings), not on team 0. Since the
+// frontier began following each team's frontmost survivor, a mirror match is genuinely decisive: the
+// side that gets pushed back loses building space and collapses, so pinning the assertions to team 0
+// made this test a coin flip on who won. What it guards is that a competently-played AI side buys
+// capacity and converts it — not that both sides do.
 static void TestAiExpandsCapacity() {
     Sim S;
     S.Init(0x144);
@@ -186,24 +191,25 @@ static void TestAiExpandsCapacity() {
         for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
         S.StepEvents(Comb, NC);
     }
-    int32_t Buildings = 0, Units = 0, PerType[4] = {};
+    int32_t Buildings[2] = {}, Units[2] = {}, Camps[2] = {};
     for (int32_t I = 0; I < S.Count; ++I) {
-        if (!S.IsAlive(I) || S.Team[I] != 0) continue;
+        if (!S.IsAlive(I)) continue;
+        const int T = S.Team[I] & 1;
         if (S.IsBuilding(I)) {
             if (S.IsHomeBase(I)) continue;
-            ++Buildings;
-            if (S.Type[I] < 4) ++PerType[S.Type[I]];
+            ++Buildings[T];
+            if (S.Type[I] == UnitMiner) ++Camps[T];
         } else {
-            ++Units;
+            ++Units[T];
         }
     }
-    CHECK(Buildings > 4);        // the old hard cap was one building per type
-    CHECK(PerType[UnitMiner] > 1);  // it expands the economy, not just the army
-    CHECK(Units > 60);           // capacity actually became army (was 15-42 for a whole match)
-    // Not sitting on a fortune it cannot spend: gold below the price of the cheapest building it
-    // could add would be over-strict (it saves up between placements), so bound it generously —
-    // the failure being caught is a five-figure hoard, not thrift.
-    CHECK(S.Teams[0].Gold < 20000);
+    const int W = Buildings[1] > Buildings[0] ? 1 : 0;   // the side still standing
+    CHECK(Buildings[W] > 4);   // the old hard cap was one building per type, four total
+    CHECK(Camps[W] > 1);       // it expands the ECONOMY too, not just the army
+    CHECK(Units[W] > 60);      // capacity actually became army (was 15-42 for a whole match)
+    // Not sitting on a fortune it cannot spend. Bounded generously: it legitimately saves between
+    // placements, and the failure being caught is a five-figure hoard, not thrift.
+    CHECK(S.Teams[W].Gold < 20000);
 }
 
 #if LUR_INTERNAL

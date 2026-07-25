@@ -509,6 +509,38 @@ void android_main(android_app* App) {
             }
 
             if (SoloRunning) {
+                // PRE-MATCH HOLD, mirroring the linked path (#139/#149). Until you place your opening
+                // camp the clock does NOT run — no ticks, no match timer — and your camp and the AI's
+                // land in the SAME tick, exactly as two peers apply both camps at tick 0. Before this,
+                // the solo sim ticked from 0 while you were still choosing a spot: the AI's economy
+                // effectively started on however long you deliberated, and the timer counted time you
+                // had not played. Elapsed time is DROPPED here, not banked, so no catch-up burst
+                // follows the placement.
+                if (!State.SoloSim.HasMinerCamp(0)) {
+                    SoloAccumNs = 0;
+                    Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+                    const int Drained = State.SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
+                    // Pre-match only the opening camp counts (the linked path drops the rest too),
+                    // and only if the sim would actually accept it — otherwise an invalid drop would
+                    // start the AI's clock while the player still has no camp.
+                    int Kept = 0;
+                    for (int I = 0; I < Drained; ++I)
+                        if (Evs[I].Kind == Rps::EventPlaceBuilding && Evs[I].Type == Rps::UnitMiner &&
+                            State.SoloSim.CanPlaceBuilding(0, Rps::UnitMiner, Rps::Fixed{Evs[I].X},
+                                                           Rps::Fixed{Evs[I].Y}))
+                            Evs[Kept++] = Evs[I];
+                    if (Kept > 0) {
+                        int AiCount = 0;
+                        State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Kept,
+                                                  Rps::MaxEventsPerTick - Kept, AiCount);
+                        State.SoloSim.StepEvents(Evs, Kept + AiCount);
+#if LUR_INTERNAL
+                        SoloRec.Events(State.SoloSim.Tick - 1, Evs, Kept + AiCount);
+#endif
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;   // held: publish nothing new, tick nothing
+                }
                 SoloAccumNs += ElapsedNs;
                 while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from the service loop
                     SoloAccumNs -= kStepNs;
@@ -516,9 +548,7 @@ void android_main(android_app* App) {
                     // team-1 is the Execute order), then the AI (team 1) fills the remaining budget.
                     Rps::InputEvent Evs[Rps::MaxEventsPerTick];
                     int Count = State.SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
-                    // The AI holds until the human commits its first mining camp (feedback) — no
-                    // building a lead while the player is still placing their opening camp.
-                    if (State.SoloSim.HasMinerCamp(0)) {
+                    {
                         int AiCount = 0;
                         State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Count,
                                                   Rps::MaxEventsPerTick - Count, AiCount);

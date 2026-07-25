@@ -344,6 +344,26 @@ Rps::Fixed WorldToFixed(float Wv) {
     }
 
     if (_SoloActive) {
+        // PRE-MATCH HOLD, mirroring the linked path (#139/#149): until you place your opening camp
+        // the clock does not run, and your camp and the AI's land in the SAME tick — as two peers
+        // both apply their camps at tick 0. Elapsed time while held is dropped, not banked.
+        if (!_SoloSim.HasMinerCamp(0)) {
+            _SoloAccumNs = 0;
+            Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+            int Kept = 0;
+            for (const Rps::InputEvent& E : _SoloPending)
+                if (Kept < Rps::MaxEventsPerTick && E.Kind == Rps::EventPlaceBuilding &&
+                    E.Type == Rps::UnitMiner &&
+                    _SoloSim.CanPlaceBuilding(0, Rps::UnitMiner, Rps::Fixed{E.X}, Rps::Fixed{E.Y}))
+                    Evs[Kept++] = E;
+            _SoloPending.clear();   // pre-match only the camp counts; the rest is dropped
+            if (Kept > 0) {
+                int AiCount = 0;
+                _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Kept,
+                                     Rps::MaxEventsPerTick - Kept, AiCount);
+                _SoloSim.StepEvents(Evs, Kept + AiCount);
+            }
+        } else {
         _SoloAccumNs += ElapsedNs;
         while (_SoloAccumNs >= kStepNs) {   // fixed 10 Hz
             _SoloAccumNs -= kStepNs;
@@ -352,13 +372,13 @@ Rps::Fixed WorldToFixed(float Wv) {
             for (const Rps::InputEvent& E : _SoloPending)
                 if (Count < Rps::MaxEventsPerTick) Evs[Count++] = E;
             _SoloPending.clear();
-            // The AI holds until the human commits its first mining camp (feedback).
-            if (_SoloSim.HasMinerCamp(0)) {
+            {
                 int AiCount = 0;
                 _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Count, Rps::MaxEventsPerTick - Count, AiCount);
                 Count += AiCount;
             }
             _SoloSim.StepEvents(Evs, Count);
+        }
         }
         if (!_SoloScored && _SoloSim.Result != Rps::ResultOngoing && _SoloTier >= 0) {
             _SoloScored = true;
