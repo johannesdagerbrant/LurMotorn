@@ -358,14 +358,28 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##Hysteresis,   "rps.ai." Pfx ".hysteresis",    HY, CVarFlagAffectsGameplay, "Lead margin before switching countered type");\
     LUR_CVAR(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
     LUR_CVAR(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)")
+// Tier STRENGTH is ordered by the economy knobs, not only by information quality (measured
+// 2026-07-25, 30 matches per pairing). Once the AI could batch-queue and expand, being
+// economy-heavy became the dominant strategy — and `easy` accidentally had the best economy of the
+// three (soldier_ratio 50 vs hard's 55), so it beat medium 9-1 and even beat hard. So the ladder now
+// runs the other way on purpose: soldier_ratio 55 / 65 / 80 and worker_target 45 / 22 / 8 for
+// hard / medium / easy. A high soldier_ratio STARVES the economy, which is what makes easy weak.
+//
+// Note worker_target only bites before contact: the FSM leaves the Building state as soon as the
+// enemy fields anything, after which soldier_ratio governs the split. Moving hard's worker_target
+// between 28 and 45 changed nothing at all in a real match.
 //                 OW  WT  ST  PR  CA  JI HY  AL  SR
-LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 50);
-LUR_AI_TIER(Medium, "medium", 4,  8,  20, 2, 20, 6,  2, 15, 60);
+LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 80);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
 // that made the human's flood possible. Target/ratio now follow the human's shape.
-LUR_AI_TIER(Hard,   "hard",   5, 45,  0,  1, 5,  2,  1, 10, 55);
+// Cadence 12, not 5: re-deciding every half second thrashes hard's production across types (a
+// queued batch of the wrong counter is dead gold). At cadence 5 it lost to easy 3-27; at 12 it beats
+// medium 25-5. Slower still is worse again — at 25/40 it starts losing to medium too — so 12 is a
+// measured knee, not a preference.
+LUR_AI_TIER(Hard,   "hard",   5, 45,  0,  1, 12, 2,  1, 10, 55);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----

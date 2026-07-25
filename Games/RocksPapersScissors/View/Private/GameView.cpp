@@ -631,27 +631,49 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     {
         const float Dash = 7.0f * HS, DashGap = 6.0f * HS, Thick = 2.0f * HS;
         const float Target[2] = {FW(Snap.FrontierT0), FW(Snap.FrontierT1)};
-        auto DrawFrontier = [&](int Team) {
-            // ADVANCE is gameplay-exact, RETRACTION is sprung. Pushing the line forward is a thing
-            // the player did and must read as immediate — smoothing it would show a boundary that
-            // does not match where you may actually build. Retraction is the opposite problem: it
-            // happens when a distant unit of yours dies, often off-screen, and an instant jump is
-            // simply missed. A double spring is the right shape for it (theorangeduck.com's spring
-            // roll call): it eases IN, so the line visibly "gives way" instead of starting at full
-            // speed, and eases out onto the new boundary without overshooting past it.
-            //
-            // Visual only: the sim's frontier is the authority for every placement test, and this
-            // float never re-enters it. So the two peers may draw the retraction at different
-            // moments and stay bit-identical.
-            const bool Forward = Team == 0 ? Target[Team] >= FrontierSpring[Team].X
-                                           : Target[Team] <= FrontierSpring[Team].X;
-            if (!FrontierSpringInit[Team] || Forward) {
-                FrontierSpring[Team].Snap(Target[Team]);   // first frame, or ground gained
-                FrontierSpringInit[Team] = true;
-            } else {
-                FrontierSpring[Team].Update(Target[Team], FrontierRetractHalflife, DtSec);
+        // Latch the last TWO ticks' frontier per team. Forward motion is then interpolated across the
+        // tick with the same Alpha the units use, instead of being re-snapped every frame: the sim
+        // only moves this line at 10 Hz, so snapping made it visibly step (the reported forward
+        // jitter) while the units that pushed it glided. Riding the same Alpha is still
+        // gameplay-exact in the sense that matters — the line advances exactly with the units whose
+        // positions define it, no spring, no lag of its own.
+        if (!FrontierHaveTick_ || Snap.Tick != FrontierTick_) {
+            for (int T = 0; T < 2; ++T) {
+                FrontierPrev_[T] = FrontierHaveTick_ ? FrontierCur_[T] : Target[T];
+                FrontierCur_[T] = Target[T];
             }
-            const float Y = SY(FrontierSpring[Team].X);
+            FrontierTick_ = Snap.Tick;
+            FrontierHaveTick_ = true;
+        }
+        auto DrawFrontier = [&](int Team) {
+            // ADVANCE tracks the sim exactly (interpolated across the tick, like every unit);
+            // RETRACTION is sprung. Ground GAINED must read as immediate and show precisely where you
+            // may build. Ground LOST is the opposite problem: it happens when a far-forward unit of
+            // yours dies, often off-screen, and an instant jump is simply missed. A double spring is
+            // the right shape for that (theorangeduck.com's spring roll call): it eases IN, so the
+            // line visibly gives way instead of leaving at full speed, and eases out onto the new
+            // boundary without passing it.
+            //
+            // Visual only: the sim's frontier is the authority for every placement test and this
+            // float never re-enters it, so two peers may draw the retraction at different moments and
+            // stay bit-identical.
+            const float Gained = Team == 0 ? FrontierCur_[Team] - FrontierPrev_[Team]
+                                           : FrontierPrev_[Team] - FrontierCur_[Team];
+            if (Gained > 0.0f) Retracting_[Team] = false;
+            else if (Gained < 0.0f) Retracting_[Team] = true;
+            // Gained == 0 holds the current mode, so a retraction already in flight is not cut short
+            // by the next (unchanged) tick — which is what killed it when the test was "not forward".
+            float Line;
+            if (Retracting_[Team]) {
+                FrontierSpring[Team].Update(FrontierCur_[Team], FrontierRetractHalflife, DtSec);
+                Line = FrontierSpring[Team].X;
+                const float Left = Line - FrontierCur_[Team];
+                if (Left * Left < 0.01f) Retracting_[Team] = false;   // arrived: hand back to advance
+            } else {
+                Line = FrontierPrev_[Team] + (FrontierCur_[Team] - FrontierPrev_[Team]) * Alpha;
+                FrontierSpring[Team].Snap(Line);   // keep the spring parked here for the next retract
+            }
+            const float Y = SY(Line);
             if (Y < -2.0f || Y > HeightPx + 2.0f) return;
             for (float X = 32.0f * HS; X < WidthPx - 2.0f * HS; X += Dash + DashGap)
                 Blit(FrontierMat[Team], X + Dash * 0.5f, Y, Dash, Thick);

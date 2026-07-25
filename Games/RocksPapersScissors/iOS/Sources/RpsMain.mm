@@ -346,7 +346,12 @@ Rps::Fixed WorldToFixed(float Wv) {
         // PRE-MATCH HOLD, mirroring the linked path (#139/#149): until you place your opening camp
         // the clock does not run, and your camp and the AI's land in the SAME tick — as two peers
         // both apply their camps at tick 0. Elapsed time while held is dropped, not banked.
-        if (!_SoloSim.HasMinerCamp(0)) {
+        //
+        // Gated on the match being ONGOING as well: after a loss the player's camps are usually gone,
+        // and without that test this branch would sit there trying to open a match that is already
+        // decided. (On Android the same confusion was worse — the equivalent gate `continue`d past the
+        // result handling entirely and stuck the player on "you lose".)
+        if (_SoloSim.Result == Rps::ResultOngoing && !_SoloSim.HasMinerCamp(0)) {
             _SoloAccumNs = 0;
             Rps::InputEvent Evs[Rps::MaxEventsPerTick];
             int Kept = 0;

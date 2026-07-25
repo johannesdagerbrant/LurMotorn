@@ -317,8 +317,14 @@ private:
     // #141 build-frontier lines. ADVANCE snaps (it must match where you can build, exactly);
     // RETRACTION runs through a double spring, because losing ground happens when a far-off unit
     // dies and an instant jump goes unseen. Visual only — the sim's frontier stays the authority.
+    // Advance rides the same per-tick Alpha the units do (the sim moves this line at 10 Hz, so
+    // re-snapping it every frame made it visibly step); retraction runs the spring.
+    float FrontierPrev_[2] = {0.0f, 0.0f};
+    float FrontierCur_[2] = {0.0f, 0.0f};
+    uint32_t FrontierTick_ = 0;
+    bool FrontierHaveTick_ = false;
+    bool Retracting_[2] = {false, false};
     Lur::Math::DoubleSpring FrontierSpring[2];
-    bool FrontierSpringInit[2] = {false, false};
     static constexpr float FrontierRetractHalflife = 0.45f;   // slow enough to notice, not to annoy
     // #143 onboarding (view-only, per session): a looping pointing hand demos the first camp
     // placement until you place one; then the first building's x1/x5 buttons PULSE until you

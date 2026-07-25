@@ -494,6 +494,52 @@ void android_main(android_app* App) {
             }
 
             if (SoloRunning) {
+                // MATCH DECIDED — tally once, hold the result on screen, then rebuild. This runs
+                // BEFORE the pre-match gate below, and that order is the whole point: losing normally
+                // means your camps are gone, so when this sat after a `!HasMinerCamp(0)` gate a wiped
+                // player was stuck on "you lose" forever and the loss was never even tallied. A
+                // finished match is its own state; it must not be reachable only through having a camp.
+                if (State.SoloSim.Result != Rps::ResultOngoing) {
+                    if (!SoloScored && SoloTier_ >= 0) {
+                        SoloScored = true;
+#if LUR_INTERNAL
+                        SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
+                                       static_cast<int>(State.SoloAi.CounterEnemy()));
+                        SoloRec.End(State.SoloSim);   // finalise: complete + replayable from here
+                        LOGI("REC match %d finished: result=%u tick=%u -> %s", SoloMatchNo,
+                             static_cast<unsigned>(State.SoloSim.Result), State.SoloSim.Tick,
+                             SoloRecPath(SoloMatchNo).c_str());
+#endif
+                        if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
+                        else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
+                        else State.AiDraws_[SoloTier_].fetch_add(1);
+                    }
+                    // #149: the result stands for PostMatchHoldNs, then a FRESH match at the same tier
+                    // in the pre-match state (the AI waits for your camp; the camera re-locks itself).
+                    SoloPostNs += ElapsedNs;
+                    if (SoloPostNs >= Rps::PostMatchHoldNs && SoloTier_ >= 0) {
+                        const uint64_t NextSeed = State.SoloSim.Seed + 1;
+                        State.SoloSim.Init(NextSeed);
+                        State.SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier_));
+                        SoloScored = false;  SoloPostNs = 0;  SoloAccumNs = 0;
+                        LastPubTick = 0xFFFFFFFFu;
+                        LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
+                             static_cast<unsigned long long>(NextSeed));
+#if LUR_INTERNAL
+                        SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, SoloTier_, 0);
+                        RecCensusNs = 0;
+#endif
+                        // Publish the fresh (empty) sim at once, or the view keeps drawing the old
+                        // match's final frame — including its result overlay — until the first tick.
+                        State.Mailbox.Back().CaptureFrom(State.SoloSim, NowNs(), kStepNs);
+                        State.Mailbox.Publish();
+                        State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
+                        LastPubTick = State.SoloSim.Tick;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                    continue;   // the match is over: nothing to tick
+                }
+                SoloPostNs = 0;
                 // PRE-MATCH HOLD, mirroring the linked path (#139/#149). Until you place your opening
                 // camp the clock does NOT run — no ticks, no match timer — and your camp and the AI's
                 // land in the SAME tick, exactly as two peers apply both camps at tick 0. Before this,
@@ -577,43 +623,8 @@ void android_main(android_app* App) {
                          State.SoloSim.Teams[1].Gold, W[1], So[1], B[1], AiSt, AiCt);
                 }
 #endif
-                // #2: tally the result ONCE (you are team 0: team-0 win = W, team-1 win = L, draw = D).
-                if (!SoloScored && State.SoloSim.Result != Rps::ResultOngoing && SoloTier_ >= 0) {
-                    SoloScored = true;
-#if LUR_INTERNAL
-                    SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
-                                   static_cast<int>(State.SoloAi.CounterEnemy()));
-                    SoloRec.End(State.SoloSim);   // finalise: the file is complete + replayable now
-                    LOGI("REC match %d finished: result=%u tick=%u -> %s", SoloMatchNo,
-                         static_cast<unsigned>(State.SoloSim.Result), State.SoloSim.Tick,
-                         SoloRecPath(SoloMatchNo).c_str());
-#endif
-                    if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
-                    else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
-                    else State.AiDraws_[SoloTier_].fetch_add(1);
-                }
-                // #149: hold the win/lose screen, then start a FRESH match at the same tier, back in
-                // the pre-match state (the AI waits for your camp, and the camera re-locks to the
-                // baseline, both on their own). Seed+1 keeps each match different. Same hold as the
-                // linked path — one constant in Tunables so solo and linked can't drift.
-                if (State.SoloSim.Result != Rps::ResultOngoing) {
-                    SoloPostNs += ElapsedNs;
-                    if (SoloPostNs >= Rps::PostMatchHoldNs && SoloTier_ >= 0) {
-                        const uint64_t NextSeed = State.SoloSim.Seed + 1;
-                        State.SoloSim.Init(NextSeed);
-                        State.SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier_));
-                        SoloScored = false;  SoloPostNs = 0;  SoloAccumNs = 0;
-                        LastPubTick = 0xFFFFFFFFu;
-                        LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
-                             static_cast<unsigned long long>(NextSeed));
-#if LUR_INTERNAL
-                        SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, SoloTier_, 0);
-                        RecCensusNs = 0;
-#endif
-                    }
-                } else {
-                    SoloPostNs = 0;
-                }
+                // (Result handling — tally, hold, rebuild — is at the TOP of this block, above the
+                // pre-match gate, so a wiped player still gets it.)
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;  // solo owns the loop; skip Lp
             }
