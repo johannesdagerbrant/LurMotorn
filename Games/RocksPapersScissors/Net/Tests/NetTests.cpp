@@ -607,7 +607,75 @@ static void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D,
 static void RouteToPeer(Lur::Net::Session& S, LockstepPeer& Lp) {
     S.SetHandler(MsgInput,  [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgInput, D, N); });
     S.SetHandler(MsgAnchor, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgAnchor, D, N); });
+    S.SetHandler(MsgResyncChunk, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgResyncChunk, D, N); });
+#if LUR_INTERNAL
+    // The dev-only slots too — every main registers these, so the test composition must match or
+    // it silently proves less than it looks like it does.
+    S.SetHandler(MsgCvar,        [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgCvar, D, N); });
+    S.SetHandler(MsgCvarSync,    [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgCvarSync, D, N); });
+    S.SetHandler(MsgFingerprint, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgFingerprint, D, N); });
+#endif
 }
+
+#if LUR_INTERNAL
+// ---- #147: the cvar sync ACROSS A REAL SESSION, which is what the phones run. Every other cvar
+// test calls Lp.OnMessage directly, so all of them passed while the sync was completely dead on
+// the wire: Session's handler table was bounded at 8 and MsgCvar/MsgCvarSync/MsgFingerprint live
+// at 8/9/10, so they were dropped at registration AND at dispatch, in silence. Two phones showed
+// hash=90c238b0 gold=400 vs hash=9aaa0e2a gold=190 and nothing in either log said why. ----
+static void TestCvarSyncOverSessionLoopback() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    const Fixed   FrontDefault = CvInitialFrontier.Default();
+
+    auto A = std::make_unique<SessPeer>();
+    auto B = std::make_unique<SessPeer>();
+    A->T.SetDeferred(true);
+    B->T.SetDeferred(true);
+    Lur::Transport::LoopbackTransport::Link(A->T, B->T);
+    RouteToPeer(A->S, A->Lp);
+    RouteToPeer(B->S, B->Lp);
+    const std::string AGuid = "guid-aaaa", BGuid = "guid-bbbb";
+    A->S.Start(&A->T, AGuid);
+    B->S.Start(&B->T, BGuid);
+    int Guard = 0;
+    while (!(A->S.IsReady() && B->S.IsReady()) && Guard++ < 200) { A->S.Tick(OneTickNs); B->S.Tick(OneTickNs); }
+    CHECK(A->S.IsReady() && B->S.IsReady());
+
+    // A is the phone with the persisted rps-cvars.cfg; B is clean. Same order the mains use:
+    // Lp.Init, then fingerprint, then seed from the globals, then SendCvarSync.
+    CvStartingGold.Set(400);
+    CvInitialFrontier.Set(F(60));
+    A->Lp.Init(0x50FA, 0, SendViaSession, &A->S);
+    A->Lp.SendFingerprint();
+    A->Lp.SeedGameplayCvar(CvIdStartingGold,    400,       800);
+    A->Lp.SeedGameplayCvar(CvIdInitialFrontier, F(60).Raw, 800);
+    A->Lp.SendCvarSync();
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+    B->Lp.Init(0x50FA, 1, SendViaSession, &B->S);
+    B->Lp.SendFingerprint();
+    B->Lp.SendCvarSync();
+    for (int I = 0; I < 4; ++I) { A->S.Tick(OneTickNs); B->S.Tick(OneTickNs); }  // deliver
+
+    CHECK(!A->Lp.BuildMismatch() && !B->Lp.BuildMismatch());  // the gate ran at all (also was dead)
+    CHECK(B->Lp.GetSim().Cv.StartingGold == 400);             // the sync CROSSED the session...
+    CHECK(B->Lp.GetSim().Teams[0].Gold == 400);               // ...and re-derived the Init state
+    CHECK(B->Lp.GetSim().FrontierT0 == F(60));
+    CHECK(A->Lp.GetSim().StateHash() == B->Lp.GetSim().StateHash());  // the on-device readout
+
+    for (int I = 0; I < 120; ++I) {
+        A->S.Tick(OneTickNs); B->S.Tick(OneTickNs);
+        DriveInput(A->Lp, 0, I); DriveInput(B->Lp, 1, I);
+        A->Lp.Tick(OneTickNs); B->Lp.Tick(OneTickNs);
+        CHECK(!A->Lp.Desynced() && !B->Lp.Desynced());
+    }
+    CHECK(A->Lp.ExecTick() > 10);   // past the anchor that desynced on hardware
+    CHECK(A->Lp.GetSim().StateHash() == B->Lp.GetSim().StateHash());
+
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+}
+#endif
 static void TestLockstepOverSessionLoopback() {
     auto A = std::make_unique<SessPeer>();  // Sim inside each -> heap, not stack
     auto B = std::make_unique<SessPeer>();
@@ -724,6 +792,9 @@ int main() {
     TestLockstepCeilingStallAndResume();
     TestLockstepColdRejoinResync();
     TestLockstepOverSessionLoopback();
+#if LUR_INTERNAL
+    TestCvarSyncOverSessionLoopback();
+#endif
 
     if (GFailures == 0) std::printf("rps_net_tests: ALL PASS\n");
     else std::printf("rps_net_tests: %d FAILURE(S)\n", GFailures);

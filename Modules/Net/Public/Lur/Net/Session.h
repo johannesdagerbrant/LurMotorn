@@ -180,7 +180,15 @@ private:
     void OnHello(const uint8_t* Payload, std::size_t Size);
     void Logf(const char* Fmt, ...);
 
-    static constexpr int         MaxMsgTypes     = 8;   // indices 0..7 (covers Sync = 7)
+    // One past the HIGHEST enumerator. This must cover every EMsgType: the value indexes the
+    // handler table in BOTH SetHandler and the dispatch, and an out-of-range slot is silently
+    // dropped at both ends — no error, no log. It sat at 8 ("covers Sync = 7") while Game3..Game5
+    // were later added at 8..10, so the RTS's gameplay-CVar sync and build-fingerprint gate were
+    // registered into nothing and every arriving one was discarded. That is why two phones never
+    // converged their cvars (#147) and why a mismatched build was never actually refused (#112):
+    // the receiver logged the datagram, then threw it away one line later. DERIVED from the enum
+    // so adding a slot can't reintroduce it.
+    static constexpr int         MaxMsgTypes     = static_cast<int>(EMsgType::Game5) + 1;
     static constexpr std::size_t GuidLen          = 32;  // 128-bit id as hex (Lur::Save::DeviceIdHexLen)
 
     // Real-time link timing (nanoseconds). Frame-rate-independent: derived from the

@@ -94,6 +94,33 @@ static void TestMessageFramingStripsType() {
     CHECK(Got.size() == 2 && Got[0] == 0xAB && Got[1] == 0xCD);
 }
 
+// EVERY game slot must actually be deliverable. The handler table is indexed by the raw enum
+// value at BOTH registration and dispatch, and an out-of-range slot is dropped at both ends in
+// silence — so a bound that doesn't cover the enum makes a whole message type a no-op that still
+// LOGS as received. That shipped: the bound stopped at 8 while Game3..Game5 live at 8..10, so the
+// RTS's gameplay-CVar sync and its build-fingerprint gate were silently dead on the wire (#147).
+// Only Game0 was ever tested here, which is exactly why nothing caught it. This walks the lot.
+static void TestEveryGameSlotDispatches() {
+    const EMsgType Slots[] = {EMsgType::Game0, EMsgType::Game1, EMsgType::Game2,
+                              EMsgType::Game3, EMsgType::Game4, EMsgType::Game5};
+    for (const EMsgType Slot : Slots) {
+        LoopbackTransport TA, TB;
+        LoopbackTransport::Link(TA, TB);
+        Session SA, SB;
+        SA.Start(&TA, Guid('a'));
+        SB.Start(&TB, Guid('b'));
+
+        int Calls = 0;
+        std::vector<uint8_t> Got;
+        SB.SetHandler(Slot, [&](const uint8_t* D, std::size_t N) { ++Calls; Got.assign(D, D + N); });
+        const uint8_t Payload[] = {0x5A, 0xA5, 0x11};
+        SA.Send(Slot, Payload, sizeof(Payload));
+        CHECK(Calls == 1);  // registered AND dispatched — a dropped slot leaves this at 0
+        CHECK(Got.size() == 3);
+        CHECK(Got.size() == 3 && Got[0] == 0x5A && Got[2] == 0x11);
+    }
+}
+
 // A Hello carrying a different ProtocolVersion must NOT complete the handshake —
 // two app versions refuse each other rather than risk mis-decoding a game.
 static void TestVersionMismatchRefused() {
@@ -634,6 +661,7 @@ int main() {
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
     TestMessageFramingStripsType();
+    TestEveryGameSlotDispatches();
     TestVersionMismatchRefused();
     TestChessMoveAcrossSessions();
     TestMoveFramingDisambiguation();
