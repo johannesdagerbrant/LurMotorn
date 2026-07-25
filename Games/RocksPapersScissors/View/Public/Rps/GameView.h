@@ -43,6 +43,11 @@ public:
     // Link status for the opponent selector's dot (view-only; call when it changes).
     void SetLinked(bool InLinked);
 
+    // Point the selector at the Linked-opponent row. Called when the main AUTO-switches to the
+    // peer as a link establishes: without it the HUD kept naming the AI tier ("Easy") through a
+    // linked match, so the player had no way to see who they were actually playing.
+    void SelectLinkedOpponent();
+
     // OS safe-area insets in pixels: the HUD's top block (dropdown + panel) starts
     // below TopPx (status bar / notch) and the production plates sit above BottomPx
     // (Android navigation bar / iOS home indicator). View-only, per-device.
@@ -228,6 +233,8 @@ private:
     float BottomInsetPx = 0.0f;
     bool Linked = false;
     bool SelectorDirty = true;            // rebuild items when link state changes
+    // The opponent list is the three AI tiers then (when a peer is up) the linked row.
+    static constexpr int LinkedRowIndex = 3;
     int  AiTierPicked_ = -1;              // #127: AI tier chosen from the selector (one-shot via TakeAiTier)
     bool PeerRowPicked_ = false;          // #2: linked-opponent row chosen (one-shot via TakePeerPick)
     // #2 per-opponent session score ("W-L-D"), shown at each row's right end.

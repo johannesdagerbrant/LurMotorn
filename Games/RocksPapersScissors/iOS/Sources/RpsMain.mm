@@ -117,6 +117,7 @@ Rps::Fixed WorldToFixed(float Wv) {
     int _PendingTier;          // one-shot selector pick -> (re)start solo (-1 = none)
     bool _SwitchToLinked;      // selector: switch from solo to the linked peer
     bool _PeerEverReady;       // rising-edge latch for the peer-link notice
+    bool _PrevPeerReady;       // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
     int _AiW[3], _AiL[3], _AiD[3];
 }
 
@@ -315,11 +316,29 @@ Rps::Fixed WorldToFixed(float Wv) {
         _View.SetLinked(true);       // adds the Linked-opponent row (green dot)
         _View.NotifyPeerLinked();    // blink the bar
     }
-    // AUTO-switch solo -> linked the instant the peer's session is ready, so BOTH peers enter
-    // lockstep within ~a frame of the same Session-ready edge (the proven direct-link timing). The
-    // manual tap drifted the two Lp.Init calls seconds apart -> the tick-10 anchor desynced (#147).
-    _SwitchToLinked = false;  // pick no longer required
-    if (_SoloActive && PeerReady) { _SoloActive = false; _Team = 0; }
+    // AUTO-switch solo -> linked, on the EDGE where the link establishes and ONLY out of an AI match
+    // the player has not started (no mine camp dragged in yet). Two freshly opened phones therefore
+    // pair and front-load the match with zero taps, and because both peers switch on the same
+    // Session-ready edge they enter lockstep within ~a frame of each other — the proven direct-link
+    // timing (a manual tap drifted the two Lp.Init calls seconds apart, so the peer that switched
+    // first ran lockstep alone and desynced at tick 10, #147).
+    //
+    // Never auto-switch out of a STARTED AI match (that would destroy a game in progress), and never
+    // out of a linked match, started or not: _SoloActive is false there, and a re-link after a blip
+    // must resync rather than re-Init. The selector stays the deliberate way across, from ANY state.
+    const bool LinkEdge = PeerReady && !_PrevPeerReady;
+    _PrevPeerReady = PeerReady;
+    const bool ManualPick = _SwitchToLinked;
+    _SwitchToLinked = false;
+    const bool AutoSwitch = LinkEdge && !_SoloSim.HasMinerCamp(0);   // unstarted AI match only
+    if (_SoloActive && PeerReady && (AutoSwitch || ManualPick)) {
+        _SoloActive = false;
+        _Team = 0;
+        _View.SelectLinkedOpponent();   // name the peer in the HUD instead of the AI tier
+        os_log(OS_LOG_DEFAULT, "OnlyRps: switch solo -> linked (%{public}s)",
+               AutoSwitch ? "auto: link established, AI match not started"
+                          : "player picked the linked opponent");
+    }
 
     if (_SoloActive) {
         _SoloAccumNs += ElapsedNs;

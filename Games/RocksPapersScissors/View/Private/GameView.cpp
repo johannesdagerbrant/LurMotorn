@@ -308,12 +308,19 @@ void GameView::SetLinked(bool InLinked) {
     SelectorDirty = true;
 }
 
+void GameView::SelectLinkedOpponent() {
+    if (!Linked) return;                        // no linked row exists yet — nothing to select
+    if (SelectorDirty) RefreshSelector();       // build the row before pointing at it
+    Selector.SetSelected(LinkedRowIndex);       // the linked row sits after the three AI tiers
+}
+
 void GameView::RefreshSelector() {
     // #2: the opponent list is the three AI tiers, plus a LINKED-opponent row WHEN a peer is
     // connected — no "searching" placeholder (a peer is either linked or simply not listed) and no
     // hot-seat row: it's an AI or a linked opponent. Each row shows its session "W-L-D" score at
     // the right end. Picking any row (re)starts/switches to that match immediately (the main polls
     // TakeAiTier / TakePeerPick). Persistent peer enumeration + cross-launch scores ride #15-20.
+    static_assert(LinkedRowIndex == 3, "the linked row must follow exactly the three AI tiers");
     const char* Names[3] = {"Easy", "Medium", "Hard"};
     const Color Dots[3] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
                            {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},

@@ -113,6 +113,7 @@ struct AppState {
     // the per-opponent W-L-D shown in the selector (session-scoped; cross-launch persistence = #15-20).
     std::atomic<bool>    PeerLinked{false};   // sim -> glue: a real peer connected (row + blink)
     std::atomic<bool>    SwitchToLinked{false};  // glue -> sim: player picked the linked-opponent row
+    std::atomic<bool>    SelectLinkedRow{false}; // sim -> glue: we switched to the peer; name it in the HUD
     std::atomic<int>     AiWins_[3]{}, AiLosses_[3]{}, AiDraws_[3]{};  // vs each AI tier
     std::atomic<int>     PeerWins_{0}, PeerLosses_{0}, PeerDraws_{0};  // vs the linked peer
 };
@@ -367,6 +368,7 @@ void android_main(android_app* App) {
         bool SoloScored = false;           // #2 this solo match's result already tallied
         bool LinkedScored = false;         // #2 this linked match's result already tallied
         bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
+        bool PrevPeerReady = false;        // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
 #if LUR_INTERNAL
         uint64_t DiagAccumNs = 0, AutoAccumNs = 0;
         // Dev-only autospam (#101): debug.lur.autoplay=1 (set before launch) floods our own
@@ -412,14 +414,27 @@ void android_main(android_app* App) {
                 PeerEverReady = true;
                 State.PeerLinked.store(true, std::memory_order_release);  // glue: View.SetLinked + blink
             }
-            // AUTO-switch solo -> linked the instant a peer's session is ready, so BOTH peers enter
-            // lockstep within ~a frame of the same Session-ready edge — exactly the proven direct-link
-            // timing. (The manual "Linked opponent" tap drifted the two Lp.Init calls SECONDS apart:
-            // the peer that switched first ran lockstep alone, so the tick-10 anchor desynced. #147)
-            (void)State.SwitchToLinked.exchange(false, std::memory_order_acq_rel);  // pick no longer required
-            if (SoloRunning && PeerReady) {
+            // AUTO-switch solo -> linked, on the EDGE where the link establishes and ONLY out of an
+            // AI match the player has not started (no mine camp dragged in yet). Two freshly opened
+            // phones therefore pair and front-load the match with zero taps, and because both peers
+            // switch on the same Session-ready edge they enter lockstep within ~a frame of each other
+            // — the proven direct-link timing (a manual tap drifted the two Lp.Init calls SECONDS
+            // apart, so the peer that switched first ran lockstep alone and desynced at tick 10, #147).
+            //
+            // Never auto-switch out of a STARTED AI match (that would destroy a game in progress),
+            // and never out of a linked match, started or not: SoloRunning is false there, and a
+            // re-link after a blip must resync rather than re-Init. That leaves the selector as the
+            // deliberate way across — honoured below from ANY state, including a started AI match.
+            const bool LinkEdge = PeerReady && !PrevPeerReady;
+            PrevPeerReady = PeerReady;
+            const bool ManualPick = State.SwitchToLinked.exchange(false, std::memory_order_acq_rel);
+            const bool AutoSwitch = LinkEdge && !State.SoloSim.HasMinerCamp(0);  // unstarted AI match only
+            if (SoloRunning && PeerReady && (AutoSwitch || ManualPick)) {
                 SoloRunning = false;
                 State.SoloActive.store(false, std::memory_order_release);
+                State.SelectLinkedRow.store(true, std::memory_order_release);  // glue: name the peer in the HUD
+                LOGI("switch solo -> linked (%s)", AutoSwitch ? "auto: link established, AI match not started"
+                                                             : "player picked the linked opponent");
             }
 
             if (SoloRunning) {
@@ -567,6 +582,11 @@ void android_main(android_app* App) {
                 State.View.NotifyPeerLinked();    // blink the bar
                 ViewLinkedApplied = true;
             }
+            // feedback: the sim switched us to the peer -> point the selector at that row, so the HUD
+            // names who we are actually playing instead of still reading the AI tier.
+            // (gated on ViewLinkedApplied so the flag is never consumed before the row exists)
+            if (ViewLinkedApplied && State.SelectLinkedRow.exchange(false, std::memory_order_acq_rel))
+                State.View.SelectLinkedOpponent();
             // #2: push the per-opponent SESSION scores to the selector (no-op when unchanged, so this
             // only rebuilds the list on a real change).
             for (int T = 0; T < 3; ++T)
