@@ -315,6 +315,16 @@ constexpr uint32_t MaxExecTicksPerService = 8;
 // 1-outstanding-write GATT queue with stale anchors (#90; seen at 21:22 in the ANR).
 constexpr uint32_t AnchorBurstThreshold = 16;
 
+// #149: how long the win/lose screen stands before a FRESH match begins (awaiting both camps
+// again). PRESENTATION, never hashed and never a sim input — it only paces when the next match is
+// built. It lives here rather than in either main so solo and linked cannot drift apart: a peer
+// restarting on a different hold than its opponent is harmless (the #139 both-camps gate covers
+// the skew) but two DIFFERENT holds would read as a bug on whichever phone waited longer.
+//
+// Counted in WALL time on purpose. Sim::StepEvents early-returns once Result != ResultOngoing, so
+// there is no post-result tick to count — a tick-based hold would never expire.
+constexpr uint64_t PostMatchHoldNs = 4'000'000'000ull;
+
 // ---- Fixed capacities (no heap in the tick; sized for the raised engine target) ----
 // MaxUnitsPerTeam is the compile-time unit ceiling per side (design doc §5's
 // "hundreds-to-thousands"). Slot reuse (lowest free slot) bounds live memory here.

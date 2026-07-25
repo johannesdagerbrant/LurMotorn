@@ -111,6 +111,15 @@ public:
     // without this bound the survivor was wedged permanently.
     static constexpr uint64_t ResyncStallTimeoutNs = 3'000'000'000ull;
 
+    // #149: pre-match, the local camp is RE-SENT on this period until the peer's camp comes back.
+    // A single send was enough only while both peers entered the match together. Across a
+    // post-match restart they re-init a few ms to seconds apart, so peer A's camp could arrive
+    // while B was still on its win screen — B buffered it as the OLD match's input and B's own
+    // restart then cleared it, leaving both sides waiting on a camp neither would send again
+    // (the arrival-before-reinit family of #147/#148). Re-sending makes the exchange
+    // self-healing regardless of who restarts first.
+    static constexpr uint64_t PreMatchCampResendNs = 500'000'000ull;
+
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
     bool Desynced() const { return Desync; }
@@ -123,6 +132,10 @@ public:
     // so play begins from tick 0 with both camps already in the identical sim state. The view
     // reads this for the pre-match camera / "waiting for opponent" state.
     bool MatchStarted() const { return MatchStarted_; }
+    // #149: which match this is, 0-based, bumped by each post-match restart. The mains latch their
+    // "already tallied this match" flags per index — the only way to score exactly once per match
+    // now that one Lp lives across many of them.
+    uint32_t MatchIndex() const { return MatchIndex_; }
     // The local camp the player has placed but that isn't in the sim yet (pre-match, waiting for
     // the opponent to ready). Lets the view show your camp the instant you drop it. HasLocalCamp
     // stays true after the match starts, so gate the preview on !MatchStarted().
@@ -143,8 +156,16 @@ public:
 private:
     void ProduceAndSend(const std::vector<InputEvent>& Batch);
     void Execute();
-    void PreMatchTick();    // #139: hold the clock, exchange the start camp, start on both-ready
+    void PreMatchTick(uint64_t ElapsedNs);  // #139: hold the clock, exchange the start camp, start on both-ready
     void TryStartMatch();   // #139: both camps in -> seed tick 0 with them + begin the clock
+    // #149: everything Init does to build a match, WITHOUT the peer identity (MyTeam/Send/Ctx) or
+    // the merged cvar set — so the post-match restart reuses one code path with Init and cannot
+    // forget a field. Init calls it too; only Init resets MatchIndex_.
+    void BeginMatch(uint64_t Seed);
+    // #149: true when a pre-match batch is only a repeat of the camp we already hold (the peer's
+    // periodic re-send) — dropped instead of buffered as input.
+    bool IsPeerCampRepeat(const InputEvent* Batch, int Count) const;
+    void SendLocalCamp();   // #149: our camp as a framed MsgInput batch (first send + re-sends)
 #if LUR_INTERNAL
     // Gameplay-CVar overrides waiting to be applied, keyed by the exec tick they land on
     // (both peers hold the SAME tick->overrides once the MsgCvar is delivered). Applied to
@@ -213,7 +234,10 @@ private:
     bool MatchStarted_ = false;
     bool LocalReady_ = false;      // our camp placed (and captured as the tick-0 local input)
     bool PeerReady_ = false;       // peer's camp received
-    bool LocalCampSent_ = false;   // we've sent our camp to the peer once
+    bool LocalCampSent_ = false;   // we've sent our camp to the peer at least once
+    uint64_t CampResendNs_ = 0;    // #149 time since that send (pre-match re-send period)
+    uint64_t PostMatchNs_ = 0;     // #149 wall time held on the win/lose screen
+    uint32_t MatchIndex_ = 0;      // #149 0-based match counter (restart bumps it)
     InputEvent LocalCamp_{};
     InputEvent PeerCamp_{};
 

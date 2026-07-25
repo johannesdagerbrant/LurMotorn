@@ -848,6 +848,161 @@ static void TestLockstepColdRejoinResync() {
     CHECK(A.GetSim().StateHash() == B2.GetSim().StateHash());  // still bit-identical after rejoin
 }
 
+// ---- #149: post-match hold -> a FRESH match awaiting both camps ----
+// Every test here needs a match that ENDS, fast and deterministically. The cheapest real ending is
+// economic exhaustion: with starting gold set to exactly the camp price, placing the opening camp
+// leaves 0 gold, no units and nothing queued — so both teams are doomed on that very tick and the
+// win rule declares a draw. Real result, one tick, no army needed.
+static void ForcedDrawPair(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb, uint64_t Seed) {
+    A.Init(Seed, 0, Enqueue, &Qa);
+    B.Init(Seed, 1, Enqueue, &Qb);
+#if LUR_INTERNAL
+    const int32_t CampPrice = CvMinerBuildingCost.Default();
+    A.SeedGameplayCvar(CvIdStartingGold, CampPrice, 1000);
+    B.SeedGameplayCvar(CvIdStartingGold, CampPrice, 1000);
+    A.SendCvarSync();
+    B.SendCvarSync();
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+    CHECK(A.GetSim().Cv.StartingGold == CampPrice && B.GetSim().Cv.StartingGold == CampPrice);
+#endif
+}
+
+// Both peers ready, the match runs to its (draw) result, and the hold has NOT expired yet.
+static void RunToResult(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 12 && A.GetSim().Result == ResultOngoing; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.GetSim().Result != ResultOngoing);
+    CHECK(A.GetSim().Result == B.GetSim().Result);
+}
+
+// The core behaviour: the result stands for PostMatchHoldNs (no restart early), then a fresh match
+// begins — pre-match again, tick 0, both camps required, seed bumped and AGREED by both peers.
+static void TestPostMatchHoldThenFreshMatch() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    ForcedDrawPair(A, B, Qa, Qb, 0x149A);
+    const uint64_t OldSeed = A.Seed();
+    RunToResult(A, B, Qa, Qb);
+    const uint32_t Idx = A.MatchIndex();
+
+    // Just under the hold: still the finished match, so the win/lose screen is still up.
+    uint64_t Held = 0;
+    while (Held + OneTickNs < PostMatchHoldNs) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        Held += OneTickNs;
+    }
+    CHECK(A.MatchIndex() == Idx);                       // no restart yet
+    CHECK(A.GetSim().Result != ResultOngoing);
+    CHECK(A.Seed() == OldSeed);
+
+    // Past the hold: a fresh match, waiting on camps again.
+    for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    CHECK(A.MatchIndex() == Idx + 1 && B.MatchIndex() == Idx + 1);
+    CHECK(!A.MatchStarted() && !B.MatchStarted());      // the #139 gate is armed again
+    CHECK(A.ExecTick() == 0 && B.ExecTick() == 0);
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(!A.HasLocalCamp() && !B.HasLocalCamp());      // last match's camp does not carry over
+    CHECK(A.Seed() == OldSeed + 1 && B.Seed() == A.Seed());   // hazard 5: agreed, and varied
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+#if LUR_INTERNAL
+    // Hazard 6: the merged cvar set survives the restart — a fresh sim must never fall back to
+    // Sim::Init off the local globals (that is #147 returning through a new door).
+    CHECK(A.GetSim().Cv.StartingGold == CvMinerBuildingCost.Default());
+    CHECK(B.GetSim().Cv.StartingGold == CvMinerBuildingCost.Default());
+#endif
+    // And the second match is playable and stays bit-identical.
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
+// Hazard 3 — the restart SKEW. The peers time the hold on their own clocks, so one rebuilds first
+// and sends its camp while the other is still on its win screen, where it lands as the OLD match's
+// input and is then wiped by that peer's own restart. Without the periodic re-send both sides wait
+// forever on a camp neither will send again. Here A restarts a full hold-period before B.
+//
+// This also covers the SECOND half of the fix, which the re-send alone does not give you: B's camp
+// reaches A, so A has both and STARTS — and a started peer has left PreMatchTick and will never
+// re-send again, leaving B stranded forever on a camp it can no longer be told. So a started peer
+// that sees the peer still repeating its camp answers by re-sending its own. Take that answer-back
+// out and this test hangs B at MatchStarted()==false.
+static void TestPostMatchRestartSkewStillStarts() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    ForcedDrawPair(A, B, Qa, Qb, 0x149B);
+    RunToResult(A, B, Qa, Qb);
+
+    // Only A's clock advances past the hold: A rebuilds, B is still holding its result.
+    uint64_t Held = 0;
+    while (Held < PostMatchHoldNs + OneTickNs) { A.Tick(OneTickNs); Held += OneTickNs; }
+    CHECK(!A.MatchStarted() && A.ExecTick() == 0);   // A is in the new match
+    CHECK(B.GetSim().Result != ResultOngoing);       // B is still on the win screen
+
+    // A's player drops a camp immediately. Its first send reaches a B that has not restarted yet —
+    // exactly the packet the old code lost.
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));
+    for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); Deliver(Qa, B); }
+    CHECK(!A.MatchStarted());                        // still waiting on B's camp, as it must
+
+    // Now B's hold expires too, and its player drops a camp. The re-send closes the gap.
+    Held = 0;
+    while (Held < PostMatchHoldNs + OneTickNs) { B.Tick(OneTickNs); Deliver(Qb, A); Held += OneTickNs; }
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));
+    for (int I = 0; I < 20 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.MatchStarted() && B.MatchStarted());     // the whole point: neither is stranded
+    for (int I = 0; I < 20; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
+// Hazard 4 — a REPEATED camp must be idempotent. The re-sends keep arriving until the peer's own
+// camp comes back, and every one of them lands on a receiver that is already PeerReady_. Buffered
+// as input they would shift the peer's whole event stream by one tick per duplicate, which surfaces
+// as a desync. Also asserts a duplicate does not place a second camp.
+static void TestPreMatchDuplicateCampIsIdempotent() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x149C, 0, Enqueue, &Qa);
+    B.Init(0x149C, 1, Enqueue, &Qb);
+
+    // A readies; its camp reaches B. B is now PeerReady_ but has not readied itself.
+    const InputEvent ACamp = InputEvent::Place(0, UnitMiner, F(17), F(14));
+    A.QueueLocalEvent(ACamp);
+    A.Tick(OneTickNs);
+    Deliver(Qa, B);
+    // Five more hold-periods worth of A ticking: every one of these is a re-send arriving at a
+    // PeerReady_ B (five duplicates, more than any real restart skew would produce).
+    for (int I = 0; I < 5; ++I) {
+        for (int J = 0; J < 6; ++J) A.Tick(OneTickNs);   // 600ms > PreMatchCampResendNs
+        Deliver(Qa, B);
+    }
+    CHECK(!B.MatchStarted());   // duplicates are not a readiness signal for B itself
+
+    // B readies -> the match starts. If the duplicates had been buffered as input, B's view of A's
+    // timeline is shifted and the anchor cross-check trips within ten ticks.
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));
+    for (int I = 0; I < 40; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(A.ExecTick() > 10);                                 // past the first anchor
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    // Exactly one camp per team: a duplicate never became a second placement.
+    int Camps[2] = {0, 0};
+    const Sim& S = B.GetSim();
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J) && S.IsBuilding(J) && S.Type[J] == UnitMiner) ++Camps[S.Team[J]];
+    CHECK(Camps[0] == 1 && Camps[1] == 1);
+}
+
 int main() {
     TestEventBatchRoundTrip();
     TestEventBatchFuzz();
@@ -869,6 +1024,9 @@ int main() {
     TestResyncStallCannotWedgeSurvivor();
     TestResyncReoffersToBehindPeer();
     TestLockstepOverSessionLoopback();
+    TestPostMatchHoldThenFreshMatch();          // #149
+    TestPostMatchRestartSkewStillStarts();      // #149 hazard 3
+    TestPreMatchDuplicateCampIsIdempotent();    // #149 hazard 4
 #if LUR_INTERNAL
     TestCvarSyncOverSessionLoopback();
 #endif

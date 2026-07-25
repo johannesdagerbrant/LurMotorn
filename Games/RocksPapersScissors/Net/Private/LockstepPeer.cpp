@@ -40,11 +40,12 @@ CvSnapshot LockstepPeer::MergedCvs() const {
 }
 #endif
 
-void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* InCtx) {
+// #149: build a match. Everything Init does EXCEPT the peer identity (MyTeam/Send/Ctx) and the
+// merged cvar set — those survive a restart by construction, since they aren't touched here. Init
+// and the post-match restart share this so a new field can't be reset in one path and forgotten in
+// the other. Note ResetSim, never Sim::Init: a fresh sim must come from the MERGED cvars (#147).
+void LockstepPeer::BeginMatch(uint64_t Seed) {
     ResetSim(Seed);
-    MyTeam = InMyTeam & 1u;
-    Send = InSend;
-    Ctx = InCtx;
     Delay = InputDelayTicks;
     LocalEvents.assign(Delay, {});  // ticks 0..Delay-1 are empty by convention on BOTH peers
     PeerEvents.assign(Delay, {});
@@ -60,8 +61,12 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     LocalReady_ = false;
     PeerReady_ = false;
     LocalCampSent_ = false;
+    CampResendNs_ = 0;
+    PostMatchNs_ = 0;
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
+    AwaitingNs = 0;
+    ReoffersLeft = 0;   // no resync round is in flight in a fresh match (BeginResync arms it)
 #if LUR_INTERNAL
     // #147: ResetSim above already honours a merged set that arrived BEFORE this Init — on iOS that
     // is the normal order, not a race: one renderFrame pumps the session inbox (delivering the
@@ -70,6 +75,14 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     // nothing against a fresh match's tick numbering.
     PendingCvars.clear();
 #endif
+}
+
+void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* InCtx) {
+    MyTeam = InMyTeam & 1u;
+    Send = InSend;
+    Ctx = InCtx;
+    MatchIndex_ = 0;      // a fresh session; the restart path is the only other bump
+    BeginMatch(Seed);
 }
 
 void LockstepPeer::QueueLocalEvent(InputEvent E) {
@@ -110,7 +123,26 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // match is still pending OR just started here, no wall tick is produced yet, so both peers
     // begin advancing from WallTicks==0 on their NEXT Tick — symmetric, no start-skew (one peer
     // readies during its own Tick, the other during a delivered message).
-    if (!MatchStarted_) { PreMatchTick(); return; }
+    // #149: the match is decided — hold the win/lose screen, then begin a FRESH match that waits
+    // for both camps again. Checked before anything touches the timeline: once the result is in,
+    // nothing more should be produced, sent or executed on it.
+    //
+    // The two peers detect the result on the same TICK but time this hold on their own clocks, so
+    // they rebuild a few ms apart. That is safe — and ONLY because the new match holds until both
+    // camps are in (#139). Do not try to make the restart bit-synchronous. Seed+1 keeps the peers
+    // agreeing (both hold the same seed) while giving each match its own variety.
+    if (MatchStarted_ && TheSim.Result != ResultOngoing) {
+        PostMatchNs_ += ElapsedNs;
+        if (PostMatchNs_ >= PostMatchHoldNs) {
+            const uint64_t NextSeed = TheSim.Seed + 1;
+            BeginMatch(NextSeed);
+            ++MatchIndex_;
+            Lur::Log::Info("RPS: match %u begins (seed 0x%llx) — awaiting both camps", MatchIndex_,
+                           static_cast<unsigned long long>(NextSeed));
+        }
+        return;
+    }
+    if (!MatchStarted_) { PreMatchTick(ElapsedNs); return; }
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
         // All events queued since the last produced tick fold into the FIRST new tick's batch
@@ -130,21 +162,37 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 // #139 match-start: pre-match, the clock is held. Capture the local camp (the first miner-place
 // the UI queued) as tick 0's local input, send it once so the peer can mirror it, and start the
 // match the moment both camps are in. No wall ticks are produced/executed until then.
-void LockstepPeer::PreMatchTick() {
+void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
     if (!LocalReady_) {
         std::lock_guard<std::mutex> Lock(EventQueueMutex_);
         for (const InputEvent& E : PendingLocalEvents)
             if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner) { LocalCamp_ = E; LocalReady_ = true; break; }
         PendingLocalEvents.clear();  // pre-match: only the mining camp is accepted; drop the rest
     }
-    if (LocalReady_ && !LocalCampSent_) {
-        Lur::Serialization::BitWriter W;
-        EncodeEventBatch(W, &LocalCamp_, 1);          // the same framed batch as a live input tick
-        const std::vector<uint8_t>& B = W.Finish();
-        if (Send) Send(Ctx, MsgInput, B.data(), B.size());
-        LocalCampSent_ = true;
+    // #149: send our camp, then KEEP re-sending it on a period until the peer's arrives. One send
+    // was safe only while both peers entered a match together; across a post-match restart the
+    // earlier riser's camp can land while the other is still on its win screen, where it is
+    // buffered as the old match's input and then wiped by that peer's own restart. Re-sending
+    // costs one tiny frame every 500ms and makes the exchange self-healing whoever restarts first.
+    // Gated on LocalReady_ only — NOT on "the peer hasn't readied". Holding our camp back once
+    // theirs is in hand deadlocks the handshake: whoever readies SECOND already knows the other's
+    // camp, so it would never send its own and the first peer would wait forever.
+    if (LocalReady_) {
+        CampResendNs_ += ElapsedNs;
+        if (!LocalCampSent_ || CampResendNs_ >= PreMatchCampResendNs) SendLocalCamp();
     }
     TryStartMatch();
+}
+
+// The local camp as a framed MsgInput batch — the identical shape a live input tick has, so the
+// receiver's normal decode path handles it.
+void LockstepPeer::SendLocalCamp() {
+    Lur::Serialization::BitWriter W;
+    EncodeEventBatch(W, &LocalCamp_, 1);
+    const std::vector<uint8_t>& B = W.Finish();
+    if (Send) Send(Ctx, MsgInput, B.data(), B.size());
+    LocalCampSent_ = true;
+    CampResendNs_ = 0;
 }
 
 // Both camps in hand -> make them tick 0's input on BOTH peers and start the clock. LocalEvents[0]
@@ -327,6 +375,18 @@ namespace {
 constexpr uint8_t ResyncTagMarker = 0xFF;
 }  // namespace
 
+// #149: is this pre-match batch just the peer's camp again (its 500ms re-send), rather than new
+// input? Without this check the re-sends of PreMatchCampResendNs would each be buffered as a real
+// input tick and corrupt the new match's timeline — the re-send has to be idempotent on the
+// receiver to be safe on the sender. Matched on the full event, so a genuine second miner-place at
+// a DIFFERENT spot still counts as input.
+bool LockstepPeer::IsPeerCampRepeat(const InputEvent* Batch, int Count) const {
+    if (Count != 1) return false;
+    const InputEvent& E = Batch[0];
+    return E.Kind == EventPlaceBuilding && E.Type == UnitMiner && E.Team == PeerCamp_.Team &&
+           E.X == PeerCamp_.X && E.Y == PeerCamp_.Y;
+}
+
 void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
     if (Type == MsgInput) {
         Lur::Serialization::BitReader R(Data, N);
@@ -338,7 +398,17 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             // at PeerEvents[Delay]+ once we start) so nothing is dropped across the skew.
             if (Cnt < 0) return;
             if (!PeerReady_) { if (Cnt >= 1) { PeerCamp_ = Buf[0]; PeerReady_ = true; TryStartMatch(); } }
-            else PeerEvents.emplace_back(Buf, Buf + Cnt);
+            else if (!IsPeerCampRepeat(Buf, Cnt)) PeerEvents.emplace_back(Buf, Buf + Cnt);
+            return;
+        }
+        // #149: we have STARTED but the peer is still re-sending the camp we already hold — so it
+        // never got OURS (we started on its camp; our own send raced its restart and was dropped).
+        // Re-sending our camp is the only thing that can unstrand it: the peer that starts first
+        // leaves PreMatchTick and would otherwise never send again. And the repeat must NOT be
+        // buffered — it is not a produced tick, so appending it would shift PeerEvents' index==tick
+        // alignment and desync us (a repeat placement is a deterministic no-op anyway).
+        if (IsPeerCampRepeat(Buf, Cnt)) {
+            SendLocalCamp();
             return;
         }
         if (!Awaiting && Cnt >= 0) {

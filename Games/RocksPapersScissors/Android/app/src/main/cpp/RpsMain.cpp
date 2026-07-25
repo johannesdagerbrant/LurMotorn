@@ -420,7 +420,9 @@ void android_main(android_app* App) {
         uint64_t SoloAccumNs = 0;          //   fixed-timestep accumulator for the local sim
         int  SoloTier_ = -1;               // #2 current solo tier (score attribution)
         bool SoloScored = false;           // #2 this solo match's result already tallied
+        uint64_t SoloPostNs = 0;           // #149 wall time held on the solo win/lose screen
         bool LinkedScored = false;         // #2 this linked match's result already tallied
+        uint32_t LinkedScoredIdx = 0xFFFFFFFFu;  // #149 which Lp match LinkedScored refers to
         bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
         bool PrevPeerReady = false;        // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
 #if LUR_INTERNAL
@@ -523,6 +525,24 @@ void android_main(android_app* App) {
                     else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
                     else State.AiDraws_[SoloTier_].fetch_add(1);
                 }
+                // #149: hold the win/lose screen, then start a FRESH match at the same tier, back in
+                // the pre-match state (the AI waits for your camp, and the camera re-locks to the
+                // baseline, both on their own). Seed+1 keeps each match different. Same hold as the
+                // linked path — one constant in Tunables so solo and linked can't drift.
+                if (State.SoloSim.Result != Rps::ResultOngoing) {
+                    SoloPostNs += ElapsedNs;
+                    if (SoloPostNs >= Rps::PostMatchHoldNs && SoloTier_ >= 0) {
+                        const uint64_t NextSeed = State.SoloSim.Seed + 1;
+                        State.SoloSim.Init(NextSeed);
+                        State.SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier_));
+                        SoloScored = false;  SoloPostNs = 0;  SoloAccumNs = 0;
+                        LastPubTick = 0xFFFFFFFFu;
+                        LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
+                             static_cast<unsigned long long>(NextSeed));
+                    }
+                } else {
+                    SoloPostNs = 0;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
                 continue;  // solo owns the loop; skip Lp
             }
@@ -586,6 +606,12 @@ void android_main(android_app* App) {
                       State.Mailbox.Back().CaptureFrom(State.Lp.GetSim(), NowNs(), kStepNs); }
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
+                }
+                // #149: one Lp now spans many matches, so the tally latch is per MATCH INDEX — a
+                // restart re-arms it exactly once, and a re-entered index can never double-count.
+                if (LinkedScoredIdx != State.Lp.MatchIndex()) {
+                    LinkedScoredIdx = State.Lp.MatchIndex();
+                    LinkedScored = false;
                 }
                 // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
                 if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {

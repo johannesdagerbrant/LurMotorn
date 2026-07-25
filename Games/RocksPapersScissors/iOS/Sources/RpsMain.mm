@@ -114,6 +114,8 @@ Rps::Fixed WorldToFixed(float Wv) {
     int _SoloTier;
     uint64_t _SoloAccumNs;
     bool _SoloScored;
+    uint64_t _SoloPostNs;      // #149 wall time held on the solo win/lose screen
+    uint32_t _ScoredIdx;       // #149 which Lp match index _Scored refers to
     std::vector<Rps::InputEvent> _SoloPending;  // human events queued (main thread), drained per tick
     int _PendingTier;          // one-shot selector pick -> (re)start solo (-1 = none)
     bool _SwitchToLinked;      // selector: switch from solo to the linked peer
@@ -301,7 +303,7 @@ Rps::Fixed WorldToFixed(float Wv) {
     if (_PendingTier >= 0) {
         _SoloSim.Init(kMatchSeed);
         _SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(_PendingTier));
-        _SoloActive = true; _SoloTier = _PendingTier; _SoloScored = false;
+        _SoloActive = true; _SoloTier = _PendingTier; _SoloScored = false; _SoloPostNs = 0;
         _SoloAccumNs = 0; _LastTick = 0xFFFFFFFFu; _Started = false; _Team = 0; _CamInit = false;
         _SoloPending.clear();
         os_log(OS_LOG_DEFAULT, "OnlyRps: solo AI match (re)started (tier %d)", _PendingTier);
@@ -365,6 +367,21 @@ Rps::Fixed WorldToFixed(float Wv) {
             else ++_AiD[_SoloTier];
             _View.SetAiScore(_SoloTier, _AiW[_SoloTier], _AiL[_SoloTier], _AiD[_SoloTier]);
         }
+        // #149: hold the win/lose screen, then begin a FRESH match at the same tier from Seed+1 —
+        // back in the pre-match state (the AI waits for your camp; the camera re-locks itself).
+        if (_SoloSim.Result != Rps::ResultOngoing) {
+            _SoloPostNs += ElapsedNs;
+            if (_SoloPostNs >= Rps::PostMatchHoldNs && _SoloTier >= 0) {
+                const uint64_t NextSeed = _SoloSim.Seed + 1;
+                _SoloSim.Init(NextSeed);
+                _SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(_SoloTier));
+                _SoloScored = false; _SoloPostNs = 0; _SoloAccumNs = 0;
+                _SoloPending.clear();
+                os_log(OS_LOG_DEFAULT, "OnlyRps: solo next match begins (tier %d)", _SoloTier);
+            }
+        } else {
+            _SoloPostNs = 0;
+        }
     } else {
         if (!_Started && PeerReady) {
             const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
@@ -390,10 +407,13 @@ Rps::Fixed WorldToFixed(float Wv) {
             // that kept running sat in Awaiting forever. Harmless for a fresh pair (empty
             // histories, marker F=0 both ways). After Init so Init can't wipe it.
             _Lp.BeginResync();
-            _Started = true; _Scored = false;
+            _Started = true; _Scored = false; _ScoredIdx = _Lp.MatchIndex();
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
         if (_Started) _Lp.Tick(ElapsedNs);
+        // #149: one Lp spans many matches now (it holds the win screen, then rebuilds), so the
+        // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
+        if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }
         // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
         if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
             _Scored = true;

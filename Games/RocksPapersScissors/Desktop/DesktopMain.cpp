@@ -508,6 +508,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     int SW[3] = {}, SL[3] = {}, SD[3] = {};
     int CurTier = static_cast<int>(AiTier);
     bool Scored = false;
+    uint64_t PostMatchNs = 0;   // #149 wall time held on the win/lose screen
 
     while (Win.PumpEvents()) {
         const uint64_t Now = NowNs();
@@ -630,6 +631,26 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             if (Snap.Result == Rps::ResultTeam0Wins) ++SW[CurTier];
             else if (Snap.Result == Rps::ResultTeam1Wins) ++SL[CurTier];
             else ++SD[CurTier];
+        }
+        // #149: hold the win/lose screen for PostMatchHoldNs, then start a fresh match at the same
+        // tier from Seed+1 — back in the pre-match state, waiting for your camp. Same restart path
+        // the tier pick uses; the camera re-locks itself on !HasMinerCamp, so nothing else to reset.
+        if (HaveSnap && Snap.Result != Rps::ResultOngoing) {
+            PostMatchNs += ElapsedNs;
+            if (PostMatchNs >= Rps::PostMatchHoldNs) {
+                PostMatchNs = 0;
+                Scored = false;
+                ++Seed;
+                Ai.Init(Seed, /*team*/ 1, static_cast<Rps::EAiTier>(CurTier));
+                Runner->Stop();
+                Runner->Start(Seed, &SampleSoloVsAi, &AiCtx,
+                              static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat);
+                CamInit = false;
+                Lur::Log::Info("solo: next match begins (seed 0x%llx)",
+                               static_cast<unsigned long long>(Seed));
+            }
+        } else {
+            PostMatchNs = 0;
         }
         for (int T = 0; T < 3; ++T) View.SetAiScore(T, SW[T], SL[T], SD[T]);
         if (HaveSnap && W > 0 && H > 0) {
