@@ -68,7 +68,8 @@ constexpr UnitStats UnitTable[UnitCount] = {
     {  50,   50,  45, F(5, 10),      7, F(2),       6, UnitPaper  }, // Scissor cutter
 };
 
-LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay);   // attacker vs the type it beats
+LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay,
+         "Damage multiplier when attacking the type you beat (the RPS triangle)");
 constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
 // ---- Per-type unit stats as gameplay CVars (#122). The dotted name IS the console-tree
@@ -77,26 +78,26 @@ constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 // Speed is Fixed. Range/Cooldown and the RPS Beats relation stay compile-time in UnitTable
 // (Beats is wire/order-load-bearing, not a number to twiddle). The Sim latches these into
 // Sim::Units[] (DeriveUnits) each tick. ----
-LUR_CVAR_T(CvMinerCost,      "rps.unit.miner.cost",      30,       CVarFlagAffectsGameplay, "Gold to queue a miner cart");
-LUR_CVAR_T(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
-LUR_CVAR_T(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
-LUR_CVAR_T(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
-LUR_CVAR_T(CvMinerBuild,     "rps.unit.miner.build_time",50,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
-LUR_CVAR_T(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
-LUR_CVAR_T(CvRockHp,         "rps.unit.rock.hp",         100,      CVarFlagAffectsGameplay, "Rock hit points");
-LUR_CVAR_T(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
-LUR_CVAR_T(CvRockDamage,     "rps.unit.rock.damage",     7,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
-LUR_CVAR_T(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
-LUR_CVAR_T(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
-LUR_CVAR_T(CvPaperHp,        "rps.unit.paper.hp",        50,       CVarFlagAffectsGameplay, "Paper hit points");
-LUR_CVAR_T(CvPaperSpeed,     "rps.unit.paper.speed",     F(1),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
-LUR_CVAR_T(CvPaperDamage,    "rps.unit.paper.damage",    9,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
-LUR_CVAR_T(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
-LUR_CVAR_T(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
-LUR_CVAR_T(CvScissorHp,      "rps.unit.scissor.hp",      80,       CVarFlagAffectsGameplay, "Scissor hit points");
-LUR_CVAR_T(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 4),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
-LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  12,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
-LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
+LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      30,       CVarFlagAffectsGameplay, "Gold to queue a miner cart");
+LUR_CVAR(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
+LUR_CVAR(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
+LUR_CVAR(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
+LUR_CVAR(CvMinerBuild,     "rps.unit.miner.build_time",50,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
+LUR_CVAR(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
+LUR_CVAR(CvRockHp,         "rps.unit.rock.hp",         100,      CVarFlagAffectsGameplay, "Rock hit points");
+LUR_CVAR(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
+LUR_CVAR(CvRockDamage,     "rps.unit.rock.damage",     7,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
+LUR_CVAR(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
+LUR_CVAR(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
+LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        50,       CVarFlagAffectsGameplay, "Paper hit points");
+LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     F(1),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    9,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
+LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
+LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
+LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      80,       CVarFlagAffectsGameplay, "Scissor hit points");
+LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 4),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
+LUR_CVAR(CvScissorDamage,  "rps.unit.scissor.damage",  12,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
+LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 
 // ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
 // (#131 SoA). Each building type's health + placement cost is a knob nested UNDER that unit's
@@ -109,33 +110,33 @@ LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffec
 // investment (500 of the 800 opening gold) and every soldier building costs more than you start
 // with, so the first soldier is always mined for, never opened with. Re-tune by playing, not by
 // reasoning: these are felt numbers. ----
-LUR_CVAR_T(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
-LUR_CVAR_T(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   500, CVarFlagAffectsGameplay, "Gold to place a mining camp");
-LUR_CVAR_T(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
-LUR_CVAR_T(CvRockBuildingCost,    "rps.unit.rock.building_cost",    700, CVarFlagAffectsGameplay, "Gold to place a Rock building");
-LUR_CVAR_T(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
-LUR_CVAR_T(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  1000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
-LUR_CVAR_T(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
-LUR_CVAR_T(CvScissorBuildingCost, "rps.unit.scissor.building_cost",1250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+LUR_CVAR(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
+LUR_CVAR(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   500, CVarFlagAffectsGameplay, "Gold to place a mining camp");
+LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
+LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",    700, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
+LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  1000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
+LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",1250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
 // Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
 // gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
 // match — the decisive killing blow that replaced the slow economic-exhaustion win. Tanky by
 // design: HP well above any other building (placeholder ~3x the toughest combat building).
-LUR_CVAR_T(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
+LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
-LUR_CVAR_T(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
-LUR_CVAR_T(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
-LUR_CVAR_T(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
-LUR_CVAR_T(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
+LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
+LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
+LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
+LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
-LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
+LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
 // Opening gold (§12.6): a tunable knob whose DEFAULT is exactly one mining camp + three miner
 // carts = MinerBuildingCost(100) + 3 x MinerCost(30) = 190. Enough for the forced camp-then-miners
 // opening and nothing else (a combat building is gated on the first miner unit anyway, ApplyPlace),
 // so a player can't open with military. Keep the default in step with those costs if they change.
-LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  800,      CVarFlagAffectsGameplay, "Opening gold: one mining camp (500) + 10 miner carts");
+LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  800,      CVarFlagAffectsGameplay, "Opening gold: one mining camp (500) + 10 miner carts");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
@@ -144,7 +145,7 @@ constexpr int32_t WorkersPerMine = 6;
 constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry (default for the CVar below)
 // How fast a cart gathers (#122): ticks to fill one carry. Lower = faster mining. Default =
 // the constant above, so the economy is unchanged until edited.
-LUR_CVAR_T(CvDigTicks, "rps.economy.dig_ticks", DigTicks, CVarFlagAffectsGameplay, "Ticks a cart digs to fill a carry (lower = faster)");
+LUR_CVAR(CvDigTicks, "rps.economy.dig_ticks", DigTicks, CVarFlagAffectsGameplay, "Ticks a cart digs to fill a carry (lower = faster)");
 constexpr int32_t CarryCapacity = 15;      // gold per round trip
 // (#135: no compile-time StartGold/StartMiners — the match opens with only CvStartingGold and no
 // units; each team places its mining camp to begin producing.)
@@ -199,12 +200,14 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // Separation must WIN at short range so units stay visibly spaced (playtest 2026-07-20:
 // weak separation let cohesion compress the blob into an unreadable mush). Strong push +
 // wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
-LUR_CVAR_T(CvSepRadius, "rps.boid.sep_radius", F(24, 10), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
-LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3, 2), CVarFlagAffectsGameplay);      // > cohesion at contact — sets the spacing
+LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(24, 10), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
+LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3, 2), CVarFlagAffectsGameplay,
+         "Same-team push-apart strength; must beat cohesion at contact or the blob turns to mush");
 // Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
 // fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
-LUR_CVAR_T(CvEnemySepRadius, "rps.boid.enemy_sep_radius", F(3, 2), CVarFlagAffectsGameplay, "Enemy keep-apart radius (world units)");
-LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFlagAffectsGameplay);
+LUR_CVAR(CvEnemySepRadius, "rps.boid.enemy_sep_radius", F(3, 2), CVarFlagAffectsGameplay, "Enemy keep-apart radius (world units)");
+LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFlagAffectsGameplay,
+         "Push-apart strength against enemies; un-piles a melee into arcs instead of a pixel-pile");
 // Two-tier cohesion (soldiers only) — THE readability mechanism. Toward the same-type
 // centroid (tight: papers blob with papers) plus a weaker pull toward the whole army's
 // warrior centroid (so type-blobs travel loosely together, not scattered).
@@ -217,50 +220,58 @@ LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFla
 // GROUP-UP pass (2026-07-20 playtest): same-type cohesion reaches FAR to find teammates
 // across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
 // lone spawn drifts toward its type over distance without the group compressing to mush.
-LUR_CVAR_T(CvCohSameRadius, "rps.boid.coh_same_radius", F(15), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
-LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay);                //   weight (gentle — soft pull, not a hard clump)
-LUR_CVAR_T(CvCohAllRadius, "rps.boid.coh_all_radius", F(9), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
+LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(15), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
+LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay,
+         "Pull toward your OWN type's centre: keep it gentle, a soft wide gather not a hard clump");
+LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(9), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
 // Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
 // pile onto each other — same-type globs are the readable unit; the whole-army pull is a
 // barely-there nudge so they don't scatter to opposite corners.
-LUR_CVAR(CvWCohAll, "rps.boid.w_coh_all", F(1, 64), CVarFlagAffectsGameplay);                //   weight (≪≪ WCohSame — barely noticeable)
-LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay);                      // goal-pursuit weight (unit direction)
+LUR_CVAR(CvWCohAll, "rps.boid.w_coh_all", F(1, 64), CVarFlagAffectsGameplay,
+         "Pull toward the WHOLE army's centre: far below w_coh_same, just enough not to scatter");
+LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
+         "Goal-pursuit weight — the reference 1.0 the other flock weights are judged against");
 // Predator flee (2026-07-20 playtest): a unit must NEVER steer toward the enemy type it
 // is weak against (the type that beats it). A repulsion from that predator, larger radius
 // than enemy separation, corrected falloff (strongest at contact). Chases prey, flees the
 // counter — so the RPS triangle plays out spatially, not just in the damage numbers.
-LUR_CVAR_T(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(7), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 4), CVarFlagAffectsGameplay);           // subtle drift away (playtest 2026-07-20: nudged up a
-                                                   //   little); still < WSeek so hunting prey dominates
+LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(7), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 4), CVarFlagAffectsGameplay,
+         "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
 // with a smoothstep fade; no floats, no libs). WNoise is its amplitude; NoiseTimeScale is
 // ticks→lattice (smaller = slower, smoother drift).
-LUR_CVAR_T(CvNoiseTimeScale, "rps.boid.noise_time_scale", F(1, 12), CVarFlagAffectsGameplay, "Noise temporal frequency (lattice cells/tick)");
-LUR_CVAR_T(CvWNoise, "rps.boid.w_noise", F(2, 5), CVarFlagAffectsGameplay, "Wander amplitude (world-units of pull)");
+LUR_CVAR(CvNoiseTimeScale, "rps.boid.noise_time_scale", F(1, 12), CVarFlagAffectsGameplay, "Noise temporal frequency (lattice cells/tick)");
+LUR_CVAR(CvWNoise, "rps.boid.w_noise", F(2, 5), CVarFlagAffectsGameplay, "Wander amplitude (world-units of pull)");
 // Fractal (fBm) noise levers (#123): stack N octaves of the value noise, each at Lacunarity x
 // the frequency and Gain x the amplitude, normalized. Octaves=1 is exactly the single-octave
 // wander above (bit-identical default) — turn it up for richer, less repetitive drift.
-LUR_CVAR_T(CvNoiseOctaves,     "rps.boid.noise_octaves",     1,       CVarFlagAffectsGameplay, "Noise octaves (1 = smooth; more = detailed)");
-LUR_CVAR_T(CvNoiseGain,        "rps.boid.noise_gain",        F(1, 2), CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
-LUR_CVAR_T(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(2),    CVarFlagAffectsGameplay, "Frequency multiply per octave");
+LUR_CVAR(CvNoiseOctaves,     "rps.boid.noise_octaves",     1,       CVarFlagAffectsGameplay, "Noise octaves (1 = smooth; more = detailed)");
+LUR_CVAR(CvNoiseGain,        "rps.boid.noise_gain",        F(1, 2), CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
+LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(2),    CVarFlagAffectsGameplay, "Frequency multiply per octave");
 // Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
 // last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
 // Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
 // Lava-lamp: slower turns (MaxAccel down) + more glide (Damp up) = the viscous feel.
-LUR_CVAR_T(CvAlignRadius, "rps.boid.align_radius", F(5), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
-LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay);                  //   weight (match neighbour heading — laminar flow)
-LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", F(10, 100), CVarFlagAffectsGameplay);             // per-tick turn/accel clamp (gloopy, ≈0.7 s to reach Speed)
-LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay);           // carried-Δ retention in free flight (viscous glide)
-LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsGameplay);          // stronger decay when engaged — no orbiting the target
+LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(5), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
+LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay,
+         "Match same-type neighbours' heading — turns a crowd into laminar flow");
+LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", F(10, 100), CVarFlagAffectsGameplay,
+         "Per-tick turn/accelerate clamp: lower = heavier, gloopier units (~0.7 s to reach speed)");
+LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay,
+         "Momentum kept per tick in free flight: higher = more glide (the lava-lamp feel)");
+LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsGameplay,
+         "Momentum kept once in attack range: low so a unit settles instead of orbiting its target");
 // Slice C (#98) — guard-lite INTERPOSE: an enemy soldier within GuardAlertR of one of MY
 // miners is a RAIDER. A defender that has BOTH a friendly cart and a flagged raider within
 // InterposeR steers to the point BETWEEN them — screening the cart (even from a predator it
 // wouldn't attack). Positioning, not targeting: it keeps raiders off the economy by body.
 constexpr Fixed GuardAlertR = F(6);                // raider = enemy soldier this close to a cart
-LUR_CVAR_T(CvInterposeRadius, "rps.boid.interpose_radius", F(12), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
-LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay);                 // pull toward the block point (≈ WSeek)
+LUR_CVAR(CvInterposeRadius, "rps.boid.interpose_radius", F(12), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
+LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay,
+         "Pull toward the point between a raider and your cart — screening by body, not targeting");
 // The single flock GATHER radius = the LARGEST force radius. One widened neighbour walk feeds
 // every force (each re-tests its own smaller radius), so brute≡grid holds no matter which
 // force is widest. Now that the radii are CVars (#123) it is DERIVED AT RUNTIME from the
@@ -328,15 +339,15 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
 // knobs for a tier so the three stay in lockstep. ----
 #define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR)                                                    \
-    LUR_CVAR_T(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
-    LUR_CVAR_T(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
-    LUR_CVAR_T(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
-    LUR_CVAR_T(CvAi##Tier##Precision,    "rps.ai." Pfx ".precision",     PR, CVarFlagAffectsGameplay, "Enemy-count rounding bucket (1 = exact)");    \
-    LUR_CVAR_T(CvAi##Tier##Cadence,      "rps.ai." Pfx ".cadence",       CA, CVarFlagAffectsGameplay, "Ticks between re-decisions");                 \
-    LUR_CVAR_T(CvAi##Tier##Jitter,       "rps.ai." Pfx ".jitter",        JI, CVarFlagAffectsGameplay, "Random +/- cadence jitter (ticks)");          \
-    LUR_CVAR_T(CvAi##Tier##Hysteresis,   "rps.ai." Pfx ".hysteresis",    HY, CVarFlagAffectsGameplay, "Lead margin before switching countered type");\
-    LUR_CVAR_T(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
-    LUR_CVAR_T(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)")
+    LUR_CVAR(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
+    LUR_CVAR(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
+    LUR_CVAR(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
+    LUR_CVAR(CvAi##Tier##Precision,    "rps.ai." Pfx ".precision",     PR, CVarFlagAffectsGameplay, "Enemy-count rounding bucket (1 = exact)");    \
+    LUR_CVAR(CvAi##Tier##Cadence,      "rps.ai." Pfx ".cadence",       CA, CVarFlagAffectsGameplay, "Ticks between re-decisions");                 \
+    LUR_CVAR(CvAi##Tier##Jitter,       "rps.ai." Pfx ".jitter",        JI, CVarFlagAffectsGameplay, "Random +/- cadence jitter (ticks)");          \
+    LUR_CVAR(CvAi##Tier##Hysteresis,   "rps.ai." Pfx ".hysteresis",    HY, CVarFlagAffectsGameplay, "Lead margin before switching countered type");\
+    LUR_CVAR(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
+    LUR_CVAR(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)")
 //                 OW  WT  ST  PR  CA  JI HY  AL  SR
 LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 50);
 LUR_AI_TIER(Medium, "medium", 4,  8,  20, 2, 20, 6,  2, 15, 60);

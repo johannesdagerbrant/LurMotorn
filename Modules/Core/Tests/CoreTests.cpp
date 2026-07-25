@@ -136,9 +136,10 @@ static void TestFromStringGeneric() {
 }
 
 // ---- CVar<T>: default/get/set/reset/overridden + registry (dev shape) ----
-LUR_CVAR(CvTestInt, "test.int", 7, ::Lur::Core::CVarFlagNone);
-LUR_CVAR(CvTestBool, "test.bool", false, ::Lur::Core::CVarFlagNone);
-LUR_CVAR(CvTestMode, "test.mode", ETestMode::Auto, ::Lur::Core::CVarFlagAffectsGameplay);
+LUR_CVAR(CvTestInt, "test.int", 7, ::Lur::Core::CVarFlagNone, "Test fixture: int CVar");
+LUR_CVAR(CvTestBool, "test.bool", false, ::Lur::Core::CVarFlagNone, "Test fixture: bool CVar");
+LUR_CVAR(CvTestMode, "test.mode", ETestMode::Auto, ::Lur::Core::CVarFlagAffectsGameplay,
+         "Test fixture: enum CVar");
 
 static void TestCVarMechanism() {
     CHECK(CvTestInt.Get() == 7);

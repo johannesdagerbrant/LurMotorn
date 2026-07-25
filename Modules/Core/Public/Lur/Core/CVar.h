@@ -51,8 +51,9 @@ enum class ECVarOrigin : uint8_t { Game = 0, Engine = 1 };
 class ICVar {
 public:
     virtual const char* Name() const     = 0;
-    // Optional one-line help shown by the console's per-CVar "i" button (empty = no tooltip,
-    // the "i" renders greyed + inert). Declared via LUR_CVAR_T; plain LUR_CVAR leaves it "".
+    // One-line help shown by the console's per-CVar "i" button. ALWAYS present: LUR_CVAR takes it
+    // as a required argument and static_asserts it non-empty, so no CVar can reach the console
+    // undocumented and the "i" button never has to render an inert/greyed state.
     virtual const char* Tooltip() const   = 0;
     virtual uint32_t    Flags() const     = 0;
     virtual ECVarOrigin Origin() const    = 0;
@@ -193,51 +194,49 @@ CVar(const char*, T, A...) -> CVar<T>;
 
 }  // namespace Lur::Core
 
-// LUR_CVAR(Var, "name", Default, Flags) — the ONE way to declare a CVar. The dotted name IS
-// the hierarchy: the console groups cvars into a tree by splitting the name on '.' (so
-// "rps.boid.sep_strength" nests under rps -> boid), which is why there is no separate category.
+// LUR_CVAR(Var, "name", Default, Flags, "Description") — the ONE way to declare a CVar. The
+// dotted name IS the hierarchy: the console groups cvars into a tree by splitting the name on '.'
+// (so "rps.boid.sep_strength" nests under rps -> boid), which is why there is no separate category.
 //   Dev:      inline mutable CVar + a separate registrar static (so the console/panel/
 //             cvars.cfg can find it by name) + a compile-time float-gameplay ban.
-//   Shipping: JUST the constant-initialized value (flags/registrar vanish), satisfying §1.1's
-//             structural condition for the zero-overhead fold.
+//   Shipping: JUST the constant-initialized value (flags/registrar/description vanish),
+//             satisfying §1.1's structural condition for the zero-overhead fold.
 // The macro has no trailing ';' — call sites write `LUR_CVAR(...);`.
+//
+// THE DESCRIPTION IS MANDATORY, and that is enforced by the compiler two ways: it is a required
+// macro argument (omit it and the arity is wrong), and the static_assert below rejects an EMPTY
+// one. A knob nobody can explain is a knob nobody can tune — the console's per-CVar "i" button
+// shows this string, and it is the only place a tuner learns what a name like "w_coh_all" means.
+// There is deliberately NO tooltip-less form: the previous LUR_CVAR/LUR_CVAR_T split let 19 of
+// them ship undocumented, with the explanation stranded in a trailing // comment the console
+// could never show.
 #if LUR_SHIPPING
-    #define LUR_CVAR(Var, Name, Default, Flags) \
+    #define LUR_CVAR(Var, Name, Default, Flags, Tooltip)                                      \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
         inline constexpr ::Lur::Core::CVar Var { Name, Default }
 #else
-    #define LUR_CVAR(Var, Name, Default, Flags)                                             \
-        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&       \
-                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),           \
-                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags) };                             \
-        inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
-#endif
-
-// LUR_CVAR_T — as LUR_CVAR, plus an optional one-line Tooltip shown by the console's per-CVar
-// "i" button. Shipping drops the tooltip (dev-only string) exactly like the other dev args.
-#if LUR_SHIPPING
-    #define LUR_CVAR_T(Var, Name, Default, Flags, Tooltip) \
-        inline constexpr ::Lur::Core::CVar Var { Name, Default }
-#else
-    #define LUR_CVAR_T(Var, Name, Default, Flags, Tooltip)                                   \
-        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&        \
-                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),            \
-                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), (Tooltip) };                   \
+    #define LUR_CVAR(Var, Name, Default, Flags, Tooltip)                                      \
+        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&          \
+                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),              \
+                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name);  \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), (Tooltip) };                    \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
 
 // LUR_CVAR_ENGINE — identical, but tags the CVar as engine-origin for the panel's
 // Engine/Game split (Addendum D.3). Only engine modules use it; games use LUR_CVAR.
 #if LUR_SHIPPING
-    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags) \
+    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags, Tooltip)                               \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
         inline constexpr ::Lur::Core::CVar Var { Name, Default }
 #else
-    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags)                                      \
-        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&       \
-                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),           \
-                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name); \
-        inline ::Lur::Core::CVar Var { Name, Default, (Flags), nullptr,                      \
-                                       ::Lur::Core::ECVarOrigin::Engine };                   \
+    #define LUR_CVAR_ENGINE(Var, Name, Default, Flags, Tooltip)                               \
+        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&          \
+                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),              \
+                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name);  \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
+        inline ::Lur::Core::CVar Var { Name, Default, (Flags), (Tooltip),                      \
+                                       ::Lur::Core::ECVarOrigin::Engine };                     \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
