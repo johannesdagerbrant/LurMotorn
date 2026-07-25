@@ -790,6 +790,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float QW = 34.0f * HS, RGap = 4.0f * HS;
                 const float RowY = By + Half + 8.0f * HS;
                 const float GroupL = Bx - BldgPx * 0.5f;
+                // Its own translucent plate (playtest): the count and the bar sit over open field or
+                // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
+                // building's controls read as one family.
+                Blit(ProdBtnBg, Bx, RowY, BldgPx + 6.0f * HS, 20.0f * HS);
                 char QB[16];
                 std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
                 Text.Draw(Renderer, QB, GroupL, RowY - 7.0f * HS, QW, 14.0f * HS, 12.0f * HS, Ico,
@@ -811,20 +815,26 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             PB.Slot = I;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
             const bool AffordOne = Snap.Gold[My] >= UnitCost;
-            // Unit price: coin + number, centred over the building.
+            // Reading order down the building (playtest 2026-07-25): health bar above the icon, then
+            // the x1/x5 pair ON it, then the price of ONE unit under the buttons, then the queue +
+            // progress row under the icon on its own plate. Everything is inside the building's own
+            // footprint, so a cluster never lands on a neighbour's art — which is what happened when
+            // the price floated above the icon.
+            const float RowW = ProdBtnPerBldg * Bw + (ProdBtnPerBldg - 1) * BGap;
+            const float RowLeft = Bx - RowW * 0.5f;
+            // The buttons sit at the BOTTOM of the icon so their lower edge is right above the queue/
+            // progress plate — thumb and readout together — with the unit price above them at the
+            // icon's top. (Price and buttons swapped after seeing it on the phone.)
+            const float Top = By + Half - Bh - 4.0f * HS;
             {
-                const float CostY = By - BHalf - 22.0f * HS;
-                const float Cs = 20.0f * HS;                     // coin size
+                const float CostY = By - Half + 14.0f * HS;      // centre of the coin+price row
+                const float Cs = 20.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
                 BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 20.0f * HS, CostY, Cs);
                 Text.Draw(Renderer, CBuf, Bx - 8.0f * HS, CostY - 11.0f * HS, 48.0f * HS, 22.0f * HS,
                           19.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left, EVAlign::Middle, false);
             }
-            // The x1 / x5 pair: a horizontal row directly under the cost, each button a big square.
-            const float RowW = ProdBtnPerBldg * Bw + (ProdBtnPerBldg - 1) * BGap;
-            const float RowLeft = Bx - RowW * 0.5f;
-            const float Top = By - BHalf + 2.0f * HS;
             // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
             // throbs — right after the first camp x5 is unaffordable, so pulsing it would beg for a
             // buy the player can't make. The plate + "x1"/price brighten on the beat; the gold COIN
