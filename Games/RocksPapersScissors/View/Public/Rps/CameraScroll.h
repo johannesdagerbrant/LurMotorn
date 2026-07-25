@@ -30,15 +30,6 @@ struct CameraScroll {
     }
     void End() { Dragging = false; }
 
-    // #106 minimap scrollbar: jump straight to a scroll position (no content-drag, no flick).
-    // Kills momentum and re-bases the frame reference so Update's velocity estimate doesn't read
-    // the teleport as a colossal flick. The next Update still clamps it to the field.
-    void JumpTo(float NewY) {
-        Y = NewY;
-        Vel = 0.0f;
-        PrevFrameY = NewY;
-    }
-
     // Once per frame: while dragging, measure velocity from the frame's motion; after
     // release, coast on that velocity and dampen it exponentially (~0.3 s time constant),
     // stopping cleanly at the field edges. MinCam is normally NEGATIVE (#85): the view

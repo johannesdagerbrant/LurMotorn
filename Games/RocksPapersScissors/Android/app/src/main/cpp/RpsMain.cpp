@@ -101,7 +101,6 @@ struct AppState {
     int TwoTapCount = 0;
     bool TwoFingerActive = false;
     float DevDragY = 0.0f, DevDragMoved = 0.0f;    // #150 console drag-scroll (glue)
-    bool MiniDrag = false;                         // #106 dragging the minimap scrollbar (glue)
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
 
     // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
@@ -253,14 +252,6 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_DOWN: {
             S->DownX = X; S->DownY = Y;
             S->TwoFingerActive = false;
-            // #106: the minimap strip owns its gesture — press jumps the view to that row and the
-            // finger then drags it (a tap IS a teleport, a drag IS a fast-scroll). Tested before the
-            // plates and the world, and cleared here so a cancelled strip drag can't get stuck on.
-            S->MiniDrag = S->View.MinimapAt(X, Y);
-            if (S->MiniDrag) {
-                S->Cam.JumpTo(S->View.MinimapCameraY(Y));
-                return 1;
-            }
             const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
             if (Plate >= 0) {
                 S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
@@ -279,9 +270,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             if (Count == 2) { S->TwoFingerActive = true; S->TwoDownNs = NowNs(); }
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
-            if (S->MiniDrag) {
-                S->Cam.JumpTo(S->View.MinimapCameraY(Y));  // #106 the view tracks the finger
-            } else if (S->View.IsPlacing()) {
+            if (S->View.IsPlacing()) {
                 float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
                 const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
                 S->View.UpdatePlaceDrag(Gsx, Gsy, V);
@@ -292,11 +281,6 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
         case AMOTION_EVENT_ACTION_POINTER_UP:
             return 1;  // the whole gesture is decided at ACTION_UP (last finger up)
         case AMOTION_EVENT_ACTION_UP: {
-            if (S->MiniDrag) {  // #106: the strip consumed the whole gesture — no tap, no placement
-                S->MiniDrag = false;
-                S->TwoFingerActive = false;
-                return 1;
-            }
             // A placement in progress commits (valid drop -> Place event) or slides back.
             if (S->View.IsPlacing()) {
                 bool Placed = false;

@@ -444,19 +444,6 @@ int GameView::OnTap(float XPx, float YPx) {
     return -1;
 }
 
-bool GameView::MinimapAt(float XPx, float YPx) const {
-    if (!Ready || MiniRect_[2] <= 0.0f || MiniRect_[3] <= 0.0f) return false;
-    return XPx >= MiniRect_[0] && XPx <= MiniRect_[0] + MiniRect_[2] &&
-           YPx >= MiniRect_[1] && YPx <= MiniRect_[1] + MiniRect_[3];
-}
-
-float GameView::MinimapCameraY(float YPx) const {
-    if (MiniHeightPx_ <= 0.0f) return 0.0f;
-    // Invert Render's MapFy: Py = Bottom - (Fy / WorldH) * StripH  ->  Fy = (Bottom - Py) * WorldH / StripH.
-    const float Fy = (MiniBottomPx_ - YPx) * MiniWorldH_ / MiniHeightPx_;
-    return Fy - MiniVisH_ * 0.5f;  // the grabbed row lands mid-screen, not at the bottom edge
-}
-
 int GameView::PlateAt(float XPx, float YPx) const {
     if (!Ready) return -1;
     for (int Ty = 0; Ty < 4; ++Ty) {
@@ -1139,18 +1126,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             return StripX + 1.5f + (Wx / FW(WorldWidth)) * (StripW - 3.0f);
         };
         const float VisH = HeightPx / P;
-        // #106: publish the strip's geometry for the input path — the touch rect is widened to the
-        // LEFT (the ribbon hugs the screen edge, so there is nowhere to grow right) to a finger-
-        // sized target, and the mapping constants let MinimapCameraY invert MapFy exactly.
-        const float MiniTouchW = 44.0f * HS;
-        MiniRect_[0] = StripX + StripW - MiniTouchW;
-        MiniRect_[1] = StripY;
-        MiniRect_[2] = MiniTouchW;
-        MiniRect_[3] = StripH;
-        MiniBottomPx_ = StripB;
-        MiniHeightPx_ = StripH;
-        MiniWorldH_ = WH;
-        MiniVisH_ = VisH;
         float WinTop = MapFy(CameraY + VisH), WinBot = MapFy(CameraY);
         if (WinTop < StripY) WinTop = StripY;
         if (WinBot > StripB) WinBot = StripB;

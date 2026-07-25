@@ -87,15 +87,11 @@ public:
     // delay). Active=false clears it. Prevents "my camp is invisible until both players placed".
     void SetPlacedPreview(int Type, float Wx, float Wy, bool Active);
 
-    // ---- #106 minimap-as-scrollbar ----
-    // Is (XPx,YPx) on the minimap strip? The rect is touch-widened past the drawn strip (a 12px
-    // ribbon is a mouse target, not a finger one). Test this BEFORE the plates/world on a
-    // pointer-down: the strip is HUD and owns its gesture.
-    bool MinimapAt(float XPx, float YPx) const;
-    // The camera Y that centres the view on the field row under strip pixel YPx — the inverse of
-    // the strip mapping Render draws with. Same (possibly flipped) space as CameraScroll::Y, so the
-    // caller just feeds it to CameraScroll::JumpTo; clamping stays CameraScroll's job.
-    float MinimapCameraY(float YPx) const;
+    // (#106's minimap-as-scrollbar was REMOVED — playtest 2026-07-25. To be a finger target the
+    // strip needed a touch rect ~3.7x wider than the 12*HS ribbon it draws, and that invisible
+    // margin reached back over the playfield, stealing taps from the production buttons of any
+    // building near the right edge. The minimap is a passive overview again; if it returns, its
+    // target must not extend past what it draws.)
 
     // #140 per-building production: hit-test a tap against the x1/x5 buttons drawn over EVERY local
     // building this frame. Returns the batch COUNT (1/5) and sets OutSlot to the building's sim
@@ -278,14 +274,6 @@ private:
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap
-    // #106 minimap strip: its TOUCH rect + the mapping constants, captured each Render so a
-    // pointer-down can hit-test the strip and invert strip-Y back into a camera position. Same
-    // thread discipline as PlateRect (written in Render, read by the main's input path).
-    float MiniRect_[4] = {};              // touch rect {x,y,w,h} (wider than the drawn ribbon)
-    float MiniBottomPx_ = 0.0f;           // pixel the strip maps world-Y 0 to
-    float MiniHeightPx_ = 0.0f;           // strip height in pixels (world height maps across it)
-    float MiniWorldH_ = 0.0f;             // world height spanned by the strip
-    float MiniVisH_ = 0.0f;               // world units visible on screen (to centre the jump)
     // §9 opening gate: this plate's building type isn't unlocked yet, so it draws greyed and is NOT
     // a drag source (PlateAt / OnTap skip it). Refreshed from the snapshot each Draw.
     bool  PlateLocked[4] = {};

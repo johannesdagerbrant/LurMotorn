@@ -91,7 +91,6 @@ Rps::Fixed WorldToFixed(float Wv) {
     Rps::CameraScroll _Cam;
     bool _CamInit;
     float _DownX, _DownY;
-    bool _MiniDrag;                 // #106 dragging the minimap scrollbar
     uint8_t _Team;
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
@@ -549,13 +548,6 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     _DownX = X; _DownY = Y;
-    // #106: the minimap strip owns its gesture — press jumps the view to that row and the finger
-    // then drags it. Tested before the plates and the world, like the rest of the HUD.
-    _MiniDrag = _View.MinimapAt(X, Y);
-    if (_MiniDrag) {
-        _Cam.JumpTo(_View.MinimapCameraY(Y));
-        return;
-    }
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float Off = [self ghostOffPxForWidth:W];
     const bool Live = _SoloActive || _Started;
@@ -580,10 +572,6 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
-    if (_MiniDrag) {
-        _Cam.JumpTo(_View.MinimapCameraY(Y));  // #106 the view tracks the finger
-        return;
-    }
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
@@ -600,10 +588,6 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
-    if (_MiniDrag) {  // #106: the strip consumed the whole gesture — no tap, no placement
-        _MiniDrag = false;
-        return;
-    }
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
         bool Placed = false;
