@@ -724,13 +724,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
-        // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of BIG squares under the price,
-        // not a slim stacked column. Sized in absolute HS units rather than as a fraction of the
-        // building icon, because what matters is the size of a thumb, not the size of the art: at
-        // 44*HS these are ~123 px on a 450-dpi phone, comfortably past the ~48 dp tap target, where
-        // the old slim column was under half that and genuinely fidgety.
+        // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of big squares, not a slim stacked
+        // column. ONE width (CtrlW) governs the whole control stack — cost plate, button row, queue
+        // plate — so every outline down the building lines up instead of three ragged widths, and the
+        // buttons are exactly as wide as the progress bar they sit above. Height stays generous:
+        // ~120 px on this phone, so the tap target is comfortable even though the width is now
+        // dictated by alignment rather than by the thumb.
         const float BGap = 6.0f * HS;
-        const float Bw = 44.0f * HS;
+        const float CtrlW = BldgPx + 6.0f * HS;
+        const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
         const float Bh = 40.0f * HS;
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
@@ -793,7 +795,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // Its own translucent plate (playtest): the count and the bar sit over open field or
                 // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
                 // building's controls read as one family.
-                Blit(ProdBtnBg, Bx, RowY, BldgPx + 6.0f * HS, 20.0f * HS);
+                Blit(ProdBtnBg, Bx, RowY, CtrlW, 20.0f * HS);
                 char QB[16];
                 std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
                 Text.Draw(Renderer, QB, GroupL, RowY - 7.0f * HS, QW, 14.0f * HS, 12.0f * HS, Ico,
@@ -831,6 +833,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float Cs = 20.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
+                // Its own plate, same width and same translucency as the buttons and the queue row —
+                // the price is drawn over the building's own art, where gold-on-cyan was hard to read.
+                Blit(ProdBtnBg, Bx, CostY, CtrlW, 26.0f * HS);
                 BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 20.0f * HS, CostY, Cs);
                 Text.Draw(Renderer, CBuf, Bx - 8.0f * HS, CostY - 11.0f * HS, 48.0f * HS, 22.0f * HS,
                           19.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left, EVAlign::Middle, false);
