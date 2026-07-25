@@ -81,38 +81,42 @@ LUR_CVAR_T(CvMinerCost,      "rps.unit.miner.cost",      30,       CVarFlagAffec
 LUR_CVAR_T(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
 LUR_CVAR_T(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
 LUR_CVAR_T(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
-LUR_CVAR_T(CvMinerBuild,     "rps.unit.miner.build_time",30,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
+LUR_CVAR_T(CvMinerBuild,     "rps.unit.miner.build_time",50,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
 LUR_CVAR_T(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
-LUR_CVAR_T(CvRockHp,         "rps.unit.rock.hp",         60,       CVarFlagAffectsGameplay, "Rock hit points");
+LUR_CVAR_T(CvRockHp,         "rps.unit.rock.hp",         100,      CVarFlagAffectsGameplay, "Rock hit points");
 LUR_CVAR_T(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
-LUR_CVAR_T(CvRockDamage,     "rps.unit.rock.damage",     8,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
-LUR_CVAR_T(CvRockBuild,      "rps.unit.rock.build_time", 50,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
+LUR_CVAR_T(CvRockDamage,     "rps.unit.rock.damage",     7,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
+LUR_CVAR_T(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
 LUR_CVAR_T(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
-LUR_CVAR_T(CvPaperHp,        "rps.unit.paper.hp",        90,       CVarFlagAffectsGameplay, "Paper hit points");
-LUR_CVAR_T(CvPaperSpeed,     "rps.unit.paper.speed",     F(5, 10), CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR_T(CvPaperHp,        "rps.unit.paper.hp",        50,       CVarFlagAffectsGameplay, "Paper hit points");
+LUR_CVAR_T(CvPaperSpeed,     "rps.unit.paper.speed",     F(1),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
 LUR_CVAR_T(CvPaperDamage,    "rps.unit.paper.damage",    9,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
-LUR_CVAR_T(CvPaperBuild,     "rps.unit.paper.build_time",50,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
+LUR_CVAR_T(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
 LUR_CVAR_T(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
-LUR_CVAR_T(CvScissorHp,      "rps.unit.scissor.hp",      45,       CVarFlagAffectsGameplay, "Scissor hit points");
-LUR_CVAR_T(CvScissorSpeed,   "rps.unit.scissor.speed",   F(5, 10), CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
-LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  7,        CVarFlagAffectsGameplay, "Scissor attack damage per hit");
-LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",50,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
+LUR_CVAR_T(CvScissorHp,      "rps.unit.scissor.hp",      80,       CVarFlagAffectsGameplay, "Scissor hit points");
+LUR_CVAR_T(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 4),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
+LUR_CVAR_T(CvScissorDamage,  "rps.unit.scissor.damage",  12,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
+LUR_CVAR_T(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 
 // ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
 // (#131 SoA). Each building type's health + placement cost is a knob nested UNDER that unit's
 // console node (rps.unit.<type>.building_*) so a type's unit knobs and building knobs group
 // together (spec §8 goal). All AffectsGameplay: they gate the deterministic sim (placement
 // cost, building HP, queue cap, footprint/repulsion geometry, the frontier gate, opening
-// gold), so they latch into Cv, sync over lockstep, and are console-tunable. Numbers are
-// PLACEHOLDERS for the #84 balance pass — structure (which knobs exist) is what's code here. ----
+// gold), so they latch into Cv, sync over lockstep, and are console-tunable.
+// The placement COSTS are no longer placeholders: they come from a two-human playtest
+// (2026-07-25) tuned for a TACTICAL opening rather than a spammy one — a camp is a real
+// investment (500 of the 800 opening gold) and every soldier building costs more than you start
+// with, so the first soldier is always mined for, never opened with. Re-tune by playing, not by
+// reasoning: these are felt numbers. ----
 LUR_CVAR_T(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
-LUR_CVAR_T(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   100, CVarFlagAffectsGameplay, "Gold to place a mining camp");
+LUR_CVAR_T(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   500, CVarFlagAffectsGameplay, "Gold to place a mining camp");
 LUR_CVAR_T(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
-LUR_CVAR_T(CvRockBuildingCost,    "rps.unit.rock.building_cost",    150, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR_T(CvRockBuildingCost,    "rps.unit.rock.building_cost",    700, CVarFlagAffectsGameplay, "Gold to place a Rock building");
 LUR_CVAR_T(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
-LUR_CVAR_T(CvPaperBuildingCost,   "rps.unit.paper.building_cost",   150, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR_T(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  1000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
 LUR_CVAR_T(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
-LUR_CVAR_T(CvScissorBuildingCost, "rps.unit.scissor.building_cost", 150, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+LUR_CVAR_T(CvScissorBuildingCost, "rps.unit.scissor.building_cost",1250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
 // Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
 // gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
@@ -126,12 +130,12 @@ LUR_CVAR_T(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFla
 LUR_CVAR_T(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
-LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(45), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
+LUR_CVAR_T(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
 // Opening gold (§12.6): a tunable knob whose DEFAULT is exactly one mining camp + three miner
 // carts = MinerBuildingCost(100) + 3 x MinerCost(30) = 190. Enough for the forced camp-then-miners
 // opening and nothing else (a combat building is gated on the first miner unit anyway, ApplyPlace),
 // so a player can't open with military. Keep the default in step with those costs if they change.
-LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  190,      CVarFlagAffectsGameplay, "Opening gold: 1 miner building + 3 miner units");
+LUR_CVAR_T(CvStartingGold,          "rps.econ.starting_gold",  800,      CVarFlagAffectsGameplay, "Opening gold: one mining camp (500) + 10 miner carts");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
