@@ -243,8 +243,14 @@ private:
     float BottomInsetPx = 0.0f;
     bool Linked = false;
     bool SelectorDirty = true;            // rebuild items when link state changes
-    // The opponent list is the three AI tiers then (when a peer is up) the linked row.
-    static constexpr int LinkedRowIndex = 3;
+    // Opponent-list layout: the linked row FIRST (when a peer is up), then a non-selectable
+    // "AI OPPONENTS" header that renders as the separator, then the three AI tiers. So the AI rows
+    // SHIFT depending on whether a peer is linked — never remember a row index, remember WHICH
+    // opponent (SelPeer_/SelAiTier_) and re-derive the row.
+    int PeerRow() const { return 0; }
+    int AiRow(int Tier) const { return (Linked ? 2 : 0) + Tier; }
+    bool SelPeer_ = false;    // the selection is the linked peer (else an AI tier)
+    int  SelAiTier_ = 0;      // which AI tier the selection is/was
     int  AiTierPicked_ = -1;              // #127: AI tier chosen from the selector (one-shot via TakeAiTier)
     bool PeerRowPicked_ = false;          // #2: linked-opponent row chosen (one-shot via TakePeerPick)
     // #2 per-opponent session score ("W-L-D"), shown at each row's right end.

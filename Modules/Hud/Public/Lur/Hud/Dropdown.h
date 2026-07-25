@@ -85,6 +85,8 @@ private:
 
     // Per-colour dot/ring mesh caches (key = packed RGBA8, bit 31 = ring vs disc).
     std::unordered_map<uint32_t, Lur::Render::MeshHandle> ColorMesh;
+    // Mint every colour the current items need, OUTSIDE a frame. Returns how many were minted.
+    int WarmColorMeshes();
 
     std::vector<DropdownItem> Items;
     int  SelectedIdx = 0;

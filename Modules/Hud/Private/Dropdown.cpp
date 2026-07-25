@@ -143,6 +143,12 @@ void Dropdown::CreateResources(Lur::Render::IRenderer* Renderer, const Lur::Text
     SplitDisc   = MakeSplitDiscMesh(Renderer);
     ChevronDown = MakeChevronMesh(Renderer, true);
     ChevronUp   = MakeChevronMesh(Renderer, false);
+
+    // Re-mint the per-colour dot meshes for the items we already hold. Without this the cache we
+    // just cleared stays empty until the next SetItems, leaving Draw to allocate — which is what
+    // this cache exists to avoid, and it left the status dots undrawn after a renderer rebuild
+    // ("green at first, then black" on iOS, where the #73 reattach rebuilds the renderer).
+    WarmColorMeshes();
 }
 
 MeshHandle Dropdown::MeshFor(Color C, bool RingShape) {
@@ -158,16 +164,25 @@ MeshHandle Dropdown::MeshFor(Color C, bool RingShape) {
     return M;
 }
 
-void Dropdown::SetItems(const DropdownItem* NewItems, int Count) {
-    Items.assign(NewItems, NewItems + Count);
-    // Warm the colour caches now (outside the frame) so Draw allocates nothing.
+// Mint a mesh for every colour the current items need, so Draw allocates nothing. Called from
+// SetItems AND from CreateResources: after a renderer rebuild the cache is empty and the items are
+// unchanged, so nothing else would ever re-warm it and Draw would be left doing the allocating
+// (which is exactly what this is here to avoid).
+int Dropdown::WarmColorMeshes() {
+    int Warmed = 0;
     for (const DropdownItem& It : Items) {
         if (It.Header || It.Lead == ELeadStyle::None) continue;
         if (It.Lead == ELeadStyle::Dot) {
-            MeshFor(It.LeadFill, false);
-            if (It.Ring) MeshFor(It.RingColor, true);
+            if (MeshFor(It.LeadFill, false) != 0) ++Warmed;
+            if (It.Ring && MeshFor(It.RingColor, true) != 0) ++Warmed;
         }
     }
+    return Warmed;
+}
+
+void Dropdown::SetItems(const DropdownItem* NewItems, int Count) {
+    Items.assign(NewItems, NewItems + Count);
+    WarmColorMeshes();
     if (SelectedIdx >= Count) SelectedIdx = 0;
 }
 

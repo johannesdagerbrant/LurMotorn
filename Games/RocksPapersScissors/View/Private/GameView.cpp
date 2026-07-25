@@ -309,9 +309,10 @@ void GameView::SetLinked(bool InLinked) {
 }
 
 void GameView::SelectLinkedOpponent() {
-    if (!Linked) return;                        // no linked row exists yet — nothing to select
-    if (SelectorDirty) RefreshSelector();       // build the row before pointing at it
-    Selector.SetSelected(LinkedRowIndex);       // the linked row sits after the three AI tiers
+    if (!Linked) return;                   // no linked row exists yet — nothing to select
+    SelPeer_ = true;                       // semantic: survives the row shift on any rebuild
+    if (SelectorDirty) RefreshSelector();  // builds the row AND applies the selection
+    else Selector.SetSelected(PeerRow());  // the linked row is the FIRST row
 }
 
 void GameView::RefreshSelector() {
@@ -320,14 +321,32 @@ void GameView::RefreshSelector() {
     // hot-seat row: it's an AI or a linked opponent. Each row shows its session "W-L-D" score at
     // the right end. Picking any row (re)starts/switches to that match immediately (the main polls
     // TakeAiTier / TakePeerPick). Persistent peer enumeration + cross-launch scores ride #15-20.
-    static_assert(LinkedRowIndex == 3, "the linked row must follow exactly the three AI tiers");
     const char* Names[3] = {"Easy", "Medium", "Hard"};
     const Color Dots[3] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
                            {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
                            {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f}};
-    Lur::Hud::DropdownItem Items[4];
+    // ORDER (feedback 2026-07-25): the LINKED opponent sits at the TOP — a human peer is the main
+    // event and the AI tiers are the fallback below it — with an "AI OPPONENTS" header between
+    // them. The header is non-selectable and the widget draws a divider line above any header that
+    // isn't the first row, so that one row IS the requested separating line.
+    Lur::Hud::DropdownItem Items[5];
     char Buf[24];
     int N = 0;
+    if (Linked) {
+        Items[N].Label = "Linked opponent";
+        Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
+        // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth difficulty.
+        // Green/amber/red stay reserved for the AI tiers, so the dot colour alone says "radio link".
+        // #0082FC is the Bluetooth SIG blue.
+        Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
+        std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
+        Items[N].Trailing = Buf;
+        ++N;
+        Items[N].Label = "AI OPPONENTS";   // separator + section label in one row
+        Items[N].Header = true;
+        Items[N].Lead = Lur::Hud::ELeadStyle::None;
+        ++N;
+    }
     for (int T = 0; T < 3; ++T, ++N) {
         Items[N].Label = Names[T];
         Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
@@ -335,20 +354,11 @@ void GameView::RefreshSelector() {
         std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", AiScoreW_[T], AiScoreL_[T], AiScoreD_[T]);
         Items[N].Trailing = Buf;
     }
-    if (Linked) {
-        Items[N].Label = "Linked opponent";
-        Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
-        // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth difficulty.
-        // Green/amber/red are reserved for the AI tiers, so the dot colour alone says "this is the
-        // radio link" (feedback 2026-07-25). #0082FC is the Bluetooth SIG blue.
-        Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
-        std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
-        Items[N].Trailing = Buf;
-        ++N;
-    }
-    const int Prev = Selector.Selected();
     Selector.SetItems(Items, N);
-    Selector.SetSelected(Prev >= 0 && Prev < N ? Prev : 0);  // preserve the active row across rebuilds
+    // Re-point at the SAME OPPONENT, not the same row number: the rows shift by two the moment the
+    // linked row appears, so preserving the index would silently move the selection to a different
+    // opponent (and could land it on the header).
+    Selector.SetSelected(SelPeer_ && Linked ? PeerRow() : AiRow(SelAiTier_));
     SelectorDirty = false;
 }
 
@@ -402,9 +412,21 @@ int GameView::OnTap(float XPx, float YPx) {
         // tier (#127); the main polls TakeAiTier(). Peer/same-device rows have no target yet
         // (#85 follow-up). TookSelection() is the one-shot latch.
         if (Selector.TookSelection()) {
+            // Decode the ROW back to an opponent. The AI rows sit below the linked row + header
+            // when a peer is up, so the offset is not fixed (headers are never selectable, so the
+            // separator row can't arrive here).
             const int Sel = Selector.Selected();
-            if (Sel >= 0 && Sel <= 2) AiTierPicked_ = Sel;            // #2: an AI tier -> (re)start solo
-            else if (Sel == 3 && Linked) PeerRowPicked_ = true;       // #2: the linked opponent -> switch
+            if (Linked && Sel == PeerRow()) {
+                SelPeer_ = true;
+                PeerRowPicked_ = true;                                // #2: switch to the peer match
+            } else {
+                const int Tier = Sel - AiRow(0);
+                if (Tier >= 0 && Tier <= 2) {
+                    SelPeer_ = false;
+                    SelAiTier_ = Tier;
+                    AiTierPicked_ = Tier;                             // #2: (re)start solo at this tier
+                }
+            }
         }
         return -2;
     }
