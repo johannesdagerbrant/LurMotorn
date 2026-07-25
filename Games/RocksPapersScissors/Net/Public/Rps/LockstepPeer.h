@@ -154,7 +154,12 @@ private:
     struct CvarVal { int32_t Raw; uint64_t WallMs; };
     std::unordered_map<uint8_t, CvarVal> ActiveCvars;
     void MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs);  // resolver: last-writer; tie -> default
-    void ApplyActiveCvars();  // TheSim.Cv = defaults, then overlay ActiveCvars (pre-tick-0)
+    void ApplyActiveCvars();  // rebuild the pre-tick-0 sim from the merged set (or move Cv mid-match)
+    CvSnapshot MergedCvs() const;  // compile-time defaults overlaid with ActiveCvars
+    // Set once this peer has merged ANYTHING (seeded or received). From then on the merged set —
+    // not the local globals — is what a fresh sim must be built from, so #147 can't come back via
+    // a path that calls Sim::Init directly.
+    bool HaveMergedCvs_ = false;
 
     bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
 
@@ -162,6 +167,10 @@ private:
     std::vector<PendingCvar> CvQueue_;
     void DrainCvarQueue();  // sim thread: apply queued UI edits via SetGameplayCvar
 #endif
+    // #147: the ONE way this class (re)creates its Sim — from the merged cvar set once any sync has
+    // happened, from the globals before that. Match start, the pre-tick-0 sync apply, and the resync
+    // rebuild all route through it; calling Sim::Init directly is what let the peers diverge.
+    void ResetSim(uint64_t Seed);
     void EmitAnchor();
     void CrossCheck(uint32_t Tick);
     void RebuildFromHistory(uint32_t Frontier);  // Incoming[0/1] -> fresh sim + timeline at Frontier

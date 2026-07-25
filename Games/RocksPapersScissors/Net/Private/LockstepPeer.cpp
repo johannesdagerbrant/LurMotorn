@@ -14,8 +14,34 @@
 
 namespace Rps {
 
-void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* InCtx) {
+// #147: the ONE way this class (re)creates its Sim. Every fresh-sim path — match start, the
+// pre-tick-0 cvar sync, and the resync rebuild — must derive the Init-dependent hashed state
+// (frontier high-water, opening gold, home-base Y) from the MERGED cvar set. Latching this peer's
+// LOCAL globals instead is exactly how two phones ended up with different initial state and
+// desynced, and it was wrong in three separate places; routing them all through here means a
+// future fresh-sim path cannot reintroduce it. Before any sync has happened there is no merged
+// set yet, so the globals ARE the answer (and in Shipping they're the only thing there is).
+void LockstepPeer::ResetSim(uint64_t Seed) {
+#if LUR_INTERNAL
+    if (HaveMergedCvs_) { TheSim.InitWithCvs(Seed, MergedCvs()); return; }
+#endif
     TheSim.Init(Seed);
+}
+
+#if LUR_INTERNAL
+// The merged override set as a full Cv. Baseline = the COMPILE-TIME defaults, never LatchCvs():
+// the merged set is expressed relative to the defaults ("absent" and "wall-clock tie" both mean
+// default), so overlaying it onto locally-overridden globals silently keeps this peer's own value
+// for every id the merge didn't carry.
+CvSnapshot LockstepPeer::MergedCvs() const {
+    CvSnapshot Merged = DefaultCvs();
+    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(Merged, Id, V.Raw);
+    return Merged;
+}
+#endif
+
+void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* InCtx) {
+    ResetSim(Seed);
     MyTeam = InMyTeam & 1u;
     Send = InSend;
     Ctx = InCtx;
@@ -37,16 +63,12 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
 #if LUR_INTERNAL
-    // #147: the peer's MsgCvarSync can land BEFORE our own Init — on iOS it reliably does, because
-    // one renderFrame pumps the session inbox (delivering it) and only afterwards reaches the
-    // "session ready -> Lp.Init" branch. That merge is still in ActiveCvars, but TheSim.Init above
-    // just re-latched Cv from the LOCAL globals, throwing the merged values away: on hardware the
-    // Android kept its persisted gold=400 while the iPhone showed the default 190. So re-apply
-    // whatever merged set we already hold, which also re-derives the Init-dependent state.
-    // Per-tick stamps are dropped instead: they were computed as ExecTick+N on the OLD timeline
-    // and mean nothing against a fresh match's tick numbering.
+    // #147: ResetSim above already honours a merged set that arrived BEFORE this Init — on iOS that
+    // is the normal order, not a race: one renderFrame pumps the session inbox (delivering the
+    // peer's MsgCvarSync) and only afterwards reaches the "session ready -> Lp.Init" branch.
+    // Per-tick stamps are dropped: they were computed as ExecTick+N on the OLD timeline and mean
+    // nothing against a fresh match's tick numbering.
     PendingCvars.clear();
-    if (!ActiveCvars.empty()) ApplyActiveCvars();
 #endif
 }
 
@@ -203,6 +225,10 @@ void LockstepPeer::MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs) {
     // Last-writer-wins by wall clock; an exact timestamp collision with a DIFFERENT value
     // reverts to the compile-time default (drop the override) — the one value both peers
     // unambiguously agree on (C.2). Commutative, so both peers reach the same merged set.
+    // #147: from the first merge onward THIS peer is in the synced regime, so every later fresh sim
+    // must come from the merged set rather than the globals — including when the merge resolver has
+    // emptied the set (a wall-clock tie), which means "all compile-time defaults", NOT "our locals".
+    HaveMergedCvs_ = true;
     const auto It = ActiveCvars.find(Id);
     if (It == ActiveCvars.end()) { ActiveCvars[Id] = {Raw, WallMs}; return; }
     if (WallMs > It->second.WallMs)                          It->second = {Raw, WallMs};
@@ -211,25 +237,18 @@ void LockstepPeer::MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs) {
 }
 
 void LockstepPeer::ApplyActiveCvars() {
-    // #147: baseline = the COMPILE-TIME defaults, NOT LatchCvs(). The merged set is expressed
-    // relative to the defaults ("absent" and "tie" both mean default), so overlaying it onto the
-    // local globals kept this peer's own persisted rps-cvars.cfg value for every unmerged id —
-    // the two peers then held different Cv despite a "successful" sync.
-    CvSnapshot Merged = DefaultCvs();
-    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(Merged, Id, V.Raw);  // ...then overlay
     // #147: several HASHED initial values are DERIVED from Cv inside Sim::Init (each team's
-    // frontier high-water, the opening gold, the home base's Y). Assigning Cv leaves those at the
-    // value baked from this peer's PRE-sync Cv, so two peers whose persisted cvars differed
-    // desynced at the very first anchor with no units on the field. Re-run Init from the merged
-    // Cv instead, so every derived value comes from the same input on both peers.
+    // frontier high-water, the opening gold, the home base's Y). Assigning Cv alone leaves those
+    // at the value baked from this peer's PRE-sync Cv, so two peers whose persisted cvars differed
+    // desynced at the very first anchor with no units on the field. Rebuild the sim from the merged
+    // Cv instead (ResetSim), so every derived value comes from the same input on both peers.
     //
-    // Safe because this only ever runs pre-tick-0: the transport is reliable+ordered and each
-    // peer sends MsgCvarSync (at Init) BEFORE its camp on MsgInput, so a peer's sync always
-    // lands before PeerReady_ — i.e. before the match can start. The mid-match branch exists
-    // only so a hypothetical late sync degrades to the old behaviour instead of wiping a live
-    // match; the anchor hash would then flag it.
-    if (!MatchStarted_ && TheSim.Tick == 0) TheSim.InitWithCvs(TheSim.Seed, Merged);
-    else                                    TheSim.Cv = Merged;
+    // Pre-tick-0 is the normal case: the transport is reliable+ordered and each peer sends
+    // MsgCvarSync (at Init) BEFORE its camp on MsgInput, so a peer's sync lands before PeerReady_
+    // — i.e. before the match can start. Once the match IS running, only Cv can move; rebuilding
+    // would wipe live state, and the anchor hash would flag any resulting divergence.
+    if (!MatchStarted_ && TheSim.Tick == 0) ResetSim(TheSim.Seed);
+    else                                    TheSim.Cv = MergedCvs();
 }
 
 void LockstepPeer::SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs) {
@@ -420,7 +439,11 @@ void LockstepPeer::BeginResync() {
 
 void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     const uint64_t S = TheSim.Seed;
-    TheSim.Init(S);  // fresh sim, same seed
+    // #147: ResetSim, NOT TheSim.Init — a rebuild must start from the MERGED cvar set. Re-latching
+    // the local globals here silently un-converged an already-synced match on every reconnect (the
+    // replay then ran on a different Cv than the peer's), which is the same defect as at match
+    // start and the resync path is the easiest one to miss: it only fires after a link blip.
+    ResetSim(S);  // fresh sim, same seed
     LocalEvents.clear();
     PeerEvents.clear();
     for (uint32_t T = 0; T < Frontier; ++T) {

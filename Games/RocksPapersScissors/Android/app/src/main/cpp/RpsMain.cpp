@@ -532,9 +532,19 @@ void android_main(android_app* App) {
                 DiagAccumNs += ElapsedNs;
                 if (DiagAccumNs > 2'000'000'000ull) {
                     DiagAccumNs = 0;
-                    LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u", State.Lp.ExecTick(),
-                         State.Lp.GetSim().AliveCount(0), State.Lp.GetSim().AliveCount(1),
-                         State.Lp.Desynced() ? 1 : 0, State.PresentedFrames.load(std::memory_order_relaxed));
+                    // #147: hash + gold + frontier are the CONVERGENCE readout. The anchor cross-check
+                    // only starts once the match does, so before either camp is placed a divergence
+                    // was completely invisible — the two phones simply showed different numbers and
+                    // nobody could tell which state was wrong. Pre-match these MUST be identical on
+                    // both peers; comparing one line per phone is the whole test, no taps required.
+                    const Rps::Sim& DS = State.Lp.GetSim();
+                    LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u hash=%08x gold=%d "
+                         "frontier=%d started=%d",
+                         State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
+                         State.Lp.Desynced() ? 1 : 0, State.PresentedFrames.load(std::memory_order_relaxed),
+                         static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
+                         DS.Teams[State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
+                         DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0);
                     char TraceLine[512];
                     if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0) LOGI("TRACE %s", TraceLine);
                 }

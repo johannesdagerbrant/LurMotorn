@@ -431,11 +431,18 @@ Rps::Fixed WorldToFixed(float Wv) {
             // presented= distinguishes "rendering but invisible" from a dead swapchain
             // (issue #73): black screen + advancing count = compositor problem; stuck
             // count = the renderer itself isn't presenting.
+            // #147: hash + gold + frontier are the CONVERGENCE readout — pre-match they MUST match
+            // the peer's line exactly. The anchor cross-check only begins once the match does, so
+            // before either camp is placed a divergence was otherwise invisible.
             const Rps::Sim& DS = _SoloActive ? _SoloSim : _Lp.GetSim();
-            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d presented=%u",
+            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d presented=%u "
+                   "hash=%08x gold=%d frontier=%d started=%d",
                    _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                    _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
-                   _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u);
+                   _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
+                   static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
+                   DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),
+                   _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0));
         }
     }
 #endif

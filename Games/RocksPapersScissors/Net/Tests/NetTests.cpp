@@ -384,6 +384,70 @@ static void TestCvarSyncArrivingBeforeInit() {
     CvInitialFrontier.Set(FrontDefault);
 }
 
+// ---- #147: a RESYNC rebuild must keep the merged cvar set. RebuildFromHistory re-created the sim
+// with Sim::Init, re-latching the LOCAL globals, so a rejoining peer replayed the whole match on a
+// DIFFERENT Cv than the survivor and desynced immediately. The easiest of the three fresh-sim paths
+// to miss, because it only fires after a link blip. Modelled on TestLockstepColdRejoinResync: the
+// rejoiner must be genuinely BEHIND, or the marker branch keeps its own history and never rebuilds.
+static void TestCvarSyncSurvivesResync() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    const Fixed   FrontDefault = CvInitialFrontier.Default();
+
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    CvStartingGold.Set(400);                       // A boots with the persisted overrides live
+    CvInitialFrontier.Set(F(60));
+    A.Init(0x5E51, 0, Enqueue, &Qa);
+    CvStartingGold.Set(GoldDefault);               // B boots clean (no cvars.cfg)
+    CvInitialFrontier.Set(FrontDefault);
+    B.Init(0x5E51, 1, Enqueue, &Qb);
+    A.SeedGameplayCvar(CvIdStartingGold,    400,       700);
+    A.SeedGameplayCvar(CvIdInitialFrontier, F(60).Raw, 700);
+    A.SendCvarSync();
+    B.SendCvarSync();
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+    CHECK(B.GetSim().Teams[0].Gold == 400);        // converged before the blip
+
+    for (int I = 0; I < 40; ++I) {                 // play a while
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Frontier = A.ExecTick();
+    const uint64_t StateAtF = A.GetSim().StateHash();
+    CHECK(Frontier > 20);
+
+    // B relaunches FRESH and rejoins: it must rebuild the whole match off A's history. Its own
+    // globals are the defaults, so a rebuild that latches them replays on gold=190/frontier=45.
+    Outbox Qb2;
+    LockstepPeer B2;
+    B2.Init(0x5E51, 1, Enqueue, &Qb2);
+    B2.SeedGameplayCvar(CvIdStartingGold,    400,       700);   // the sync it re-does on reconnect
+    B2.SeedGameplayCvar(CvIdInitialFrontier, F(60).Raw, 700);
+    A.BeginResync();
+    B2.BeginResync();
+    Deliver(Qa, B2);   // A's history + frontier marker -> B2 rebuilds from it
+    Deliver(Qb2, A);   // B2's empty history -> A keeps its own (it is ahead)
+
+    CHECK(!A.AwaitingResync() && !B2.AwaitingResync());
+    CHECK(B2.ExecTick() == Frontier);
+    CHECK(B2.GetSim().Cv.StartingGold == 400);      // the rebuild kept the MERGED set...
+    CHECK(B2.GetSim().Cv.InitialFrontier == F(60));
+    CHECK(B2.GetSim().StateHash() == StateAtF);      // ...so the replay lands bit-identical
+
+    for (int I = 0; I < 40; ++I) {                  // and live lockstep resumes cleanly
+        DriveInput(A, 0, I); DriveInput(B2, 1, I);
+        A.Tick(OneTickNs); B2.Tick(OneTickNs);
+        Deliver(Qa, B2); Deliver(Qb2, A);
+        CHECK(!A.Desynced() && !B2.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B2.GetSim().StateHash());
+
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+}
+
 // ---- #112: build-fingerprint gate — identical builds pass, a mismatch is refused ----
 static void TestBuildFingerprintGate() {
     Outbox Qa, Qb;
@@ -651,6 +715,7 @@ int main() {
     TestCvarSyncMatchStartMerge();
     TestCvarSyncRederivesInitState();
     TestCvarSyncArrivingBeforeInit();
+    TestCvarSyncSurvivesResync();
     TestBuildFingerprintGate();
 #endif
     TestLockstepExecuteCapBounded();
