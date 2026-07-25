@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>   // debug.lur.console edge detection (memcpy/strcmp on the prop value)
 #include <memory>
 #include <string>
 #include <thread>
@@ -739,7 +740,9 @@ void android_main(android_app* App) {
     bool ViewLinkedApplied = false;
     auto FramePrev = std::chrono::steady_clock::now();
 #if LUR_INTERNAL
-    int ConsolePropCountdown = 1;   // frames until the next debug.lur.console poll
+    int ConsolePropCountdown = 1;         // frames until the next debug.lur.console poll
+    char ConsolePropLast[PROP_VALUE_MAX] = {};   // last value seen, so we act on CHANGES only
+    bool ConsolePropSeeded = false;              // first read is a baseline, never an action
 #endif
     while (!App->destroyRequested) {
         // WAIT-EARLY, SAMPLE-LATE: spend the GPU fence-wait idle up front, BEFORE polling
@@ -777,12 +780,21 @@ void android_main(android_app* App) {
             // LUR_INTERNAL, not merely !LUR_SHIPPING: this is a REMOTE-CONTROL surface, not console
             // plumbing — anything a player must never reach belongs behind the same gate as the
             // autoplayer and debug.lur.autoplay, its nearest neighbour.
+            // EDGE-triggered, not a standing order. Acting on the property's VALUE every poll made it
+            // authoritative, so a leftover `debug.lur.console 0` slammed the console shut twice a
+            // second and the two-finger triple-tap could never win — the console "closed immediately"
+            // on opening. Now only a CHANGE does anything, and the first read is just a baseline, so a
+            // stale property from an earlier session is inert.
             if (--ConsolePropCountdown <= 0) {
                 ConsolePropCountdown = 30;  // ~twice a second at 60 fps — a poll, not a per-frame cost
                 char ConsoleV[PROP_VALUE_MAX] = {};
-                if (__system_property_get("debug.lur.console", ConsoleV) > 0) {
-                    const bool Want = ConsoleV[0] == '1';
-                    if (Want != State.View.DevOverlayOpen()) State.View.SetDevOverlayOpen(Want);
+                __system_property_get("debug.lur.console", ConsoleV);
+                if (!ConsolePropSeeded) {
+                    std::memcpy(ConsolePropLast, ConsoleV, sizeof(ConsoleV));
+                    ConsolePropSeeded = true;
+                } else if (std::strcmp(ConsoleV, ConsolePropLast) != 0) {
+                    std::memcpy(ConsolePropLast, ConsoleV, sizeof(ConsoleV));
+                    State.View.SetDevOverlayOpen(ConsoleV[0] == '1');
                 }
             }
 #endif
