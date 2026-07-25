@@ -557,7 +557,8 @@ Rps::Fixed WorldToFixed(float Wv) {
         const float H = static_cast<float>(Layer.drawableSize.height);
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
         const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
-        _View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot (#148)
+        // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
+        _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
     } else {
         // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on release
         // (touchesEnded), so a press that turns into a camera pan queues nothing.
@@ -576,7 +577,7 @@ Rps::Fixed WorldToFixed(float Wv) {
         const float Off = [self ghostOffPxForWidth:W];
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
         const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
-        _View.UpdatePlaceDrag(Gsx, Gsy, V);
+        _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
     } else {
         _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
     }

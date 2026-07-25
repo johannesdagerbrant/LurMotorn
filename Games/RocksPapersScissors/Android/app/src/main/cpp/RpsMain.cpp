@@ -257,7 +257,8 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
                 float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
                 const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                S->View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
+                // Finger point AND snapped point: the ghost sticks to the finger, the snap eases in.
+                S->View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
             } else {
                 // #107: a press on an x1/x5 button lights up NOW (the enqueue still commits on
                 // release, below, so a press that turns into a pan queues nothing).
@@ -273,7 +274,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             if (S->View.IsPlacing()) {
                 float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
                 const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                S->View.UpdatePlaceDrag(Gsx, Gsy, V);
+                S->View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
             } else if (Count == 1) {
                 S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
             }

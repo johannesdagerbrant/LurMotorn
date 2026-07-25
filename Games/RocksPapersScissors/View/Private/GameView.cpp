@@ -461,6 +461,9 @@ void GameView::BeginPlaceDrag(int Type, float XPx, float YPx) {
     GhostDragging_ = true;
     GhostValid_ = false;
     GhostXPx_ = XPx; GhostYPx_ = YPx;  // seed at the finger so frame 1 isn't at a stale spot
+    GhostDesiredX_ = XPx; GhostDesiredY_ = YPx;
+    GhostPushX_.Snap(0.0f);            // no obstacle push yet; start with zero offset, not last drag's
+    GhostPushY_.Snap(0.0f);
     SlideT_ = -1.0f;  // cancel any in-flight slide-back
 }
 
@@ -497,6 +500,14 @@ bool GameView::PressProductionButton(float XPx, float YPx) {
 void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
     if (GhostType_ < 0) return;
     GhostXPx_ = XPx; GhostYPx_ = YPx; GhostValid_ = Valid;
+    GhostDesiredX_ = XPx; GhostDesiredY_ = YPx;   // no separate desired point given: no push to spring
+}
+
+void GameView::UpdatePlaceDrag(float DesXPx, float DesYPx, float ResXPx, float ResYPx, bool Valid) {
+    if (GhostType_ < 0) return;
+    GhostDesiredX_ = DesXPx; GhostDesiredY_ = DesYPx;   // where the finger is
+    GhostXPx_ = ResXPx; GhostYPx_ = ResYPx;             // where the sim would accept it
+    GhostValid_ = Valid;
 }
 
 void GameView::EndPlaceDrag(bool Placed) {
@@ -620,11 +631,27 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     {
         const float Dash = 7.0f * HS, DashGap = 6.0f * HS, Thick = 2.0f * HS;
         const float Target[2] = {FW(Snap.FrontierT0), FW(Snap.FrontierT1)};
-        const float Ease = 1.0f - std::exp(-9.0f * DtSec);  // smooth follow (decouples from the 10 Hz step)
         auto DrawFrontier = [&](int Team) {
-            if (DispFrontier[Team] < 0.0f) DispFrontier[Team] = Target[Team];      // snap on first frame
-            else DispFrontier[Team] += (Target[Team] - DispFrontier[Team]) * Ease;  // then glide
-            const float Y = SY(DispFrontier[Team]);
+            // ADVANCE is gameplay-exact, RETRACTION is sprung. Pushing the line forward is a thing
+            // the player did and must read as immediate — smoothing it would show a boundary that
+            // does not match where you may actually build. Retraction is the opposite problem: it
+            // happens when a distant unit of yours dies, often off-screen, and an instant jump is
+            // simply missed. A double spring is the right shape for it (theorangeduck.com's spring
+            // roll call): it eases IN, so the line visibly "gives way" instead of starting at full
+            // speed, and eases out onto the new boundary without overshooting past it.
+            //
+            // Visual only: the sim's frontier is the authority for every placement test, and this
+            // float never re-enters it. So the two peers may draw the retraction at different
+            // moments and stay bit-identical.
+            const bool Forward = Team == 0 ? Target[Team] >= FrontierSpring[Team].X
+                                           : Target[Team] <= FrontierSpring[Team].X;
+            if (!FrontierSpringInit[Team] || Forward) {
+                FrontierSpring[Team].Snap(Target[Team]);   // first frame, or ground gained
+                FrontierSpringInit[Team] = true;
+            } else {
+                FrontierSpring[Team].Update(Target[Team], FrontierRetractHalflife, DtSec);
+            }
+            const float Y = SY(FrontierSpring[Team].X);
             if (Y < -2.0f || Y > HeightPx + 2.0f) return;
             for (float X = 32.0f * HS; X < WidthPx - 2.0f * HS; X += Dash + DashGap)
                 Blit(FrontierMat[Team], X + Dash * 0.5f, Y, Dash, Thick);
@@ -1031,7 +1058,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (GhostType_ >= 0) {
         const float DragPx = FW(Snap.BuildingFootprint) * 2.0f * P;  // footprint-sized while dragging
         const float ButtonPx = PlateW * 0.52f;
-        float Gx = GhostXPx_, Gy = GhostYPx_, GPx = DragPx;
+        // The ghost tracks the FINGER exactly; only the displacement obstacles push it by is sprung.
+        // That distinction is the whole point: springing the position would make the icon lag the
+        // thumb, which feels broken, whereas springing the OFFSET (a local-space vector from the
+        // finger to the resolved spot) leaves the icon glued to the finger and lets the sidestep
+        // around a mine or another building ease in and out instead of snapping.
+        //
+        // Nothing here reaches the sim: EndPlaceDrag commits the RESOLVED position, so a building
+        // lands exactly where it would have without any spring — the solver is invisible to gameplay
+        // and to the peer.
+        if (GhostDragging_) {
+            GhostPushX_.Update(GhostXPx_ - GhostDesiredX_, GhostPushHalflife, DtSec);
+            GhostPushY_.Update(GhostYPx_ - GhostDesiredY_, GhostPushHalflife, DtSec);
+        }
+        float Gx = GhostDesiredX_ + GhostPushX_.X, Gy = GhostDesiredY_ + GhostPushY_.X, GPx = DragPx;
         if (!GhostDragging_ && SlideT_ >= 0.0f) {
             SlideT_ += DtSec;
             constexpr float Dur = 0.18f;

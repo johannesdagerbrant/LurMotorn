@@ -7,6 +7,7 @@
 #include "Lur/DevGui/Numpad.h"
 #include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
+#include "Lur/Math/Spring.h"   // visual-only smoothing (frontier retraction, ghost obstacle push)
 #include "Lur/Render/Renderer.h"
 #include "Lur/Text/Font.h"
 #include "Rps/Snapshot.h"
@@ -107,6 +108,12 @@ public:
     // Update the dragged ghost's screen position + whether the current drop is valid (the caller
     // computes validity from the authoritative sim: Sim::WouldAcceptPlace at the drop world pos).
     void UpdatePlaceDrag(float XPx, float YPx, bool Valid);
+    // Preferred form: pass BOTH the pointer's own (thumb-offset) point and the RESOLVED spot the sim
+    // would accept. The icon is then drawn glued to the pointer with the obstacle-induced offset
+    // between them run through a spring, so it never lags the finger while its sidestep around a
+    // mine or a building eases instead of snapping. Purely cosmetic: the release still commits the
+    // resolved position, so placement is identical with or without the spring.
+    void UpdatePlaceDrag(float DesXPx, float DesYPx, float ResXPx, float ResYPx, bool Valid);
     // Release: Placed==true when the caller emitted the place event (valid drop); false slides the
     // ghost back to its plate (invalid drop / no-op). Either way the drag ends.
     void EndPlaceDrag(bool Placed);
@@ -307,9 +314,12 @@ private:
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;
-    // #141 build-frontier lines ease toward the sim's (10 Hz, monotonic-jump) frontier so they
-    // glide like the interpolated units instead of stepping per tick. -1 = snap on first frame.
-    float DispFrontier[2] = {-1.0f, -1.0f};
+    // #141 build-frontier lines. ADVANCE snaps (it must match where you can build, exactly);
+    // RETRACTION runs through a double spring, because losing ground happens when a far-off unit
+    // dies and an instant jump goes unseen. Visual only — the sim's frontier stays the authority.
+    Lur::Math::DoubleSpring FrontierSpring[2];
+    bool FrontierSpringInit[2] = {false, false};
+    static constexpr float FrontierRetractHalflife = 0.45f;   // slow enough to notice, not to annoy
     // #143 onboarding (view-only, per session): a looping pointing hand demos the first camp
     // placement until you place one; then the first building's x1/x5 buttons PULSE until you
     // queue anything there (taught once, never nags again).
@@ -330,7 +340,13 @@ private:
     // following the pointer, GhostDragging_, or sliding back after an invalid drop, SlideT_>=0).
     int   GhostType_ = -1;
     bool  GhostDragging_ = false;
-    float GhostXPx_ = 0.0f, GhostYPx_ = 0.0f;   // current pointer (or slide-back head) position
+    float GhostXPx_ = 0.0f, GhostYPx_ = 0.0f;   // RESOLVED spot (or slide-back head) — what gets placed
+    // The pointer's own position, plus a spring on the (resolved - desired) offset. Springing the
+    // OFFSET rather than the position is what keeps the icon on the finger while still smoothing how
+    // obstacles shove it aside. Visual only; the release commits GhostXPx_/GhostYPx_.
+    float GhostDesiredX_ = 0.0f, GhostDesiredY_ = 0.0f;
+    Lur::Math::DoubleSpring GhostPushX_, GhostPushY_;
+    static constexpr float GhostPushHalflife = 0.09f;   // brisk: this must read as reactive, not soft
     bool  GhostValid_ = false;
     float GhostBlink_ = 0.0f;                    // invalid-blink clock (seconds)
     float SlideT_ = -1.0f;                       // >=0 while the ghost tweens back to its plate

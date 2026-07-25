@@ -624,7 +624,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                     View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
                     float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
                     const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                    View.UpdatePlaceDrag(Gsx, Gsy, V);  // hop the ghost to the snapped spot
+                    // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
+                    View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
                 } else {
                     // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on
                     // release (below), so a press that turns into a camera pan queues nothing.
@@ -635,7 +636,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 if (View.IsPlacing()) {
                     float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
                     const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                    View.UpdatePlaceDrag(Gsx, Gsy, V);
+                    View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
                 } else {
                     Cam.Move(T.YPx, Ppu());
                 }
