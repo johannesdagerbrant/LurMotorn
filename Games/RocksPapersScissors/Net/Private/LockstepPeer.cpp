@@ -87,7 +87,21 @@ void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
 }
 
 void LockstepPeer::Tick(uint64_t ElapsedNs) {
-    if (Awaiting) return;  // in a resync exchange: hold production/execution until reconciled
+    // #148: a resync exchange holds production/execution — but it must NEVER hold forever. The
+    // survivor of an app restart waited on a marker the newcomer could not send (Session fires its
+    // resync handler only on a reconnect EDGE, which a freshly launched app never takes), and with
+    // no timeout here that phone was wedged permanently: the reported "still paused on the phone
+    // that kept running". Consistency over completeness — on giving up we keep OUR state, and the
+    // peer rebuilds from it when it next offers/asks.
+    if (Awaiting) {
+        AwaitingNs += ElapsedNs;
+        if (AwaitingNs < ResyncStallTimeoutNs) return;
+        Lur::Log::Info("RPS: resync stalled %llums with no peer marker — resuming on our own state "
+                       "(tick %u)", static_cast<unsigned long long>(AwaitingNs / 1'000'000ull),
+                       TheSim.Tick);
+        Awaiting = false;
+        AwaitingNs = 0;
+    }
 #if LUR_INTERNAL
     DrainCvarQueue();  // apply any UI-thread gameplay-CVar edits (stamps + sends MsgCvar)
 #endif
@@ -348,10 +362,20 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         } else if (Tag == ResyncTagMarker) {
             Lur::Serialization::BitReader R(Data + 1, N - 1);
             const uint32_t F = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
-            if (R.IsOk() && F > TheSim.Tick && IncomingHistory.size() >= F)
+            if (R.IsOk() && F > TheSim.Tick && IncomingHistory.size() >= F) {
                 RebuildFromHistory(F);  // peer is ahead -> adopt its history
-            else IncomingHistory.clear();  // we're ahead / short -> keep ours
+            } else {
+                IncomingHistory.clear();  // we're ahead / short -> keep ours
+                // #148: the peer is BEHIND us — a restarted app rejoins at F=0. It cannot catch up
+                // unless we hand it our history, and our first offer may have been thrown away by
+                // its own Lp.Init (which clears IncomingHistory). So re-offer, once per round.
+                if (R.IsOk() && F < TheSim.Tick && ReoffersLeft > 0) {
+                    --ReoffersLeft;
+                    SendResyncOffer();
+                }
+            }
             Awaiting = false;              // reconciled either way; resume live
+            AwaitingNs = 0;
         }
     }
 #if LUR_INTERNAL
@@ -398,7 +422,11 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
 #endif
 }
 
-void LockstepPeer::BeginResync() {
+// #148: send our executed history + the frontier marker. Split out of BeginResync so the peer
+// that is AHEAD can re-send it: a rejoining peer's Lp.Init can wipe an offer that arrived before
+// it (Session::Tick delivers datagrams BEFORE the main reaches its "session ready -> Lp.Init"
+// branch), and then nobody would ever hand it the history again.
+void LockstepPeer::SendResyncOffer() {
     const uint32_t F = TheSim.Tick;  // our executed frontier
     // Reconstruct the executed COMBINED history (team0-first per tick, the Execute order) so a
     // rejoiner replays it through a fresh sim and both split it back per team.
@@ -431,10 +459,15 @@ void LockstepPeer::BeginResync() {
     Marker.push_back(ResyncTagMarker);
     Marker.insert(Marker.end(), MB.begin(), MB.end());
     if (Send) Send(Ctx, MsgResyncChunk, Marker.data(), Marker.size());
+}
 
-    ReseedFrom(F);  // re-base our own timeline (drops in-flight beyond F); sim already at F
+void LockstepPeer::BeginResync() {
+    SendResyncOffer();
+    ReseedFrom(TheSim.Tick);  // re-base our own timeline (drops in-flight beyond F); sim already at F
     IncomingHistory.clear();
-    Awaiting = true;  // cleared when we process the peer's marker
+    Awaiting = true;    // cleared when we process the peer's marker (or by the stall timeout)
+    AwaitingNs = 0;
+    ReoffersLeft = 1;   // #148: one re-offer per round is enough, and can't ping-pong
 }
 
 void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {

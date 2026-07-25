@@ -448,6 +448,81 @@ static void TestCvarSyncSurvivesResync() {
     CvInitialFrontier.Set(FrontDefault);
 }
 
+// ---- #148: restarting one app must not wedge the peer. The survivor takes Session's reconnect
+// edge and offers its history; the RESTARTED app never takes that edge (it connects before the
+// Hello handshake finishes), so it sent no frontier marker — and LockstepPeer::Tick early-returns
+// while Awaiting with nothing to clear it, so the survivor froze permanently. Reported from a live
+// two-phone session: "still paused on the phone that kept running the app." ----
+static void TestResyncStallCannotWedgeSurvivor() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x5A1D, 0, Enqueue, &Qa);
+    B.Init(0x5A1D, 1, Enqueue, &Qb);
+    for (int I = 0; I < 40; ++I) {   // play a while
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Before = A.ExecTick();
+    CHECK(Before > 20);
+
+    // A is the survivor: it takes the reconnect edge and offers its history. The peer NEVER
+    // answers (the restarted app can't), so A must not hold forever.
+    A.BeginResync();
+    Qa.Q.clear();                       // nothing delivered to B; nobody will send a marker back
+    CHECK(A.AwaitingResync());
+    for (int I = 0; I < 5; ++I) { A.Tick(OneTickNs); }
+    CHECK(A.AwaitingResync());          // still holding — the bound is seconds, not ticks
+    CHECK(A.ExecTick() == Before);       // genuinely frozen while it waits
+
+    // Past the stall bound it resumes on its own state instead of wedging.
+    A.Tick(LockstepPeer::ResyncStallTimeoutNs);
+    CHECK(!A.AwaitingResync());
+    for (int I = 0; I < 20; ++I) { DriveInput(A, 0, I); A.Tick(OneTickNs); }
+    CHECK(A.ExecTick() > Before);        // the match is running again
+}
+
+// ---- #148: the peer that is AHEAD re-offers its history when it sees a marker behind its own
+// frontier. Without that, a rejoiner whose Lp.Init wiped the first offer (arrival-before-Init, the
+// same hazard as #147) would never be handed the history again and would sit at tick 0. ----
+static void TestResyncReoffersToBehindPeer() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x5A1E, 0, Enqueue, &Qa);
+    B.Init(0x5A1E, 1, Enqueue, &Qb);
+    for (int I = 0; I < 40; ++I) {
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Frontier = A.ExecTick();
+    const uint64_t StateAtF = A.GetSim().StateHash();
+
+    // The survivor offers first, and that offer is LOST (this is the Init-wipe on the newcomer).
+    A.BeginResync();
+    Qa.Q.clear();
+
+    // The newcomer relaunches, enters the match, and reconciles (the new post-Init BeginResync).
+    Outbox Qb2;
+    LockstepPeer B2;
+    B2.Init(0x5A1E, 1, Enqueue, &Qb2);
+    B2.BeginResync();                   // sends an empty history + marker F=0
+    Deliver(Qb2, A);                    // A sees a marker BEHIND it -> must re-offer
+    CHECK(!A.AwaitingResync());          // A reconciled and resumed immediately
+    Deliver(Qa, B2);                    // the re-offer reaches B2
+    CHECK(!B2.AwaitingResync());
+    CHECK(B2.ExecTick() == Frontier);            // caught up off the re-offer
+    CHECK(B2.GetSim().StateHash() == StateAtF);  // bit-identical to the survivor
+
+    for (int I = 0; I < 30; ++I) {       // and live lockstep resumes
+        DriveInput(A, 0, I); DriveInput(B2, 1, I);
+        A.Tick(OneTickNs); B2.Tick(OneTickNs);
+        Deliver(Qa, B2); Deliver(Qb2, A);
+        CHECK(!A.Desynced() && !B2.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B2.GetSim().StateHash());
+}
+
 // ---- #112: build-fingerprint gate — identical builds pass, a mismatch is refused ----
 static void TestBuildFingerprintGate() {
     Outbox Qa, Qb;
@@ -791,6 +866,8 @@ int main() {
     TestLockstepDetectsDivergence();
     TestLockstepCeilingStallAndResume();
     TestLockstepColdRejoinResync();
+    TestResyncStallCannotWedgeSurvivor();
+    TestResyncReoffersToBehindPeer();
     TestLockstepOverSessionLoopback();
 #if LUR_INTERNAL
     TestCvarSyncOverSessionLoopback();

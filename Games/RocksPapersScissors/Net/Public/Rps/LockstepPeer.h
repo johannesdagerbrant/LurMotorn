@@ -105,6 +105,12 @@ public:
     void BeginResync();
     bool AwaitingResync() const { return Awaiting; }
 
+    // #148: how long a peer may hold production/execution waiting for the other side's frontier
+    // marker before resuming on its own state. A restarted app cannot send that marker (Session
+    // fires its resync handler only on a reconnect EDGE, which a fresh launch never takes), and
+    // without this bound the survivor was wedged permanently.
+    static constexpr uint64_t ResyncStallTimeoutNs = 3'000'000'000ull;
+
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
     bool Desynced() const { return Desync; }
@@ -196,7 +202,10 @@ private:
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)
 
     bool Awaiting = false;                            // in a resync exchange: don't produce/execute yet
+    uint64_t AwaitingNs = 0;                          // #148: how long we've been holding (stall bound)
+    int  ReoffersLeft = 0;                            // #148: re-sends of our history left this round
     std::vector<std::vector<InputEvent>> IncomingHistory;  // reassembled peer combined-batch history
+    void SendResyncOffer();                           // #148: our history + frontier marker
 
     // #135/#139 match-start ready gate. Pre-match the clock holds; each peer's first miner-camp
     // placement is its "ready", exchanged over MsgInput. Both camps become tick 0's input on both

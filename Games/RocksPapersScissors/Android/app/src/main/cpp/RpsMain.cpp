@@ -493,6 +493,14 @@ void android_main(android_app* App) {
                 });
                 State.Lp.SendCvarSync();
 #endif
+                // #148: reconcile with the peer on ENTERING the match, not only on a reconnect
+                // edge. A freshly launched app never takes that edge (it connects before the Hello
+                // handshake completes, so Session sees no not-connected -> connected transition
+                // while Ready), so it never offered its frontier — and the peer that kept running
+                // sat in Awaiting forever waiting for it. For a genuinely fresh pair this is a
+                // cheap no-op exchange: both send an empty history and marker F=0, and each sees
+                // 0 > 0 fail and resumes. Done AFTER Init so Init can't wipe it.
+                State.Lp.BeginResync();
                 State.Started = true;
                 LinkedScored = false;  // #2 tally this match's result once
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);

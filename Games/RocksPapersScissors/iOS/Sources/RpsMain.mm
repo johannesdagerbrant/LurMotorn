@@ -384,6 +384,11 @@ Rps::Fixed WorldToFixed(float Wv) {
             });
             Lp->SendCvarSync();
 #endif
+            // #148: reconcile on ENTERING the match, not only on a reconnect edge — a freshly
+            // launched app never takes that edge, so it never offered its frontier and the peer
+            // that kept running sat in Awaiting forever. Harmless for a fresh pair (empty
+            // histories, marker F=0 both ways). After Init so Init can't wipe it.
+            _Lp.BeginResync();
             _Started = true; _Scored = false;
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
