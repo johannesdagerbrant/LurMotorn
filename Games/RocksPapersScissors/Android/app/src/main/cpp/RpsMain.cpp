@@ -114,6 +114,12 @@ struct AppState {
     std::atomic<bool>    PeerLinked{false};   // sim -> glue: a real peer connected (row + blink)
     std::atomic<bool>    SwitchToLinked{false};  // glue -> sim: player picked the linked-opponent row
     std::atomic<bool>    SelectLinkedRow{false}; // sim -> glue: we switched to the peer; name it in the HUD
+    // #139/feedback: sim -> glue, the camp the player committed while the opponent hasn't placed
+    // theirs. Pre-match it is NOT in the sim (both camps become tick 0's input together), so the
+    // view has to draw it from here or the field looks empty and the drop looks lost. Fixed RAW
+    // (the sim's units) so no float crosses the thread boundary in a different form than the wire.
+    std::atomic<bool>    PendingCamp{false};
+    std::atomic<int32_t> PendingCampX{0}, PendingCampY{0};
     std::atomic<int>     AiWins_[3]{}, AiLosses_[3]{}, AiDraws_[3]{};  // vs each AI tier
     std::atomic<int>     PeerWins_{0}, PeerLosses_{0}, PeerDraws_{0};  // vs the linked peer
 };
@@ -514,6 +520,15 @@ void android_main(android_app* App) {
 #endif
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
+                // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can
+                // show it while we wait for the opponent. Clears itself the moment the match starts
+                // (the real camp is then in the snapshot, with its production buttons).
+                const bool Pending = State.Lp.HasLocalCamp() && !State.Lp.MatchStarted();
+                if (Pending) {
+                    State.PendingCampX.store(State.Lp.LocalCamp().X, std::memory_order_relaxed);
+                    State.PendingCampY.store(State.Lp.LocalCamp().Y, std::memory_order_relaxed);
+                }
+                State.PendingCamp.store(Pending, std::memory_order_release);
                 // Publish a snapshot only when a NEW tick landed (per-tick, 10 Hz — not the
                 // old per-frame ~90 KB capture on the render thread).
                 const uint32_t T = State.Lp.ExecTick();
@@ -637,6 +652,14 @@ void android_main(android_app* App) {
             // published tick left the pre-link screen black (a #91 regression).
             {
                 LUR_TRACE_SCOPE("render.view");
+                // #139/feedback: your camp, committed and waiting on the opponent's (not in the sim
+                // yet). Solo never sets it: there the place applies immediately.
+                const bool Pend = State.PendingCamp.load(std::memory_order_acquire);
+                constexpr float FixedOne = static_cast<float>(Rps::Fixed::One);
+                State.View.SetPendingCamp(
+                    Pend,
+                    static_cast<float>(State.PendingCampX.load(std::memory_order_relaxed)) / FixedOne,
+                    static_cast<float>(State.PendingCampY.load(std::memory_order_relaxed)) / FixedOne);
                 State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowNs()), State.Cam.Y, W, H,
                                   State.LinkedTeam.load(std::memory_order_relaxed) == 1, DtSec);
             }

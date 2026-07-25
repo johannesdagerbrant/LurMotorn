@@ -43,6 +43,16 @@ public:
     // Link status for the opponent selector's dot (view-only; call when it changes).
     void SetLinked(bool InLinked);
 
+    // #139/feedback: the camp you placed while WAITING for the opponent to place theirs. Pre-match
+    // it isn't in the sim yet (both camps are applied together as tick 0's input), so the field
+    // looked empty right after you committed it — as if the drop had been lost. Draw it from the
+    // peer's pending local camp instead. Production buttons come from the SIM's buildings, so a
+    // pending camp correctly has none: you can't queue units before the match starts.
+    // Call with Active=false to clear (solo, or once the match is running and the real camp exists).
+    void SetPendingCamp(bool Active, float WorldX, float WorldY) {
+        PendingCamp_ = Active; PendingCampX_ = WorldX; PendingCampY_ = WorldY;
+    }
+
     // Point the selector at the Linked-opponent row. Called when the main AUTO-switches to the
     // peer as a link establishes: without it the HUD kept naming the AI tier ("Easy") through a
     // linked match, so the player had no way to see who they were actually playing.
@@ -244,6 +254,12 @@ private:
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap
+    // §9 opening gate: this plate's building type isn't unlocked yet, so it draws greyed and is NOT
+    // a drag source (PlateAt / OnTap skip it). Refreshed from the snapshot each Draw.
+    bool  PlateLocked[4] = {};
+    // #139/feedback: a committed-but-not-yet-simulated mining camp (waiting on the opponent).
+    bool  PendingCamp_ = false;
+    float PendingCampX_ = 0.0f, PendingCampY_ = 0.0f;
     Lur::Render::MaterialHandle PanelMat = 0;
     Lur::Render::MaterialHandle PanelEdge = 0;
     Lur::Render::MaterialHandle PlateBg = 0;

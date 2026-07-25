@@ -173,6 +173,11 @@ struct Sim {
     // (§4.1) so the preview can never disagree with what the sim will actually accept.
     bool WouldAcceptPlace(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const;
 
+    // §9 opening gate alone, without a position: is this building type unlocked for the team yet?
+    // (Miner camp always; soldier buildings once the team has a live miner UNIT.) The HUD greys out
+    // and un-arms a locked plate with this. Mirrored by Snapshot::IsBuildingUnlocked.
+    bool IsBuildingUnlocked(uint8_t Team, uint8_t Type) const;
+
 #if LUR_INTERNAL
     // Dev-only stress scene (issue #75): bulk-spawn PerTeam soldiers spread across each
     // half of the field, to prove the tick budget (grid) + one-draw render hold at the

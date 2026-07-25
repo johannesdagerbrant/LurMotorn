@@ -988,18 +988,23 @@ bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
     return true;
 }
 
+// #135/§9 opening gate, location-independent: a miner CAMP is always placeable, but SOLDIER
+// (non-miner) buildings are locked until the team's first miner UNIT has spawned (a placed camp
+// isn't enough). Split out so the HUD can grey out + un-arm a locked plate instead of letting it
+// look available and silently refuse every drop. Mirrored by Snapshot::IsBuildingUnlocked — change
+// both together.
+bool Sim::IsBuildingUnlocked(uint8_t Team, uint8_t Type) const {
+    if (Type >= UnitCount || Team > 1) return false;
+    if (Type == UnitMiner) return true;
+    for (int32_t J = 0; J < Count; ++J)
+        if (IsAlive(J) && !IsBuilding(J) && this->Team[J] == Team && this->Type[J] == UnitMiner)
+            return true;
+    return false;
+}
+
 bool Sim::WouldAcceptPlace(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
     if (Type >= UnitCount || Team > 1) return false;
-    // #135/§9 opening gates: a miner CAMP is always placeable, but SOLDIER (non-miner) buildings
-    // are disabled until the team's first miner UNIT has spawned (a placed camp isn't enough).
-    if (Type != UnitMiner) {
-        bool HasMinerUnit = false;
-        for (int32_t J = 0; J < Count; ++J)
-            if (IsAlive(J) && !IsBuilding(J) && this->Team[J] == Team && this->Type[J] == UnitMiner) {
-                HasMinerUnit = true; break;
-            }
-        if (!HasMinerUnit) return false;
-    }
+    if (!IsBuildingUnlocked(Team, Type)) return false;          // §9 opening gate
     if (!CanPlaceBuilding(Team, Type, X, Y)) return false;      // spatial validity (§5.1)
     return Teams[Team].Gold >= BuildingCostFor(Cv, Type);       // affordable
 }

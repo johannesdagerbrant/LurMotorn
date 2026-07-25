@@ -127,6 +127,13 @@ MeshHandle MakeChevronMesh(Lur::Render::IRenderer* R, bool Down) {
 
 void Dropdown::CreateResources(Lur::Render::IRenderer* Renderer, const Lur::Text::Font* Font) {
     Rend = Renderer;
+    // Every handle in the per-colour cache belongs to the renderer that MINTED it, so a rebuild
+    // invalidates the lot. Not clearing it meant MeshFor kept returning handles from a destroyed
+    // renderer and the status dots silently stopped drawing — visible only on iOS, because the #73
+    // reattach (renderer Shutdown/Init + CreateResources again) is the one path that rebuilds; the
+    // dots looked "black on iPhone, correct on Android" for exactly that reason. The colours are
+    // re-warmed by the next SetItems.
+    ColorMesh.clear();
     Text.CreateResources(Renderer, Font);
     White = Renderer->CreateMaterial(MaterialDesc{0, Color{1, 1, 1, 1}, false});
 
@@ -139,11 +146,15 @@ void Dropdown::CreateResources(Lur::Render::IRenderer* Renderer, const Lur::Text
 }
 
 MeshHandle Dropdown::MeshFor(Color C, bool RingShape) {
+    if (Rend == nullptr) return 0;  // before CreateResources there is nothing to mint from
+    // NOTE the key mixes the shape flag into the TOP bit, which PackRgba also uses for red — two
+    // entries can collide only on an exact 31-bit match, which no palette here produces. Widen the
+    // key if the palette ever grows arbitrary.
     const uint32_t Key = PackRgba(C) ^ (RingShape ? 0x80000000u : 0u);
     auto It = ColorMesh.find(Key);
     if (It != ColorMesh.end()) return It->second;
     const MeshHandle M = RingShape ? MakeRingMesh(Rend, C) : MakeDiscMesh(Rend, C);
-    ColorMesh.emplace(Key, M);
+    if (M != 0) ColorMesh.emplace(Key, M);  // never cache a FAILURE: it would be permanent
     return M;
 }
 

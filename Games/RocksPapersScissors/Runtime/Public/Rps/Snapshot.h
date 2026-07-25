@@ -165,18 +165,22 @@ struct Snapshot {
     // the render thread) can't call the live Sim; this reproduces the identical predicate over the
     // published snapshot fields, so the preview can never disagree with what the sim accepts. MUST
     // stay in lockstep with Sim::WouldAcceptPlace/CanPlaceBuilding (change both together).
+    // §9 opening gate as a LOCATION-INDEPENDENT question: is this building type unlocked for the
+    // team at all? A miner CAMP always is; SOLDIER buildings only once the team's first miner UNIT
+    // has spawned (a placed camp isn't enough). Split out so the HUD can grey out and un-arm a
+    // locked plate — a locked building used to look identical to an available one and just silently
+    // refuse every drop, which reads as the game being broken (feedback 2026-07-25).
+    bool IsBuildingUnlocked(uint8_t PlaceTeam, uint8_t PlaceType) const {
+        if (PlaceType >= UnitCount || PlaceTeam > 1) return false;
+        if (PlaceType == UnitMiner) return true;
+        for (int32_t J = 0; J < Count; ++J)
+            if (IsAlive(J) && !IsBuilding(J) && Team[J] == PlaceTeam && Type[J] == UnitMiner) return true;
+        return false;
+    }
+
     bool WouldAcceptPlace(uint8_t PlaceTeam, uint8_t PlaceType, Fixed X, Fixed Y) const {
         if (PlaceType >= UnitCount || PlaceTeam > 1) return false;
-        // §9 opening gate: a miner CAMP is always placeable, but SOLDIER (non-miner) buildings are
-        // disabled until the team's first miner UNIT has spawned (a placed camp isn't enough).
-        if (PlaceType != UnitMiner) {
-            bool HasMinerUnit = false;
-            for (int32_t J = 0; J < Count; ++J)
-                if (IsAlive(J) && !IsBuilding(J) && Team[J] == PlaceTeam && Type[J] == UnitMiner) {
-                    HasMinerUnit = true; break;
-                }
-            if (!HasMinerUnit) return false;
-        }
+        if (!IsBuildingUnlocked(PlaceTeam, PlaceType)) return false;      // §9 opening gate
         if (!CanPlaceBuilding(PlaceTeam, PlaceType, X, Y)) return false;  // spatial validity (§5.1)
         return Gold[PlaceTeam] >= BuildingCost[PlaceType];                // affordable
     }

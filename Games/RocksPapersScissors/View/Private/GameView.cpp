@@ -338,7 +338,10 @@ void GameView::RefreshSelector() {
     if (Linked) {
         Items[N].Label = "Linked opponent";
         Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
-        Items[N].LeadFill = Color{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f};
+        // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth difficulty.
+        // Green/amber/red are reserved for the AI tiers, so the dot colour alone says "this is the
+        // radio link" (feedback 2026-07-25). #0082FC is the Bluetooth SIG blue.
+        Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
         std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
         Items[N].Trailing = Buf;
         ++N;
@@ -406,6 +409,7 @@ int GameView::OnTap(float XPx, float YPx) {
         return -2;
     }
     for (int Ty = 0; Ty < 4; ++Ty) {
+        if (PlateLocked[Ty]) continue;  // §9: a locked plate is unselectable, not just un-droppable
         const float* Rc = PlateRect[Ty];
         if (XPx >= Rc[0] && XPx <= Rc[0] + Rc[2] && YPx >= Rc[1] && YPx <= Rc[1] + Rc[3])
             return Ty;
@@ -416,6 +420,9 @@ int GameView::OnTap(float XPx, float YPx) {
 int GameView::PlateAt(float XPx, float YPx) const {
     if (!Ready) return -1;
     for (int Ty = 0; Ty < 4; ++Ty) {
+        // A LOCKED plate is not a drag source at all (§9 opening gate): report a miss so the press
+        // falls through as a world tap instead of starting a drag that could never be dropped.
+        if (PlateLocked[Ty]) continue;
         const float* Rc = PlateRect[Ty];
         if (XPx >= Rc[0] && XPx <= Rc[0] + Rc[2] && YPx >= Rc[1] && YPx <= Rc[1] + Rc[3]) return Ty;
     }
@@ -670,6 +677,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Bh = (BldgPx * 0.90f - BGap) * 0.5f;     // two stacked, inside the icon height
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
+
+        // #139/feedback: your committed camp while the opponent hasn't placed theirs yet. It is NOT
+        // in the sim (both camps land together as tick 0's input), so without this the field read as
+        // empty and the drop looked lost. Same glyph + team tint as a real camp; deliberately NO
+        // production buttons (those come from the sim's buildings, and nothing can be queued before
+        // the match starts) and no health bar (it has no HP yet). Gently pulsed so it reads as
+        // "pending", not "built".
+        if (PendingCamp_) {
+            const float Px = SX(PendingCampX_), Py = SY(PendingCampY_);
+            const float Breathe = 0.90f + 0.10f * std::sin(PulseT_ * 3.0f);
+            BlitGlyph(static_cast<int>(GlyphMineCamp), TypeTintMat[My][UnitMiner], Px, Py,
+                      BldgPx * Breathe);
+        }
         bool FirstLocalSeen = false;   // the first (lowest-slot) local building = the camp
         for (int32_t I = 0; I < Snap.Count; ++I) {
             if (!Snap.IsAlive(I) || !Snap.IsBuilding(I)) continue;
@@ -817,6 +837,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
     const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
     const Color BadC{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f};
+    const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};  // disabled/locked, not "unaffordable"
     const float Pad = 8.0f * HS;
     char Buf[64];
 
@@ -881,9 +902,18 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // The plate is a DRAG SOURCE to PLACE a building (#139), so its price is the building
         // PLACEMENT cost and affordability reads against that (not the unit cost — units are
         // queued at the placed building via its x1/x5/x20 buttons, #140).
-        const bool Afford = Snap.Gold[My] >= Snap.BuildingCost[Ty];
-        Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
-             PlateW + 2.0f, PlateH2 + 2.0f);
+        // §9 opening gate: a LOCKED plate (soldier buildings before the first miner unit) is
+        // DISABLED, not merely refused — greyed out here and un-armed in PlateAt, so it can't be
+        // dragged at all. It used to look identical to an available one and silently reject every
+        // drop, which reads as the game being broken (feedback 2026-07-25).
+        const bool Unlocked = Snap.IsBuildingUnlocked(My, static_cast<uint8_t>(Ty));
+        PlateLocked[Ty] = !Unlocked;
+        const bool Afford = Unlocked && Snap.Gold[My] >= Snap.BuildingCost[Ty];
+        // Locked: skip the type frame (gold for the camp / edge for the trio) so the plate reads
+        // as inert chrome rather than an armed button.
+        if (Unlocked)
+            Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
+                 PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
         // Button glyph is the BUILDING icon (miner = camp) in the LOCAL team's per-type tint —
         // the exact icon that follows the finger and lands on the field (#139). While THIS plate
@@ -893,10 +923,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (GhostType_ != Ty)
             BlitGlyph(PlateGlyph, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
                       X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
-        BlitGlyph(GlyphGold, GoldIconMat, X + 12.0f * HS, PlateY + 12.0f * HS, 13.0f * HS);
+        // Locked: the price is grey (not the red "you can't afford this" — you CAN afford it, the
+        // building just isn't available yet), and the coin dims with it.
+        BlitGlyph(GlyphGold, Unlocked ? GoldIconMat : PlateIconDim, X + 12.0f * HS,
+                  PlateY + 12.0f * HS, 13.0f * HS);
         std::snprintf(Buf, sizeof(Buf), "%d", Snap.BuildingCost[Ty]);
         Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
-                  13.0f * HS, Afford ? Ico : BadC, EHAlign::Left, EVAlign::Top, false);
+                  13.0f * HS, !Unlocked ? DimC : (Afford ? Ico : BadC), EHAlign::Left, EVAlign::Top,
+                  false);
     }
 
     // #139 placement ghost: the building icon that "left" its plate follows the pointer — team-

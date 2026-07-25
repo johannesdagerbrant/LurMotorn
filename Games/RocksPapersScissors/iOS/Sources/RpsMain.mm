@@ -472,6 +472,17 @@ Rps::Fixed WorldToFixed(float Wv) {
     // Camera LOCKED at the baseline until you place your first mining camp (feedback) — free scroll after.
     if (!_Snap.HasMinerCamp(_Team)) _Cam.Y = MinCam;
     else _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
+    // #139/feedback: your camp, committed and waiting on the opponent's — it is NOT in the sim yet
+    // (both camps become tick 0's input together), so without this the field looked empty right
+    // after the drop. Single-threaded here, so read the peer directly. Never in solo: there the
+    // place applies immediately and the real camp is in the snapshot.
+    {
+        const bool Pend = !_SoloActive && _Started && _Lp.HasLocalCamp() && !_Lp.MatchStarted();
+        constexpr float FixedOne = static_cast<float>(Rps::Fixed::One);
+        _View.SetPendingCamp(Pend,
+                             static_cast<float>(_Lp.LocalCamp().X) / FixedOne,
+                             static_cast<float>(_Lp.LocalCamp().Y) / FixedOne);
+    }
     _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1,
                  static_cast<float>(ElapsedNs) / 1.0e9f);
 }
