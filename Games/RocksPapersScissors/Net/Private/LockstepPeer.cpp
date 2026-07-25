@@ -36,6 +36,18 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     LocalCampSent_ = false;
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
+#if LUR_INTERNAL
+    // #147: the peer's MsgCvarSync can land BEFORE our own Init — on iOS it reliably does, because
+    // one renderFrame pumps the session inbox (delivering it) and only afterwards reaches the
+    // "session ready -> Lp.Init" branch. That merge is still in ActiveCvars, but TheSim.Init above
+    // just re-latched Cv from the LOCAL globals, throwing the merged values away: on hardware the
+    // Android kept its persisted gold=400 while the iPhone showed the default 190. So re-apply
+    // whatever merged set we already hold, which also re-derives the Init-dependent state.
+    // Per-tick stamps are dropped instead: they were computed as ExecTick+N on the OLD timeline
+    // and mean nothing against a fresh match's tick numbering.
+    PendingCvars.clear();
+    if (!ActiveCvars.empty()) ApplyActiveCvars();
+#endif
 }
 
 void LockstepPeer::QueueLocalEvent(InputEvent E) {

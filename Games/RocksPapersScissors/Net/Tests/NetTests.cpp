@@ -336,6 +336,54 @@ static void TestCvarSyncRederivesInitState() {
     CvWAlign.Set(AlignDefault);
 }
 
+// ---- #147: the peer's MsgCvarSync ARRIVES BEFORE our own Lp.Init. Not hypothetical — it is
+// what happens on iOS every time (one renderFrame pumps the session inbox, delivering the sync,
+// and only afterwards reaches the "ready -> Lp.Init" branch), and it silently defeated the fix
+// on hardware: the merged set sat in ActiveCvars while Init re-latched Cv from the local globals.
+// Caught by a two-phone run showing Android gold=400 / iPhone gold=190. ----
+static void TestCvarSyncArrivingBeforeInit() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    const Fixed   FrontDefault = CvInitialFrontier.Default();
+
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    // A boots with the persisted overrides live in its globals and sends its set.
+    CvStartingGold.Set(400);
+    CvInitialFrontier.Set(F(60));
+    A.Init(0xAB1E, 0, Enqueue, &Qa);
+    A.SeedGameplayCvar(CvIdStartingGold,    400,       900);
+    A.SeedGameplayCvar(CvIdInitialFrontier, F(60).Raw, 900);
+    A.SendCvarSync();
+    // B is clean, and receives A's sync while its OWN Lp is still uninitialised...
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+    Deliver(Qa, B);
+    // ...and only THEN enters the match. Init must not discard what the sync already merged.
+    B.Init(0xAB1E, 1, Enqueue, &Qb);
+    B.SendCvarSync();
+    Deliver(Qb, A);
+
+    CHECK(B.GetSim().Cv.StartingGold == 400);          // the value the peer sent, not our default
+    CHECK(B.GetSim().Teams[0].Gold == 400);            // ...and the Init-DERIVED state with it
+    CHECK(B.GetSim().Cv.InitialFrontier == F(60));
+    CHECK(B.GetSim().FrontierT0 == F(60));
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    for (int I = 0; I < 40; ++I) {                     // and it holds through several anchors
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    CvStartingGold.Set(GoldDefault);
+    CvInitialFrontier.Set(FrontDefault);
+}
+
 // ---- #112: build-fingerprint gate — identical builds pass, a mismatch is refused ----
 static void TestBuildFingerprintGate() {
     Outbox Qa, Qb;
@@ -602,6 +650,7 @@ int main() {
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();
     TestCvarSyncRederivesInitState();
+    TestCvarSyncArrivingBeforeInit();
     TestBuildFingerprintGate();
 #endif
     TestLockstepExecuteCapBounded();
