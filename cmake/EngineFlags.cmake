@@ -169,3 +169,14 @@ if(PROJECT_IS_TOP_LEVEL)
         add_compile_options(/W4 /WX /GR-)
     endif()
 endif()
+
+# Static libstdc++/libgcc on MinGW (issue #152). Our host binaries are built by the WinLibs
+# g++, but a Windows PATH usually carries OTHER mingw runtimes — Git for Windows ships its own
+# libstdc++-6.dll — and the loader takes the first one it finds. Loading a foreign libstdc++
+# into our binary is an ABI mismatch that CRASHES: the headless AI harness segfaulted inside
+# std::ifstream's constructor when launched from Git Bash, printing nothing, which read for a
+# while as "the harness's logging is broken" (it wasn't; it died before the first line).
+# Linking the runtimes statically makes every host binary shell-agnostic and un-hijackable.
+if(PROJECT_IS_TOP_LEVEL AND MINGW)
+    add_link_options(-static-libstdc++ -static-libgcc)
+endif()

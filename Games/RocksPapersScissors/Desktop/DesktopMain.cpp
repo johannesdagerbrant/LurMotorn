@@ -382,6 +382,74 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
     return 0;
 }
 
+// #152: headless AI DIAGNOSTIC. The --aivs tally answers "which tier is stronger"; it cannot
+// answer "is this tier functional at all", which is the question after an economy change — a tier
+// tuned against the old purse can sit broke and idle and still tie another broken tier 0-0. So run
+// one mirror match and report WHAT THE AI DID: the tick each milestone was reached (camp, first
+// miner, first soldier building, first soldier) plus a periodic census of gold/workers/soldiers/
+// buildings. Milestones that never arrive print as "-", which is the failure this exists to catch.
+int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
+#if !LUR_SHIPPING
+    Lur::Core::LoadCVarConfig("rps-cvars.cfg");
+#endif
+    const char* Names[] = {"easy", "medium", "hard"};
+    auto S = std::make_unique<Rps::Sim>();   // ~MBs of SoA: heap, not the 1 MB main stack (#94)
+    S->Init(Seed);
+    Rps::AiController Ai0, Ai1;
+    Ai0.Init(Seed, 0, Tier);
+    Ai1.Init(Seed, 1, Tier);
+    // Census of one team: gold, alive miners, alive soldiers, producing buildings (the HQ excluded —
+    // it produces nothing, so counting it would hide "this AI never built anything").
+    struct Census { int Gold, Workers, Soldiers, Buildings; };
+    auto Look = [&](uint8_t T) {
+        Census C{S->Teams[T].Gold, 0, 0, 0};
+        for (int32_t I = 0; I < S->Count; ++I) {
+            if (!S->IsAlive(I) || S->Team[I] != T) continue;
+            if (S->Kind[I] == Rps::KindBuilding) ++C.Buildings;
+            else if (S->Kind[I] == Rps::KindUnit) {
+                if (S->Type[I] == Rps::UnitMiner) ++C.Workers; else ++C.Soldiers;
+            }
+        }
+        return C;
+    };
+    int TCamp = -1, TMiner = -1, TBldg = -1, TSoldier = -1;   // milestone ticks (-1 = never)
+    Lur::Log::Info("AI diag: tier=%s seed=0x%llx cap=%d ticks (%.0fs at %d Hz)",
+                   Names[static_cast<int>(Tier)], static_cast<unsigned long long>(Seed), MaxTicks,
+                   static_cast<double>(MaxTicks) / Rps::TickRateHz, Rps::TickRateHz);
+    Lur::Log::Info("  tick |    t0 gold  wrk  sol  bld |    t1 gold  wrk  sol  bld");
+    for (int T = 0; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
+        Rps::InputEvent E0[Rps::MaxEventsPerTick], E1[Rps::MaxEventsPerTick];
+        int C0 = 0, C1 = 0;
+        Ai0.DecideEvents(*S, S->Tick, E0, Rps::MaxEventsPerTick, C0);
+        Ai1.DecideEvents(*S, S->Tick, E1, Rps::MaxEventsPerTick, C1);
+        Rps::InputEvent Comb[2 * Rps::MaxEventsPerTick];
+        int NC = 0;
+        for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];
+        for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+        S->StepEvents(Comb, NC);
+        const Census A = Look(0);
+        if (TCamp < 0 && S->HasMinerCamp(0)) TCamp = T;
+        if (TMiner < 0 && A.Workers > 0) TMiner = T;
+        if (TBldg < 0 && A.Buildings > 1) TBldg = T;      // >1: the miner camp is the first
+        if (TSoldier < 0 && A.Soldiers > 0) TSoldier = T;
+        if (EveryTicks > 0 && T % EveryTicks == 0) {
+            const Census B = Look(1);
+            Lur::Log::Info("%6d | %9d %4d %4d %4d | %9d %4d %4d %4d", T, A.Gold, A.Workers,
+                           A.Soldiers, A.Buildings, B.Gold, B.Workers, B.Soldiers, B.Buildings);
+        }
+    }
+    auto Ms = [](int T) { return T < 0 ? -1.0 : static_cast<double>(T) / Rps::TickRateHz; };
+    Lur::Log::Info("AI diag RESULT (%s): camp %.1fs | first miner %.1fs | 2nd building %.1fs | "
+                   "first soldier %.1fs   (-1.0 = NEVER)",
+                   Names[static_cast<int>(Tier)], Ms(TCamp), Ms(TMiner), Ms(TBldg), Ms(TSoldier));
+    const Census A = Look(0), B = Look(1);
+    Lur::Log::Info("  final: t0 gold=%d wrk=%d sol=%d bld=%d | t1 gold=%d wrk=%d sol=%d bld=%d | "
+                   "result=%u at tick %u",
+                   A.Gold, A.Workers, A.Soldiers, A.Buildings, B.Gold, B.Workers, B.Soldiers,
+                   B.Buildings, static_cast<unsigned>(S->Result), S->Tick);
+    return 0;
+}
+
 int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo, bool NoCombat,
             bool FoeOnly, Rps::EAiTier AiTier) {
     // --flockdemo (#97): a solo StressFill scene for visual tuning of the flock. Combat is
@@ -707,6 +775,8 @@ int main(int argc, char** argv) {
     int Stress = 0;
     Rps::EAiTier AiTier = Rps::EAiTier::Medium;  // solo opponent difficulty (#124)
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
+    bool AiDiag = false;                         // #152 headless AI milestone/census diagnostic
+    int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
     int Matches = 9;
     int MaxTicks = 6000;
@@ -730,6 +800,11 @@ int main(int argc, char** argv) {
             AiVsA = ParseTier(V.substr(0, C));
             AiVsB = ParseTier(C == std::string::npos ? std::string{} : V.substr(C + 1));
         }
+        else if (A == "--aidiag" && I + 1 < argc) {  // #152 one mirror match, milestones + census
+            AiDiag = true;
+            AiTier = ParseTier(argv[++I]);
+        }
+        else if (A == "--every" && I + 1 < argc) DiagEvery = std::atoi(argv[++I]);
         else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
         else if (A == "--maxticks" && I + 1 < argc) MaxTicks = std::atoi(argv[++I]);
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
@@ -745,6 +820,7 @@ int main(int argc, char** argv) {
         else if (A == "--winh" && I + 1 < argc) kWinH = std::atoi(argv[++I]);
     }
 
+    if (AiDiag) return RunAiDiag(AiTier, Seed, MaxTicks, DiagEvery);
     if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, AiTier);
