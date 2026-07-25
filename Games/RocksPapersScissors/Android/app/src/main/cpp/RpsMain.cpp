@@ -656,7 +656,7 @@ void android_main(android_app* App) {
     // Session/Lp/Sim (except Lp.SetLocalMask, atomic). ----
     bool ViewLinkedApplied = false;
     auto FramePrev = std::chrono::steady_clock::now();
-#if !LUR_SHIPPING
+#if LUR_INTERNAL
     int ConsolePropCountdown = 1;   // frames until the next debug.lur.console poll
 #endif
     while (!App->destroyRequested) {
@@ -685,13 +685,16 @@ void android_main(android_app* App) {
             const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
             const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
 
-#if !LUR_SHIPPING
+#if LUR_INTERNAL
             // Dev hook: `adb shell setprop debug.lur.console 1` opens the CVar console, 0 closes it —
             // polled, so it toggles live. Exists because the console's real gesture is a TWO-finger
             // triple-tap and `adb shell input` cannot inject multi-touch (nor can we write evdev
             // directly: Samsung's SELinux denies /dev/input writes even to group `input`). Without
-            // this the console is unreachable from an automated on-device check. Same family as
-            // debug.lur.autoplay; compiled out of Shipping.
+            // this the console is unreachable from an automated on-device check.
+            //
+            // LUR_INTERNAL, not merely !LUR_SHIPPING: this is a REMOTE-CONTROL surface, not console
+            // plumbing — anything a player must never reach belongs behind the same gate as the
+            // autoplayer and debug.lur.autoplay, its nearest neighbour.
             if (--ConsolePropCountdown <= 0) {
                 ConsolePropCountdown = 30;  // ~twice a second at 60 fps — a poll, not a per-frame cost
                 char ConsoleV[PROP_VALUE_MAX] = {};

@@ -34,20 +34,41 @@ int32_t Quantize(int32_t C, int32_t Bucket) {
     if (Bucket <= 1) return C;
     return ((C + Bucket / 2) / Bucket) * Bucket;
 }
-// First alive building of (Team, Type), or -1.
-int32_t FindBuilding(const Sim& S, uint8_t Team, uint8_t Type) {
-    for (int32_t I = 0; I < S.Count; ++I)
-        if (S.IsAlive(I) && S.IsBuilding(I) && S.Team[I] == Team && S.Type[I] == Type) return I;
-    return -1;
+// Survey (Team, Type)'s production capacity: how many such buildings are alive, and which of them
+// has the SHALLOWEST queue (ties -> lowest slot, so it stays deterministic).
+//
+// #144: "shallowest", not "first". Production is flat per building since #132, so N buildings of a
+// type produce N units per BuildTicks — but only if the work is SPREAD over them. The old
+// first-match lookup piled everything onto one building and left the rest idle, which made extra
+// capacity worthless even once the AI could afford it.
+struct TypeCapacity {
+    int32_t Owned = 0;      // alive buildings of this type
+    int32_t Slot = -1;      // the one with the shallowest queue
+    int32_t Queue = 0;      //   ...and its depth
+};
+TypeCapacity SurveyType(const Sim& S, uint8_t Team, uint8_t Type) {
+    TypeCapacity C;
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || !S.IsBuilding(I) || S.Team[I] != Team || S.Type[I] != Type) continue;
+        if (S.IsHomeBase(I)) continue;          // #146: the HQ produces nothing
+        ++C.Owned;
+        if (C.Slot < 0 || S.Queue[I] < C.Queue) { C.Slot = I; C.Queue = S.Queue[I]; }
+    }
+    return C;
 }
 // First valid placement spot for the AI in its own band — a deterministic sweep of candidate
 // cells, first one CanPlaceBuilding accepts (avoids overlaps/mines/frontier). Buildings
 // accumulate, so successive placements naturally step to the next free cell.
+// #144: the row sweep runs deeper than the opening frontier reaches (rows are 4 units apart, so 14
+// rows = 52 units vs the 35-unit initial frontier). Forward rows are simply refused by
+// CanPlaceBuilding until the AI's own units have walked far enough to advance its frontier
+// high-water — so the AI grows into the ground it earns instead of being boxed in by a sweep that
+// stopped short of its own buildable depth.
 bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY) {
     const int32_t Base = Team == 0 ? 5 : (WorldHeight.ToInt() - 5);
     const int32_t Dir = Team == 0 ? 1 : -1;
     const int32_t Xs[4] = {8, 14, 20, 26};
-    for (int32_t R = 0; R < 8; ++R)
+    for (int32_t R = 0; R < 14; ++R)
         for (int32_t Xi = 0; Xi < 4; ++Xi) {
             const Fixed X = F(Xs[Xi]);
             const Fixed Y = F(Base + Dir * R * 4);
@@ -164,23 +185,40 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // --- Translate the desired unit type into building EVENTS (#137). ---
     if (Cap < 1) return;
     // 1. The forced first building is a mining camp: until one exists, that's the only action.
-    const int32_t MinerB = FindBuilding(S, MyTeam_, UnitMiner);
-    if (MinerB < 0) {
+    if (SurveyType(S, MyTeam_, UnitMiner).Owned == 0) {
         Fixed X, Y;
         if (AiPlaceSpot(S, MyTeam_, UnitMiner, X, Y))
             Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
         return;
     }
-    // 2. To produce Want, ensure a building of that type. If it exists, queue there (but don't
-    //    over-stack — flat production drains slowly); else place one when affordable. Gold and
-    //    validity are enforced deterministically by the sim (ApplyPlace/ApplyQueue).
-    const int32_t WantB = FindBuilding(S, MyTeam_, Want);
-    if (WantB >= 0) {
-        if (S.Queue[WantB] < 3) Out[Count++] = InputEvent::Queue(MyTeam_, WantB, 1);
-    } else if (S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, Want)) {
+    // 2. Produce Want — spreading the work, and BUYING CAPACITY when it runs out (#144).
+    //
+    // Two rules, one event per tick (so a rich AI still spends over several ticks rather than in a
+    // burst, and gold/validity stay the sim's to enforce — ApplyPlace/ApplyQueue are deterministic
+    // no-ops when refused):
+    //
+    //   EXPAND when every building of this type is already carrying QueueDepth work AND gold is at
+    //   ExpandGoldFactor% of another building's price. Both halves matter: saturation means capacity
+    //   (not money) is the binding constraint, and the gold margin keeps a reserve for units so the
+    //   AI can't building-sprawl itself out of an army. This is what was missing — the old code
+    //   placed a building of a type only when it owned NONE, capping throughput at four buildings
+    //   while income compounded past it forever.
+    //
+    //   Otherwise QUEUE at the shallowest building of the type, so N buildings do N units per
+    //   BuildTicks instead of one building doing all the work with the others idle.
+    const TypeCapacity Cap_ = SurveyType(S, MyTeam_, Want);
+    const int32_t Price = BuildingCostFor(S.Cv, Want);
+    const int32_t Gold = S.Teams[MyTeam_].Gold;
+    const int32_t Depth = S.Cv.AiQueueDepth > 0 ? S.Cv.AiQueueDepth : 1;
+    const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
+    const bool Saturated = Cap_.Owned > 0 && Cap_.Queue >= Depth;
+    const bool CanAffordAnother = Gold >= Price * Factor / 100;   // Price <= a few thousand: no overflow
+    if ((Cap_.Owned == 0 && Gold >= Price) || (Saturated && CanAffordAnother)) {
         Fixed X, Y;
         if (AiPlaceSpot(S, MyTeam_, Want, X, Y))
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
+    } else if (Cap_.Slot >= 0 && Cap_.Queue < Depth) {
+        Out[Count++] = InputEvent::Queue(MyTeam_, Cap_.Slot, 1);
     }
 }
 
