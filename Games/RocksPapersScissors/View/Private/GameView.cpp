@@ -792,6 +792,17 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
+        // #160: with the translucent plates gone, every label sits directly on the building's art, so
+        // each one gets a dark offset copy behind it. That is what the plates were actually for
+        // (gold-on-cyan was unreadable) — the legibility problem outlives the panel, so it needs its
+        // own answer. Two text draws for a handful of short labels; no new material or pipeline.
+        const Color ShadowC{0.0f, 0.0f, 0.0f, 0.75f};
+        auto TextShadowed = [&](const char* S, float X, float Y, float W, float H, float Px, Color C,
+                                EHAlign HA) {
+            const float O = 1.5f * HS;   // offset: enough to separate, small enough not to smear
+            Text.Draw(Renderer, S, X + O, Y + O, W, H, Px, ShadowC, HA, EVAlign::Middle, false);
+            Text.Draw(Renderer, S, X, Y, W, H, Px, C, HA, EVAlign::Middle, false);
+        };
         // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of big squares, not a slim stacked
         // column. ONE width (CtrlW) governs the whole control stack — cost plate, button row, queue
         // plate — so every outline down the building lines up instead of three ragged widths, and the
@@ -899,16 +910,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // icon's top. (Price and buttons swapped after seeing it on the phone.)
             const float Top = By + Half - Bh - 4.0f * HS;
             {
-                const float CostY = By - Half + 14.0f * HS;      // centre of the coin+price row
-                const float Cs = 20.0f * HS;
+                // #160: WAY smaller, and NO plate. The plates were the real occluders — the building's
+                // art was legible through a glyph but not through three stacked translucent panels.
+                // The price is reference information, not a control, so it yields the most space.
+                const float CostY = By - Half + 9.0f * HS;       // centre of the coin+price row
+                const float Cs = 11.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
-                // Its own plate, same width and same translucency as the buttons and the queue row —
-                // the price is drawn over the building's own art, where gold-on-cyan was hard to read.
-                Blit(ProdBtnBg, Bx, CostY, CtrlW, 26.0f * HS);
-                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 20.0f * HS, CostY, Cs);
-                Text.Draw(Renderer, CBuf, Bx - 8.0f * HS, CostY - 11.0f * HS, 48.0f * HS, 22.0f * HS,
-                          19.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left, EVAlign::Middle, false);
+                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 11.0f * HS, CostY, Cs);
+                // A dark offset copy behind the text replaces the plate: the plate existed because
+                // gold-on-cyan was unreadable, and that problem does not go away just because the
+                // panel did. One extra text draw per building, and it works over any art.
+                TextShadowed(CBuf, Bx - 3.0f * HS, CostY - 7.0f * HS, 40.0f * HS, 14.0f * HS,
+                             12.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left);
             }
             // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
             // throbs — right after the first camp x5 is unaffordable, so pulsing it would beg for a
@@ -931,26 +945,29 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
                 const float Cx = BX + Bw * 0.5f, Cy = Top + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
-                // Plate: opacity-only throb (base colour), else the normal translucent plate.
-                // A press wins over the pulse: LIGHT plate (#107) beats the dark breathing one (#143).
-                Blit(Press > 0.0f ? PressPlate[PulseStep]
-                                  : (BtnPulse ? PulsePlate[PulseStep] : ProdBtnBg), Cx, Cy, bw, bh);
-                // Text glows toward crystal-clear white on the beat; on a press the plate goes light
-                // under it, so the label DARKENS instead (that inversion is what reads as "pushed in").
+                // #160: NO plate. It was carrying three jobs — persistent background, #107 press
+                // flash, #143 onboarding throb — so removing it means the feedback moves onto the
+                // GLYPH. The hit rect above is untouched, so the button is exactly as easy to hit as
+                // before; only the paint is gone. (void) the step LUT index: the plate LUTs it fed
+                // are no longer drawn here.
+                (void)PulseStep;
+                // Press now BRIGHTENS the label to white instead of darkening it. Darkening was only
+                // legible against the light press plate; with no plate a dark label on dark art just
+                // disappears at the moment you most need confirmation. The "pushed in" read comes
+                // from the scale-down already folded into PulseK.
                 auto Glow = [&](Color C) -> Color {
-                    if (Press > 0.0f) return {C.R * (1.0f - 0.8f * Press), C.G * (1.0f - 0.8f * Press),
-                                              C.B * (1.0f - 0.8f * Press), 1.0f};
-                    return {C.R + (1.0f - C.R) * Throb, C.G + (1.0f - C.G) * Throb,
-                            C.B + (1.0f - C.B) * Throb, 1.0f};
+                    const float Lift2 = Press > Throb ? Press : Throb;
+                    return {C.R + (1.0f - C.R) * Lift2, C.G + (1.0f - C.G) * Lift2,
+                            C.B + (1.0f - C.B) * Lift2, 1.0f};
                 };
-                // The multiplier is now the button's WHOLE content, so it gets the whole plate: one
-                // big glyph, centred, instead of a two-line label crammed into a slim column.
+                // The label IS the button now, so it stays big and centred in the (unchanged) hit
+                // rect: the visual shrank to a glyph but the target did not.
                 // "+1"/"+5", not "x1"/"x5" (#159): the button ADDS that many to the queue, it does
                 // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
                 char L[8];
                 std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
-                Text.Draw(Renderer, L, bx, by2, bw, bh, 26.0f * HS * PulseK,
-                          Afford ? Glow(Ico) : DimC, EHAlign::Center, EVAlign::Middle, false);
+                TextShadowed(L, bx, by2, bw, bh, 26.0f * HS * PulseK,
+                             Afford ? Glow(Ico) : DimC, EHAlign::Center);
             }
         }
     }
