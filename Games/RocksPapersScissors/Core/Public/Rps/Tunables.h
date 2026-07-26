@@ -415,7 +415,7 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // is moot but harmless. Difficulty = information quality (staleness/precision) + reaction
 // cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
 // knobs for a tier so the three stay in lockstep. ----
-#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR)                                                    \
+#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB)                                            \
     LUR_CVAR(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
     LUR_CVAR(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
     LUR_CVAR(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
@@ -424,7 +424,22 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##Jitter,       "rps.ai." Pfx ".jitter",        JI, CVarFlagAffectsGameplay, "Random +/- cadence jitter (ticks)");          \
     LUR_CVAR(CvAi##Tier##Hysteresis,   "rps.ai." Pfx ".hysteresis",    HY, CVarFlagAffectsGameplay, "Lead margin before switching countered type");\
     LUR_CVAR(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
-    LUR_CVAR(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)")
+    LUR_CVAR(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)"); \
+    LUR_CVAR(CvAi##Tier##QueueDepth,   "rps.ai." Pfx ".queue_depth",   QD, CVarFlagAffectsGameplay, "Units kept queued per building (batch size)"); \
+    LUR_CVAR(CvAi##Tier##MaxBuildings, "rps.ai." Pfx ".max_buildings", MB, CVarFlagAffectsGameplay, "Cap on producing buildings it will place (0 = unlimited)")
+// ---- The ladder is now STRICTLY ORDERED BY DESIGN: the better tier always beats the lesser one. ----
+// That replaces the old goal of a 77-83% adjacent-rung win rate. It is delivered by a monotonic
+// PRODUCTION-VOLUME ladder — queue_depth 8/5/3 and max_buildings unlimited/12/4 for hard/medium/easy —
+// which is a stronger and far more tunable ordering than information quality (staleness/precision)
+// ever gave: measured 16-0 / 16-0 / 16-0 over 16 matches per pairing, with no upsets to chase.
+//
+// It does cost the premise recorded below ("every tier has identical actions; only information
+// differs"). That premise was written before there was evidence; 16 recorded beginner losses showed
+// the SHARED volume knobs were the dominant term in how brutal easy felt, so volume became the axis
+// that carries difficulty. Information quality still shapes HOW a tier plays — it just no longer has
+// to carry the whole ordering on its own.
+//
+// Historical note on the old ordering (kept because the reasoning still explains the knobs):
 // Tier STRENGTH is ordered by the economy knobs, not only by information quality (measured
 // 2026-07-25, 30 matches per pairing). Once the AI could batch-queue and expand, being
 // economy-heavy became the dominant strategy — and `easy` accidentally had the best economy of the
@@ -464,8 +479,24 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // GOOD build order, and easy beat medium 6-8 with it. With a healthy opening the weakening
 // direction is LOW: never converting the money into army.
 //                 OW  WT  ST  PR  CA  JI HY  AL  SR
-LUR_AI_TIER(Easy,   "easy",   4, 30,  60, 4, 50, 15, 3, 20, 40);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65);
+// Economy PACED TO A REAL BEGINNER (measured from 16 recorded losses, 2026-07-26). The recordings
+// showed easy was not out-fighting first-timers, it was out-ECONOMISING them ~3x and then converting
+// the bank into 90-220 soldiers in a terminal 30s burst: workers 11/24/45/55 at 60/90/120/150s
+// against the beginner's 4.9/8.8/16.4/27.7, and 8-12 buildings against their 1-4. Neither side had
+// an army before ~90s, so the old "it rushes" reading was wrong — the flood is funded, not early.
+// worker_target 14, queue_depth 2 and max_buildings 4 aim easy's ramp at the beginner curve, which
+// is what makes a 200-unit bombardment arithmetically impossible rather than merely discouraged.
+// Paced to the BETTER HALF of those 16 (ranked by the economy they actually built), so a real
+// challenge survives: that half ran workers 5/11/24/42 and ~2/2/3/5 buildings at 60/90/120/150s,
+// with peak armies averaging ~27. Measured result at 24/3/4: workers 11/25/29/29, soldiers
+// 0/0/20/40, 4 buildings — against easy's OLD 55 workers, 8-12 buildings and 86 soldiers at 150s.
+// max_buildings is the dominant term, not worker_target: production is flat per building (#132), so
+// each extra building is worth ~25 soldiers by 150s (measured mb 4/5/6 -> 40/65/81).
+// One thing these knobs CANNOT do is match the beginner's 5 workers at 60s — easy sits at 11 in every
+// configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
+// human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
+LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -481,7 +512,7 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65);
 // could not employ, and starving its army to do it: at 45 it LOST to medium 3-7. At 22 the ladder is
 // hard>medium 14-6, medium>easy 17-3, hard>easy 20-0 (20 matches/pairing). This knob is coupled to
 // rps.build.mine_clearance — re-measure both together.
-LUR_AI_TIER(Hard,   "hard",   5, 22,  0,  1, 12, 2,  1, 10, 55);
+LUR_AI_TIER(Hard,   "hard",   5, 22,  0,  1, 12, 2,  1, 10, 55, 8,  0);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -531,7 +562,9 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(Ai##Tier##Jitter,       CvAi##Tier##Jitter)       \
     IX(Ai##Tier##Hysteresis,   CvAi##Tier##Hysteresis)   \
     IX(Ai##Tier##AllinLead,    CvAi##Tier##AllinLead)    \
-    IX(Ai##Tier##SoldierRatio, CvAi##Tier##SoldierRatio)
+    IX(Ai##Tier##SoldierRatio, CvAi##Tier##SoldierRatio) \
+    IX(Ai##Tier##QueueDepth,   CvAi##Tier##QueueDepth)   \
+    IX(Ai##Tier##MaxBuildings, CvAi##Tier##MaxBuildings)
 
 
 // ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----

@@ -30,7 +30,13 @@ enum class EAiTier : uint8_t { Easy = 0, Medium = 1, Hard = 2 };
 // The nine per-tier knobs, resolved from the latched CvSnapshot for one tier.
 struct AiKnobs {
     int32_t OpenWorkers, WorkerTarget, Staleness, Precision, Cadence, Jitter, Hysteresis,
-        AllinLead, SoldierRatio;
+        AllinLead, SoldierRatio,
+        // Per-tier PRODUCTION VOLUME. These were deliberately shared by all tiers ("expansion is
+        // action quality, and every tier has identical actions"), but 16 recorded beginner losses
+        // showed the shared values were the dominant term in how brutal easy feels: it out-economised
+        // first-timers ~3x and converted the bank into 90-220 soldiers. Volume is now per-tier so
+        // easy's ramp can be paced to a real beginner's.
+        QueueDepth, MaxBuildings;
 };
 AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier);
 

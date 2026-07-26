@@ -491,6 +491,12 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
         // match clock starts here exactly as it does for a human.
         bool Opened = false;
         int TSoldier = -1, TMid = -1, TZone = -1, TWipe = -1;
+        // The AI's economy at the milestones the RECORDINGS measured, so its ramp can be compared
+        // straight against a real beginner's. From 16 recorded losses (2026-07-26), the better-half
+        // beginner ran workers 4.9 / 11.2 / 24.1 / 41.6 and ~1.5 / 2.2 / 3.2 / 5.2 buildings at
+        // 60/90/120/150s. Pacing easy to that is the acceptance test for "it builds like a
+        // first-timer" — and a win tally cannot see it at all.
+        int32_t MWrk[4] = {-1, -1, -1, -1}, MSol[4] = {-1, -1, -1, -1}, MBld[4] = {-1, -1, -1, -1};
         for (int T = 0; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
             Rps::InputEvent E[2 * Rps::MaxEventsPerTick];
             int N = 0;
@@ -514,7 +520,7 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
             S->StepEvents(E, N);
             // Where is the AI's army, and how far has it walked into the player's ground?
             int32_t Front = Rps::WorldHeight.ToInt();   // team 1 advances DOWN, so frontmost = min Y
-            int32_t Soldiers = 0, T0Bld = 0;
+            int32_t Soldiers = 0, T0Bld = 0, AiWorkers = 0, AiBld = 0;
             bool T0Hq = false;
             for (int32_t I = 0; I < S->Count; ++I) {
                 if (!S->IsAlive(I)) continue;
@@ -526,10 +532,15 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
                     if (S->IsBuilding(I)) ++T0Bld;
                     continue;
                 }
-                if (S->IsBuilding(I) || S->Type[I] == Rps::UnitMiner) continue;
+                if (S->IsBuilding(I)) { if (!S->IsHomeBase(I)) ++AiBld; continue; }
+                if (S->Type[I] == Rps::UnitMiner) { ++AiWorkers; continue; }
                 ++Soldiers;
                 const int32_t Y = S->PosY[I].ToInt();
                 if (Y < Front) Front = Y;
+            }
+            for (int Mi = 0; Mi < 4; ++Mi) {
+                const int32_t MT = (60 + 30 * Mi) * static_cast<int32_t>(Rps::TickRateHz);
+                if (T == MT) { MWrk[Mi] = AiWorkers; MSol[Mi] = Soldiers; MBld[Mi] = AiBld; }
             }
             if (TSoldier < 0 && Soldiers > 0) TSoldier = T;
             if (TMid < 0 && Soldiers > 0 && Front < Mid) TMid = T;
@@ -543,6 +554,10 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
         if (TMid >= 0)     { SumMid += TMid;         ++GotMid; }
         if (TZone >= 0)    { SumZone += TZone;       ++GotZone; }
         if (S->Result == Rps::ResultTeam1Wins) ++Wiped;
+        Lur::Log::Info("    AI curve 60/90/120/150s:  workers %d/%d/%d/%d  soldiers %d/%d/%d/%d  "
+                       "buildings %d/%d/%d/%d   (better-half beginner: wrk 5/11/24/42, bld 2/2/3/5)",
+                       MWrk[0], MWrk[1], MWrk[2], MWrk[3], MSol[0], MSol[1], MSol[2], MSol[3],
+                       MBld[0], MBld[1], MBld[2], MBld[3]);
         Lur::Log::Info("  seed %#llx: first soldier %.0fs | midfield %.0fs | PLAYER ZONE %.0fs | "
                        "player HQ dead %.0fs",
                        static_cast<unsigned long long>(MatchSeed), Ms(TSoldier), Ms(TMid), Ms(TZone),

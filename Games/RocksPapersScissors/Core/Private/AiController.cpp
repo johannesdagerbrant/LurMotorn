@@ -7,16 +7,19 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
         case EAiTier::Easy:
             return {Cv.AiEasyOpenWorkers, Cv.AiEasyWorkerTarget, Cv.AiEasyStaleness,
                     Cv.AiEasyPrecision, Cv.AiEasyCadence, Cv.AiEasyJitter, Cv.AiEasyHysteresis,
-                    Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio};
+                    Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio,
+                    Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings};
         case EAiTier::Hard:
             return {Cv.AiHardOpenWorkers, Cv.AiHardWorkerTarget, Cv.AiHardStaleness,
                     Cv.AiHardPrecision, Cv.AiHardCadence, Cv.AiHardJitter, Cv.AiHardHysteresis,
-                    Cv.AiHardAllinLead, Cv.AiHardSoldierRatio};
+                    Cv.AiHardAllinLead, Cv.AiHardSoldierRatio,
+                    Cv.AiHardQueueDepth, Cv.AiHardMaxBuildings};
         case EAiTier::Medium:
         default:
             return {Cv.AiMediumOpenWorkers, Cv.AiMediumWorkerTarget, Cv.AiMediumStaleness,
                     Cv.AiMediumPrecision, Cv.AiMediumCadence, Cv.AiMediumJitter,
-                    Cv.AiMediumHysteresis, Cv.AiMediumAllinLead, Cv.AiMediumSoldierRatio};
+                    Cv.AiMediumHysteresis, Cv.AiMediumAllinLead, Cv.AiMediumSoldierRatio,
+                    Cv.AiMediumQueueDepth, Cv.AiMediumMaxBuildings};
     }
 }
 
@@ -336,7 +339,10 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const TypeCapacity Cap_ = SurveyType(S, MyTeam_, Want);
     const int32_t Price = BuildingCostFor(S.Cv, Want);
     const int32_t Gold = S.Teams[MyTeam_].Gold;
-    const int32_t Depth = S.Cv.AiQueueDepth > 0 ? S.Cv.AiQueueDepth : 1;
+    // PER-TIER batch size now (K.QueueDepth), not the shared rps.ai.queue_depth. The shared value
+    // was the single biggest reason easy buried a beginner: batching 8 at a time against a
+    // first-timer issuing ~10 queue commands a match is a 20x throughput gap in decisions alone.
+    const int32_t Depth = K.QueueDepth > 0 ? K.QueueDepth : 1;
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
     const bool CanAffordAnother = Gold >= Price * Factor / 100;   // Price <= a few thousand: no overflow
     // EXPAND on SURPLUS, not on saturation. The earlier saturation test (all buildings already
@@ -344,7 +350,23 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // one-decision-per-tick AI refills — so it never concluded it needed capacity and sat on its
     // gold. Idle gold is the honest signal, and it is what a human acts on: a recorded human win had
     // 21 buildings to the AI's 8 (2026-07-25 flight recordings, #144).
-    if (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother) {
+    // Building CAP (K.MaxBuildings, 0 = unlimited): counted over ALL producing buildings, not per
+    // type, because it is a proxy for "how much stuff does this tier build" — the recordings put a
+    // beginner at 1-4 buildings and easy at 8-12, and since production is FLAT PER BUILDING (#132)
+    // that count IS the army-throughput multiplier. Capping it is what makes a 200-unit flood
+    // arithmetically impossible rather than merely slower. The HQ is excluded (it produces
+    // nothing), so the cap counts exactly the buildings that generate units.
+    int32_t MyBuildings = 0;
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J) && S.IsBuilding(J) && !S.IsHomeBase(J) && S.Team[J] == MyTeam_)
+            ++MyBuildings;
+    const bool UnderCap = K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings;
+    // The exemption is "I have NO producing buildings at all" — the forced opening camp — NOT "I have
+    // none OF THIS TYPE". Per-type would silently floor the cap at one building per unit type (four),
+    // so max_buildings below 4 could never bind: asking for 3 still produced 4. The cap has to mean
+    // what it says, or it is not a tuning knob.
+    const bool OpeningCamp = MyBuildings == 0;
+    if ((OpeningCamp || UnderCap) && (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother)) {
         // WHERE matters as much as whether (#144 slice 3, from the recorded human win):
         //   * a mining camp goes ON the richest unworked mine — that is what makes cart trips short
         //     and captures the map's economy instead of re-mining the home cluster;
