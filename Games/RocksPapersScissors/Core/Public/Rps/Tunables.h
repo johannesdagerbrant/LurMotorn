@@ -29,6 +29,19 @@ constexpr Fixed F(int32_t V) { return Fixed::FromInt(V); }
 constexpr Fixed F(int32_t Num, int32_t Den) {
     return Fixed{static_cast<int32_t>((static_cast<int64_t>(Num) << Fixed::FracBits) / Den)};
 }
+// Rounding counterpart to F(Num, Den) — use it for any default you would naturally WRITE as a
+// decimal, so the compile-time value and the typed/persisted one are the same raw.
+//
+// F truncates; the console + cvars.cfg decimal codec (FixedString.h) rounds to nearest. They agree
+// whenever the division is exact and disagree when it isn't: F(1,10) is raw 6553, but "0.1" parses
+// to 6554. A truncated default therefore can NEVER round-trip through its own console — it persists
+// as "0.09999" — and a hand-edited cvars.cfg saying "0.1" silently differs from it. That is not
+// theoretical: it cost one raw unit of w_predator_flee and showed up as a StateHash difference
+// between the two phones (#155 promotion), visible only because the pre-match LOCKSTEP readout
+// prints the hash.
+constexpr Fixed FRound(int32_t Num, int32_t Den) {
+    return Fixed{static_cast<int32_t>(((static_cast<int64_t>(Num) << Fixed::FracBits) + Den / 2) / Den)};
+}
 
 // ---- Unit types. Declaration order is load-bearing: it indexes UnitTable AND is
 // the bit position in the input mask (bit 0 = Miner ... bit 3 = Scissor). ----
@@ -250,7 +263,7 @@ LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
 // read as units flinching on contact; a wide soft drift instead bends approach paths, so armies
 // slide around their counter rather than bouncing off it.
 LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(15), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 10), CVarFlagAffectsGameplay,
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", FRound(1, 10), CVarFlagAffectsGameplay,
          "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
@@ -272,7 +285,7 @@ LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(2),    CVarFlagAffe
 LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(5), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
 LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay,
          "Match same-type neighbours' heading — turns a crowd into laminar flow");
-LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", F(10, 100), CVarFlagAffectsGameplay,
+LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", FRound(10, 100), CVarFlagAffectsGameplay,
          "Per-tick turn/accelerate clamp: lower = heavier, gloopier units (~0.7 s to reach speed)");
 LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay,
          "Momentum kept per tick in free flight: higher = more glide (the lava-lamp feel)");
