@@ -429,10 +429,14 @@ static void TestPlacementValidity() {
     CHECK(!S.CanPlaceBuilding(0, UnitRock, F(10), F(10)));
     CHECK(!S.CanPlaceBuilding(0, UnitRock, F(10) + Fp, F(10)));
     CHECK(S.CanPlaceBuilding(0, UnitRock, F(10) + Fp + Fp + F(1), F(10)));
-    // Live mine: footprint over it is rejected; clear of it is fine.
+    // Live mine: inside the clearance is rejected, outside it is fine. Keyed on Cv.MineClearance,
+    // NOT the footprint (#157) — those were the same number until the clearance was widened so a
+    // camp could not cover the mine and hide the carts working it.
+    const Fixed Mc = S.Cv.MineClearance;
     S.MineX[0] = F(20); S.MineY[0] = F(12); S.MineGold[0] = MineGoldCapacity;
     CHECK(!S.CanPlaceBuilding(0, UnitRock, F(20), F(12)));
-    CHECK(S.CanPlaceBuilding(0, UnitRock, F(20), F(12) + Fp + F(1)));
+    CHECK(!S.CanPlaceBuilding(0, UnitRock, F(20), F(12) + Mc - F(1)));   // just inside -> refused
+    CHECK(S.CanPlaceBuilding(0, UnitRock, F(20), F(12) + Mc + F(1)));    // just outside -> allowed
 }
 
 // §5.3 (playtest decision 2026-07-25, replacing #133's monotonic high-water): the frontier tracks a

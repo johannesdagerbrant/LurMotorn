@@ -92,12 +92,35 @@ bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY)
 // hash-safe and identical on both peers.
 bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed TargetY, Fixed& OX,
                  Fixed& OY) {
-    // Offsets ordered by (roughly) increasing distance. Deliberately coarse — the footprint is a few
-    // units, so finer steps would just retry overlapping spots.
-    static const int32_t Dx[] = {0,  3, -3, 0,  0,  3, -3,  3, -3, 6, -6, 0,  0,  6, -6,  6, -6,
-                                 9, -9, 0,  0,  9, -9, 12, -12, 0,   0, 12, -12};
-    static const int32_t Dy[] = {0,  0,  0, 3, -3,  3,  3, -3, -3, 0,  0, 6, -6,  6,  6, -6, -6,
-                                 0,  0,  9, -9,  9, -9, 0,   0, 12, -12, 12, -12};
+    // Offsets ordered by increasing distance. Coarse steps of 3 were fine while the mine clearance
+    // equalled the footprint (3), but they put a CLIFF in the clearance knob (#157): the nearest
+    // offsets are 6 then 9, so a clearance anywhere in (6, 9] made the AI skip from 6 straight to 9
+    // and every cart trip got 50% longer. Measured: clearance 6 -> hard beats easy 8-0; clearance
+    // 6.5 -> hard LOSES 0-8, purely from that quantisation, not from the map.
+    //
+    // So the rings are finer where it matters — 7, 8 and the 5/6 diagonals now exist, letting the AI
+    // sit JUST outside whatever the clearance is instead of overshooting to the next multiple of 3.
+    // Still a bounded hand-ordered table (~45 entries, integer, nearest-first) rather than a search:
+    // this runs on the expand branch and each candidate costs a CanPlaceBuilding scan.
+    static const int32_t Dx[] = {
+        0,                                   // 0
+        3, -3,  0,  0,   3, -3,  3, -3,      // 3, 4.24
+        6, -6,  0,  0,                       // 6
+        0,  0,  7, -7,   5, -5,  5, -5,      // 7, 7.07
+        0,  0,  8, -8,   6, -6,  6, -6,      // 8, 8.49
+        0,  0,  9, -9,                       // 9
+        0,  0, 12, -12,  9, -9,  9, -9,      // 12, 12.73
+       12, -12, 12, -12};                    // 16.97
+    static const int32_t Dy[] = {
+        0,
+        0,  0,  3, -3,   3,  3, -3, -3,
+        0,  0,  6, -6,
+        7, -7,  0,  0,   5,  5, -5, -5,
+        8, -8,  0,  0,   6,  6, -6, -6,
+        9, -9,  0,  0,
+       12, -12, 0,  0,   9,  9, -9, -9,
+       12, -12, -12, 12};
+    static_assert(sizeof(Dx) == sizeof(Dy), "AiPlaceNear ring: Dx/Dy must pair up");
     constexpr int32_t Ring = static_cast<int32_t>(sizeof(Dx) / sizeof(Dx[0]));
     const int32_t Tx = TargetX.ToInt(), Ty = TargetY.ToInt();
     for (int32_t I = 0; I < Ring; ++I) {

@@ -139,16 +139,37 @@ void BuildMap(Sim& S) {
     const Fixed Xs[MinesPerCluster] = {F(4), F(9), F(14), F(20), F(25), F(30)};
     const int32_t Hi = WorldHeight.ToInt();
     const int32_t Mid = Hi / 2;
+    // #157: the two rows nearest each end sit HARD AGAINST the map edge, so nothing can be built
+    // BEHIND them (below the bottom pair / above the top pair). They used to sit at CampInset+2 and
+    // +6 (8 and 12), which left a usable strip behind them — camps went up there, off to the side of
+    // the economy, and the row nearest the edge became the awkward one to serve.
+    //
+    // The invariant, and why these two numbers: a building's lowest legal centre is
+    // Edge = 1.5 x footprint (CanPlaceBuilding keeps the whole ICON on-map), and it must also clear
+    // every live mine by Cv.MineClearance. So a row at Ym has no room behind it exactly when
+    //     Ym - MineClearance < 1.5 x footprint
+    // At footprint 3 / clearance 6 that is Ym < 10.5 — both 3 and 9 qualify. Asserted below rather
+    // than left as a comment, because it silently depends on two CVars.
+    const int32_t EdgeRow = 3;    // hard against the end
+    const int32_t NextRow = 9;    // one row in, still unbuildable-behind
     const Fixed ClusterY[ClustersPerTeam * 2] = {
-        F(CampInset + 2),        // t0 home      (right at the bottom camp — fast early gold)
-        F(CampInset + 6),        // t0 safe      (near the bottom camp)
+        F(EdgeRow),              // t0 home      (hard at the bottom edge — nothing fits behind it)
+        F(NextRow),              // t0 safe      (one row in, still sealed)
         F(Hi / 4),               // t0 midfield
         F(Mid - 8),              // t0 contested (toward mid)
-        F(Hi - CampInset - 2),   // t1 home      (right at the top camp)
-        F(Hi - CampInset - 6),   // t1 safe      (near the top camp)
+        F(Hi - EdgeRow),         // t1 home      (hard at the top edge)
+        F(Hi - NextRow),         // t1 safe      (one row in, still sealed)
         F(Hi - Hi / 4),          // t1 midfield
         F(Mid + 8),              // t1 contested (toward mid)
     };
+    // The sealing invariant above. If a future footprint/clearance edit breaks it, a strip of
+    // buildable ground reappears behind the end rows — a subtle map regression that no test would
+    // otherwise catch, so trap it loudly at Init.
+    const Fixed EdgeMargin = S.Cv.BuildingFootprint * F(3, 2);
+    LUR_ASSERT_MSG(F(NextRow) - S.Cv.MineClearance < EdgeMargin,
+                   "RPS map: end mine rows no longer seal the edge (row %d, clearance %d, "
+                   "min build centre %d) — a strip behind them became buildable",
+                   NextRow, S.Cv.MineClearance.ToInt(), EdgeMargin.ToInt());
     int32_t Idx = 0;
     for (int G = 0; G < ClustersPerTeam * 2; ++G)
         for (int K = 0; K < MinesPerCluster; ++K) {
@@ -993,9 +1014,12 @@ bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
         if (!IsAlive(J) || !IsBuilding(J)) continue;
         if (Dist2(X, Y, PosX[J], PosY[J]) < MinBB) return false;
     }
-    // No overlap with a LIVE mine (depleted mines are gone -> building over them is allowed):
-    // the footprint must not cover the mine point.
-    const int64_t MinBM = static_cast<int64_t>(Fp.Raw) * Fp.Raw;
+    // Clearance from a LIVE mine (depleted mines are gone -> building over them is allowed).
+    // Cv.MineClearance, NOT the footprint (#157): the footprint test only kept the mine POINT
+    // outside the footprint, and since both icons draw much larger than the footprint a camp simply
+    // covered the mine — hiding the carts working it, which is the one place the player is watching.
+    const int64_t Mc = Cv.MineClearance.Raw;
+    const int64_t MinBM = Mc * Mc;
     for (int32_t M = 0; M < NumMines; ++M) {
         if (MineGold[M] <= 0) continue;
         if (Dist2(X, Y, MineX[M], MineY[M]) < MinBM) return false;

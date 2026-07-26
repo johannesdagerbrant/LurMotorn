@@ -78,9 +78,21 @@ static void TestEventBatchFuzz() {
 // tests exercise real place/queue EVENTS over the wire and stay reproducible. Team 0 builds in
 // the bottom band, team 1 in the top. #135: the match opens empty (no start-miners), so the camp
 // lands at slot 0 (team 0) / 1 (team 1) — the combined batch applies team 0's place before team 1's.
+
+// ONE definition of the tests' opening-camp spot, because it has to satisfy several map rules at
+// once and a scattered magic coordinate silently rots when any of them moves (#157 did exactly
+// that — the old (17, 14) fell inside the widened mine clearance and every match-start test failed
+// at once, looking like a lockstep bug rather than a stale coordinate). It must be:
+//   * >= Cv.MineClearance (7) from every live mine. X=17 sits midway between the mine columns at
+//     14 and 20, so dx=3 and the end mine row at Y=9 forces dy >= sqrt(49-9) = 6.33 -> Y >= 15.4.
+//   * >= 2 x footprint from the HQ, which auto-places at InitialFrontier x 3/4 = 26.25.
+//   * inside the team's opening frontier (<= 35 from its own end).
+// Y=16 clears all three with margin; mirrored for team 1.
+static const Fixed CampTestX = F(17);
+static Fixed CampTestY(uint8_t Team) { return Team == 0 ? F(16) : F(WorldHeight.ToInt() - 16); }
 static void DriveInput(LockstepPeer& P, uint8_t Team, int TickIdx) {
     if (TickIdx == 3)
-        P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, F(17), Team == 0 ? F(14) : F(226)));  // clear of the home base (#146)
+        P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, CampTestX, CampTestY(Team)));
     else if (TickIdx == 15)
         P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
 }
@@ -112,8 +124,8 @@ static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
 // (its "ready"), the camps are exchanged, and the match starts from tick 0 with both camps in.
 // Tests that don't otherwise place a camp call this so the clock actually starts.
 static void PlaceCampsAndStart(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));  // clear of the home base (#146)
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));  // clear of the home base (#146)
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
     for (int I = 0; I < 4 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
@@ -158,7 +170,7 @@ static void TestLockstepReadyGate() {
     B.Init(0x135, 1, Enqueue, &Qb);
 
     // Only A readies (places its camp): the match must NOT start; both clocks hold at tick 0.
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));  // clear of the home base (#146)
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));  // clear of the home base (#146)
     for (int I = 0; I < 10; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
     }
@@ -166,7 +178,7 @@ static void TestLockstepReadyGate() {
     CHECK(A.ExecTick() == 0 && B.ExecTick() == 0);
 
     // B readies too -> both camps in -> the match starts and runs bit-identical.
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));  // clear of the home base (#146)
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));  // clear of the home base (#146)
     for (int I = 0; I < 40; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
         CHECK(!A.Desynced() && !B.Desynced());
@@ -943,14 +955,14 @@ static void TestPostMatchRestartSkewStillStarts() {
 
     // A's player drops a camp immediately. Its first send reaches a B that has not restarted yet —
     // exactly the packet the old code lost.
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, F(17), F(14)));
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
     for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); Deliver(Qa, B); }
     CHECK(!A.MatchStarted());                        // still waiting on B's camp, as it must
 
     // Now B's hold expires too, and its player drops a camp. The re-send closes the gap.
     Held = 0;
     while (Held < PostMatchHoldNs + OneTickNs) { B.Tick(OneTickNs); Deliver(Qb, A); Held += OneTickNs; }
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
     for (int I = 0; I < 20 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
     }
@@ -973,7 +985,7 @@ static void TestPreMatchDuplicateCampIsIdempotent() {
     B.Init(0x149C, 1, Enqueue, &Qb);
 
     // A readies; its camp reaches B. B is now PeerReady_ but has not readied itself.
-    const InputEvent ACamp = InputEvent::Place(0, UnitMiner, F(17), F(14));
+    const InputEvent ACamp = InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0));
     A.QueueLocalEvent(ACamp);
     A.Tick(OneTickNs);
     Deliver(Qa, B);
@@ -987,7 +999,7 @@ static void TestPreMatchDuplicateCampIsIdempotent() {
 
     // B readies -> the match starts. If the duplicates had been buffered as input, B's view of A's
     // timeline is shifted and the anchor cross-check trips within ten ticks.
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, F(17), F(226)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
     for (int I = 0; I < 40; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
         CHECK(!A.Desynced() && !B.Desynced());

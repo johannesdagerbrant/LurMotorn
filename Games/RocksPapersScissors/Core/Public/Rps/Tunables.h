@@ -151,6 +151,26 @@ LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagA
 LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
 LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
 LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
+// How far a building must sit from a LIVE mine (#157). Was the footprint (3), which only kept the
+// mine POINT outside the footprint — but the icons are much bigger than the footprint, so a camp
+// drawn at radius 3.45 completely covered a mine drawn at radius 1.1, and the carts working that
+// mine vanished under it. The whole gathering loop was invisible at exactly the spot the player
+// cares about.
+//
+// 6 is derived, and it is also a CEILING the map imposes. What has to be visible is the ring of
+// carts WORKING the mine: camp icon radius 3.45 + the carts' working spread (~2, WorkersPerMine
+// diggers separated around the deposit) = 5.45, so 6.
+//
+// Do not raise it without re-tuning the AI ladder. Mines within a row are only 5-6 apart in X, so
+// demanding more from EVERY mine pushes camps away from the whole row and income becomes bound by
+// cart TRAVEL rather than miner count — which breaks economy-heavy tiers specifically. Measured at
+// 20 matches/pairing: at 6 the ladder is hard>medium 14-6, medium>easy 17-3, hard>easy 20-0; at 7,
+// hard LOSES to easy 0-10 because its worker_target buys miners it cannot employ. 6.5 is
+// non-transitive. The clearance and the tier economy knobs are one joint tuning problem.
+//
+// It also sets how far the end mine rows must sit from the map edge to be unbuildable-behind
+// (BuildMap asserts that invariant).
+LUR_CVAR(CvMineClearance,         "rps.build.mine_clearance",F(6),     CVarFlagAffectsGameplay, "Min building-centre distance from a live mine (world units)");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
 LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
@@ -434,7 +454,14 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65);
 // queued batch of the wrong counter is dead gold). At cadence 5 it lost to easy 3-27; at 12 it beats
 // medium 25-5. Slower still is worse again — at 25/40 it starts losing to medium too — so 12 is a
 // measured knee, not a preference.
-LUR_AI_TIER(Hard,   "hard",   5, 45,  0,  1, 12, 2,  1, 10, 55);
+//
+// worker_target 22, down from 45 (#157). The mine clearance widening (3 -> 6) made income bound by
+// cart TRAVEL rather than miner count — and WorkersPerMine caps 6 diggers per deposit, so a target of
+// 45 needed 8 served mines that the wider clearance no longer lets it place. It was buying miners it
+// could not employ, and starving its army to do it: at 45 it LOST to medium 3-7. At 22 the ladder is
+// hard>medium 14-6, medium>easy 17-3, hard>easy 20-0 (20 matches/pairing). This knob is coupled to
+// rps.build.mine_clearance — re-measure both together.
+LUR_AI_TIER(Hard,   "hard",   5, 22,  0,  1, 12, 2,  1, 10, 55);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -555,6 +582,7 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(BuildingFootprint,       CvBuildingFootprint)       \
     FX(BuildingRepelRadius,     CvBuildingRepelRadius)     \
     FX(BuildingRepelStrength,   CvBuildingRepelStrength)   \
+    FX(MineClearance,           CvMineClearance)           \
     FX(InitialFrontier,         CvInitialFrontier)         \
     IX(StartingGold,            CvStartingGold)            \
     LUR_AI_TIER_IDS(IX, Easy)                              \
