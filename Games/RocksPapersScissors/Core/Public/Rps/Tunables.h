@@ -330,12 +330,32 @@ LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay,
 // band — a unit hunts the enemy type it beats even when a mirror is somewhat nearer,
 // instead of just fighting whoever's closest. Beyond the band, closeness takes over again.
 constexpr Fixed TargetBand = F(12);
-// Playtest 2026-07-19: carts RING a deposit instead of standing on it — a cart can
-// dig once within MineDigRange, and live deposits push units outward (soft
-// obstacles, same strength as unit separation). Repel < dig range, so diggers
-// settle in the annulus between the two.
-constexpr Fixed MineDigRange = F(22, 10);
-constexpr Fixed MineRepelRadius = F(3, 2);
+// ---- rps.mine.* — a deposit's PLACEMENT and its SIZE, all tunable (#158) ----
+// Playtest 2026-07-19: carts RING a deposit instead of standing on it — a cart can dig once within
+// dig_range, and live deposits push units outward (soft obstacles, same strength as unit
+// separation). KEEP repel_radius < dig_range, or diggers are pushed out of their own reach and the
+// deposit stalls: the diggers settle in the annulus between the two.
+//
+// A mine has THREE sizes and they are independent, so tuning one alone looks wrong:
+//   visual_size  — the drawn diameter. RENDER ONLY (not AffectsGameplay): it never enters the sim,
+//                  the hash, or the peer sync, so two devices may legitimately disagree on it.
+//   repel_radius — the physical soft-obstacle radius units are pushed out of.
+//   dig_range    — how close a cart must get to actually mine.
+// They start deliberately mismatched: drawn radius is 1.1 (visual_size 2.2 / 2) while the physical
+// push is 1.5, so the obstacle is already wider than the art. Note NONE of these affect how close a
+// BUILDING may be placed — that is rps.build.mine_clearance (placement) and rps.build.footprint,
+// which are a separate family from repulsion.
+LUR_CVAR(CvMineDigRange,    "rps.mine.dig_range",    FRound(22, 10), CVarFlagAffectsGameplay, "How close a cart must be to dig (world units)");
+LUR_CVAR(CvMineRepelRadius, "rps.mine.repel_radius", F(3, 2),        CVarFlagAffectsGameplay, "Soft-obstacle radius pushing units off a deposit (keep < dig_range)");
+LUR_CVAR(CvMineVisualSize,  "rps.mine.visual_size",  FRound(22, 10), CVarFlagNone,            "Drawn mine DIAMETER in world units (render only — never synced)");
+// The two STARTER rows, as a distance in from each team's own end (so they mirror by construction).
+// #157 put them hard against the edge to seal the ground behind them; these expose that choice.
+// BuildMap WARNS (it does not assert — these are yours to tune) when a value stops sealing: the
+// seal holds while row < 1.5 x footprint + mine_clearance, i.e. below 10.5 at the defaults.
+// Only the two starter rows are knobs. midfield/contested stay derived from WorldHeight so they
+// keep scaling with the map instead of freezing at an absolute Y.
+LUR_CVAR(CvMineRowHome,     "rps.mine.row_home",     F(3),           CVarFlagAffectsGameplay, "Starter row 1: distance in from each team's end (world units)");
+LUR_CVAR(CvMineRowSafe,     "rps.mine.row_safe",     F(9),           CVarFlagAffectsGameplay, "Starter row 2: distance in from each team's end (world units)");
 
 // ---- Spatial grid (design §5) — cell size in whole world units. This is a PURE
 // perf knob: any value yields bit-identical results to brute force (rps_sim_tests
@@ -583,6 +603,10 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(BuildingRepelRadius,     CvBuildingRepelRadius)     \
     FX(BuildingRepelStrength,   CvBuildingRepelStrength)   \
     FX(MineClearance,           CvMineClearance)           \
+    FX(MineDigRange,            CvMineDigRange)            \
+    FX(MineRepelRadius,         CvMineRepelRadius)         \
+    FX(MineRowHome,             CvMineRowHome)             \
+    FX(MineRowSafe,             CvMineRowSafe)             \
     FX(InitialFrontier,         CvInitialFrontier)         \
     IX(StartingGold,            CvStartingGold)            \
     LUR_AI_TIER_IDS(IX, Easy)                              \

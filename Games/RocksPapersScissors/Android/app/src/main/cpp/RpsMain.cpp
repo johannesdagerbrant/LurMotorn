@@ -111,6 +111,12 @@ struct AppState {
     // the drag-place UI, replacing the retired press mask). Additive — when no AI row is picked the
     // normal peer path is untouched.
     std::atomic<int>     SoloAiTier{-1};    // glue -> sim: one-shot AI tier pick -> (re)start solo
+    // #158 glue -> sim, one-shot: a gameplay CVar was just edited. The MAP (mine rows) is built at
+    // Sim::Init, so an edit is invisible until the next match — but while a fresh match is still
+    // WAITING FOR THE FIRST CAMP there is no state to lose, so the sim thread re-Inits and the new
+    // layout appears immediately. Deliberately pre-match only: mid-match re-Init is not wanted (it
+    // would throw the game away) and is not needed for tuning.
+    std::atomic<bool>    RebuildPreMatch{false};
     std::atomic<bool>    SoloActive{false}; // sim -> glue: solo match running (tap routing)
     Rps::SoloInputInbox  SoloIn;            // glue -> sim: the human's place/queue events (thread-safe)
     Rps::Sim             SoloSim;           // SIM only (after SoloActive)
@@ -156,6 +162,10 @@ void OnCvarCommit(void* Ctx, Lur::Core::ICVar& Cv) {
     if (Id >= 0) S->Lp.QueueGameplayCvar(static_cast<uint8_t>(Id), Cv.RawValue(), Ms);
     Lur::Core::SaveCVarConfig(S->CvarsPath.c_str());
     Rps::DeriveUnitStats(Rps::LatchCvs(), S->Snap.Units);  // reflect the edit in the pre-match HUD
+    // #158: ask the sim thread to rebuild the map if the match hasn't started. Only a flag —
+    // touching SoloSim from the glue thread would race the tick. The sim thread checks pre-match
+    // itself, so a mid-match edit is simply ignored here.
+    S->RebuildPreMatch.store(true, std::memory_order_release);
 }
 #endif
 
@@ -246,7 +256,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     };
     // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb doesn't
     // hide it (the desired point handed to Resolve; snapping refines from there).
-    const float GhostOffPx = (static_cast<float>(S->Snap.BuildingFootprint.Raw) /
+    const float GhostOffPx = (static_cast<float>(S->Snap.Cv.BuildingFootprint.Raw) /
                               static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu(W);
     const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
 
@@ -489,6 +499,25 @@ void android_main(android_app* App) {
                 SoloRecBegin(NewTier);
 #endif
             }
+#if LUR_INTERNAL
+            // #158: a dev CVar edit while a fresh solo match is still WAITING FOR THE FIRST CAMP —
+            // re-Init so map knobs (rps.mine.row_*) are visible immediately. Pre-match only: nothing
+            // has happened yet, so there is nothing to throw away. Same seed, so only the edited
+            // knobs move. Re-latches Cv through Init, which is what rebuilds the mine field.
+            if (State.RebuildPreMatch.exchange(false, std::memory_order_acq_rel) && SoloRunning &&
+                !State.SoloSim.HasMinerCamp(0) && State.SoloSim.Result == Rps::ResultOngoing) {
+                State.SoloSim.Init(kMatchSeed);
+                State.SoloAi.Init(kMatchSeed, /*AI team*/ 1,
+                                  static_cast<Rps::EAiTier>(SoloTier_ < 0 ? 0 : SoloTier_));
+                SoloAccumNs = 0;
+                State.Mailbox.Back().CaptureFrom(State.SoloSim, NowNs(), kStepNs);
+                State.Mailbox.Publish();
+                State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
+                LastPubTick = State.SoloSim.Tick;
+                LOGI("pre-match map rebuilt from edited cvars (mine rows %d/%d)",
+                     State.SoloSim.Cv.MineRowHome.ToInt(), State.SoloSim.Cv.MineRowSafe.ToInt());
+            }
+#endif
 
             // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake —
             // that's what raises the "opponent link established" notice + the Linked-opponent row. Lp

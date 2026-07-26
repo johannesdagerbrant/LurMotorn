@@ -158,12 +158,49 @@ static void TestRunnerPublishesSnapshots() {
     delete R;
 }
 
+// ---- #158: the placement PREVIEW must agree with the SIM, everywhere ----
+// This is the test whose absence let a real bug ship. The ghost's valid/invalid blink is evaluated
+// on the render thread against a Snapshot, and that used to be a hand-copied mirror of
+// Sim::CanPlaceBuilding with a comment asking editors to keep both in step. Widening the mine
+// clearance updated the sim only, so the ghost turned GREEN a few units from a deposit and the drop
+// was then refused — the preview lied, which reads as the game being broken.
+//
+// Sweeping the whole map at 1-unit resolution for both teams and every buildable type is the
+// assertion that matters: not "the mirror looks right" but "these two functions cannot disagree on
+// any input". It still has teeth now that the mirror is gone, because the snapshot's CAPTURE of the
+// CVar block could regress independently of the predicate.
+static void TestPreviewAgreesWithSim() {
+    static Sim S;
+    S.Init(0x158);
+    // A few buildings and a spent deposit so overlap, clearance and depleted-mine paths all appear.
+    S.Teams[0].Gold = 100000;
+    S.Teams[1].Gold = 100000;
+    S.MineGold[0] = 0;   // depleted -> building over it IS allowed; the two must agree on that too
+    Snapshot Snap;
+    Snap.CaptureFrom(S, 0, 100'000'000ull);
+    int Mismatches = 0, Accepted = 0;
+    const int32_t Wi = WorldWidth.ToInt(), Hi = WorldHeight.ToInt();
+    for (uint8_t Team = 0; Team < 2; ++Team)
+        for (uint8_t Type = UnitMiner; Type < UnitCount; ++Type)
+            for (int32_t X = 0; X <= Wi; ++X)
+                for (int32_t Y = 0; Y <= Hi; ++Y) {
+                    const bool Sim_ = S.CanPlaceBuilding(Team, Type, F(X), F(Y));
+                    const bool Prev = Snap.CanPlaceBuilding(Team, Type, F(X), F(Y));
+                    if (Sim_ != Prev) ++Mismatches;
+                    if (Sim_) ++Accepted;
+                }
+    CHECK(Mismatches == 0);
+    CHECK(Accepted > 0);   // a sweep that accepts nothing would pass vacuously
+    if (Mismatches != 0) std::printf("  preview/sim disagreed on %d of the swept points\n", Mismatches);
+}
+
 int main() {
     TestAdvancePreservingNeverDiscards();
     TestMailboxPublishConsume();
     TestInterpolationAlpha();
     TestRunnerMatchesSynchronous();
     TestRunnerPublishesSnapshots();
+    TestPreviewAgreesWithSim();
 
     if (GFailures == 0) std::printf("rps_runtime_tests: ALL PASS\n");
     else std::printf("rps_runtime_tests: %d FAILURE(S)\n", GFailures);

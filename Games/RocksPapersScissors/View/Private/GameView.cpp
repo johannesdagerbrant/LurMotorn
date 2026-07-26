@@ -544,7 +544,7 @@ bool GameView::ResolvePlacement(float DesXPx, float DesYPx, float CameraY, float
     float Dx = 0.0f, Dy = 0.0f;
     ScreenToWorld(DesXPx, DesYPx, CameraY, WidthPx, HeightPx, FlipY, Dx, Dy);
     // Snap radius ≈ the building's on-field icon size (footprint diameter, world units).
-    const float Radius = FW(Snap.BuildingFootprint) * 2.0f;
+    const float Radius = FW(Snap.Cv.BuildingFootprint) * 2.0f;
     const bool Valid = Snap.SnapToValidPlace(Team, static_cast<uint8_t>(GhostType_), Dx, Dy, Radius,
                                              OutWx, OutWy);
     if (Valid) WorldToScreen(OutWx, OutWy, CameraY, WidthPx, HeightPx, FlipY, OutGhostXPx, OutGhostYPx);
@@ -616,7 +616,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
-    const float MinePx = 2.2f * P;
+    // #158: drawn mine diameter is a CVar. Read from the GLOBAL, not the sim snapshot, and that is
+    // deliberate — it is render-only (not AffectsGameplay), so it is never latched into Cv, never
+    // hashed, and never synced; putting it in the snapshot would imply the sim cares. It also means
+    // an edit shows up on the very next frame with no match restart, unlike the map knobs.
+    const float MinePx = FW(Rps::CvMineVisualSize.Get()) * P;
     for (int T = 0; T < NumMines; ++T) {
         if (Snap.MineGold[T] <= 0) continue;
         const float Mx = SX(FW(Snap.MineX[T])), My = SY(FW(Snap.MineY[T]));
@@ -695,7 +699,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const float UnitPx = 1.7f * P;
     uint32_t N = 0;
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
-    const float BldgPx = FW(Snap.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
+    const float BldgPx = FW(Snap.Cv.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
                                                                  //   footprint so the slim buttons fit inside
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
@@ -1049,7 +1053,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // drop, which reads as the game being broken (feedback 2026-07-25).
         const bool Unlocked = Snap.IsBuildingUnlocked(My, static_cast<uint8_t>(Ty));
         PlateLocked[Ty] = !Unlocked;
-        const bool Afford = Unlocked && Snap.Gold[My] >= Snap.BuildingCost[Ty];
+        const bool Afford = Unlocked && Snap.Gold[My] >= BuildingCostFor(Snap.Cv, Ty);
         // Locked: skip the type frame (gold for the camp / edge for the trio) so the plate reads
         // as inert chrome rather than an armed button.
         if (Unlocked)
@@ -1068,7 +1072,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // building just isn't available yet), and the coin dims with it.
         BlitGlyph(GlyphGold, Unlocked ? GoldIconMat : PlateIconDim, X + 12.0f * HS,
                   PlateY + 12.0f * HS, 13.0f * HS);
-        std::snprintf(Buf, sizeof(Buf), "%d", Snap.BuildingCost[Ty]);
+        std::snprintf(Buf, sizeof(Buf), "%d", BuildingCostFor(Snap.Cv, Ty));
         Text.Draw(Renderer, Buf, X + 20.0f * HS, PlateY + 5.0f * HS, 40.0f * HS, 14.0f * HS,
                   13.0f * HS, !Unlocked ? DimC : (Afford ? Ico : BadC), EHAlign::Left, EVAlign::Top,
                   false);
@@ -1082,7 +1086,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // its slide-back target (the plate) is known.
     GhostBlink_ += DtSec;
     if (GhostType_ >= 0) {
-        const float DragPx = FW(Snap.BuildingFootprint) * 2.0f * P;  // footprint-sized while dragging
+        const float DragPx = FW(Snap.Cv.BuildingFootprint) * 2.0f * P;  // footprint-sized while dragging
         const float ButtonPx = PlateW * 0.52f;
         // The ghost tracks the FINGER exactly; only the displacement obstacles push it by is sprung.
         // That distinction is the whole point: springing the position would make the icon lag the

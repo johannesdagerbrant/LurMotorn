@@ -19,7 +19,9 @@
 #include <cstring>
 
 #include "Lur/Core/Assert.h"
+#include "Lur/Core/Log.h"      // #158: the starter-row seal is a WARNING, not an abort
 #include "Lur/Sim/Random.h"
+#include "Rps/Placement.h"     // #158: the one shared placement predicate (Sim + Snapshot)
 #include "Lur/Trace/Trace.h"  // LUR_TRACE_SCOPE — observational only (compiles out in Shipping)
 
 namespace Rps {
@@ -150,26 +152,30 @@ void BuildMap(Sim& S) {
     //     Ym - MineClearance < 1.5 x footprint
     // At footprint 3 / clearance 6 that is Ym < 10.5 — both 3 and 9 qualify. Asserted below rather
     // than left as a comment, because it silently depends on two CVars.
-    const int32_t EdgeRow = 3;    // hard against the end
-    const int32_t NextRow = 9;    // one row in, still unbuildable-behind
+    // #158: the two starter rows are CVars (rps.mine.row_home / row_safe), as a distance in from
+    // each team's own end so they stay mirrored whatever they are set to. midfield/contested remain
+    // derived from WorldHeight — freezing them at an absolute Y would stop them scaling with the map.
+    const Fixed EdgeRow = S.Cv.MineRowHome;
+    const Fixed NextRow = S.Cv.MineRowSafe;
     const Fixed ClusterY[ClustersPerTeam * 2] = {
-        F(EdgeRow),              // t0 home      (hard at the bottom edge — nothing fits behind it)
-        F(NextRow),              // t0 safe      (one row in, still sealed)
+        EdgeRow,                 // t0 home      (nearest the bottom edge)
+        NextRow,                 // t0 safe      (one row in)
         F(Hi / 4),               // t0 midfield
         F(Mid - 8),              // t0 contested (toward mid)
-        F(Hi - EdgeRow),         // t1 home      (hard at the top edge)
-        F(Hi - NextRow),         // t1 safe      (one row in, still sealed)
+        WorldHeight - EdgeRow,   // t1 home      (nearest the top edge)
+        WorldHeight - NextRow,   // t1 safe      (one row in)
         F(Hi - Hi / 4),          // t1 midfield
         F(Mid + 8),              // t1 contested (toward mid)
     };
-    // The sealing invariant above. If a future footprint/clearance edit breaks it, a strip of
-    // buildable ground reappears behind the end rows — a subtle map regression that no test would
-    // otherwise catch, so trap it loudly at Init.
-    const Fixed EdgeMargin = S.Cv.BuildingFootprint * F(3, 2);
-    LUR_ASSERT_MSG(F(NextRow) - S.Cv.MineClearance < EdgeMargin,
-                   "RPS map: end mine rows no longer seal the edge (row %d, clearance %d, "
-                   "min build centre %d) — a strip behind them became buildable",
-                   NextRow, S.Cv.MineClearance.ToInt(), EdgeMargin.ToInt());
+    // The #157 sealing property, now a WARNING and not an assert: these rows are a tuning knob, so a
+    // value that stops sealing is a choice to be told about, not a programmer error to abort on.
+    // Warn once per Init; it is a handful of lines per match, only in a dev build.
+    const Fixed EdgeMargin = S.Cv.BuildingFootprint * F(3, 2);   // lowest legal building centre
+    const Fixed Seal = EdgeMargin + S.Cv.MineClearance;
+    if (!(EdgeRow < Seal) || !(NextRow < Seal))
+        Lur::Log::Info("RPS map: starter rows %d/%d do NOT seal the edge (need < %d = 1.5x footprint "
+                       "+ mine_clearance) — ground behind them is buildable",
+                       EdgeRow.ToInt(), NextRow.ToInt(), Seal.ToInt());
     int32_t Idx = 0;
     for (int G = 0; G < ClustersPerTeam * 2; ++G)
         for (int K = 0; K < MinesPerCluster; ++K) {
@@ -469,7 +475,7 @@ void WorkerSeek(Sim& S, int32_t I) {
             const Fixed Tx = S.MineX[Tr], Ty = S.MineY[Tr];
             // Dig from range (playtest): stop WHERE THE CART STANDS once close enough —
             // no snap onto the deposit; with the mine repulsion the carts ring it.
-            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= MineDigRange) {
+            if (Max(Abs(Tx - S.PosX[I]), Abs(Ty - S.PosY[I])) <= S.Cv.MineDigRange) {
                 S.WorkerState[I] = WorkDig;
                 S.WorkerTimer[I] = S.Cv.DigTicks;
                 return;
@@ -613,7 +619,7 @@ void AddMineRepel(const Sim& S, int32_t I, int64_t& Ax, int64_t& Ay) {
     for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
         if (S.MineGold[Mn] <= 0) continue;
         AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
-                 MineRepelRadius, S.Cv.SeparationStrength, Ax, Ay);
+                 S.Cv.MineRepelRadius, S.Cv.SeparationStrength, Ax, Ay);
     }
 }
 // Chebyshev-clamp a raw (Q16.16) vector in place to a max magnitude — the sqrt-free
@@ -996,35 +1002,11 @@ void Sim::DeriveUnits() {
 
 bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
     (void)Type;  // one shared footprint for all building types (§12.2); Type reserved for later
-    const Fixed Fp = Cv.BuildingFootprint;
-    // In-bounds with a margin covering the building's VISUAL extent (the icon draws ~1.35x the
-    // footprint radius, GameView), not just the footprint — so a placed building (and the x1/x5
-    // buttons drawn inside its icon) can never poke off the map/screen edge. World-space (matches
-    // the view's world-space visual scale), so it stays deterministic across devices.
-    const Fixed Edge = Fp * F(3, 2);  // ~1.5x footprint: keeps the whole icon on-map
-    if (X.Raw - Edge.Raw < 0 || X + Edge > WorldWidth) return false;
-    if (Y.Raw - Edge.Raw < 0 || Y + Edge > WorldHeight) return false;
-    // §5.3 frontier gate: you cannot build past your own high-water line.
-    if (Team == 0) { if (Y > FrontierT0) return false; }
-    else           { if (Y < FrontierT1) return false; }
-    // No overlap with another building: shared footprint -> centres must be >= 2·Fp apart.
-    const int64_t TwoFp = static_cast<int64_t>(Fp.Raw) + Fp.Raw;
-    const int64_t MinBB = TwoFp * TwoFp;
-    for (int32_t J = 0; J < Count; ++J) {
-        if (!IsAlive(J) || !IsBuilding(J)) continue;
-        if (Dist2(X, Y, PosX[J], PosY[J]) < MinBB) return false;
-    }
-    // Clearance from a LIVE mine (depleted mines are gone -> building over them is allowed).
-    // Cv.MineClearance, NOT the footprint (#157): the footprint test only kept the mine POINT
-    // outside the footprint, and since both icons draw much larger than the footprint a camp simply
-    // covered the mine — hiding the carts working it, which is the one place the player is watching.
-    const int64_t Mc = Cv.MineClearance.Raw;
-    const int64_t MinBM = Mc * Mc;
-    for (int32_t M = 0; M < NumMines; ++M) {
-        if (MineGold[M] <= 0) continue;
-        if (Dist2(X, Y, MineX[M], MineY[M]) < MinBM) return false;
-    }
-    return true;
+    // #158: the rule itself lives in Rps/Placement.h and is shared VERBATIM with the render-thread
+    // preview (Snapshot::CanPlaceBuilding). It used to be duplicated here and mirrored there, and
+    // the mirror fell out of step the first time the rule changed — the ghost went green where the
+    // sim refused. One predicate, two data sources, no lockstep-by-comment.
+    return PlacementAccepts(*this, Cv.BuildingFootprint, Cv.MineClearance, Team, X, Y);
 }
 
 // #135/§9 opening gate, location-independent: a miner CAMP is always placeable, but SOLDIER

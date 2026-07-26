@@ -634,8 +634,18 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     static const char* kCvarsPath = "rps-cvars.cfg";
     if (const int Loaded = Lur::Core::LoadCVarConfig(kCvarsPath); Loaded > 0)
         Lur::Log::Info("loaded %d persisted cvar override(s) from %s", Loaded, kCvarsPath);
-    View.SetCvCommitHook([](void*, Lur::Core::ICVar&) { Lur::Core::SaveCVarConfig(kCvarsPath); },
-                         nullptr);
+    // #158: a commit also REQUESTS a pre-match map rebuild. The map (mine rows) is built in
+    // Sim::Init, so a knob edit is otherwise invisible until the next match — but while a fresh
+    // match still waits for your opening camp there is nothing to lose by re-Initing, so the new
+    // layout shows at once. Only a flag here: the restart is a Runner Stop/Start and belongs on the
+    // main loop, not inside a console callback. Ctx-passed rather than a global.
+    bool RebuildPreMatch = false;
+    View.SetCvCommitHook(
+        [](void* Ctx, Lur::Core::ICVar&) {
+            Lur::Core::SaveCVarConfig(kCvarsPath);
+            *static_cast<bool*>(Ctx) = true;
+        },
+        &RebuildPreMatch);
     Lur::Log::Info("dev console: press the key left of '1' (backtick/paragraph) to open; click cvars to edit");
 #endif
 
@@ -689,7 +699,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb
         // doesn't hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so
         // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
-        const float GhostOffPx = (static_cast<float>(Snap.BuildingFootprint.Raw) /
+        const float GhostOffPx = (static_cast<float>(Snap.Cv.BuildingFootprint.Raw) /
                                   static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu();
         // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid
         // spot within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where
@@ -767,6 +777,20 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                         if (Cnt > 0) Human.Push(Rps::InputEvent::Queue(0, Slot, Cnt));
                     }
                 }
+            }
+        }
+        // #158: a cvar was edited and the match hasn't started — rebuild so map knobs
+        // (rps.mine.row_*) are visible while you tune. Pre-match ONLY, and gated on having a
+        // snapshot to test: mid-match tuning deliberately does not restart the game.
+        if (RebuildPreMatch) {
+            RebuildPreMatch = false;
+            if (HaveSnap && Snap.Result == Rps::ResultOngoing && !Snap.HasMinerCamp(0)) {
+                Runner->Stop();
+                Runner->Start(Seed, UseAi ? &SampleSoloVsAi : &SampleSolo, &AiCtx,
+                              static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat, SoloGate);
+                Lur::Log::Info("pre-match map rebuilt from edited cvars (mine rows %d/%d, clearance %d)",
+                               Rps::CvMineRowHome.Get().ToInt(), Rps::CvMineRowSafe.Get().ToInt(),
+                               Rps::CvMineClearance.Get().ToInt());
             }
         }
         // #2: picking an AI tier from the selector (re)starts a fresh match at that difficulty at

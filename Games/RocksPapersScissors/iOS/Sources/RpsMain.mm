@@ -538,7 +538,7 @@ Rps::Fixed WorldToFixed(float Wv) {
 // a building's x1/x5 button queues units. Single-threaded here, so Lp.QueueLocalEvent is called
 // directly. Placement is gated on _Started (a live match). You play _Team.
 - (float)ghostOffPxForWidth:(float)W {
-    return static_cast<float>(_Snap.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
+    return static_cast<float>(_Snap.Cv.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
 }
 // Route a local place/queue event to whichever match is live: the solo sim's pending queue (drained
 // in renderFrame's solo tick) or the linked peer's inbox. Single-threaded, so both are safe here.

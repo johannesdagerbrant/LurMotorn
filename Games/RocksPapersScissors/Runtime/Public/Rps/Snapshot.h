@@ -4,6 +4,7 @@
 #include <mutex>
 
 #include "Lur/Sim/Fixed.h"
+#include "Rps/Placement.h"   // #158: the ONE shared placement predicate (no more sim/preview mirror)
 #include "Rps/Sim.h"
 #include "Rps/Tunables.h"
 
@@ -44,7 +45,13 @@ struct Snapshot {
     // radius, carried so the view can draw the frontier lines and size the placement ghost.
     Fixed    FrontierT0{};
     Fixed    FrontierT1{};
-    Fixed    BuildingFootprint{};
+    // #158: the WHOLE latched gameplay CVar block, copied in one assignment, rather than a handful
+    // of cherry-picked fields. The cherry-picking was the actual defect behind the ghost/sim
+    // disagreement: adding a placement tunable to the sim left a second place that had to be
+    // remembered, and it wasn't. With the block carried wholesale, any knob the shared predicate
+    // (Rps/Placement.h) reads is present here automatically and cannot fall out of step. It is a
+    // POD of ints/Fixed — a few hundred bytes against this struct's ~90 KB, so the copy is noise.
+    CvSnapshot Cv{};
 
     // HUD / overlay counters (read via this same hand-off, never from the live Sim).
     uint32_t Tick = 0;
@@ -95,7 +102,7 @@ struct Snapshot {
         std::memcpy(MineGold, S.MineGold, sizeof(int32_t) * NumMines);
         FrontierT0 = S.FrontierT0;
         FrontierT1 = S.FrontierT1;
-        BuildingFootprint = S.Cv.BuildingFootprint;
+        Cv = S.Cv;   // #158: one line, so no future placement knob can be forgotten here
         Tick = S.Tick;
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
@@ -160,11 +167,15 @@ struct Snapshot {
         return Dx * Dx + Dy * Dy;
     }
 
-    // #139 RENDER-THREAD mirror of Sim::WouldAcceptPlace / Sim::CanPlaceBuilding. The SimRunner
-    // ticks the sim on its own thread, so the drag-place ghost's valid/invalid blink (evaluated on
-    // the render thread) can't call the live Sim; this reproduces the identical predicate over the
-    // published snapshot fields, so the preview can never disagree with what the sim accepts. MUST
-    // stay in lockstep with Sim::WouldAcceptPlace/CanPlaceBuilding (change both together).
+    // #139 RENDER-THREAD placement preview. The SimRunner ticks the sim on its own thread, so the
+    // drag-place ghost's valid/invalid blink (evaluated on the render thread) can't call the live
+    // Sim — it answers over the published snapshot instead.
+    //
+    // #158: this is no longer a hand-written MIRROR of the sim's predicate. It calls the SAME
+    // function (Rps::PlacementAccepts) over the same captured CVar block, so "change both together"
+    // is no longer a rule anyone can forget — there is only one implementation to change. The data
+    // is still a snapshot (it must be: the render thread cannot read a ticking Sim), so the preview
+    // can be one tick stale; it can no longer be WRONG.
     // §9 opening gate as a LOCATION-INDEPENDENT question: is this building type unlocked for the
     // team at all? A miner CAMP always is; SOLDIER buildings only once the team's first miner UNIT
     // has spawned (a placed camp isn't enough). Split out so the HUD can grey out and un-arm a
@@ -182,33 +193,13 @@ struct Snapshot {
         if (PlaceType >= UnitCount || PlaceTeam > 1) return false;
         if (!IsBuildingUnlocked(PlaceTeam, PlaceType)) return false;      // §9 opening gate
         if (!CanPlaceBuilding(PlaceTeam, PlaceType, X, Y)) return false;  // spatial validity (§5.1)
-        return Gold[PlaceTeam] >= BuildingCost[PlaceType];                // affordable
+        return Gold[PlaceTeam] >= BuildingCostFor(Cv, PlaceType);         // affordable
     }
 
-    // Spatial-only placement validity — the snapshot mirror of Sim::CanPlaceBuilding (§5.1/§5.3).
+    // Spatial-only placement validity — the SHARED predicate (§5.1/§5.3), not a copy of it.
     bool CanPlaceBuilding(uint8_t PlaceTeam, uint8_t PlaceType, Fixed X, Fixed Y) const {
         (void)PlaceType;  // one shared footprint for all building types (§12.2)
-        const Fixed Fp = BuildingFootprint;
-        const Fixed Edge = Fp * F(3, 2);  // ~1.5x footprint keeps the whole icon on-map (matches Sim)
-        if (X.Raw - Edge.Raw < 0 || X + Edge > WorldWidth) return false;
-        if (Y.Raw - Edge.Raw < 0 || Y + Edge > WorldHeight) return false;
-        // §5.3 frontier gate: you cannot build past your own high-water line.
-        if (PlaceTeam == 0) { if (Y > FrontierT0) return false; }
-        else                { if (Y < FrontierT1) return false; }
-        // No overlap with another building: shared footprint -> centres must be >= 2·Fp apart.
-        const int64_t TwoFp = static_cast<int64_t>(Fp.Raw) + Fp.Raw;
-        const int64_t MinBB = TwoFp * TwoFp;
-        for (int32_t J = 0; J < Count; ++J) {
-            if (!IsAlive(J) || !IsBuilding(J)) continue;
-            if (Dist2Raw(X, Y, PosX[J], PosY[J]) < MinBB) return false;
-        }
-        // No overlap with a LIVE mine (depleted mines are gone -> allowed to build over them).
-        const int64_t MinBM = static_cast<int64_t>(Fp.Raw) * Fp.Raw;
-        for (int32_t M = 0; M < NumMines; ++M) {
-            if (MineGold[M] <= 0) continue;
-            if (Dist2Raw(X, Y, MineX[M], MineY[M]) < MinBM) return false;
-        }
-        return true;
+        return PlacementAccepts(*this, Cv.BuildingFootprint, Cv.MineClearance, PlaceTeam, X, Y);
     }
 
     // Fixed-timestep interpolation factor at render time NowNs. Clamps to [0,1] — no
