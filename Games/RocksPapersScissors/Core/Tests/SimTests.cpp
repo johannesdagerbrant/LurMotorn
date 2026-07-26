@@ -573,14 +573,19 @@ static void TestEventPlaceAndQueueApply() {
     static Sim S;
     S.Init(0);
     ClearField(S);
-    S.Teams[0].Gold = 1000;
+    // Fund this from the LIVE costs, never a hardcoded purse: these are CVars, and a flat 1000 went
+    // silently insolvent when the camp went to 600 and miners to 100 — the queue then clamped to
+    // what was affordable and this read as a queue-mechanics failure instead of a broke test.
     const int32_t PlaceCost = BuildingCostFor(S.Cv, UnitMiner);
+    const int32_t MinerUnitCost = S.Units[UnitMiner].Cost;
+    const int32_t Purse = PlaceCost + 5 * MinerUnitCost + 1000;   // + slack for the invalid-place probe
+    S.Teams[0].Gold = Purse;
     InputEvent P = InputEvent::Place(0, UnitMiner, F(17), F(10));
     S.StepEvents(&P, 1);
     const int32_t B = FirstBuilding(S);
     CHECK(B >= 0);
     CHECK(S.Team[B] == 0 && S.Type[B] == UnitMiner && S.Kind[B] == KindBuilding);
-    CHECK(S.Teams[0].Gold == 1000 - PlaceCost);
+    CHECK(S.Teams[0].Gold == Purse - PlaceCost);
     // Queue 5 miners at it — gold deducted per unit.
     const int32_t GoldPreQ = S.Teams[0].Gold;
     InputEvent Q = InputEvent::Queue(0, B, 5);

@@ -78,7 +78,7 @@ constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 // Speed is Fixed. Range/Cooldown and the RPS Beats relation stay compile-time in UnitTable
 // (Beats is wire/order-load-bearing, not a number to twiddle). The Sim latches these into
 // Sim::Units[] (DeriveUnits) each tick. ----
-LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      30,       CVarFlagAffectsGameplay, "Gold to queue a miner cart");
+LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      100,      CVarFlagAffectsGameplay, "Gold to queue a miner cart");
 LUR_CVAR(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
 LUR_CVAR(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
 LUR_CVAR(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
@@ -107,17 +107,25 @@ LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffects
 // gold), so they latch into Cv, sync over lockstep, and are console-tunable.
 // The placement COSTS are no longer placeholders: they come from a two-human playtest
 // (2026-07-25) tuned for a TACTICAL opening rather than a spammy one — a camp is a real
-// investment (500 of the 800 opening gold) and every soldier building costs more than you start
-// with, so the first soldier is always mined for, never opened with. Re-tune by playing, not by
-// reasoning: these are felt numbers. ----
+// investment and every soldier building costs more than you start with, so the first soldier is
+// always mined for, never opened with. Re-tune by playing, not by reasoning: these are felt
+// numbers.
+//
+// 2026-07-26: promoted from the phone's persisted rps-cvars.cfg — these are what was actually
+// being PLAYED on the Galaxy, while the compile-time defaults had drifted well below them (camp
+// 500, rock 700, paper 1000, scissor 1250). The spread also widened deliberately: soldier
+// buildings now step 1500/2000/3250 rather than 700/1000/1250, so committing to a type is a real
+// decision and a mis-read counter is expensive. Anything measured against the old numbers (the AI
+// tier ladder especially) has to be re-measured — a tier tuned against a cheaper purse is tuned
+// against a different game. ----
 LUR_CVAR(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
-LUR_CVAR(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   500, CVarFlagAffectsGameplay, "Gold to place a mining camp");
+LUR_CVAR(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   600, CVarFlagAffectsGameplay, "Gold to place a mining camp");
 LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
-LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",    700, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",   1500, CVarFlagAffectsGameplay, "Gold to place a Rock building");
 LUR_CVAR(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
-LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  1000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  2000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
 LUR_CVAR(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
-LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",1250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",3250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
 // Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
 // gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
@@ -132,11 +140,12 @@ LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagA
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
 LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
-// Opening gold (§12.6): a tunable knob whose DEFAULT is exactly one mining camp + three miner
-// carts = MinerBuildingCost(100) + 3 x MinerCost(30) = 190. Enough for the forced camp-then-miners
-// opening and nothing else (a combat building is gated on the first miner unit anyway, ApplyPlace),
-// so a player can't open with military. Keep the default in step with those costs if they change.
-LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  800,      CVarFlagAffectsGameplay, "Opening gold: one mining camp (500) + 10 miner carts");
+// Opening gold (§12.6): sized to buy the forced opening and nothing else — one mining camp
+// (MinerBuildingCost 600) + six miner carts (6 x MinerCost 100) = 1200 exactly. A combat building
+// is gated on the first miner unit anyway (ApplyPlace) AND now costs more than the whole opening
+// purse, so a player cannot open with military under any spend order. Keep this in step with those
+// two costs if they change — the "exactly one camp + N carts" property is the point, not the number.
+LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  1200,     CVarFlagAffectsGameplay, "Opening gold: one mining camp (600) + 6 miner carts (100 ea)");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
@@ -235,8 +244,12 @@ LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
 // is weak against (the type that beats it). A repulsion from that predator, larger radius
 // than enemy separation, corrected falloff (strongest at contact). Chases prey, flees the
 // counter — so the RPS triangle plays out spatially, not just in the damage numbers.
-LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(7), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 4), CVarFlagAffectsGameplay,
+// 2026-07-26 (promoted from the phone's persisted config): radius roughly doubled to 15 and the
+// weight cut from 0.25 to 0.1 — flee EARLIER but far more GENTLY. The strong short-range version
+// read as units flinching on contact; a wide soft drift instead bends approach paths, so armies
+// slide around their counter rather than bouncing off it.
+LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(15), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(1, 10), CVarFlagAffectsGameplay,
          "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
@@ -368,8 +381,36 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // Note worker_target only bites before contact: the FSM leaves the Building state as soon as the
 // enemy fields anything, after which soldier_ratio governs the split. Moving hard's worker_target
 // between 28 and 45 changed nothing at all in a real match.
+//
+// EASY IS THE TEACHING TIER, and that is a different job from "bottom rung" (#155). The app opens
+// straight into an Easy match (RpsMain.mm), so it is first contact for every new player — and the
+// ladder's own metric is blind to whether a human can learn against it. Tiering easy by AI-vs-AI
+// win rate had made it weak by STARVING its economy (worker_target 8 / soldier_ratio 80), which is
+// an early rush: a liability against hard (the #154 coin flip) and a massacre against a first-timer.
+// Measured with --aibeginner (tier vs a place-a-camp-then-idle player): the first wave reached the
+// player's build zone at 102s and wiped them 6/6. worker_target 30 pushes that to ~155s.
+//
+// That knob is the right one precisely BECAUSE of the note below: worker_target only bites before
+// contact — and against a beginner, pre-contact IS the whole match. (allin_lead is inert here for a
+// different reason: past worker_target the Building state already produces soldiers exclusively, so
+// AllIn changes nothing. Don't reach for it.) Re-measure with --aibeginner, never --aivs, which
+// cannot see this failure at all.
+//
+// Easy's TWO jobs are now TWO SEPARATE KNOBS, and keeping them separate is what makes this tunable:
+//   * worker_target 30 = the beginner grace window (pre-contact only) -> wave at ~155s.
+//   * soldier_ratio  40 = its rung on the ladder (Reacting only)      -> medium beats it 8-2.
+// They are independent because a passive player never fields an army, so the FSM never leaves
+// Building and soldier_ratio is never consulted — measured: the 157s window is IDENTICAL at
+// soldier_ratio 30/40/50. Tune the window with worker_target, the rung with soldier_ratio.
+//
+// soldier_ratio 40, NOT the old 80, and the reason the direction flipped matters: the note below
+// says a HIGH ratio starves the economy and is what made easy weak. That was true at worker_target
+// 8 (no economy AND no savings). At worker_target 30 the economy is already banked before contact,
+// so a high ratio is no longer starvation — it is economy-first-then-all-in, which is a genuinely
+// GOOD build order, and easy beat medium 6-8 with it. With a healthy opening the weakening
+// direction is LOW: never converting the money into army.
 //                 OW  WT  ST  PR  CA  JI HY  AL  SR
-LUR_AI_TIER(Easy,   "easy",   4,  8,  60, 4, 50, 15, 3, 20, 80);
+LUR_AI_TIER(Easy,   "easy",   4, 30,  60, 4, 50, 15, 3, 20, 40);
 LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's

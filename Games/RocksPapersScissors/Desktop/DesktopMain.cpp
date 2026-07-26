@@ -451,6 +451,111 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
     return 0;
 }
 
+// #155: headless BEGINNER diagnostic — the one question --aivs and --aidiag both refuse to answer.
+// Both of those measure the AI against a COMPETENT opponent (another tier), and tier strength there
+// is ordered by economy: `easy` is weak on the ladder precisely BECAUSE it starves its economy and
+// dumps everything into soldiers, which is an early rush. A rush is a liability against `hard` and a
+// massacre against a first-timer, so the ladder's own metric is blind to the thing that decides
+// whether a new player ever learns the game.
+//
+// The proxy for that new player is deliberately the FLOOR: team 0 places one mining camp (which is
+// what starts the match — the mains gate the AI on exactly that, DesktopMain.cpp RunSolo) and then
+// does nothing at all for the rest of the match. Everything the AI then achieves, it achieves
+// against someone who is still reading the screen.
+//
+// What it reports is the arrival clock, not a win tally: when the AI's first soldier EXISTS, when it
+// crosses midfield, and when it reaches the player's build zone — that last one is the moment a
+// beginner's match is effectively decided, and it is the number the grace window is specified in.
+int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks, int EveryTicks) {
+#if !LUR_SHIPPING
+    Lur::Core::LoadCVarConfig("rps-cvars.cfg");
+#endif
+    const char* Names[] = {"easy", "medium", "hard"};
+    // The player's half is everything below midfield; their build zone is the opening frontier depth.
+    const int32_t Mid = Rps::WorldHeight.ToInt() / 2;
+    Lur::Log::Info("AI-vs-beginner: tier=%s, %d matches, cap %d ticks (%.0fs), beginner = camp then idle",
+                   Names[static_cast<int>(Tier)], Matches, MaxTicks,
+                   static_cast<double>(MaxTicks) / Rps::TickRateHz);
+    auto Ms = [](int T) { return T < 0 ? -1.0 : static_cast<double>(T) / Rps::TickRateHz; };
+    long long SumSoldier = 0, SumMid = 0, SumZone = 0;
+    int GotSoldier = 0, GotMid = 0, GotZone = 0, Wiped = 0;
+    for (int M = 0; M < Matches; ++M) {
+        const uint64_t MatchSeed = BaseSeed + static_cast<uint64_t>(M);
+        auto S = std::make_unique<Rps::Sim>();   // ~MBs of SoA: heap, not the 1 MB main stack (#94)
+        S->Init(MatchSeed);
+        Rps::AiController Ai;
+        Ai.Init(MatchSeed, 1, Tier);
+        const int32_t Zone = S->Cv.InitialFrontier.ToInt();
+        // The beginner's ONLY act: drop a camp on the first legal spot near their own baseline (a
+        // first-timer plants it at home, not on a distant mine). Fires as tick 0's input, so the
+        // match clock starts here exactly as it does for a human.
+        bool Opened = false;
+        int TSoldier = -1, TMid = -1, TZone = -1, TWipe = -1;
+        for (int T = 0; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
+            Rps::InputEvent E[2 * Rps::MaxEventsPerTick];
+            int N = 0;
+            if (!Opened) {
+                for (int R = 0; R < 6 && !Opened; ++R)
+                    for (const int32_t X : {8, 14, 20, 26}) {
+                        const Rps::Fixed Px = Rps::F(X), Py = Rps::F(5 + R * 4);
+                        if (!S->CanPlaceBuilding(0, Rps::UnitMiner, Px, Py)) continue;
+                        E[N++] = Rps::InputEvent::Place(0, Rps::UnitMiner, Px, Py);
+                        Opened = true;
+                        break;
+                    }
+            }
+            // The AI holds until the player commits that camp — the same gate the real solo path
+            // applies, so the AI's economy never starts on time the player has not yet spent.
+            if (S->HasMinerCamp(0)) {
+                int C = 0;
+                Ai.DecideEvents(*S, S->Tick, E + N, static_cast<int>(Rps::MaxEventsPerTick) - N, C);
+                N += C;
+            }
+            S->StepEvents(E, N);
+            // Where is the AI's army, and how far has it walked into the player's ground?
+            int32_t Front = Rps::WorldHeight.ToInt();   // team 1 advances DOWN, so frontmost = min Y
+            int32_t Soldiers = 0, T0Bld = 0;
+            bool T0Hq = false;
+            for (int32_t I = 0; I < S->Count; ++I) {
+                if (!S->IsAlive(I)) continue;
+                if (S->Team[I] == 0) {
+                    // The HQ specifically, not any building: losing IS the HQ dying (#146), and the
+                    // player's mining camp routinely outlives it — so counting all buildings reported
+                    // "never razed" for a match the player had already lost.
+                    if (S->IsHomeBase(I)) T0Hq = true;
+                    if (S->IsBuilding(I)) ++T0Bld;
+                    continue;
+                }
+                if (S->IsBuilding(I) || S->Type[I] == Rps::UnitMiner) continue;
+                ++Soldiers;
+                const int32_t Y = S->PosY[I].ToInt();
+                if (Y < Front) Front = Y;
+            }
+            if (TSoldier < 0 && Soldiers > 0) TSoldier = T;
+            if (TMid < 0 && Soldiers > 0 && Front < Mid) TMid = T;
+            if (TZone < 0 && Soldiers > 0 && Front < Zone) TZone = T;
+            if (TWipe < 0 && !T0Hq && Opened) TWipe = T;
+            if (EveryTicks > 0 && T % EveryTicks == 0 && Matches == 1)
+                Lur::Log::Info("%6d | ai gold=%6d sol=%4d front=%3d | player bld=%d hq=%d", T,
+                               S->Teams[1].Gold, Soldiers, Front, T0Bld, T0Hq ? 1 : 0);
+        }
+        if (TSoldier >= 0) { SumSoldier += TSoldier; ++GotSoldier; }
+        if (TMid >= 0)     { SumMid += TMid;         ++GotMid; }
+        if (TZone >= 0)    { SumZone += TZone;       ++GotZone; }
+        if (S->Result == Rps::ResultTeam1Wins) ++Wiped;
+        Lur::Log::Info("  seed %#llx: first soldier %.0fs | midfield %.0fs | PLAYER ZONE %.0fs | "
+                       "player HQ dead %.0fs",
+                       static_cast<unsigned long long>(MatchSeed), Ms(TSoldier), Ms(TMid), Ms(TZone),
+                       Ms(TWipe));
+    }
+    auto Avg = [&](long long Sum, int N) { return N == 0 ? -1.0 : Ms(static_cast<int>(Sum / N)); };
+    Lur::Log::Info("AI-vs-beginner RESULT (%s): avg first soldier %.0fs | avg midfield %.0fs | "
+                   "avg PLAYER ZONE %.0fs (%d/%d reached) | player wiped %d/%d",
+                   Names[static_cast<int>(Tier)], Avg(SumSoldier, GotSoldier), Avg(SumMid, GotMid),
+                   Avg(SumZone, GotZone), GotZone, Matches, Wiped, Matches);
+    return 0;
+}
+
 #if LUR_INTERNAL
 // #144: read back a match recorded on a device (Rps::MatchRecorder) and print it. The sim is
 // deterministic and the recording carries the seed + the exact latched CVar set, so the replay is
@@ -848,6 +953,7 @@ int main(int argc, char** argv) {
     Rps::EAiTier AiTier = Rps::EAiTier::Medium;  // solo opponent difficulty (#124)
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
     bool AiDiag = false;                         // #152 headless AI milestone/census diagnostic
+    bool AiBeginner = false;                     // #155 headless AI-vs-first-timer arrival clock
     int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
     const char* ReplayPath = nullptr;            // #144 --replay <file>: read a device recording
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
@@ -877,6 +983,10 @@ int main(int argc, char** argv) {
             AiDiag = true;
             AiTier = ParseTier(argv[++I]);
         }
+        else if (A == "--aibeginner" && I + 1 < argc) {  // #155 tier vs a camp-then-idle first-timer
+            AiBeginner = true;
+            AiTier = ParseTier(argv[++I]);
+        }
         else if (A == "--every" && I + 1 < argc) DiagEvery = std::atoi(argv[++I]);
         else if (A == "--replay" && I + 1 < argc) ReplayPath = argv[++I];  // #144 read a device recording
         else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
@@ -898,6 +1008,7 @@ int main(int argc, char** argv) {
     if (ReplayPath != nullptr) return RunReplay(ReplayPath, DiagEvery);
 #endif
     if (AiDiag) return RunAiDiag(AiTier, Seed, MaxTicks, DiagEvery);
+    if (AiBeginner) return RunAiBeginner(AiTier, Seed, Matches, MaxTicks, DiagEvery);
     if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
     if (Solo) return RunSolo(Auto, MaxFrames, Seed, Stress, FlockDemo, NoCombat, FoeOnly, AiTier);
