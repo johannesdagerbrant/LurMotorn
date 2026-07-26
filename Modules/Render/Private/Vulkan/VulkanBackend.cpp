@@ -407,6 +407,10 @@ public:
         if (MaterialId == 0 || MaterialId > Materials.size()) return;
         const Mesh& M = Meshes[MeshId - 1];
         const Material& Mat = Materials[MaterialId - 1];
+        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
+        // missing sprite is a symptom you can see and log, not a native backtrace.
+        if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
 
         BindPipeline(Pipeline);
 
@@ -444,6 +448,10 @@ public:
             return;
         }
         const Material& Mat = Materials[MaterialId - 1];
+        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
+        // missing sprite is a symptom you can see and log, not a native backtrace.
+        if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
 
         std::memcpy(static_cast<Vertex*>(TextVBMapped) + TextVBCursor,
                     Vertices, static_cast<size_t>(VertexCount) * sizeof(Vertex));
@@ -486,6 +494,10 @@ public:
         }
         const Mesh& M = Meshes[MeshId - 1];
         const Material& Mat = Materials[MaterialId - 1];
+        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
+        // missing sprite is a symptom you can see and log, not a native backtrace.
+        if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
 
         std::memcpy(static_cast<InstanceData*>(InstanceMapped) + InstanceCursor,
                     Instances, static_cast<size_t>(Count) * sizeof(InstanceData));
@@ -1063,6 +1075,21 @@ private:
         Alloc.pSetLayouts = &DescriptorSetLayout;
         VkDescriptorSet Set = VK_NULL_HANDLE;
         VK_CHECK(vkAllocateDescriptorSets(Device, &Alloc, &Set));
+        // FAIL LOUDLY AND EARLY when the pool is exhausted (#159). This used to fall through and
+        // hand vkUpdateDescriptorSets a NULL dstSet, which is undefined behaviour — on Mali it
+        // segfaulted deep inside libGLES_mali, so exceeding MaxMaterials looked like a GPU-driver
+        // crash with nothing pointing at the descriptor pool. One material past the cap cost a
+        // native backtrace to diagnose. Returning null here instead keeps the process alive and the
+        // draw path skips the material (an untextured gap is a visible, debuggable symptom).
+        if (Set == VK_NULL_HANDLE) {
+            LOGE("descriptor pool exhausted: %u materials already allocated (MaxMaterials=%u) — "
+                 "raise MaxMaterials; this material will not draw",
+                 static_cast<uint32_t>(Materials.size()), MaxMaterials);
+            // LOGE, not LUR_ASSERT: Modules/Render deliberately does not depend on Lur::Core, and
+            // one assert is not worth adding that edge to the module graph. The log names the cap
+            // and the count, which is the diagnosis this needed.
+            return VK_NULL_HANDLE;
+        }
 
         VkDescriptorImageInfo ImageInfo{};
         ImageInfo.sampler = Sampler;
@@ -1352,7 +1379,11 @@ private:
     void*          TextIBMapped = nullptr;
     uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
-    static constexpr uint32_t MaxMaterials = 96;   // RPS HUD (#85): grid LUT + panel/plate/icon materials
+    // Descriptor-set budget. Raised from 96 (#159): RPS crossed it just by adding one tinted
+    // material per unit type for BUILDINGS, and the failure mode was a SIGSEGV inside the GPU driver
+    // (see AllocateDescriptorSet) rather than anything naming the pool. A set is a handful of bytes,
+    // so headroom is nearly free and running out is far more expensive than over-allocating.
+    static constexpr uint32_t MaxMaterials = 256;
     VkSampler             Sampler = VK_NULL_HANDLE;
     VkDescriptorSetLayout DescriptorSetLayout = VK_NULL_HANDLE;
     VkDescriptorPool      DescriptorPool = VK_NULL_HANDLE;

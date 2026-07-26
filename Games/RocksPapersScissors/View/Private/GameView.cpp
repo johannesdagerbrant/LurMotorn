@@ -218,6 +218,16 @@ void GameView::CreateResources(IRenderer* Renderer) {
     };
     CampMat[0] = AtlasTinted(TeamTint[0]);
     CampMat[1] = AtlasTinted(TeamTint[1]);
+    // #159: buildings are knocked BACK from their units — same hue, less saturation and value. A
+    // building is static scenery you place once; the units are what you actually watch, so the
+    // brightest, most saturated pixels should belong to them. Hue is deliberately unchanged, so a
+    // building still reads as "this team, this type" at a glance; only its intensity yields.
+    // Applied via HSV rather than an alpha fade: fading toward the background washed the colour out
+    // and made two teams' buildings converge on the same murky grey, losing the ownership read.
+    constexpr float BldgSat = 0.55f;   // vs 1.0 for units
+    constexpr float BldgVal = 0.70f;   // vs 1.0 for units
+    TeamTintBldg[0] = Hsv(TeamBaseHue[0], BldgSat, BldgVal);
+    TeamTintBldg[1] = Hsv(TeamBaseHue[1], BldgSat, BldgVal);
     for (int Tm = 0; Tm < 2; ++Tm)
         for (int Ty = 0; Ty < UnitCount; ++Ty) {
             const float Frac = static_cast<float>(Ty) / static_cast<float>(UnitCount - 1);  // 0 .. 1
@@ -226,6 +236,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
             TypeTintMat[Tm][Ty] = AtlasTinted(TeamTypeTint[Tm][Ty]);
             Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
+            TeamTypeTintBldg[Tm][Ty] = Hsv(H, BldgSat, BldgVal);
+            TypeTintMatBldg[Tm][Ty] = AtlasTinted(TeamTypeTintBldg[Tm][Ty]);
         }
     // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
     // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
@@ -701,10 +713,17 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
     const float BldgPx = FW(Snap.Cv.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
                                                                  //   footprint so the slim buttons fit inside
+    // #159: TWO passes — every building first, then every unit — so units always render ON TOP of
+    // buildings. This is a single instanced draw with no depth buffer, so the order instances sit in
+    // the buffer IS the layer order; slots are allocated as things are placed/spawned, so a building
+    // that happened to take a later slot drew over units standing on it, and a cart working a camp
+    // could vanish behind it. Two passes cost one extra loop over Count and still emit ONE draw.
+    for (int Pass = 0; Pass < 2; ++Pass)
     for (int32_t I = 0; I < Snap.Count && N < static_cast<uint32_t>(MaxUnits); ++I) {
         if (!Snap.IsAlive(I)) continue;
         const uint8_t Ty = Snap.Type[I], Tm = Snap.Team[I];
         const bool Bldg = Snap.IsBuilding(I);  // #139: buildings are static, footprint-sized entities
+        if (Bldg != (Pass == 0)) continue;     // pass 0 = buildings (under), pass 1 = units (over)
         const bool Home = Snap.IsHomeBase(I);  // #146: the HQ (Type is UnitNone — colour/glyph by Kind)
         if (Tm == My && !Bldg) { if (Ty == UnitMiner) ++Workers; else ++Soldiers; }  // buildings aren't army
         // ABSOLUTE team colours (playtest: the players sit together and compare
@@ -712,7 +731,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // the same wherever you see it), now a UNIQUE per-type shade of that team hue
         // so composition reads by colour as well as glyph. HUD numbers stay viewer-relative.
         // #146: the home base wears the base team hue (its Type would index out of the per-type table).
-        const Color C = Home ? TeamTint[Tm] : TeamTypeTint[Tm][Ty];
+        // #159: the BUILDING variants are the knocked-back (lower sat/value) shades of the same hues.
+        // (the HQ is itself a building — Kind != KindUnit — so it always takes the knocked-back tone)
+        const Color C = Home ? TeamTintBldg[Tm]
+                             : (Bldg ? TeamTypeTintBldg[Tm][Ty] : TeamTypeTint[Tm][Ty]);
         Lur::Render::InstanceData& D = Instances[N++];
         D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
         D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
@@ -753,7 +775,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // spot the real building will land, so there's no jump when the match starts.
     if (PreviewActive_ && PreviewType_ >= 0 && PreviewType_ < UnitCount) {
         const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphMineCamp) : PreviewType_;
-        BlitGlyph(PG, TypeTintMat[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
+        // #159: building tone — this preview stands in for a real building, so it must not be
+        // brighter than the thing it becomes (that read as a colour change on match start).
+        BlitGlyph(PG, TypeTintMatBldg[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
     }
 
     // #140 per-building UI, present on EVERY local building all the time. Each shows: a HEALTH bar
@@ -800,7 +824,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (PendingCamp_) {
             const float Px = SX(PendingCampX_), Py = SY(PendingCampY_);
             const float Breathe = 0.90f + 0.10f * std::sin(PulseT_ * 3.0f);
-            BlitGlyph(static_cast<int>(GlyphMineCamp), TypeTintMat[My][UnitMiner], Px, Py,
+            // #159: the BUILDING tone, matching what it turns into — a brighter pending camp
+            // would visibly dim the instant the match started and the real building took over.
+            BlitGlyph(static_cast<int>(GlyphMineCamp), TypeTintMatBldg[My][UnitMiner], Px, Py,
                       BldgPx * Breathe);
         }
         bool FirstLocalSeen = false;   // the first (lowest-slot) local building = the camp
@@ -919,8 +945,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 };
                 // The multiplier is now the button's WHOLE content, so it gets the whole plate: one
                 // big glyph, centred, instead of a two-line label crammed into a slim column.
+                // "+1"/"+5", not "x1"/"x5" (#159): the button ADDS that many to the queue, it does
+                // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
                 char L[8];
-                std::snprintf(L, sizeof(L), "x%d", ProdMult[K]);
+                std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
                 Text.Draw(Renderer, L, bx, by2, bw, bh, 26.0f * HS * PulseK,
                           Afford ? Glow(Ico) : DimC, EHAlign::Center, EVAlign::Middle, false);
             }

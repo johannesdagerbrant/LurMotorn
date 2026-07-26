@@ -252,6 +252,12 @@ private:
     Lur::Render::Color TeamTypeTint[2][UnitCount] = {};
     Lur::Render::MaterialHandle TypeTintMat[2][UnitCount] = {};      // button glyph (affordable)
     Lur::Render::MaterialHandle TypeTintMatDim[2][UnitCount] = {};   // button glyph (unaffordable)
+    // #159: BUILDINGS wear a knocked-back version of the same hue — same colour identity, lower
+    // saturation and value — so the units reading on top of them stay the bright, eye-catching
+    // layer. Same hue on purpose: a building must still read as "team + type" at a glance.
+    Lur::Render::Color TeamTypeTintBldg[2][UnitCount] = {};
+    Lur::Render::Color TeamTintBldg[2] = {};                          // the HQ (Type is UnitNone)
+    Lur::Render::MaterialHandle TypeTintMatBldg[2][UnitCount] = {};   // placed/preview building glyph
     Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)
 
     Lur::Text::Font Font;
