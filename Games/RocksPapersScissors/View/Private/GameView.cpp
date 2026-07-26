@@ -388,10 +388,14 @@ namespace {
 // "sep_strength" (the leaf, after the last dot). There is no separate category. Name-sorted
 // input means each node's leaves come out name-sorted (BuildCategoryTree preserves leaf order),
 // so the layout is stable frame to frame.
-std::vector<std::pair<std::string, Lur::Core::ICVar*>> GatherGameplayCvars() {
+// EVERY registered CVar, not just the AffectsGameplay ones (#156). The filter was invisible for as
+// long as every CVar in the repo was a sim tunable; the first dev-only knob (rps.dev.flight_recorder)
+// would simply not have appeared. Non-gameplay CVars nest into the same tree by name — they differ
+// only in that a commit takes the local+persist path instead of the lockstep sync, which is decided
+// per-CVar by the commit hook (AffectsGameplay), not by what the console chooses to list.
+std::vector<std::pair<std::string, Lur::Core::ICVar*>> GatherAllCvars() {
     std::vector<std::pair<std::string, Lur::Core::ICVar*>> Items;
     Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-        if (!C->AffectsGameplay()) return;
         const std::string Name = C->Name();
         const auto Dot = Name.rfind('.');
         Items.emplace_back(Dot == std::string::npos ? std::string{} : Name.substr(0, Dot), C);
@@ -1320,7 +1324,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float IndentW = 12.0f * HS;  // per depth level
 
         // Split on '.' — the dotted cvar name IS the category hierarchy (#121).
-        auto Root = Lur::DevGui::BuildCategoryTree(GatherGameplayCvars(), '.');
+        auto Root = Lur::DevGui::BuildCategoryTree(GatherAllCvars(), '.');
         const int Count = Root.TotalLeaves;
 
         // Fixed panel viewport (the content scrolls inside it, #121). Height is the screen, not
@@ -1466,14 +1470,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 continue;
             }
 
-            // ---- a cvar row: [ i | name .......... | value | R ] ----
+            // ---- a cvar row: [ i | name ......... | AG | value | R ] ----
             Lur::Core::ICVar* C = It.Cv;
             const bool Overridden = C->Overridden();
             const bool HasTip = C->Tooltip()[0] != '\0';
             const float InfoS = LineH - 6.0f * HS;
             const float InfoX = IndentX + RowPad;
             const float NameX = InfoX + InfoS + 5.0f * HS;
-            const float NameW = ValX - NameX - 6.0f * HS;
+            // "AG" tag immediately left of the value for an AffectsGameplay CVar (#156). Now that the
+            // tree lists dev knobs alongside sim tunables, the difference is not cosmetic: an AG edit
+            // is latched, hashed and synced to the peer, a dev one is local and persisted only. The
+            // name column yields the width, so unmarked rows are unchanged.
+            const bool Ag = C->AffectsGameplay();
+            const float AgW = Ag ? 18.0f * HS : 0.0f;
+            const float NameW = ValX - NameX - 6.0f * HS - AgW;
 
             if (TapPending && !TapUsed && InBand && TapX >= InfoX && TapX <= InfoX + InfoS &&
                 TapY >= Sy && TapY <= Sy + LineH && HasTip) {  // "i": open the tooltip toaster
@@ -1485,8 +1495,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; }
                 TapUsed = true;
             } else if (TapPending && !TapUsed && InBand && TapX >= IndentX && TapX <= X0 + PW &&
-                       TapY >= Sy && TapY <= Sy + LineH) {  // select -> open the numpad
-                SelectedCvar_ = C; Numpad_.Clear(); NumpadOpen_ = true; TapUsed = true;
+                       TapY >= Sy && TapY <= Sy + LineH) {
+                if (C->IsBool()) {
+                    // A bool TOGGLES in place (#156) — a numpad for a two-state knob is a keypad to
+                    // type "1" into. One tap flips it and commits down the same hook every other
+                    // edit uses, so it persists (and, were a bool ever AffectsGameplay, syncs).
+                    C->SetFromString(C->RawValue() != 0 ? "false" : "true");
+                    if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);
+                    // Never leave the numpad bound to a row that no longer uses it.
+                    if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; SelectedCvar_ = nullptr; }
+                } else {
+                    SelectedCvar_ = C; Numpad_.Clear(); NumpadOpen_ = true;
+                }
+                TapUsed = true;
             }
 
             const bool Selected = (C == SelectedCvar_);
@@ -1501,12 +1522,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const char* Label = Dot ? Dot + 1 : C->Name();
             Text.Draw(Renderer, Label, NameX, Sy, NameW, LineH, 12.5f * HS,
                       Selected ? Accent : Ink, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
+            if (Ag)
+                Text.Draw(Renderer, "AG", ValX - AgW, Sy, AgW - 3.0f * HS, LineH, 9.5f * HS, DimInk,
+                          Lur::Text::EHAlign::Right, Lur::Text::EVAlign::Middle);
             Blit(DevKeyMat, ValX + ValW * 0.5f, Sy + LineH * 0.5f, ValW, LineH - 4.0f * HS);
             char VS[64];
-            if (NumpadOpen_ && Selected) std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
-            else                         std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
+            // A bool reads as a CHECKBOX, centred, so it is obvious at a glance that the row is a
+            // toggle and not a number to type into. ASCII on purpose — the MSDF atlas is cooked from
+            // the glyphs we ship, so a ballot-box codepoint is not guaranteed to be in it.
+            if (C->IsBool())
+                std::snprintf(VS, sizeof(VS), "%s", C->RawValue() != 0 ? "[x]" : "[ ]");
+            else if (NumpadOpen_ && Selected) std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
+            else                              std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
             Text.Draw(Renderer, VS, ValX + 5.0f * HS, Sy, ValW - 10.0f * HS, LineH, 12.5f * HS,
-                      Overridden ? Accent : Ink, Lur::Text::EHAlign::Right, Lur::Text::EVAlign::Middle);
+                      Overridden ? Accent : Ink,
+                      C->IsBool() ? Lur::Text::EHAlign::Center : Lur::Text::EHAlign::Right,
+                      Lur::Text::EVAlign::Middle);
             Blit(DevKeyMat, ResetX + ResetS * 0.5f, Sy + LineH * 0.5f, ResetS, ResetS);
             Text.Draw(Renderer, "R", ResetX, Sy + (LineH - ResetS) * 0.5f, ResetS, ResetS,
                       12.0f * HS, Overridden ? Accent : DimInk, Lur::Text::EHAlign::Center,

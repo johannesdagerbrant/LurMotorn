@@ -20,6 +20,7 @@ namespace Rps {
 
 using Lur::Sim::Fixed;
 using Lur::Core::CVarFlagAffectsGameplay;  // #112: gameplay-CVar sync boundary
+using Lur::Core::CVarFlagNone;             // #156: dev-only knobs (never latched/hashed/synced)
 
 // Compile-time Fixed builders. F(n) = whole number; F(num,den) = a rational, for
 // sub-integer tunables like a 0.45-units/tick speed, evaluated with an int64
@@ -443,6 +444,22 @@ LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 8, CVarFlagAffectsGameplay,
          "Units the AI keeps queued per building before it wants more capacity");
 LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffectsGameplay,
          "Gold needed to add a building, as a percent of its cost (200 = can afford two)");
+
+// ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
+// into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
+// LUR_RPS_GAMEPLAY_CVARS X-list below. They change what the BUILD does, not what the SIM computes,
+// so two peers may legitimately disagree about them. The console shows them in the same tree as the
+// sim tunables, distinguished by the "AG" tag the gameplay ones carry. ----
+//
+// The flight recorder writes one file per solo match under the app's data dir (#144). It used to be
+// LUR_AGENT — absent from anything played — because it is automatic capture that writes files during
+// someone's session. It is now a DEV-BUILD DEFAULT with a visible off switch instead: the capture is
+// what makes a playtest readable afterwards, and requiring a special build to get it meant the
+// interesting match was always the one that wasn't recorded. The safeguards that replace absence are
+// that the switch is visible in the console rather than a hidden property, and that Shipping still
+// compiles the recorder out entirely (LUR_INTERNAL).
+LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
+         "Record each match to a timestamped .rec file for later replay");
 
 // The X-macro fragment for one tier's nine ids (all int knobs), used 3x in the gameplay list.
 #define LUR_AI_TIER_IDS(IX, Tier)              \

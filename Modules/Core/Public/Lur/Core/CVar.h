@@ -58,6 +58,9 @@ public:
     virtual uint32_t    Flags() const     = 0;
     virtual ECVarOrigin Origin() const    = 0;
     virtual bool        AffectsGameplay() const = 0;
+    // Is this a BOOLEAN knob? The console needs it to pick an editor: a bool row toggles on tap,
+    // every other type opens the numpad. Type-erased because the console only ever sees ICVar.
+    virtual bool        IsBool() const = 0;
     virtual bool        SetFromString(const char* S) = 0;  // false on parse failure
     virtual void        Reset() = 0;                       // back to the compile-time default
     virtual bool        Overridden() const = 0;
@@ -150,6 +153,7 @@ public:
     uint32_t    Flags() const override { return Flags_; }
     ECVarOrigin Origin() const override { return Origin_; }
     bool        AffectsGameplay() const override { return (Flags_ & CVarFlagAffectsGameplay) != 0; }
+    bool        IsBool() const override { return std::is_same_v<T, bool>; }
     bool        SetFromString(const char* S) override {
         T Parsed{};
         if (!FromString(S, Parsed)) return false;  // unqualified: ADL finds Sim's Fixed overload

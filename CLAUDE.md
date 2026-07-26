@@ -124,10 +124,20 @@ concretely (playtest 2026-07-25): an agent hook that opened the console from a s
 `LUR_INTERNAL`, a stale `setprop` was left on the device, and it then fought the player's own
 two-finger gesture — the game felt remote-controlled.
 
-What belongs behind it: remote control of any kind (system-property hooks, injected input, forced
-state), and automatic capture that writes files during someone's session (the RPS match flight
-recorder). What does *not*: desktop-only harnesses (`--aivs`, `--aidiag`, `--replay`) that a player
-never runs, and tooling meant for a human developer at the keyboard.
+What belongs behind it: **remote control of any kind** — system-property hooks, injected input,
+forced state. What does *not*: desktop-only harnesses (`--aivs`, `--aidiag`, `--aibeginner`,
+`--replay`) that a player never runs, and tooling meant for a human developer at the keyboard.
+
+**Capture is not remote control (revised 2026-07-26, #156).** The RPS match flight recorder used to
+be the headline example of `LUR_AGENT` — it writes files while someone is playing. That was the wrong
+call in practice: capture only pays off when it is already running, so requiring a special build
+meant the interesting match was always the one that wasn't recorded. It is now `LUR_INTERNAL`, **on
+by default in dev builds**, with `rps.dev.flight_recorder` as a visible console checkbox. The line
+that actually matters is *who is driving*: code that acts on the player's behalf without them asking
+is `LUR_AGENT`; code that merely *observes* a session the player is driving can be `LUR_INTERNAL`,
+provided the off switch is **discoverable in-product** (a console row, not a hidden system property)
+and it still compiles out of `Shipping`. A hidden switch is what made the setprop hook dangerous, not
+the fact that it had one.
 
 Two rules for handing a build over: build it **without** `-DLUR_AGENT` so the code is *absent*
 rather than idle, and **leave no device state behind** — clear properties and capture files, because

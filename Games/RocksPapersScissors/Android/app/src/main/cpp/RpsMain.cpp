@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>   // debug.lur.console edge detection (memcpy/strcmp on the prop value)
+#include <ctime>     // #156 timestamped flight-recorder filenames
 #include <memory>
 #include <string>
 #include <thread>
@@ -414,16 +415,41 @@ void android_main(android_app* App) {
         uint32_t LinkedScoredIdx = 0xFFFFFFFFu;  // #149 which Lp match LinkedScored refers to
         bool PeerEverReady = false;        // #2 rising-edge latch for the peer-link notice
         bool PrevPeerReady = false;        // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
-#if LUR_AGENT
+#if LUR_INTERNAL
         // #144 flight recorder for solo matches: one file per match under the app's data dir, pulled
-        // off the device with `run-as`. ASSISTANT-ONLY (LUR_AGENT): it exists so a session can be
-        // replayed and analysed afterwards, and it writes files while someone is playing — so it must
-        // be absent from any build handed over for play, not merely dormant in it.
+        // off the device with `run-as`.
+        //
+        // #156: LUR_INTERNAL with a console switch, no longer LUR_AGENT. It was assistant-only
+        // because it writes files while someone is playing, but that meant capture required a special
+        // build — so the interesting match was always the one that wasn't recorded. What replaces
+        // absence-from-the-build is a VISIBLE off switch (rps.dev.flight_recorder, a checkbox in the
+        // console) plus Shipping still compiling it out entirely. Contrast the setprop console hook
+        // below, which stays LUR_AGENT because it is remote control over the player's input.
+        //
+        // The switch is read ONCE per match, at Begin: toggling mid-match cannot truncate a file
+        // half-written, and every other recorder call is a no-op on an unopened file, so skipping
+        // Begin is the whole gate.
         Rps::MatchRecorder SoloRec;
         int SoloMatchNo = 0;
         uint64_t RecCensusNs = 0;
-        auto SoloRecPath = [&State](int No) {
-            return State.DataDir + "/rps-match-" + std::to_string(No) + ".rec";
+        std::string SoloRecFile;   // path of the CURRENT recording, stamped at Begin
+        auto SoloRecBegin = [&State, &SoloRec, &SoloMatchNo, &RecCensusNs, &SoloRecFile](int Tier) {
+            SoloRecFile.clear();
+            if (!Rps::CvFlightRecorder.Get()) return;
+            // Timestamped so recordings survive an app restart and sort chronologically — the old
+            // per-session counter restarted at 1 every launch and silently overwrote the previous
+            // session's files. The ordinal is kept as a suffix purely to stay collision-proof: two
+            // matches CAN start inside one second (re-picking a tier restarts instantly).
+            const std::time_t Now = std::time(nullptr);
+            std::tm Tm{};
+            localtime_r(&Now, &Tm);
+            char Stamp[24];
+            std::strftime(Stamp, sizeof(Stamp), "%Y%m%d-%H%M%S", &Tm);
+            SoloRecFile = State.DataDir + "/rps-match-" + Stamp + "-" +
+                          std::to_string(++SoloMatchNo) + ".rec";
+            SoloRec.Begin(SoloRecFile.c_str(), State.SoloSim, Tier, /*human*/ 0);
+            RecCensusNs = 0;
+            LOGI("REC started -> %s", SoloRecFile.c_str());
         };
 #endif
 #if LUR_INTERNAL
@@ -459,9 +485,8 @@ void android_main(android_app* App) {
                 State.Mailbox.Publish();
                 State.PublishedTick.store(State.SoloSim.Tick, std::memory_order_release);
                 LOGI("solo AI match (re)started (tier %d)", NewTier);
-#if LUR_AGENT
-                SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, NewTier, /*human*/ 0);
-                RecCensusNs = 0;
+#if LUR_INTERNAL
+                SoloRecBegin(NewTier);
 #endif
             }
 
@@ -507,13 +532,15 @@ void android_main(android_app* App) {
                 if (State.SoloSim.Result != Rps::ResultOngoing) {
                     if (!SoloScored && SoloTier_ >= 0) {
                         SoloScored = true;
-#if LUR_AGENT
-                        SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
-                                       static_cast<int>(State.SoloAi.CounterEnemy()));
-                        SoloRec.End(State.SoloSim);   // finalise: complete + replayable from here
-                        LOGI("REC match %d finished: result=%u tick=%u -> %s", SoloMatchNo,
-                             static_cast<unsigned>(State.SoloSim.Result), State.SoloSim.Tick,
-                             SoloRecPath(SoloMatchNo).c_str());
+#if LUR_INTERNAL
+                        if (SoloRec.IsOpen()) {
+                            SoloRec.Census(State.SoloSim, 0, static_cast<int>(State.SoloAi.State()),
+                                           static_cast<int>(State.SoloAi.CounterEnemy()));
+                            SoloRec.End(State.SoloSim);   // finalise: complete + replayable from here
+                            LOGI("REC match %d finished: result=%u tick=%u -> %s", SoloMatchNo,
+                                 static_cast<unsigned>(State.SoloSim.Result), State.SoloSim.Tick,
+                                 SoloRecFile.c_str());
+                        }
 #endif
                         if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
                         else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
@@ -530,9 +557,8 @@ void android_main(android_app* App) {
                         LastPubTick = 0xFFFFFFFFu;
                         LOGI("solo: next match begins (tier %d, seed 0x%llx)", SoloTier_,
                              static_cast<unsigned long long>(NextSeed));
-#if LUR_AGENT
-                        SoloRec.Begin(SoloRecPath(++SoloMatchNo).c_str(), State.SoloSim, SoloTier_, 0);
-                        RecCensusNs = 0;
+#if LUR_INTERNAL
+                        SoloRecBegin(SoloTier_);
 #endif
                         // Publish the fresh (empty) sim at once, or the view keeps drawing the old
                         // match's final frame — including its result overlay — until the first tick.
@@ -570,7 +596,7 @@ void android_main(android_app* App) {
                         State.SoloAi.DecideEvents(State.SoloSim, State.SoloSim.Tick, Evs + Kept,
                                                   Rps::MaxEventsPerTick - Kept, AiCount);
                         State.SoloSim.StepEvents(Evs, Kept + AiCount);
-#if LUR_AGENT
+#if LUR_INTERNAL
                         SoloRec.Events(State.SoloSim.Tick - 1, Evs, Kept + AiCount);
 #endif
                     }
@@ -591,7 +617,7 @@ void android_main(android_app* App) {
                         Count += AiCount;
                     }
                     State.SoloSim.StepEvents(Evs, Count);
-#if LUR_AGENT
+#if LUR_INTERNAL
                     // #144 flight recorder: the COMBINED batch, recorded at the tick it was applied
                     // on, so a dev machine can replay this match bit-for-bit (Rps::ReplayMatch).
                     SoloRec.Events(State.SoloSim.Tick - 1, Evs, Count);
@@ -604,7 +630,7 @@ void android_main(android_app* App) {
                     State.Mailbox.Publish();
                     State.PublishedTick.store(T, std::memory_order_release);
                 }
-#if LUR_AGENT
+#if LUR_INTERNAL
                 // #144 telemetry: a census every 2s into BOTH the recording and logcat, so the match
                 // is readable live (adb logcat -s OnlyRps) and replayable afterwards. The AI's own
                 // state + countered type go in it: a recording that shows only what it BUILT can't

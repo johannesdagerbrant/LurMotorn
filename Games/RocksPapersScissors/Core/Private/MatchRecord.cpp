@@ -42,6 +42,12 @@ bool MatchRecorder::Begin(const char* Path, const Sim& S, int Tier, uint8_t Huma
     // running persisted overrides replays exactly — without this the replay silently diverges.
     for (uint8_t Id = 0; Id < CvIdCount; ++Id)
         std::fprintf(File_, "cv %u %d\n", static_cast<unsigned>(Id), CvOverrideRaw(S.Cv, Id));
+    // Flush the header NOW, not at the first census (#156). A match sits pre-match until the player
+    // places their opening camp, and nothing else flushes until then — so a session that was opened
+    // and backgrounded left a ZERO-BYTE file, losing even the seed and the latched CVar set. The
+    // header is the part worth keeping unconditionally: it identifies the match. Costs one flush per
+    // match, against a per-tick write path that is untouched.
+    std::fflush(File_);
     Lur::Log::Info("RPS rec: recording to %s (seed %llx, tier %d)", Path,
                    static_cast<unsigned long long>(S.Seed), Tier);
     return true;
