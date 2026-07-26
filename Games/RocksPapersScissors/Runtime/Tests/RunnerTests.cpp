@@ -158,7 +158,7 @@ static void TestRunnerPublishesSnapshots() {
     delete R;
 }
 
-// ---- #158: the placement PREVIEW must agree with the SIM, everywhere ----
+// ---- #157: the placement PREVIEW must agree with the SIM, everywhere ----
 // This is the test whose absence let a real bug ship. The ghost's valid/invalid blink is evaluated
 // on the render thread against a Snapshot, and that used to be a hand-copied mirror of
 // Sim::CanPlaceBuilding with a comment asking editors to keep both in step. Widening the mine

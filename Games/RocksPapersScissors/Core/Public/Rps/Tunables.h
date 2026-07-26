@@ -330,7 +330,7 @@ LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay,
 // band — a unit hunts the enemy type it beats even when a mirror is somewhat nearer,
 // instead of just fighting whoever's closest. Beyond the band, closeness takes over again.
 constexpr Fixed TargetBand = F(12);
-// ---- rps.mine.* — a deposit's PLACEMENT and its SIZE, all tunable (#158) ----
+// ---- rps.mine.* — a deposit's PLACEMENT and its SIZE, all tunable (#157) ----
 // Playtest 2026-07-19: carts RING a deposit instead of standing on it — a cart can dig once within
 // dig_range, and live deposits push units outward (soft obstacles, same strength as unit
 // separation). KEEP repel_radius < dig_range, or diggers are pushed out of their own reach and the

@@ -111,7 +111,7 @@ struct AppState {
     // the drag-place UI, replacing the retired press mask). Additive — when no AI row is picked the
     // normal peer path is untouched.
     std::atomic<int>     SoloAiTier{-1};    // glue -> sim: one-shot AI tier pick -> (re)start solo
-    // #158 glue -> sim, one-shot: a gameplay CVar was just edited. The MAP (mine rows) is built at
+    // #157 glue -> sim, one-shot: a gameplay CVar was just edited. The MAP (mine rows) is built at
     // Sim::Init, so an edit is invisible until the next match — but while a fresh match is still
     // WAITING FOR THE FIRST CAMP there is no state to lose, so the sim thread re-Inits and the new
     // layout appears immediately. Deliberately pre-match only: mid-match re-Init is not wanted (it
@@ -162,7 +162,7 @@ void OnCvarCommit(void* Ctx, Lur::Core::ICVar& Cv) {
     if (Id >= 0) S->Lp.QueueGameplayCvar(static_cast<uint8_t>(Id), Cv.RawValue(), Ms);
     Lur::Core::SaveCVarConfig(S->CvarsPath.c_str());
     Rps::DeriveUnitStats(Rps::LatchCvs(), S->Snap.Units);  // reflect the edit in the pre-match HUD
-    // #158: ask the sim thread to rebuild the map if the match hasn't started. Only a flag —
+    // #157: ask the sim thread to rebuild the map if the match hasn't started. Only a flag —
     // touching SoloSim from the glue thread would race the tick. The sim thread checks pre-match
     // itself, so a mid-match edit is simply ignored here.
     S->RebuildPreMatch.store(true, std::memory_order_release);
@@ -500,7 +500,7 @@ void android_main(android_app* App) {
 #endif
             }
 #if LUR_INTERNAL
-            // #158: a dev CVar edit while a fresh solo match is still WAITING FOR THE FIRST CAMP —
+            // #157: a dev CVar edit while a fresh solo match is still WAITING FOR THE FIRST CAMP —
             // re-Init so map knobs (rps.mine.row_*) are visible immediately. Pre-match only: nothing
             // has happened yet, so there is nothing to throw away. Same seed, so only the edited
             // knobs move. Re-latches Cv through Init, which is what rebuilds the mine field.

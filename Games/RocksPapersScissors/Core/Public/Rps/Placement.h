@@ -1,5 +1,5 @@
 #pragma once
-// Rps::PlacementAccepts — the ONE spatial building-placement predicate (#158).
+// Rps::PlacementAccepts — the ONE spatial building-placement predicate (#157).
 //
 // Why this exists: the rule had two implementations. Sim::CanPlaceBuilding is authoritative (it
 // gates ApplyPlace), but the drag-place ghost's valid/invalid blink is evaluated on the RENDER

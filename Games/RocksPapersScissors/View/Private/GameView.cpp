@@ -218,13 +218,13 @@ void GameView::CreateResources(IRenderer* Renderer) {
     };
     CampMat[0] = AtlasTinted(TeamTint[0]);
     CampMat[1] = AtlasTinted(TeamTint[1]);
-    // #159: buildings are knocked BACK from their units — same hue, less saturation and value. A
+    // buildings are knocked BACK from their units — same hue, less saturation and value. A
     // building is static scenery you place once; the units are what you actually watch, so the
     // brightest, most saturated pixels should belong to them. Hue is deliberately unchanged, so a
     // building still reads as "this team, this type" at a glance; only its intensity yields.
     // Applied via HSV rather than an alpha fade: fading toward the background washed the colour out
     // and made two teams' buildings converge on the same murky grey, losing the ownership read.
-    // #161: darker + more desaturated again (was 0.55/0.70). With the +1/+5 labels sitting CENTRED
+    // darker + more desaturated again (was 0.55/0.70). With the +1/+5 labels sitting CENTRED
     // over the icon, the building is deliberately a BACKDROP: knocking the art back is what makes
     // the controls read on top of it without needing a plate behind them. This is the other way to
     // solve the occlusion — recede the art rather than move the UI off it.
@@ -598,6 +598,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     };
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
+    HealthBars_.clear();   // refilled each frame by the building/unit passes below
+    PulseBtnActive_ = false;   // set below if a +1 button is pulsing this frame
 
     // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
     Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
@@ -632,7 +634,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
 
     // Mines — finite (#84): a depleted mine is gone; live ones carry a gold reserve
     // bar above them (same visual language as unit health, gold fill).
-    // #158: drawn mine diameter is a CVar. Read from the GLOBAL, not the sim snapshot, and that is
+    // #157: drawn mine diameter is a CVar. Read from the GLOBAL, not the sim snapshot, and that is
     // deliberate — it is render-only (not AffectsGameplay), so it is never latched into Cv, never
     // hashed, and never synced; putting it in the snapshot would imply the sim cares. It also means
     // an edit shows up on the very next frame with no match restart, unlike the map knobs.
@@ -717,7 +719,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
     const float BldgPx = FW(Snap.Cv.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
                                                                  //   footprint so the slim buttons fit inside
-    // #159: TWO passes — every building first, then every unit — so units always render ON TOP of
+    // TWO passes — every building first, then every unit — so units always render ON TOP of
     // buildings. This is a single instanced draw with no depth buffer, so the order instances sit in
     // the buffer IS the layer order; slots are allocated as things are placed/spawned, so a building
     // that happened to take a later slot drew over units standing on it, and a cart working a camp
@@ -735,7 +737,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // the same wherever you see it), now a UNIQUE per-type shade of that team hue
         // so composition reads by colour as well as glyph. HUD numbers stay viewer-relative.
         // #146: the home base wears the base team hue (its Type would index out of the per-type table).
-        // #159: the BUILDING variants are the knocked-back (lower sat/value) shades of the same hues.
+        // the BUILDING variants are the knocked-back (lower sat/value) shades of the same hues.
         // (the HQ is itself a building — Kind != KindUnit — so it always takes the knocked-back tone)
         const Color C = Home ? TeamTintBldg[Tm]
                              : (Bldg ? TeamTypeTintBldg[Tm][Ty] : TeamTypeTint[Tm][Ty]);
@@ -779,7 +781,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // spot the real building will land, so there's no jump when the match starts.
     if (PreviewActive_ && PreviewType_ >= 0 && PreviewType_ < UnitCount) {
         const int PG = PreviewType_ == UnitMiner ? static_cast<int>(GlyphMineCamp) : PreviewType_;
-        // #159: building tone — this preview stands in for a real building, so it must not be
+        // building tone — this preview stands in for a real building, so it must not be
         // brighter than the thing it becomes (that read as a colour change on match start).
         BlitGlyph(PG, TypeTintMatBldg[My][PreviewType_], SX(PreviewWx_), SY(PreviewWy_), BldgPx);
     }
@@ -796,7 +798,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
-        // #160: with the translucent plates gone, every label sits directly on the building's art, so
+        // with the translucent plates gone, every label sits directly on the building's art, so
         // each one gets a dark offset copy behind it. That is what the plates were actually for
         // (gold-on-cyan was unreadable) — the legibility problem outlives the panel, so it needs its
         // own answer. Two text draws for a handful of short labels; no new material or pipeline.
@@ -816,8 +818,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float BGap = 6.0f * HS;
         const float CtrlW = BldgPx + 6.0f * HS;
         const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
-        const float Bh = 48.0f * HS;   // #161: a little bigger — bigger target AND a bigger label
-        // #161: the price row moved from ABOVE the icon to BELOW it, immediately above the progress
+        const float Bh = 48.0f * HS;   // a little bigger — bigger target AND a bigger label
+        const float LabelPx = 31.0f * HS;   // named once — the digit bias below is derived from it
+        // PERCEPTUAL correction, not a geometry fix. The boxes are mathematically symmetric
+        // (centres land on Bx-Half and Bx+Half), but the label is "+N": the DIGIT, which is the part
+        // you actually read, sits on the RIGHT of the pair. On the left button that puts the digit
+        // toward the building; on the right button it puts it away — so the right button reads as
+        // further out even though it isn't. Nudge buttons right of centre inward by about half a '+'
+        // advance to make the two look equidistant.
+        const float DigitBias = 0.29f * LabelPx;
+        // the price row moved from ABOVE the icon to BELOW it, immediately above the progress
         // bar. One constant for its height so the price and the queue/progress row below it are
         // positioned from the same number and cannot drift into each other.
         const float PriceRowH = 15.0f * HS;
@@ -843,7 +853,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (PendingCamp_) {
             const float Px = SX(PendingCampX_), Py = SY(PendingCampY_);
             const float Breathe = 0.90f + 0.10f * std::sin(PulseT_ * 3.0f);
-            // #159: the BUILDING tone, matching what it turns into — a brighter pending camp
+            // the BUILDING tone, matching what it turns into — a brighter pending camp
             // would visibly dim the instant the match started and the real building took over.
             BlitGlyph(static_cast<int>(GlyphMineCamp), TypeTintMatBldg[My][UnitMiner], Px, Py,
                       BldgPx * Breathe);
@@ -864,8 +874,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                                        : (Snap.BuildingMaxHp[Bty] > 0 ? Snap.BuildingMaxHp[Bty] : 1);
             const float HFrac = std::min(1.0f, std::max(0.0f, static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp)));
             const float HbW = BSize * 0.85f, HbH = 3.0f * HS, HbY = By - BHalf - 5.0f * HS;
-            Blit(HealthBg, Bx, HbY, HbW, HbH);
-            Blit(HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH);
+            // collected, not drawn here — flushed in the GUI layer so the instanced units
+            // (drawn after this pass) cannot cover a building's own bar.
+            HealthBars_.push_back({HealthBg, Bx, HbY, HbW, HbH});
+            HealthBars_.push_back({HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH});
 
             if (Home) continue;                // #146: the HQ produces nothing — no x1/x5 buttons/queue
             if (Snap.Team[I] != My) continue;  // production controls: your buildings only
@@ -879,15 +891,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
             if (Snap.Queue[I] > 0) {
                 const float QW = 34.0f * HS, RGap = 4.0f * HS;
-                // #162: JUST below the icon. The price moved up onto the icon's lower end, so this row
+                // JUST below the icon. The price moved up onto the icon's lower end, so this row
                 // no longer has to clear it — it tucks straight under the bottom edge, and the whole
                 // per-building stack gets shorter (less chance of reaching the building below).
-                const float RowY = By + Half + 13.0f * HS;
+                // up again, so the row sits FULLY over the icon's bottom rather than under it.
+                // Row is 20*HS tall, so a centre one half-height above the bottom edge puts its whole
+                // height inside the icon. Derived from the edge, not a magic offset, so it stays put
+                // if the icon size changes.
+                const float QRowH = 20.0f * HS;
+                // Centre ON the icon's bottom edge: the row straddles it, half over the art and half
+                // below. (This is the "fully inside" position moved back down by half a row height —
+                // the two cancel, so it is simply the edge.)
+                const float RowY = By + Half;
                 const float GroupL = Bx - BldgPx * 0.5f;
                 // Its own translucent plate (playtest): the count and the bar sit over open field or
                 // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
                 // building's controls read as one family.
-                Blit(ProdBtnBg, Bx, RowY, CtrlW, 20.0f * HS);
+                Blit(ProdBtnBg, Bx, RowY, CtrlW, QRowH);   // one height, shared with RowY above
                 char QB[16];
                 std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
                 Text.Draw(Renderer, QB, GroupL, RowY - 7.0f * HS, QW, 14.0f * HS, 12.0f * HS, Ico,
@@ -914,7 +934,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // progress row under the icon on its own plate. Everything is inside the building's own
             // footprint, so a cluster never lands on a neighbour's art — which is what happened when
             // the price floated above the icon.
-            // #162: the buttons straddle the icon's EDGES rather than sitting inside its width. Each
+            // the buttons straddle the icon's EDGES rather than sitting inside its width. Each
             // button's centre lands exactly on an edge (left button on Bx-Half, right on Bx+Half), so
             // exactly half of it overlaps the icon. That also opens up the icon's middle, which is
             // where its art is most recognisable — the pair frames the building instead of covering it.
@@ -924,18 +944,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // The buttons sit at the BOTTOM of the icon so their lower edge is right above the queue/
             // progress plate — thumb and readout together — with the unit price above them at the
             // icon's top. (Price and buttons swapped after seeing it on the phone.)
-            // #161: VERTICALLY CENTRED on the icon, not tucked at its bottom edge — the buttons are
+            // VERTICALLY CENTRED on the icon, not tucked at its bottom edge — the buttons are
             // the primary thing on a building now, so they sit at its middle and the (receded) art
             // reads around them.
             const float Top = By - Bh * 0.5f;
             {
-                // #160: WAY smaller, and NO plate. The plates were the real occluders — the building's
+                // WAY smaller, and NO plate. The plates were the real occluders — the building's
                 // art was legible through a glyph but not through three stacked translucent panels.
                 // The price is reference information, not a control, so it yields the most space.
-                // #162: pulled UP onto the icon's LOWER END — the price now sits over the bottom of
-                // the building rather than under it, which tightens the whole stack and frees the
-                // band below the icon for the progress bar.
-                const float CostY = By + Half - PriceRowH * 0.5f - 1.0f * HS;
+                // the price stacks directly ABOVE the progress row, which now occupies the
+                // icon's bottom 20*HS. Both are measured from the same icon-bottom edge so they cannot
+                // drift into each other. Narrow enough (coin + 2-3 digits, centred on Bx) to sit in
+                // the gap between the two edge-straddling buttons.
+                // Down by the same half-row the progress bar moved, plus a few px, so the gap between
+                // the two closes slightly as they both slide toward the icon's bottom edge.
+                const float CostY = (By + Half) - 20.0f * HS - PriceRowH * 0.5f - 1.0f * HS
+                                  + 10.0f * HS + 4.0f * HS;
                 const float Cs = 11.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
@@ -960,15 +984,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float PulseK = (1.0f + 0.16f * Throb) * (1.0f - 0.18f * Press);
                 const float Lift = Press > Throb ? Press : Throb;   // brightness: the stronger of the two
                 const int PulseStep = static_cast<int>(Lift * (PulseSteps - 1) + 0.5f);
-                const float CxEdge = Bx - Half + EdgeSpan * (static_cast<float>(K) / BtnDen);
+                float CxEdge = Bx - Half + EdgeSpan * (static_cast<float>(K) / BtnDen);
+                if (CxEdge > Bx) CxEdge -= DigitBias;   // see DigitBias — right side only
                 const float BX = CxEdge - Bw * 0.5f;   // centre ON the edge -> 50% overlap
                 PB.R[K][0] = BX; PB.R[K][1] = Top; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
+                if (BtnPulse) {   // remember it for the GUI-layer pointing hand
+                    PulseBtnActive_ = true;
+                    for (int R4 = 0; R4 < 4; ++R4) PulseBtnRect_[R4] = PB.R[K][R4];
+                }
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
                 const float Cx = BX + Bw * 0.5f, Cy = Top + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
-                // #160: NO plate. It was carrying three jobs — persistent background, #107 press
+                // NO plate. It was carrying three jobs — persistent background, #107 press
                 // flash, #143 onboarding throb — so removing it means the feedback moves onto the
                 // GLYPH. The hit rect above is untouched, so the button is exactly as easy to hit as
                 // before; only the paint is gone. (void) the step LUT index: the plate LUTs it fed
@@ -985,11 +1014,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 };
                 // The label IS the button now, so it stays big and centred in the (unchanged) hit
                 // rect: the visual shrank to a glyph but the target did not.
-                // "+1"/"+5", not "x1"/"x5" (#159): the button ADDS that many to the queue, it does
+                // "+1"/"+5", not "x1"/"x5" (visual polish): the button ADDS that many to the queue, it does
                 // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
                 char L[8];
                 std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
-                TextShadowed(L, bx, by2, bw, bh, 31.0f * HS * PulseK,   // #161: a little bigger
+                TextShadowed(L, bx, by2, bw, bh, 31.0f * HS * PulseK,   // a little bigger
                              Afford ? Glow(Ico) : DimC, EHAlign::Center);
             }
         }
@@ -1006,8 +1035,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Frac = static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp);
         const float BarW = UnitPx, BarH = 2.0f * HS;
         const float BarY = Sy - UnitPx * 0.5f - 3.0f * HS;
-        Blit(HealthBg, Sx, BarY, BarW, BarH);
-        Blit(HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);  // left-aligned
+        HealthBars_.push_back({HealthBg, Sx, BarY, BarW, BarH});   // GUI layer, see the flush
+        HealthBars_.push_back({HealthFg, Sx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH});
     }
 
     // Deposit juice (#85 playtest): "+N" floats where a miner banked its carry —
@@ -1043,6 +1072,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
     Renderer->BeginGui();
+    // EVERY health bar, drawn in the GUI layer so nothing in the world can occlude it.
+    // Positions were already computed in screen pixels during the world pass and the GUI camera is
+    // the same pixel-space ortho, so they land exactly where they were measured.
+    for (const BarQuad& B : HealthBars_) Blit(B.Mat, B.X, B.Y, B.W, B.H);
     if (SelectorDirty) RefreshSelector();
 
     using Lur::Text::EHAlign;
@@ -1209,17 +1242,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const float t = std::fmod(OnbHandT_, Period) / Period;   // 0..1 loop
             const float* MpR = PlateRect[UnitMiner];
             const float Sx = MpR[0] + MpR[2] * 0.5f, Sy = MpR[1] + MpR[3] * 0.5f;  // miner plate centre
-            // End near the nearest LIVE mine above the plate (screen space), so the demo points at
-            // gold — not at the base. Fall back to up-the-field if every near mine is depleted.
-            float Ex = WidthPx * 0.5f, Ey = HeightPx * 0.42f;
-            float BestD = 1.0e30f;
-            for (int M = 0; M < NumMines; ++M) {
-                if (Snap.MineGold[M] <= 0) continue;
-                const float Mx = SX(FW(Snap.MineX[M])), My2 = SY(FW(Snap.MineY[M]));
-                if (My2 > Sy - 40.0f * HS) continue;               // only mines above the plate
-                const float D = (Mx - Sx) * (Mx - Sx) + (My2 - Sy) * (My2 - Sy);
-                if (D < BestD) { BestD = D; Ex = Mx; Ey = My2; }
-            }
+            // end PAST BOTH STARTER MINE ROWS, not at the nearest deposit. Aiming at the nearest
+            // mine stopped the hand on the FIRST row — which is not a legal camp spot (it is inside
+            // mine_clearance) and taught the player to drop short, exactly where the drop gets refused.
+            // The target is instead the spot a camp actually belongs: just beyond the second row, on
+            // the X gap between the mine columns at 14 and 20, which is the nearest legal placement
+            // that serves both rows. Derived from the live CVars, so it follows the rows when they
+            // are re-tuned.
+            const float RowSafeW = FW(Snap.Cv.MineRowSafe);
+            const float ClearW = FW(Snap.Cv.MineClearance);
+            const float WorldH = FW(WorldHeight);
+            const float PastRowsY = My == 0 ? RowSafeW + ClearW + 1.0f
+                                            : WorldH - RowSafeW - ClearW - 1.0f;
+            float Ex = SX(17.0f), Ey = SY(PastRowsY);
+            // Keep it on screen: if the computed spot is off the top (a tall map, a scrolled camera),
+            // fall back to the old fraction-of-screen target rather than dragging into nowhere.
+            if (Ey < 40.0f * HS || Ey > Sy - 40.0f * HS) { Ex = WidthPx * 0.5f; Ey = HeightPx * 0.42f; }
             const float E = t * t * (3.0f - 2.0f * t);                            // smoothstep ease
             const float Hx = Sx + (Ex - Sx) * E, Hy = Sy + (Ey - Sy) * E;
             const float A = t < 0.15f ? t / 0.15f : (t > 0.8f ? (1.0f - t) / 0.2f : 1.0f);  // fade ends
@@ -1232,6 +1270,32 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         } else {
             OnbHandT_ = 0.0f;
         }
+    }
+
+    // the SECOND onboarding beat — once the camp is down, teach the +1 button. A pointing hand
+    // comes in from the LOWER LEFT and repeatedly approaches and retreats along that diagonal, which
+    // reads as tapping without needing a separate tap animation. Runs only while that button is
+    // actually pulsing (first camp, nothing queued yet, production not taught), so it stops the moment
+    // the player queues anything.
+    //
+    // Straight BELOW the button, not off to one side: the hand glyph points up, so approaching along
+    // the vertical means it already aims at the target and needs no rotation. Below also keeps it off
+    // the building's art and off the price/progress rows, which sit inside the icon.
+    if (PulseBtnActive_) {
+        OnbFingerT_ += DtSec;
+        const float Period = 1.1f;
+        const float Ph = std::fmod(OnbFingerT_, Period) / Period;
+        // cos gives a smooth 0 -> 1 -> 0, so the hand eases IN and back OUT with no snap at the loop
+        // boundary (a sawtooth would visibly jump back to "far").
+        const float Ease = 0.5f - 0.5f * std::cos(Ph * 6.2831853f);
+        const float Far = 40.0f * HS, Near = 10.0f * HS;
+        const float Dist = Far - (Far - Near) * Ease;
+        const float Bcx = PulseBtnRect_[0] + PulseBtnRect_[2] * 0.5f;
+        const float Bcy = PulseBtnRect_[1] + PulseBtnRect_[3] * 0.5f;
+        const float Fy = Bcy + PulseBtnRect_[3] * 0.5f + Dist;   // below the button's bottom edge
+        BlitGlyph(GlyphPointer, HintPointer[HintAlphaSteps - 1], Bcx, Fy, 44.0f * HS);
+    } else {
+        OnbFingerT_ = 0.0f;   // restart the approach from far out next time it appears
     }
 
     // Match-result banner. (The tick/FOE debug line is gone - playtest feedback;

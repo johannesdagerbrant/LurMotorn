@@ -634,7 +634,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     static const char* kCvarsPath = "rps-cvars.cfg";
     if (const int Loaded = Lur::Core::LoadCVarConfig(kCvarsPath); Loaded > 0)
         Lur::Log::Info("loaded %d persisted cvar override(s) from %s", Loaded, kCvarsPath);
-    // #158: a commit also REQUESTS a pre-match map rebuild. The map (mine rows) is built in
+    // #157: a commit also REQUESTS a pre-match map rebuild. The map (mine rows) is built in
     // Sim::Init, so a knob edit is otherwise invisible until the next match — but while a fresh
     // match still waits for your opening camp there is nothing to lose by re-Initing, so the new
     // layout shows at once. Only a flag here: the restart is a Runner Stop/Start and belongs on the
@@ -779,7 +779,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                 }
             }
         }
-        // #158: a cvar was edited and the match hasn't started — rebuild so map knobs
+        // #157: a cvar was edited and the match hasn't started — rebuild so map knobs
         // (rps.mine.row_*) are visible while you tune. Pre-match ONLY, and gated on having a
         // snapshot to test: mid-match tuning deliberately does not restart the game.
         if (RebuildPreMatch) {

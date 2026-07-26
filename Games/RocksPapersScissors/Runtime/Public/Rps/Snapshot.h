@@ -4,7 +4,7 @@
 #include <mutex>
 
 #include "Lur/Sim/Fixed.h"
-#include "Rps/Placement.h"   // #158: the ONE shared placement predicate (no more sim/preview mirror)
+#include "Rps/Placement.h"   // #157: the ONE shared placement predicate (no more sim/preview mirror)
 #include "Rps/Sim.h"
 #include "Rps/Tunables.h"
 
@@ -45,7 +45,7 @@ struct Snapshot {
     // radius, carried so the view can draw the frontier lines and size the placement ghost.
     Fixed    FrontierT0{};
     Fixed    FrontierT1{};
-    // #158: the WHOLE latched gameplay CVar block, copied in one assignment, rather than a handful
+    // #157: the WHOLE latched gameplay CVar block, copied in one assignment, rather than a handful
     // of cherry-picked fields. The cherry-picking was the actual defect behind the ghost/sim
     // disagreement: adding a placement tunable to the sim left a second place that had to be
     // remembered, and it wasn't. With the block carried wholesale, any knob the shared predicate
@@ -102,7 +102,7 @@ struct Snapshot {
         std::memcpy(MineGold, S.MineGold, sizeof(int32_t) * NumMines);
         FrontierT0 = S.FrontierT0;
         FrontierT1 = S.FrontierT1;
-        Cv = S.Cv;   // #158: one line, so no future placement knob can be forgotten here
+        Cv = S.Cv;   // #157: one line, so no future placement knob can be forgotten here
         Tick = S.Tick;
         Result = S.Result;
         for (int T = 0; T < 2; ++T) {
@@ -171,7 +171,7 @@ struct Snapshot {
     // drag-place ghost's valid/invalid blink (evaluated on the render thread) can't call the live
     // Sim — it answers over the published snapshot instead.
     //
-    // #158: this is no longer a hand-written MIRROR of the sim's predicate. It calls the SAME
+    // #157: this is no longer a hand-written MIRROR of the sim's predicate. It calls the SAME
     // function (Rps::PlacementAccepts) over the same captured CVar block, so "change both together"
     // is no longer a rule anyone can forget — there is only one implementation to change. The data
     // is still a snapshot (it must be: the render thread cannot read a ticking Sim), so the preview

@@ -2,6 +2,7 @@
 #include <atomic>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include "Lur/Core/CVar.h"  // ICVar* (selected cvar)
 #include "Lur/DevGui/Numpad.h"
@@ -252,12 +253,25 @@ private:
     Lur::Render::Color TeamTypeTint[2][UnitCount] = {};
     Lur::Render::MaterialHandle TypeTintMat[2][UnitCount] = {};      // button glyph (affordable)
     Lur::Render::MaterialHandle TypeTintMatDim[2][UnitCount] = {};   // button glyph (unaffordable)
-    // #159: BUILDINGS wear a knocked-back version of the same hue — same colour identity, lower
+    // BUILDINGS wear a knocked-back version of the same hue — same colour identity, lower
     // saturation and value — so the units reading on top of them stay the bright, eye-catching
     // layer. Same hue on purpose: a building must still read as "team + type" at a glance.
     Lur::Render::Color TeamTypeTintBldg[2][UnitCount] = {};
     Lur::Render::Color TeamTintBldg[2] = {};                          // the HQ (Type is UnitNone)
     Lur::Render::MaterialHandle TypeTintMatBldg[2][UnitCount] = {};   // placed/preview building glyph
+    // health bars are COLLECTED during the world pass and flushed in the GUI layer. They used
+    // to be drawn inline, which put a building's bar underneath the instanced units (the units draw
+    // after the per-building pass) — so a bar could be hidden by the very fight that was draining it.
+    // Collecting instead of moving the code keeps the bar next to the HP/size logic that derives it.
+    // The vector is a member so it is allocated once and reused, not per frame.
+    struct BarQuad { Lur::Render::MaterialHandle Mat; float X, Y, W, H; };
+    std::vector<BarQuad> HealthBars_;
+    // visual polish onboarding: the rect of the +1 button that is currently PULSING (the first camp's, until
+    // production is taught). Captured in the world pass and consumed in the GUI layer, where the
+    // pointing hand is drawn — the hand has to be a GUI element or the world would draw over it.
+    bool  PulseBtnActive_ = false;
+    float PulseBtnRect_[4] = {};
+    float OnbFingerT_ = 0.0f;      // pointing-hand approach/retreat phase
     Lur::Render::InstanceData Instances[MaxUnits];    // per-frame scratch (one instanced draw)
 
     Lur::Text::Font Font;

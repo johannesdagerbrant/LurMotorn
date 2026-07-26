@@ -407,7 +407,7 @@ public:
         if (MaterialId == 0 || MaterialId > Materials.size()) return;
         const Mesh& M = Meshes[MeshId - 1];
         const Material& Mat = Materials[MaterialId - 1];
-        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
         // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
         // missing sprite is a symptom you can see and log, not a native backtrace.
         if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
@@ -448,7 +448,7 @@ public:
             return;
         }
         const Material& Mat = Materials[MaterialId - 1];
-        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
         // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
         // missing sprite is a symptom you can see and log, not a native backtrace.
         if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
@@ -494,7 +494,7 @@ public:
         }
         const Mesh& M = Meshes[MeshId - 1];
         const Material& Mat = Materials[MaterialId - 1];
-        // #159: a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
+        // a material whose descriptor set could not be allocated is UNDRAWABLE. Binding a
         // null set is undefined behaviour (it crashed inside the Mali driver), so skip it — a
         // missing sprite is a symptom you can see and log, not a native backtrace.
         if (Mat.DescriptorSet == VK_NULL_HANDLE) return;
@@ -1075,7 +1075,7 @@ private:
         Alloc.pSetLayouts = &DescriptorSetLayout;
         VkDescriptorSet Set = VK_NULL_HANDLE;
         VK_CHECK(vkAllocateDescriptorSets(Device, &Alloc, &Set));
-        // FAIL LOUDLY AND EARLY when the pool is exhausted (#159). This used to fall through and
+        // FAIL LOUDLY AND EARLY when the pool is exhausted (visual polish). This used to fall through and
         // hand vkUpdateDescriptorSets a NULL dstSet, which is undefined behaviour — on Mali it
         // segfaulted deep inside libGLES_mali, so exceeding MaxMaterials looked like a GPU-driver
         // crash with nothing pointing at the descriptor pool. One material past the cap cost a
@@ -1379,7 +1379,7 @@ private:
     void*          TextIBMapped = nullptr;
     uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
-    // Descriptor-set budget. Raised from 96 (#159): RPS crossed it just by adding one tinted
+    // Descriptor-set budget. Raised from 96 (visual polish): RPS crossed it just by adding one tinted
     // material per unit type for BUILDINGS, and the failure mode was a SIGSEGV inside the GPU driver
     // (see AllocateDescriptorSet) rather than anything naming the pool. A set is a handful of bytes,
     // so headroom is nearly free and running out is far more expensive than over-allocating.

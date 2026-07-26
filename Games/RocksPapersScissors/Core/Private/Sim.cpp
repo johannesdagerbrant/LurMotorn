@@ -19,9 +19,9 @@
 #include <cstring>
 
 #include "Lur/Core/Assert.h"
-#include "Lur/Core/Log.h"      // #158: the starter-row seal is a WARNING, not an abort
+#include "Lur/Core/Log.h"      // #157: the starter-row seal is a WARNING, not an abort
 #include "Lur/Sim/Random.h"
-#include "Rps/Placement.h"     // #158: the one shared placement predicate (Sim + Snapshot)
+#include "Rps/Placement.h"     // #157: the one shared placement predicate (Sim + Snapshot)
 #include "Lur/Trace/Trace.h"  // LUR_TRACE_SCOPE — observational only (compiles out in Shipping)
 
 namespace Rps {
@@ -152,7 +152,7 @@ void BuildMap(Sim& S) {
     //     Ym - MineClearance < 1.5 x footprint
     // At footprint 3 / clearance 6 that is Ym < 10.5 — both 3 and 9 qualify. Asserted below rather
     // than left as a comment, because it silently depends on two CVars.
-    // #158: the two starter rows are CVars (rps.mine.row_home / row_safe), as a distance in from
+    // #157: the two starter rows are CVars (rps.mine.row_home / row_safe), as a distance in from
     // each team's own end so they stay mirrored whatever they are set to. midfield/contested remain
     // derived from WorldHeight — freezing them at an absolute Y would stop them scaling with the map.
     const Fixed EdgeRow = S.Cv.MineRowHome;
@@ -1002,7 +1002,7 @@ void Sim::DeriveUnits() {
 
 bool Sim::CanPlaceBuilding(uint8_t Team, uint8_t Type, Fixed X, Fixed Y) const {
     (void)Type;  // one shared footprint for all building types (§12.2); Type reserved for later
-    // #158: the rule itself lives in Rps/Placement.h and is shared VERBATIM with the render-thread
+    // #157: the rule itself lives in Rps/Placement.h and is shared VERBATIM with the render-thread
     // preview (Snapshot::CanPlaceBuilding). It used to be duplicated here and mirrored there, and
     // the mirror fell out of step the first time the rule changed — the ghost went green where the
     // sim refused. One predicate, two data sources, no lockstep-by-comment.
