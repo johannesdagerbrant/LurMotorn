@@ -879,10 +879,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
             if (Snap.Queue[I] > 0) {
                 const float QW = 34.0f * HS, RGap = 4.0f * HS;
-                // #161: pushed down to leave room for the price row, which now sits between the icon
-                // and this bar. Keep these two in step — the price is positioned relative to the SAME
-                // anchor below, so a change here has to move both or they collide.
-                const float RowY = By + Half + PriceRowH + 9.0f * HS;
+                // #162: JUST below the icon. The price moved up onto the icon's lower end, so this row
+                // no longer has to clear it — it tucks straight under the bottom edge, and the whole
+                // per-building stack gets shorter (less chance of reaching the building below).
+                const float RowY = By + Half + 13.0f * HS;
                 const float GroupL = Bx - BldgPx * 0.5f;
                 // Its own translucent plate (playtest): the count and the bar sit over open field or
                 // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
@@ -914,8 +914,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // progress row under the icon on its own plate. Everything is inside the building's own
             // footprint, so a cluster never lands on a neighbour's art — which is what happened when
             // the price floated above the icon.
-            const float RowW = ProdBtnPerBldg * Bw + (ProdBtnPerBldg - 1) * BGap;
-            const float RowLeft = Bx - RowW * 0.5f;
+            // #162: the buttons straddle the icon's EDGES rather than sitting inside its width. Each
+            // button's centre lands exactly on an edge (left button on Bx-Half, right on Bx+Half), so
+            // exactly half of it overlaps the icon. That also opens up the icon's middle, which is
+            // where its art is most recognisable — the pair frames the building instead of covering it.
+            // Interpolated across the edges so a third button (x20) would space itself correctly too.
+            const float EdgeSpan = 2.0f * Half;
+            const float BtnDen = static_cast<float>(ProdBtnPerBldg > 1 ? ProdBtnPerBldg - 1 : 1);
             // The buttons sit at the BOTTOM of the icon so their lower edge is right above the queue/
             // progress plate — thumb and readout together — with the unit price above them at the
             // icon's top. (Price and buttons swapped after seeing it on the phone.)
@@ -927,9 +932,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // #160: WAY smaller, and NO plate. The plates were the real occluders — the building's
                 // art was legible through a glyph but not through three stacked translucent panels.
                 // The price is reference information, not a control, so it yields the most space.
-                // #161: BELOW the icon, just above the progress bar — grouped with the other readout
-                // (queue + progress) instead of floating over the roof. Same anchor as RowY above.
-                const float CostY = By + Half + PriceRowH * 0.5f + 2.0f * HS;
+                // #162: pulled UP onto the icon's LOWER END — the price now sits over the bottom of
+                // the building rather than under it, which tightens the whole stack and frees the
+                // band below the icon for the progress bar.
+                const float CostY = By + Half - PriceRowH * 0.5f - 1.0f * HS;
                 const float Cs = 11.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
@@ -954,7 +960,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float PulseK = (1.0f + 0.16f * Throb) * (1.0f - 0.18f * Press);
                 const float Lift = Press > Throb ? Press : Throb;   // brightness: the stronger of the two
                 const int PulseStep = static_cast<int>(Lift * (PulseSteps - 1) + 0.5f);
-                const float BX = RowLeft + static_cast<float>(K) * (Bw + BGap);
+                const float CxEdge = Bx - Half + EdgeSpan * (static_cast<float>(K) / BtnDen);
+                const float BX = CxEdge - Bw * 0.5f;   // centre ON the edge -> 50% overlap
                 PB.R[K][0] = BX; PB.R[K][1] = Top; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
