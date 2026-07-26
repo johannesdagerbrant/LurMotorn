@@ -224,8 +224,12 @@ void GameView::CreateResources(IRenderer* Renderer) {
     // building still reads as "this team, this type" at a glance; only its intensity yields.
     // Applied via HSV rather than an alpha fade: fading toward the background washed the colour out
     // and made two teams' buildings converge on the same murky grey, losing the ownership read.
-    constexpr float BldgSat = 0.55f;   // vs 1.0 for units
-    constexpr float BldgVal = 0.70f;   // vs 1.0 for units
+    // #161: darker + more desaturated again (was 0.55/0.70). With the +1/+5 labels sitting CENTRED
+    // over the icon, the building is deliberately a BACKDROP: knocking the art back is what makes
+    // the controls read on top of it without needing a plate behind them. This is the other way to
+    // solve the occlusion — recede the art rather than move the UI off it.
+    constexpr float BldgSat = 0.42f;   // vs 1.0 for units
+    constexpr float BldgVal = 0.55f;   // vs 1.0 for units
     TeamTintBldg[0] = Hsv(TeamBaseHue[0], BldgSat, BldgVal);
     TeamTintBldg[1] = Hsv(TeamBaseHue[1], BldgSat, BldgVal);
     for (int Tm = 0; Tm < 2; ++Tm)
@@ -812,7 +816,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float BGap = 6.0f * HS;
         const float CtrlW = BldgPx + 6.0f * HS;
         const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
-        const float Bh = 40.0f * HS;
+        const float Bh = 48.0f * HS;   // #161: a little bigger — bigger target AND a bigger label
+        // #161: the price row moved from ABOVE the icon to BELOW it, immediately above the progress
+        // bar. One constant for its height so the price and the queue/progress row below it are
+        // positioned from the same number and cannot drift into each other.
+        const float PriceRowH = 15.0f * HS;
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
         // #107: latch a press stamped by the input thread, else age the flash out. Reading it here
@@ -871,7 +879,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
             if (Snap.Queue[I] > 0) {
                 const float QW = 34.0f * HS, RGap = 4.0f * HS;
-                const float RowY = By + Half + 8.0f * HS;
+                // #161: pushed down to leave room for the price row, which now sits between the icon
+                // and this bar. Keep these two in step — the price is positioned relative to the SAME
+                // anchor below, so a change here has to move both or they collide.
+                const float RowY = By + Half + PriceRowH + 9.0f * HS;
                 const float GroupL = Bx - BldgPx * 0.5f;
                 // Its own translucent plate (playtest): the count and the bar sit over open field or
                 // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
@@ -908,12 +919,17 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // The buttons sit at the BOTTOM of the icon so their lower edge is right above the queue/
             // progress plate — thumb and readout together — with the unit price above them at the
             // icon's top. (Price and buttons swapped after seeing it on the phone.)
-            const float Top = By + Half - Bh - 4.0f * HS;
+            // #161: VERTICALLY CENTRED on the icon, not tucked at its bottom edge — the buttons are
+            // the primary thing on a building now, so they sit at its middle and the (receded) art
+            // reads around them.
+            const float Top = By - Bh * 0.5f;
             {
                 // #160: WAY smaller, and NO plate. The plates were the real occluders — the building's
                 // art was legible through a glyph but not through three stacked translucent panels.
                 // The price is reference information, not a control, so it yields the most space.
-                const float CostY = By - Half + 9.0f * HS;       // centre of the coin+price row
+                // #161: BELOW the icon, just above the progress bar — grouped with the other readout
+                // (queue + progress) instead of floating over the roof. Same anchor as RowY above.
+                const float CostY = By + Half + PriceRowH * 0.5f + 2.0f * HS;
                 const float Cs = 11.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
@@ -966,7 +982,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
                 char L[8];
                 std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
-                TextShadowed(L, bx, by2, bw, bh, 26.0f * HS * PulseK,
+                TextShadowed(L, bx, by2, bw, bh, 31.0f * HS * PulseK,   // #161: a little bigger
                              Afford ? Glow(Ico) : DimC, EHAlign::Center);
             }
         }
