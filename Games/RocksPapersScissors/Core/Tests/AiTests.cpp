@@ -216,6 +216,67 @@ static void TestAiExpandsCapacity() {
     CHECK(S.Teams[W].Gold < 20000);
 }
 
+// ---- The building cap must NEVER make the FIRST soldier building unbuildable ----
+// max_buildings counts ALL producing buildings, so a tier chasing worker_target can fill it with
+// mining camps and then be forbidden its first combat building forever: it wants soldiers, has
+// nowhere to make them, and banks the income. Easy shipped like that. Three recorded matches on
+// 2026-07-27 (rps-match-20260727-074028/074257/080444) show the whole match in four numbers:
+// 4 camps, 0 soldier buildings, 0 soldiers of any type, gold climbing to 30850 untouched.
+//
+// Two independent guards, one test each, because they fail differently:
+//   * the state must not FORM  -> economy stops one short of the cap while no combat building
+//     stands (TestCapReservesASlotForCombat);
+//   * the state must CLEAR if it forms anyway -> the cap yields by one for a first combat
+//     building (this test, which injects the jammed state directly).
+// Injected rather than played out, because reaching it in a real match needs a passive opponent
+// AND income that outruns the miner queue (the owner's dig_range tuning supplied the second half;
+// stock cvars do not, which is why every existing test stayed green while easy was broken).
+static void TestCapYieldsForAFirstCombatBuilding() {
+    Sim S;
+    S.Init(0x1234);
+    Inject(S, 0, UnitRock, 6);                 // an enemy army -> it wants a counter
+    Inject(S, 1, UnitMiner, 40);               // well past easy's worker_target (24)
+    for (int K = 0; K < 4; ++K)                // easy's ENTIRE cap (max_buildings 4), all economy
+        InjectBuilding(S, 1, UnitMiner, F(4 + 7 * K), F(230));
+    S.Teams[1].Gold = 100000;                  // money is not the constraint
+    AiController Ai;
+    Ai.Init(0x1234, 1, EAiTier::Easy);
+    bool Placed = false;
+    for (uint32_t T = 0; T < 512 && !Placed; ++T) {   // easy is stale/slow: give it time to react
+        InputEvent E[MaxEventsPerTick];
+        const int C = AiTick(Ai, S, T, E);
+        for (int I = 0; I < C; ++I)
+            if (E[I].Kind == EventPlaceBuilding && E[I].Type != UnitMiner) Placed = true;
+    }
+    CHECK(Placed);
+}
+
+// The other half: with the cap NOT yet full, the economy must leave the last slot alone so the
+// jam never forms. Easy again (cap 4): no enemy, so it wants miners forever and would otherwise
+// expand into all four slots.
+static void TestCapReservesASlotForCombat() {
+    Sim S;
+    S.Init(0x1234);
+    Inject(S, 1, UnitMiner, 2);                          // below worker_target -> it wants miners
+    InjectBuilding(S, 1, UnitMiner, F(4), F(230));       // its opening camp exists
+    S.Teams[1].Gold = 100000;
+    AiController Ai;
+    Ai.Init(0x1234, 1, EAiTier::Easy);
+    int32_t Camps = 1;
+    for (uint32_t T = 0; T < 512; ++T) {
+        InputEvent E[MaxEventsPerTick];
+        const int C = AiTick(Ai, S, T, E);
+        for (int I = 0; I < C; ++I)
+            if (E[I].Kind == EventPlaceBuilding && E[I].Type == UnitMiner) {
+                // Place it for real, so the next decision sees the higher building count.
+                // Event X/Y are Fixed RAW (see InputEvent), hence the explicit Fixed{}.
+                InjectBuilding(S, 1, UnitMiner, Fixed{E[I].X}, Fixed{E[I].Y});
+                ++Camps;
+            }
+    }
+    CHECK(Camps == 3);   // 4 - 1 reserved for combat; it was 4 (and then nothing, forever)
+}
+
 #if LUR_INTERNAL
 // ---- #144: a recording must replay to a BIT-IDENTICAL match, or it is not evidence ----
 // The whole value of the flight recorder is that the file IS the match: seed + latched CVar set +
@@ -268,6 +329,8 @@ int main() {
     TestTierReactionSpeed();
     TestAiVsAiDeterminism();
     TestAiExpandsCapacity();
+    TestCapYieldsForAFirstCombatBuilding();
+    TestCapReservesASlotForCombat();
 #if LUR_INTERNAL
     TestMatchRecordingReplaysIdentically();
 #endif

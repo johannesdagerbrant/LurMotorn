@@ -494,13 +494,33 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // that count IS the army-throughput multiplier. Capping it is what makes a 200-unit flood
     // arithmetically impossible rather than merely slower. The HQ is excluded (it produces
     // nothing), so the cap counts exactly the buildings that generate units.
-    const bool UnderCap = K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings;
+    // ...but the LAST slot is RESERVED FOR COMBAT while no combat building stands, because
+    // otherwise the cap DEADLOCKS the tier. Chasing WorkerTarget fills every slot with mining
+    // camps; the first soldier building is then forbidden forever, so the AI wants soldiers,
+    // cannot place anywhere to make them, and banks gold for the rest of the match. Observed on
+    // easy (max_buildings 4, defence_floor 0) in three recorded matches on 2026-07-27: 4 camps,
+    // 27 workers, ZERO soldiers, 30k idle gold. It only became reachable when the AI learned to
+    // expand its mining — before that it placed one building per type, which hid the trap.
+    // MaxBuildings still means exactly what it says; the ECONOMY just stops one short of it until
+    // there is somewhere to make soldiers. (Tiers with an unlimited cap are untouched.)
+    const int32_t EconLimit = (K.MaxBuildings > 1 && MyCombatBldg == 0) ? K.MaxBuildings - 1
+                                                                       : K.MaxBuildings;
+    const bool UnderCap = K.MaxBuildings <= 0 ||
+                          MyBuildings < (Want == UnitMiner ? EconLimit : K.MaxBuildings);
+    // ...and the cap YIELDS BY ONE for a first combat building, whatever the reason there is none.
+    // Reserving a slot stops the deadlock from forming; this clears it if it ever forms anyway —
+    // a razed combat building, a hand-tuned cap, a future ordering change. Being one building over
+    // a tuning cap for one purchase is nothing next to a tier that cannot fight at all, and it is
+    // bounded: exactly one, and only while the AI owns zero combat buildings. This is NOT the
+    // per-type exemption rejected above (that one floored every cap at four, one per unit type).
+    const bool FirstCombat = Want != UnitMiner && MyCombatBldg == 0;
     // The exemption is "I have NO producing buildings at all" — the forced opening camp — NOT "I have
     // none OF THIS TYPE". Per-type would silently floor the cap at one building per unit type (four),
     // so max_buildings below 4 could never bind: asking for 3 still produced 4. The cap has to mean
     // what it says, or it is not a tuning knob.
     const bool OpeningCamp = MyBuildings == 0;
-    if ((OpeningCamp || UnderCap) && (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother)) {
+    if ((OpeningCamp || UnderCap || FirstCombat) &&
+        (Cap_.Owned == 0 ? Gold >= Price : CanAffordAnother)) {
         // WHERE matters as much as whether (#144 slice 3, from the recorded human win):
         //   * a mining camp goes ON the richest unworked mine — that is what makes cart trips short
         //     and captures the map's economy instead of re-mining the home cluster;
