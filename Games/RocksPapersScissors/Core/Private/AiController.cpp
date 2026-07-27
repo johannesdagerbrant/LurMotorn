@@ -143,7 +143,7 @@ bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed 
 // lowest INDEX, which is often a deposit on the enemy's half — permanently unbuildable, so the AI
 // proposed an illegal spot every time and never expanded its economy at all.
 bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
-    constexpr int32_t ServedRadius = 18;   // world units; a cluster's own spread is smaller than this
+    const int32_t ServedRadius = S.Cv.AiMineServedRadius.ToInt();   // see rps.ai.mine_served_radius
     const Fixed Limit = Team == 0 ? S.FrontierT0 : S.FrontierT1;
     int32_t Best = -1;
     Fixed BestY{0};
@@ -180,7 +180,7 @@ bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
 //
 // The enemy centroid still chooses the X: same distance from the fight, but on the correct side of
 // the map.
-constexpr int32_t FrontSetback = 8;   // world units behind the leading edge
+// Setback is Cv.AiFrontSetback (rps.ai.front_setback) — Tunables.h explains why it moved forward.
 void AiFrontTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
     const uint8_t Foe = static_cast<uint8_t>(1 - Team);
     int64_t Sx = 0, Sy = 0;
@@ -196,7 +196,8 @@ void AiFrontTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
     // A setback behind our leading edge, floored at the opening depth so the early game doesn't aim
     // behind the baseline.
     const Fixed Floor = Team == 0 ? S.Cv.InitialFrontier : WorldHeight - S.Cv.InitialFrontier;
-    const Fixed Back = Team == 0 ? Frontier - F(FrontSetback) : Frontier + F(FrontSetback);
+    const Fixed Sb = S.Cv.AiFrontSetback;
+    const Fixed Back = Team == 0 ? Frontier - Sb : Frontier + Sb;
     OY = Team == 0 ? (Back > Floor ? Back : Floor) : (Back < Floor ? Back : Floor);
     OX = N == 0 ? Fixed{WorldWidth.Raw / 2} : Fixed{static_cast<int32_t>(Sx / N)};
     (void)Sy;   // the enemy's Y picks nothing: we build behind OUR line, not at theirs

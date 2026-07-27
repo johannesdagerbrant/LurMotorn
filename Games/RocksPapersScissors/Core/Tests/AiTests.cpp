@@ -175,12 +175,16 @@ static void TestAiVsAiDeterminism() {
 // side that gets pushed back loses building space and collapses, so pinning the assertions to team 0
 // made this test a coin flip on who won. What it guards is that a competently-played AI side buys
 // capacity and converts it — not that both sides do.
+// Runs on HARD, not medium. Difficulty is now carried by a per-tier production-VOLUME ladder, and
+// medium is deliberately capped (max_buildings 12, queue_depth 5) — so asserting unbounded capacity
+// growth on it would assert against the tiering itself. Hard is the uncapped tier, and "buys capacity
+// and converts it" is exactly the property hard is supposed to have.
 static void TestAiExpandsCapacity() {
     Sim S;
     S.Init(0x144);
     AiController Ai0, Ai1;
-    Ai0.Init(0x144, 0, EAiTier::Medium);
-    Ai1.Init(0x144, 1, EAiTier::Medium);
+    Ai0.Init(0x144, 0, EAiTier::Hard);
+    Ai1.Init(0x144, 1, EAiTier::Hard);
     for (int T = 0; T < 2400 && S.Result == ResultOngoing; ++T) {
         InputEvent E0[MaxEventsPerTick], E1[MaxEventsPerTick];
         const int C0 = AiTick(Ai0, S, S.Tick, E0);

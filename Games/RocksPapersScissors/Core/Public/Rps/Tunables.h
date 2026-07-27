@@ -512,7 +512,23 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12);
 // could not employ, and starving its army to do it: at 45 it LOST to medium 3-7. At 22 the ladder is
 // hard>medium 14-6, medium>easy 17-3, hard>easy 20-0 (20 matches/pairing). This knob is coupled to
 // rps.build.mine_clearance — re-measure both together.
-LUR_AI_TIER(Hard,   "hard",   5, 22,  0,  1, 12, 2,  1, 10, 55, 8,  0);
+// UNCAPPED against a competent human (2026-07-26, from 5 recordings of the repo owner beating hard).
+// He wins the same way every time, and none of it is cleverness — it is SCALE:
+//   * zero soldiers until ~120s, banking economy while hard also holds; he reaches 62 workers at
+//     104s and 113-131 at 138s against hard's 38 and 71, peaking 121-213 vs hard's 60-121;
+//   * 16-34 buildings against hard's 9-24 (production is flat per building, so that IS throughput);
+//   * +5 spammed at a 0.2s median cadence, ~78% of 171-354 commands, 703-1470 units queued;
+//   * soldier buildings marched forward to Y=212 with hard's base at 240, so his reinforcements
+//     appear in the fight while hard's walk the map.
+// Hard then LOSES units faster than it replaces them (army 113->93->70) and ends sitting on gold.
+// It was never out-thought, it was throttled: worker_target stopped its economy dead at ~94 while his
+// compounded to 213. So worker_target 110 (his 138s figure; WorkersPerMine 6 x 48 mines allows ~288,
+// so the mines are not the ceiling) and queue_depth 20 so a big bank actually converts.
+// queue_depth stays 8, NOT the 20 I tried: measured hard 8/12 vs medium at depth 8, 4/12 at 12 and
+// 0/12 at 20. The note above already predicted it — a deep queue commits gold to a TYPE, and hard is
+// the tier that re-counters fastest, so it is the tier a deep queue punishes most. Raising it was a
+// direct contradiction of measured history and it cost every match.
+LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -531,9 +547,35 @@ LUR_AI_TIER(Hard,   "hard",   5, 22,  0,  1, 12, 2,  1, 10, 55, 8,  0);
 // re-counters fastest. Measured against opponents that play DIFFERENTLY (a mirror match hides this
 // entirely, since both sides pay the same penalty): hard beats easy 8-2 at depth 8, but only 6-4 at
 // 12. Before batching existed, depth 6 alone was enough to send hard 0-10.
+// How far BEHIND its own leading edge the AI plants combat buildings. 3, down from a hardcoded 8:
+// the recordings show the human building at Y=212 against a base at 240, so his units spawn in the
+// fight while the AI's walked. This is also the ONLY lever the AI has for "mass before engaging" — it
+// emits Place and Queue events and nothing else, so it cannot hold units back; unit movement is
+// autonomous steering. Producing at the front is how it arrives massed instead of in a trickle.
+// How close an existing camp must be for the AI to consider a deposit ALREADY SERVED. Was a
+// hardcoded 18, and that is why the AI only ever had camps at its base (player report, confirmed):
+// the test is CHEBYSHEV and the mine columns span X=4..30 on a 34-wide map, so ONE camp at mid-X
+// covers X in [-1,35] — the entire width — and marks a whole row served. +/-18 in Y also swallowed
+// both starter rows at once (Y=3 and Y=9). The AI therefore stopped expanding after its first camp
+// or two, while a human plants a camp on every row the front rolls past.
+// 7 is about one column gap (columns sit 5-6 apart), so a camp claims the 2-3 deposits it can
+// actually work — WorkersPerMine caps 6 carts per deposit, so claiming six mines with one camp was
+// always a fiction, and cart round-trip time grows with the distance it pretended not to have.
+LUR_CVAR(CvAiMineServedRadius, "rps.ai.mine_served_radius", F(7), CVarFlagAffectsGameplay,
+         "A deposit counts as served if a camp is within this (world units)");
+// 8, not the 3 I tried. Building at 3 costs hard ~2 wins in 12 (10 -> 8 vs medium): buildings planted
+// that close to the leading edge sit in contested ground and get razed. The human gets away with it
+// because he plants forward BEHIND a mass he already has; the AI plants forward and then loses the
+// building. Forward production is only safe once there is an army in front of it.
+LUR_CVAR(CvAiFrontSetback, "rps.ai.front_setback", F(8), CVarFlagAffectsGameplay,
+         "How far behind its own frontier the AI builds combat buildings (world units)");
 LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 8, CVarFlagAffectsGameplay,
          "Units the AI keeps queued per building before it wants more capacity");
-LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffectsGameplay,
+// 130, down from 200: at 200 it hoarded twice a building's price before adding capacity, which is why
+// hard finished matches sitting on gold with too few buildings to spend it. Left SHARED on purpose —
+// easy and medium are already bounded by their per-tier max_buildings (4 / 12), so eager expansion
+// lifts hard without disturbing the strict tier ordering.
+LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 130, CVarFlagAffectsGameplay,
          "Gold needed to add a building, as a percent of its cost (200 = can afford two)");
 
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
@@ -645,6 +687,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     LUR_AI_TIER_IDS(IX, Easy)                              \
     LUR_AI_TIER_IDS(IX, Medium)                            \
     LUR_AI_TIER_IDS(IX, Hard)                              \
+    FX(AiMineServedRadius,      CvAiMineServedRadius)      \
+    FX(AiFrontSetback,          CvAiFrontSetback)          \
     IX(AiQueueDepth,            CvAiQueueDepth)            \
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)
 
