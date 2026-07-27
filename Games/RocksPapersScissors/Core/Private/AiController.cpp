@@ -9,20 +9,28 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
                     Cv.AiEasyPrecision, Cv.AiEasyCadence, Cv.AiEasyJitter, Cv.AiEasyHysteresis,
                     Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio,
                     Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings, Cv.AiEasyDefenceFloor,
-                    Cv.AiEasyBuildCluster};
+                    Cv.AiEasyBuildCluster, Cv.AiEasyMinerQueue, Cv.AiEasyWaveLead};
+        case EAiTier::PerhapsImpossible:
+            return {Cv.AiPerhapsImpossibleOpenWorkers, Cv.AiPerhapsImpossibleWorkerTarget,
+                    Cv.AiPerhapsImpossibleStaleness, Cv.AiPerhapsImpossiblePrecision,
+                    Cv.AiPerhapsImpossibleCadence, Cv.AiPerhapsImpossibleJitter,
+                    Cv.AiPerhapsImpossibleHysteresis, Cv.AiPerhapsImpossibleAllinLead,
+                    Cv.AiPerhapsImpossibleSoldierRatio, Cv.AiPerhapsImpossibleQueueDepth,
+                    Cv.AiPerhapsImpossibleMaxBuildings, Cv.AiPerhapsImpossibleDefenceFloor,
+                    Cv.AiPerhapsImpossibleBuildCluster, Cv.AiPerhapsImpossibleMinerQueue, Cv.AiPerhapsImpossibleWaveLead};
         case EAiTier::Hard:
             return {Cv.AiHardOpenWorkers, Cv.AiHardWorkerTarget, Cv.AiHardStaleness,
                     Cv.AiHardPrecision, Cv.AiHardCadence, Cv.AiHardJitter, Cv.AiHardHysteresis,
                     Cv.AiHardAllinLead, Cv.AiHardSoldierRatio,
                     Cv.AiHardQueueDepth, Cv.AiHardMaxBuildings, Cv.AiHardDefenceFloor,
-                    Cv.AiHardBuildCluster};
+                    Cv.AiHardBuildCluster, Cv.AiHardMinerQueue, Cv.AiHardWaveLead};
         case EAiTier::Medium:
         default:
             return {Cv.AiMediumOpenWorkers, Cv.AiMediumWorkerTarget, Cv.AiMediumStaleness,
                     Cv.AiMediumPrecision, Cv.AiMediumCadence, Cv.AiMediumJitter,
                     Cv.AiMediumHysteresis, Cv.AiMediumAllinLead, Cv.AiMediumSoldierRatio,
                     Cv.AiMediumQueueDepth, Cv.AiMediumMaxBuildings, Cv.AiMediumDefenceFloor,
-                    Cv.AiMediumBuildCluster};
+                    Cv.AiMediumBuildCluster, Cv.AiMediumMinerQueue, Cv.AiMediumWaveLead};
     }
 }
 
@@ -349,6 +357,37 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         CounterEnemy_ != UnitNone ? CounterTo(CounterEnemy_) : static_cast<uint8_t>(UnitRock);
 
     if (MyMiners > PeakMiners_) PeakMiners_ = MyMiners;   // high-water mark (see the econ floor)
+
+    // ---- WAVE ETA: how many ticks until the nearest enemy soldier REACHES something of ours ----
+    // The owner's strategy, in his words: "I build economy, keeping queues as low as possible to
+    // expand mining camps as fast as possible, until the first wave from the opponent comes — that
+    // is when I build a cluster of counter unit buildings and max out their stacks. I counter right
+    // before the first wave reaches the base camp."
+    //
+    // Reacting at first SIGHTING (what every tier did) throws that away: the wave needs ~34s to
+    // cross the opening frontier, and the AI spent all of it making soldiers out of income it could
+    // have compounded into camps. So measure ARRIVAL, not existence — Chebyshev over the enemy's own
+    // speed, the same metric the sim moves them with, so it is ticks and not a guess.
+    int32_t WaveEta = INT32_MAX;
+    for (int32_t J = 0; J < S.Count; ++J) {
+        if (!S.IsAlive(J) || S.IsBuilding(J) || S.Team[J] == MyTeam_) continue;
+        const uint8_t Jt = S.Type[J];
+        if (Jt < UnitRock || Jt > UnitScissor) continue;      // carts are not a wave
+        const Fixed Sp = S.Units[Jt].Speed;
+        if (Sp.Raw <= 0) continue;
+        Fixed Near{0}; bool Any = false;
+        for (int32_t B = 0; B < S.Count; ++B) {               // nearest thing of MINE it is walking at
+            if (!S.IsAlive(B) || !S.IsBuilding(B) || S.Team[B] != MyTeam_) continue;
+            const Fixed D = Max(Abs(S.PosX[B] - S.PosX[J]), Abs(S.PosY[B] - S.PosY[J]));
+            if (!Any || D < Near) { Near = D; Any = true; }
+        }
+        if (!Any) continue;
+        const int32_t Eta = (Near / Sp).ToInt();
+        if (Eta < WaveEta) WaveEta = Eta;
+    }
+    // Inside the lead window the wave is "arriving": time to stop expanding and answer it. A tier
+    // with WaveLead 0 keeps the old sighting rule, so the measured lower rungs are untouched.
+    const bool WaveLanding = K.WaveLead <= 0 || WaveEta <= K.WaveLead;
     // ALL-IN is gated on the enemy's REPLACEMENT RATE, not on an absolute unit lead. An attack has
     // to walk the gap between the two frontiers, and production is FLAT PER BUILDING (#132), so
     // while it walks, the defender's soldier buildings each add a unit every BuildTicks. A lead
@@ -367,8 +406,8 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         State_ = EState::Opening;
     } else if (MySoldiers - EnemyArmy >= K.AllinLead + Incoming && MySoldiers > 0) {
         State_ = EState::AllIn;              // can out-kill their production -> commit
-    } else if (EnemyArmy > 0) {
-        State_ = EState::Reacting;           // contested -> army-biased, keep some economy
+    } else if (EnemyArmy > 0 && WaveLanding) {
+        State_ = EState::Reacting;           // the wave is landing -> answer it
     } else {
         State_ = EState::Building;           // safe -> grow economy, trickle soldiers
     }
@@ -496,7 +535,24 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // first-timer issuing ~10 queue commands a match is a 20x throughput gap in decisions alone.
     // Carts use the SHALLOW miner depth, soldiers the tier's own depth. Keeping every camp ticking
     // over on a short queue while the surplus banks toward another camp is the whole opening.
-    const int32_t RawDepth = Want == UnitMiner ? S.Cv.AiMinerQueueDepth : K.QueueDepth;
+    // Carts use the tier's own miner batch when it sets one, else the shared shallow depth — and
+    // the same two-phase rule as soldiers, for the same stated reason: "keep queues as low as
+    // possible to expand mining camps as fast as possible" while banking, then "just spam carts"
+    // once committed. Before the wave a shallow cart batch is not thrift, it is TEMPO: the gold not
+    // sitting in a camp's queue is the gold that buys the next camp.
+    const int32_t MinerBase = K.MinerQueue > 0 ? K.MinerQueue : S.Cv.AiMinerQueueDepth;
+    const int32_t MinerDepth = (K.WaveLead > 0 && WaveLanding && State_ != EState::Building)
+                                   ? S.Cv.BuildingQueueMax
+                                   : MinerBase;
+    // Soldiers: the tier's batch normally, but MAX THE STACKS when a wave is landing. Two depths,
+    // because the owner's build uses two: queues as shallow as possible while expanding (every gold
+    // in a queue is gold not in another camp), then stacks maxed the moment he commits to counters.
+    // One global depth cannot be both, which is why no single value measured well — 4 beat hard
+    // 15/16 and 5 lost 1/16 on the same seeds, chaos rather than signal.
+    const int32_t SoldierDepth = (K.WaveLead > 0 && WaveLanding && State_ != EState::Building)
+                                     ? S.Cv.BuildingQueueMax
+                                     : K.QueueDepth;
+    const int32_t RawDepth = Want == UnitMiner ? MinerDepth : SoldierDepth;
     const int32_t Depth = RawDepth > 0 ? RawDepth : 1;
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
     // Below the floor the expansion MARGIN is skipped: buy the building the moment it is affordable

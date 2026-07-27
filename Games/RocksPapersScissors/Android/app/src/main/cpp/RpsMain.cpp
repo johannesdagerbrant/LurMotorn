@@ -132,7 +132,8 @@ struct AppState {
     // (the sim's units) so no float crosses the thread boundary in a different form than the wire.
     std::atomic<bool>    PendingCamp{false};
     std::atomic<int32_t> PendingCampX{0}, PendingCampY{0};
-    std::atomic<int>     AiWins_[3]{}, AiLosses_[3]{}, AiDraws_[3]{};  // vs each AI tier
+    std::atomic<int>     AiWins_[Rps::AiTierCount]{}, AiLosses_[Rps::AiTierCount]{},
+                         AiDraws_[Rps::AiTierCount]{};  // vs each AI tier
     std::atomic<int>     PeerWins_{0}, PeerLosses_{0}, PeerDraws_{0};  // vs the linked peer
 };
 
@@ -872,7 +873,7 @@ void android_main(android_app* App) {
                 State.View.SelectLinkedOpponent();
             // #2: push the per-opponent SESSION scores to the selector (no-op when unchanged, so this
             // only rebuilds the list on a real change).
-            for (int T = 0; T < 3; ++T)
+            for (int T = 0; T < Rps::AiTierCount; ++T)
                 State.View.SetAiScore(T, State.AiWins_[T].load(std::memory_order_relaxed),
                                       State.AiLosses_[T].load(std::memory_order_relaxed),
                                       State.AiDraws_[T].load(std::memory_order_relaxed));

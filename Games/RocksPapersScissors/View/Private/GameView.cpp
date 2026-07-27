@@ -342,15 +342,18 @@ void GameView::RefreshSelector() {
     // hot-seat row: it's an AI or a linked opponent. Each row shows its session "W-L-D" score at
     // the right end. Picking any row (re)starts/switches to that match immediately (the main polls
     // TakeAiTier / TakePeerPick). Persistent peer enumeration + cross-launch scores ride #15-20.
-    const char* Names[3] = {"Easy", "Medium", "Hard"};
-    const Color Dots[3] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
-                           {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
-                           {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f}};
+    // Green / amber / red / WHITE. The traffic-light run stops at red because red is as far as that
+    // metaphor goes — the fourth tier is off the scale, and white reads as "not on the ladder" at a
+    // glance rather than "even redder". It is also the brightest dot in the list, which is the point.
+    const Color Dots[AiTierCount] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
+                                     {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
+                                     {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f},
+                                     {Srgb(0xFF), Srgb(0xFF), Srgb(0xFF), 1.0f}};
     // ORDER (feedback 2026-07-25): the LINKED opponent sits at the TOP — a human peer is the main
     // event and the AI tiers are the fallback below it — with an "AI OPPONENTS" header between
     // them. The header is non-selectable and the widget draws a divider line above any header that
     // isn't the first row, so that one row IS the requested separating line.
-    Lur::Hud::DropdownItem Items[5];
+    Lur::Hud::DropdownItem Items[2 + AiTierCount];   // linked row + header + one per tier
     char Buf[24];
     int N = 0;
     if (Linked) {
@@ -368,8 +371,8 @@ void GameView::RefreshSelector() {
         Items[N].Lead = Lur::Hud::ELeadStyle::None;
         ++N;
     }
-    for (int T = 0; T < 3; ++T, ++N) {
-        Items[N].Label = Names[T];
+    for (int T = 0; T < AiTierCount; ++T, ++N) {
+        Items[N].Label = AiTierName(static_cast<EAiTier>(T));
         Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
         Items[N].LeadFill = Dots[T];
         std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", AiScoreW_[T], AiScoreL_[T], AiScoreD_[T]);
@@ -384,7 +387,7 @@ void GameView::RefreshSelector() {
 }
 
 void GameView::SetAiScore(int Tier, int W, int L, int D) {
-    if (Tier < 0 || Tier > 2) return;
+    if (Tier < 0 || Tier >= AiTierCount) return;
     if (AiScoreW_[Tier] == W && AiScoreL_[Tier] == L && AiScoreD_[Tier] == D) return;
     AiScoreW_[Tier] = W; AiScoreL_[Tier] = L; AiScoreD_[Tier] = D;
     SelectorDirty = true;

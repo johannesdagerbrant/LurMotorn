@@ -25,7 +25,23 @@
 
 namespace Rps {
 
-enum class EAiTier : uint8_t { Easy = 0, Medium = 1, Hard = 2 };
+// APPEND-ONLY: the value is stored in flight recordings (`tier <n>`) and in the per-tier score
+// arrays, so renumbering an existing tier silently relabels history.
+enum class EAiTier : uint8_t { Easy = 0, Medium = 1, Hard = 2, PerhapsImpossible = 3 };
+// One source of truth for "how many tiers are there". Every per-tier array (score tallies, the
+// opponent selector's rows, the harness name tables) sizes off this — the alternative is a literal
+// 3 in a dozen places, and a new tier then works everywhere except the one place that was missed.
+constexpr int AiTierCount = 4;
+// Display names, indexed by EAiTier. The UI shows these verbatim.
+inline const char* AiTierName(EAiTier T) {
+    switch (T) {
+        case EAiTier::Easy:              return "Easy";
+        case EAiTier::Medium:            return "Medium";
+        case EAiTier::Hard:              return "Hard";
+        case EAiTier::PerhapsImpossible: return "Perhaps Impossible";
+    }
+    return "?";
+}
 
 // The nine per-tier knobs, resolved from the latched CvSnapshot for one tier.
 struct AiKnobs {
@@ -36,7 +52,17 @@ struct AiKnobs {
         // showed the shared values were the dominant term in how brutal easy feels: it out-economised
         // first-timers ~3x and converted the bank into 90-220 soldiers. Volume is now per-tier so
         // easy's ramp can be paced to a real beginner's.
-        QueueDepth, MaxBuildings, DefenceFloor, BuildCluster;
+        QueueDepth, MaxBuildings, DefenceFloor, BuildCluster,
+        // Carts per batch. 0 = use the shared rps.ai.miner_queue_depth, which is what every
+        // tier below the top does — their economies are tuned against that value.
+        MinerQueue,
+        // WAVE LEAD (the owner's own strategy, 2026-07-27): he keeps expanding mining right up
+        // until the opponent's first wave is nearly at his camp, and only THEN commits a cluster of
+        // counter buildings with their stacks maxed. Reacting at first SIGHTING instead — what every
+        // tier did — spends the whole walk (~34s at the opening frontier) building soldiers it did
+        // not need yet, out of income it could have compounded. Ticks of lead before arrival;
+        // 0 keeps the old sighting behaviour, which is what the measured lower tiers are tuned on.
+        WaveLead;
 };
 AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier);
 

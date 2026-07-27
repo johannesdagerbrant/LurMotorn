@@ -120,7 +120,7 @@ Rps::Fixed WorldToFixed(float Wv) {
     bool _SwitchToLinked;      // selector: switch from solo to the linked peer
     bool _PeerEverReady;       // rising-edge latch for the peer-link notice
     bool _PrevPeerReady;       // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
-    int _AiW[3], _AiL[3], _AiD[3];
+    int _AiW[Rps::AiTierCount], _AiL[Rps::AiTierCount], _AiD[Rps::AiTierCount];
 }
 
 - (void)loadView {

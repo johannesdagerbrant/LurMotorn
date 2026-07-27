@@ -11,6 +11,7 @@
 #include "Lur/Math/Spring.h"   // visual-only smoothing (frontier retraction, ghost obstacle push)
 #include "Lur/Render/Renderer.h"
 #include "Lur/Text/Font.h"
+#include "Rps/AiController.h"   // EAiTier / AiTierCount / AiTierName — the opponent selector's rows
 #include "Rps/Snapshot.h"
 
 namespace Rps {
@@ -138,7 +139,7 @@ public:
                           bool FlipY, const Snapshot& Snap, uint8_t Team,
                           float& OutWx, float& OutWy, float& OutGhostXPx, float& OutGhostYPx) const;
 
-    // One-shot: the AI tier (0=Easy,1=Medium,2=Hard) just chosen from the opponent selector,
+    // One-shot: the AI tier (see EAiTier) just chosen from the opponent selector,
     // or -1 if none since the last call. The main polls this to (re)start a single-player match
     // (#127/#2 — picking a tier at ANY time starts a fresh match). Reused on desktop + phone.
     int TakeAiTier() { const int T = AiTierPicked_; AiTierPicked_ = -1; return T; }
@@ -295,7 +296,7 @@ private:
     int  AiTierPicked_ = -1;              // #127: AI tier chosen from the selector (one-shot via TakeAiTier)
     bool PeerRowPicked_ = false;          // #2: linked-opponent row chosen (one-shot via TakePeerPick)
     // #2 per-opponent session score ("W-L-D"), shown at each row's right end.
-    int  AiScoreW_[3] = {}, AiScoreL_[3] = {}, AiScoreD_[3] = {};
+    int  AiScoreW_[AiTierCount] = {}, AiScoreL_[AiTierCount] = {}, AiScoreD_[AiTierCount] = {};
     int  PeerScoreW_ = 0, PeerScoreL_ = 0, PeerScoreD_ = 0;
     float PeerLinkBannerT_ = 0.0f;        // #2 "opponent link established" blink countdown (seconds)
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock

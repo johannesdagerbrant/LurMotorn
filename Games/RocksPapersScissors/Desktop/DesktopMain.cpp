@@ -340,9 +340,9 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
 #if !LUR_SHIPPING
     Lur::Core::LoadCVarConfig("rps-cvars.cfg");  // use the tuned AI knobs if present
 #endif
-    const char* Names[] = {"easy", "medium", "hard"};
+    
     Lur::Log::Info("AI-vs-AI: team0=%s vs team1=%s, %d matches, cap %d ticks",
-                   Names[static_cast<int>(TierA)], Names[static_cast<int>(TierB)], Matches, MaxTicks);
+                   Rps::AiTierName(TierA), Rps::AiTierName(TierB), Matches, MaxTicks);
     int Wins[3] = {0, 0, 0};  // [ongoing unused], team0, team1 -> index by EResult
     int Draws = 0, Resolved = 0;
     long long SumA0 = 0, SumA1 = 0;  // army totals for the continuous strength signal
@@ -377,8 +377,8 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
     // ALSO report resolved-count and average army sizes — the continuous strength signal.
     Lur::Log::Info("AI-vs-AI RESULT: team0(%s) %d wins | team1(%s) %d wins | %d draws | %d/%d resolved | "
                    "avg army: t0=%.0f t1=%.0f",
-                   Names[static_cast<int>(TierA)], Wins[Rps::ResultTeam0Wins],
-                   Names[static_cast<int>(TierB)], Wins[Rps::ResultTeam1Wins], Draws, Resolved, Matches,
+                   Rps::AiTierName(TierA), Wins[Rps::ResultTeam0Wins],
+                   Rps::AiTierName(TierB), Wins[Rps::ResultTeam1Wins], Draws, Resolved, Matches,
                    static_cast<double>(SumA0) / Matches, static_cast<double>(SumA1) / Matches);
     return 0;
 }
@@ -389,16 +389,16 @@ int RunAiVs(Rps::EAiTier TierA, Rps::EAiTier TierB, uint64_t BaseSeed, int Match
 // one mirror match and report WHAT THE AI DID: the tick each milestone was reached (camp, first
 // miner, first soldier building, first soldier) plus a periodic census of gold/workers/soldiers/
 // buildings. Milestones that never arrive print as "-", which is the failure this exists to catch.
-int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
+int RunAiDiag(Rps::EAiTier Tier, Rps::EAiTier Tier1, uint64_t Seed, int MaxTicks, int EveryTicks) {
 #if !LUR_SHIPPING
     Lur::Core::LoadCVarConfig("rps-cvars.cfg");
 #endif
-    const char* Names[] = {"easy", "medium", "hard"};
+    
     auto S = std::make_unique<Rps::Sim>();   // ~MBs of SoA: heap, not the 1 MB main stack (#94)
     S->Init(Seed);
     Rps::AiController Ai0, Ai1;
     Ai0.Init(Seed, 0, Tier);
-    Ai1.Init(Seed, 1, Tier);
+    Ai1.Init(Seed, 1, Tier1);   // mirror unless --aidiag a:b named two
     // Census of one team: gold, alive miners, alive soldiers, producing buildings (the HQ excluded —
     // it produces nothing, so counting it would hide "this AI never built anything").
     // Mines/Max are the CART SPREAD (rps.mine.spread_slack): how many distinct deposits this
@@ -426,8 +426,8 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
         return C;
     };
     int TCamp = -1, TMiner = -1, TBldg = -1, TSoldier = -1;   // milestone ticks (-1 = never)
-    Lur::Log::Info("AI diag: tier=%s seed=0x%llx cap=%d ticks (%.0fs at %d Hz)",
-                   Names[static_cast<int>(Tier)], static_cast<unsigned long long>(Seed), MaxTicks,
+    Lur::Log::Info("AI diag: t0=%s t1=%s seed=0x%llx cap=%d ticks (%.0fs at %d Hz)",
+                   Rps::AiTierName(Tier), Rps::AiTierName(Tier1), static_cast<unsigned long long>(Seed), MaxTicks,
                    static_cast<double>(MaxTicks) / Rps::TickRateHz, Rps::TickRateHz);
     Lur::Log::Info("  tick |    t0 gold  wrk  sol  bld  mine  max |    t1 gold  wrk  sol  bld  mine  max");
     for (int T = 0; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
@@ -455,7 +455,7 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
     auto Ms = [](int T) { return T < 0 ? -1.0 : static_cast<double>(T) / Rps::TickRateHz; };
     Lur::Log::Info("AI diag RESULT (%s): camp %.1fs | first miner %.1fs | 2nd building %.1fs | "
                    "first soldier %.1fs   (-1.0 = NEVER)",
-                   Names[static_cast<int>(Tier)], Ms(TCamp), Ms(TMiner), Ms(TBldg), Ms(TSoldier));
+                   Rps::AiTierName(Tier), Ms(TCamp), Ms(TMiner), Ms(TBldg), Ms(TSoldier));
     const Census A = Look(0), B = Look(1);
     Lur::Log::Info("  final: t0 gold=%d wrk=%d sol=%d bld=%d | t1 gold=%d wrk=%d sol=%d bld=%d | "
                    "result=%u at tick %u",
@@ -483,11 +483,11 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
 #if !LUR_SHIPPING
     Lur::Core::LoadCVarConfig("rps-cvars.cfg");
 #endif
-    const char* Names[] = {"easy", "medium", "hard"};
+    
     // The player's half is everything below midfield; their build zone is the opening frontier depth.
     const int32_t Mid = Rps::WorldHeight.ToInt() / 2;
     Lur::Log::Info("AI-vs-beginner: tier=%s, %d matches, cap %d ticks (%.0fs), beginner = camp then idle",
-                   Names[static_cast<int>(Tier)], Matches, MaxTicks,
+                   Rps::AiTierName(Tier), Matches, MaxTicks,
                    static_cast<double>(MaxTicks) / Rps::TickRateHz);
     auto Ms = [](int T) { return T < 0 ? -1.0 : static_cast<double>(T) / Rps::TickRateHz; };
     long long SumSoldier = 0, SumMid = 0, SumZone = 0;
@@ -579,7 +579,7 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
     auto Avg = [&](long long Sum, int N) { return N == 0 ? -1.0 : Ms(static_cast<int>(Sum / N)); };
     Lur::Log::Info("AI-vs-beginner RESULT (%s): avg first soldier %.0fs | avg midfield %.0fs | "
                    "avg PLAYER ZONE %.0fs (%d/%d reached) | player wiped %d/%d",
-                   Names[static_cast<int>(Tier)], Avg(SumSoldier, GotSoldier), Avg(SumMid, GotMid),
+                   Rps::AiTierName(Tier), Avg(SumSoldier, GotSoldier), Avg(SumMid, GotMid),
                    Avg(SumZone, GotZone), GotZone, Matches, Wiped, Matches);
     return 0;
 }
@@ -597,10 +597,10 @@ int RunReplay(const char* Path, int EveryTicks) {
         Lur::Log::Error("replay: %s is not a valid recording", Path);
         return 1;
     }
-    const char* Tiers[] = {"easy", "medium", "hard"};
+    
     Lur::Log::Info("replay %s: seed=%llx tier=%s human=team%u events=%zu census=%zu end=tick %u result=%d",
                    Path, static_cast<unsigned long long>(R.Seed),
-                   R.Tier >= 0 && R.Tier < 3 ? Tiers[R.Tier] : "?", static_cast<unsigned>(R.HumanTeam),
+                   R.Tier >= 0 && R.Tier < Rps::AiTierCount ? Rps::AiTierName(static_cast<Rps::EAiTier>(R.Tier)) : "?", static_cast<unsigned>(R.HumanTeam),
                    R.Events.size(), R.Census.size(), R.EndTick, R.Result);
     Lur::Log::Info("  build: %s", R.BuildFp.c_str());
 
@@ -625,7 +625,7 @@ int RunReplay(const char* Path, int EveryTicks) {
         Sh->InitWithCvs(R.Seed, R.Cv);
         const uint8_t AiTeam = static_cast<uint8_t>(1 - R.HumanTeam);
         Rps::AiController Shadow;
-        Shadow.Init(R.Seed, AiTeam, R.Tier >= 0 && R.Tier < 3 ? static_cast<Rps::EAiTier>(R.Tier)
+        Shadow.Init(R.Seed, AiTeam, R.Tier >= 0 && R.Tier < Rps::AiTierCount ? static_cast<Rps::EAiTier>(R.Tier)
                                                               : Rps::EAiTier::Hard);
         std::size_t Next = 0, NextCen = 0;
         int32_t FirstAllin = -1, Diverged = -1;
@@ -761,8 +761,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     const bool UseAi = !Auto && !FlockDemo;
     if (UseAi) {
         Ai.Init(Seed, /*team*/ 1, AiTier);
-        const char* Names[] = {"easy", "medium", "hard"};
-        Lur::Log::Info("solo opponent: AI (%s)", Names[static_cast<int>(AiTier)]);
+        
+        Lur::Log::Info("solo opponent: AI (%s)", Rps::AiTierName(AiTier));
     }
     SoloAiCtx AiCtx{&Human, &Ai};
     auto Runner = std::make_unique<Rps::SimRunner>();
@@ -783,7 +783,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     int Frame = 0;
     (void)Auto; (void)FoeOnly;  // #137b: the mask-based --auto/--autofoe soak retired (event soak = #144+)
     // #2 session W-L-D per AI tier (desktop has no peer row); the current match's tier + a scored latch.
-    int SW[3] = {}, SL[3] = {}, SD[3] = {};
+    int SW[Rps::AiTierCount] = {}, SL[Rps::AiTierCount] = {}, SD[Rps::AiTierCount] = {};
     int CurTier = static_cast<int>(AiTier);
     bool Scored = false;
     uint64_t PostMatchNs = 0;   // #149 wall time held on the win/lose screen
@@ -906,8 +906,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             Runner->Start(Seed, &SampleSoloVsAi, &AiCtx, static_cast<uint32_t>(Stress < 0 ? 0 : Stress),
                           NoCombat, SoloGate);
             CamInit = false;
-            const char* Names[] = {"easy", "medium", "hard"};
-            Lur::Log::Info("solo AI match restarted (%s)", Names[NewTier]);
+            
+            Lur::Log::Info("solo AI match restarted (%s)", Rps::AiTierName(static_cast<Rps::EAiTier>(NewTier)));
         }
         // Tally the match result once it resolves, then keep the selector rows' scores current.
         if (!Scored && HaveSnap && Snap.Result != Rps::ResultOngoing) {
@@ -936,7 +936,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         } else {
             PostMatchNs = 0;
         }
-        for (int T = 0; T < 3; ++T) View.SetAiScore(T, SW[T], SL[T], SD[T]);
+        for (int T = 0; T < Rps::AiTierCount; ++T) View.SetAiScore(T, SW[T], SL[T], SD[T]);
         if (HaveSnap && W > 0 && H > 0) {
             const float GameW = static_cast<float>(W);
             const float VisibleH = static_cast<float>(H) / Ppu();
@@ -1082,14 +1082,17 @@ int main(int argc, char** argv) {
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
     bool AiDiag = false;                         // #152 headless AI milestone/census diagnostic
     bool AiBeginner = false;                     // #155 headless AI-vs-first-timer arrival clock
+    Rps::EAiTier AiDiagTier1 = Rps::EAiTier::Medium;  // --aidiag a:b -> team 1's tier
     int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
     const char* ReplayPath = nullptr;            // #144 --replay <file>: read a device recording
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
     int Matches = 9;
     int MaxTicks = 6000;
     auto ParseTier = [](const std::string& T) {
-        return T == "easy" ? Rps::EAiTier::Easy : T == "hard" ? Rps::EAiTier::Hard
-                                                              : Rps::EAiTier::Medium;
+        if (T == "easy") return Rps::EAiTier::Easy;
+        if (T == "hard") return Rps::EAiTier::Hard;
+        if (T == "impossible") return Rps::EAiTier::PerhapsImpossible;
+        return Rps::EAiTier::Medium;
     };
     for (int I = 1; I < argc; ++I) {
         std::string A = argv[I];
@@ -1107,9 +1110,16 @@ int main(int argc, char** argv) {
             AiVsA = ParseTier(V.substr(0, C));
             AiVsB = ParseTier(C == std::string::npos ? std::string{} : V.substr(C + 1));
         }
-        else if (A == "--aidiag" && I + 1 < argc) {  // #152 one mirror match, milestones + census
+        else if (A == "--aidiag" && I + 1 < argc) {  // #152 milestones + census; "a:b" = cross-tier
             AiDiag = true;
-            AiTier = ParseTier(argv[++I]);
+            const std::string V = argv[++I];
+            const auto C = V.find(':');
+            AiTier = ParseTier(V.substr(0, C));
+            // A MIRROR hides exactly the question a new tier raises ("is it better than the rung
+            // below?"), because both sides play the same build. Naming two tiers watches the
+            // matchup itself — the census then shows WHERE one pulls ahead, which a win tally
+            // from --aivs cannot.
+            AiDiagTier1 = C == std::string::npos ? AiTier : ParseTier(V.substr(C + 1));
         }
         else if (A == "--aibeginner" && I + 1 < argc) {  // #155 tier vs a camp-then-idle first-timer
             AiBeginner = true;
@@ -1135,7 +1145,7 @@ int main(int argc, char** argv) {
 #if LUR_INTERNAL
     if (ReplayPath != nullptr) return RunReplay(ReplayPath, DiagEvery);
 #endif
-    if (AiDiag) return RunAiDiag(AiTier, Seed, MaxTicks, DiagEvery);
+    if (AiDiag) return RunAiDiag(AiTier, AiDiagTier1, Seed, MaxTicks, DiagEvery);
     if (AiBeginner) return RunAiBeginner(AiTier, Seed, Matches, MaxTicks, DiagEvery);
     if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);

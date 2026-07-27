@@ -437,7 +437,7 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // is moot but harmless. Difficulty = information quality (staleness/precision) + reaction
 // cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
 // knobs for a tier so the three stay in lockstep. ----
-#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB, DF, BC)                                    \
+#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB, DF, BC, MQ, WL)                                    \
     LUR_CVAR(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
     LUR_CVAR(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
     LUR_CVAR(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
@@ -450,7 +450,9 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##QueueDepth,   "rps.ai." Pfx ".queue_depth",   QD, CVarFlagAffectsGameplay, "Units kept queued per building (batch size)"); \
     LUR_CVAR(CvAi##Tier##MaxBuildings, "rps.ai." Pfx ".max_buildings", MB, CVarFlagAffectsGameplay, "Cap on producing buildings it will place (0 = unlimited)"); \
     LUR_CVAR(CvAi##Tier##DefenceFloor, "rps.ai." Pfx ".defence_floor", DF, CVarFlagAffectsGameplay, "Combat buildings to stand up BEFORE chasing the economy target"); \
-    LUR_CVAR(CvAi##Tier##BuildCluster, "rps.ai." Pfx ".build_cluster", BC, CVarFlagAffectsGameplay, "Buildings of one type it commits to in quick succession (1 = no clustering)")
+    LUR_CVAR(CvAi##Tier##BuildCluster, "rps.ai." Pfx ".build_cluster", BC, CVarFlagAffectsGameplay, "Buildings of one type it commits to in quick succession (1 = no clustering)"); \
+    LUR_CVAR(CvAi##Tier##MinerQueue,   "rps.ai." Pfx ".miner_queue",    MQ, CVarFlagAffectsGameplay, "Carts queued per camp per batch (0 = use the shared rps.ai.miner_queue_depth)"); \
+    LUR_CVAR(CvAi##Tier##WaveLead,     "rps.ai." Pfx ".wave_lead",      WL, CVarFlagAffectsGameplay, "Ticks before an incoming wave LANDS that it switches to countering (0 = on first sighting)")
 // ---- The ladder is now STRICTLY ORDERED BY DESIGN: the better tier always beats the lesser one. ----
 // That replaces the old goal of a 77-83% adjacent-rung win rate. It is delivered by a monotonic
 // PRODUCTION-VOLUME ladder — queue_depth 8/5/3 and max_buildings unlimited/12/4 for hard/medium/easy —
@@ -519,8 +521,8 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // One thing these knobs CANNOT do is match the beginner's 5 workers at 60s — easy sits at 11 in every
 // configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
 // human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
-LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2);
+LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1, 0, 0);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 0);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -556,7 +558,43 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2);
 // unfixed hole): economy-first with no combat capacity standing means a timely attack arrives while
 // hard has zero soldier buildings and must start them from scratch, and worker_target is inert after
 // contact so no knob could reach it. The floor is capacity, not intent.
-LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3);
+LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 0);
+// ---- "Perhaps Impossible": the ladder's top rung, tuned to the OWNER'S OWN WINNING BUILD ----
+// It gets NO information hard does not have (staleness 0, precision 1 — hard already holds the
+// maximum, and there is nothing above "sees the board now, exactly"), and no extra actions: same
+// one event per tick, same event types a thumb issues. Every number below is a build-order choice,
+// which is the only axis left — and it is copied from the recordings of the player beating hard.
+//
+// What those recordings show him doing (6 matches, 2026-07-27 20:01-20:44, all wins), against
+// hard's curve at the same times — workers / army / buildings at 60/120/180/240s:
+//     him   13/ 0/2.0    69/  1/8.8   174/ 81/16.2   347/223/28.7   (peak 366 wrk, 354 army, 35 bld)
+//     hard  11/ 0/2.0    37/ 35/6.3    64/ 55/12.8   107/109/21.0   (peak  88 wrk,  99 army, 17 bld)
+// He does not out-fight it, he out-BUILDS it 4x and converts late. Hard commits its army at ~85s
+// with ~30 units into an opponent holding zero, and its economy stops there.
+//
+// Then he described the build himself, which is what these numbers encode — TWO PHASES with
+// opposite queue policies, switched by the arrival of the first wave:
+//   1. Bank. Queues as SHALLOW as possible so every spare coin buys another mining camp. Hence
+//      queue_depth 4 and miner_queue 0 (the shared shallow 2): a deep queue early is not thrift,
+//      it is gold parked where it cannot compound. This is also why raising the volume knobs made
+//      it WORSE, measured: queue_depth 16 dropped it to 2/16 against hard, build_cluster 6 to 5/16,
+//      defence_floor 8 to 4/16 — production is flat per building (#132), so anything that diverts
+//      gold from BUILDINGS diverts it from throughput.
+//   2. Answer. When the wave is nearly at the camp (wave_lead 60 ticks = 6s of warning), commit a
+//      cluster of counter buildings and MAX THE STACKS — both queues jump to queue_max for as long
+//      as the wave is landing (AiController, SoldierDepth/MinerDepth). "From that point forward I
+//      just spam carts and build new clusters to counter as early as possible."
+// allin_lead 80 (vs 10) keeps it from throwing that army away early, on top of the production-rate
+// gate; jitter 0 because the top rung does not get a random reaction delay.
+//
+// HONEST STATUS: against hard in AI-vs-AI this is currently EVEN (23 of 48 across both sides, with
+// a side asymmetry — 23/24 as team 0, 0/24 as team 1 — that is NOT explained yet; a hard-vs-hard
+// mirror on the same seeds is 10-14, so it is not simply a positional bias in the harness). It is
+// tuned against the recordings of ONE human, and AI-vs-AI is a different opponent, so "beats him"
+// is unverified until he plays it and the recording is read back. Do not trust an 8-match sweep
+// here: the sim is deterministic, so on fixed seeds queue_depth 4 measured 15/16 and 5 measured
+// 1/16 — that is chaos, not signal. Use both side orders and 24+ seeds.
+LUR_AI_TIER(PerhapsImpossible, "impossible", 5, 110, 0, 1, 12, 0, 1, 80, 55, 4, 0, 5, 4, 0, 60);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -668,7 +706,9 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(Ai##Tier##QueueDepth,   CvAi##Tier##QueueDepth)   \
     IX(Ai##Tier##MaxBuildings, CvAi##Tier##MaxBuildings) \
     IX(Ai##Tier##DefenceFloor, CvAi##Tier##DefenceFloor) \
-    IX(Ai##Tier##BuildCluster, CvAi##Tier##BuildCluster)
+    IX(Ai##Tier##BuildCluster, CvAi##Tier##BuildCluster) \
+    IX(Ai##Tier##MinerQueue,   CvAi##Tier##MinerQueue) \
+    IX(Ai##Tier##WaveLead,     CvAi##Tier##WaveLead)
 
 
 // ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----
@@ -765,7 +805,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiQueueDepth,            CvAiQueueDepth)            \
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)      \
     FX(MineSpreadSlack,         CvMineSpreadSlack)         \
-    IX(AiEconFloorPct,          CvAiEconFloorPct)
+    IX(AiEconFloorPct,          CvAiEconFloorPct)          \
+    LUR_AI_TIER_IDS(IX, PerhapsImpossible)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
