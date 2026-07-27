@@ -415,7 +415,7 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // is moot but harmless. Difficulty = information quality (staleness/precision) + reaction
 // cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
 // knobs for a tier so the three stay in lockstep. ----
-#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB)                                            \
+#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB, DF, BC)                                    \
     LUR_CVAR(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
     LUR_CVAR(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
     LUR_CVAR(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
@@ -426,7 +426,9 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##AllinLead,    "rps.ai." Pfx ".allin_lead",    AL, CVarFlagAffectsGameplay, "Army lead (units) that triggers all-in");     \
     LUR_CVAR(CvAi##Tier##SoldierRatio, "rps.ai." Pfx ".soldier_ratio", SR, CVarFlagAffectsGameplay, "Soldier bias vs workers (percent)"); \
     LUR_CVAR(CvAi##Tier##QueueDepth,   "rps.ai." Pfx ".queue_depth",   QD, CVarFlagAffectsGameplay, "Units kept queued per building (batch size)"); \
-    LUR_CVAR(CvAi##Tier##MaxBuildings, "rps.ai." Pfx ".max_buildings", MB, CVarFlagAffectsGameplay, "Cap on producing buildings it will place (0 = unlimited)")
+    LUR_CVAR(CvAi##Tier##MaxBuildings, "rps.ai." Pfx ".max_buildings", MB, CVarFlagAffectsGameplay, "Cap on producing buildings it will place (0 = unlimited)"); \
+    LUR_CVAR(CvAi##Tier##DefenceFloor, "rps.ai." Pfx ".defence_floor", DF, CVarFlagAffectsGameplay, "Combat buildings to stand up BEFORE chasing the economy target"); \
+    LUR_CVAR(CvAi##Tier##BuildCluster, "rps.ai." Pfx ".build_cluster", BC, CVarFlagAffectsGameplay, "Buildings of one type it commits to in quick succession (1 = no clustering)")
 // ---- The ladder is now STRICTLY ORDERED BY DESIGN: the better tier always beats the lesser one. ----
 // That replaces the old goal of a 77-83% adjacent-rung win rate. It is delivered by a monotonic
 // PRODUCTION-VOLUME ladder — queue_depth 8/5/3 and max_buildings unlimited/12/4 for hard/medium/easy —
@@ -495,8 +497,8 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // One thing these knobs CANNOT do is match the beginner's 5 workers at 60s — easy sits at 11 in every
 // configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
 // human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
-LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12);
+LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 1);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -528,7 +530,11 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12);
 // 0/12 at 20. The note above already predicted it — a deep queue commits gold to a TYPE, and hard is
 // the tier that re-counters fastest, so it is the tier a deep queue punishes most. Raising it was a
 // direct contradiction of measured history and it cost every match.
-LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0);
+// defence_floor 3 is what BUYS the greed above. worker_target 110 alone lost to medium (#154's
+// unfixed hole): economy-first with no combat capacity standing means a timely attack arrives while
+// hard has zero soldier buildings and must start them from scratch, and worker_target is inert after
+// contact so no knob could reach it. The floor is capacity, not intent.
+LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 1);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -606,7 +612,9 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(Ai##Tier##AllinLead,    CvAi##Tier##AllinLead)    \
     IX(Ai##Tier##SoldierRatio, CvAi##Tier##SoldierRatio) \
     IX(Ai##Tier##QueueDepth,   CvAi##Tier##QueueDepth)   \
-    IX(Ai##Tier##MaxBuildings, CvAi##Tier##MaxBuildings)
+    IX(Ai##Tier##MaxBuildings, CvAi##Tier##MaxBuildings) \
+    IX(Ai##Tier##DefenceFloor, CvAi##Tier##DefenceFloor) \
+    IX(Ai##Tier##BuildCluster, CvAi##Tier##BuildCluster)
 
 
 // ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----

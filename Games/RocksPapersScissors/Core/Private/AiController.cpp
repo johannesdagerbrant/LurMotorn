@@ -8,18 +8,21 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
             return {Cv.AiEasyOpenWorkers, Cv.AiEasyWorkerTarget, Cv.AiEasyStaleness,
                     Cv.AiEasyPrecision, Cv.AiEasyCadence, Cv.AiEasyJitter, Cv.AiEasyHysteresis,
                     Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio,
-                    Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings};
+                    Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings, Cv.AiEasyDefenceFloor,
+                    Cv.AiEasyBuildCluster};
         case EAiTier::Hard:
             return {Cv.AiHardOpenWorkers, Cv.AiHardWorkerTarget, Cv.AiHardStaleness,
                     Cv.AiHardPrecision, Cv.AiHardCadence, Cv.AiHardJitter, Cv.AiHardHysteresis,
                     Cv.AiHardAllinLead, Cv.AiHardSoldierRatio,
-                    Cv.AiHardQueueDepth, Cv.AiHardMaxBuildings};
+                    Cv.AiHardQueueDepth, Cv.AiHardMaxBuildings, Cv.AiHardDefenceFloor,
+                    Cv.AiHardBuildCluster};
         case EAiTier::Medium:
         default:
             return {Cv.AiMediumOpenWorkers, Cv.AiMediumWorkerTarget, Cv.AiMediumStaleness,
                     Cv.AiMediumPrecision, Cv.AiMediumCadence, Cv.AiMediumJitter,
                     Cv.AiMediumHysteresis, Cv.AiMediumAllinLead, Cv.AiMediumSoldierRatio,
-                    Cv.AiMediumQueueDepth, Cv.AiMediumMaxBuildings};
+                    Cv.AiMediumQueueDepth, Cv.AiMediumMaxBuildings, Cv.AiMediumDefenceFloor,
+                    Cv.AiMediumBuildCluster};
     }
 }
 
@@ -68,15 +71,42 @@ TypeCapacity SurveyType(const Sim& S, uint8_t Team, uint8_t Type) {
 // high-water — so the AI grows into the ground it earns instead of being boxed in by a sweep that
 // stopped short of its own buildable depth.
 bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY) {
-    const int32_t Base = Team == 0 ? 5 : (WorldHeight.ToInt() - 5);
+    // Two passes, and the split matters.
+    //
+    // PASS 1 is the historic layout, but DERIVED rather than hardcoded: at the default footprint 3 it
+    // reproduces the old table exactly (X = 8/14/20/26, rows every 4), so the balance measured against
+    // that layout is preserved, while a tuned footprint now scales it instead of breaking it. Deriving
+    // to different numbers is not free — a uniform fine grid changed where every fallback building
+    // goes and cost hard 11 of 16 against medium.
+    //
+    // PASS 2 is a fine sweep that only runs when pass 1 finds nothing. That is what rescues a tight
+    // map: at footprint 6 the coarse rows step 13 and jump clean over the only legal band (a brute
+    // force finds 165 legal spots around y=15), so the AI placed NOTHING — no camp, no economy. The
+    // fine pass costs nothing in the normal case because pass 1 almost always hits first.
+    const int32_t Fp = S.Cv.BuildingFootprint.ToInt();
+    const int32_t Edge = (3 * Fp + 1) / 2;      // == CanPlaceBuilding's 1.5*Fp margin, rounded up
     const int32_t Dir = Team == 0 ? 1 : -1;
-    const int32_t Xs[4] = {8, 14, 20, 26};
-    for (int32_t R = 0; R < 14; ++R)
-        for (int32_t Xi = 0; Xi < 4; ++Xi) {
-            const Fixed X = F(Xs[Xi]);
-            const Fixed Y = F(Base + Dir * R * 4);
-            if (S.CanPlaceBuilding(Team, Type, X, Y)) { OX = X; OY = Y; return true; }
+    const int32_t MaxX = WorldWidth.ToInt() - Edge;
+    for (int32_t Pass = 0; Pass < 2; ++Pass) {
+        const int32_t XStart = Pass == 0 ? 2 * Fp + 2 : Edge;
+        const int32_t XStep = Pass == 0 ? 2 * Fp : 2;
+        const int32_t RowStep = Pass == 0 ? Fp + 1 : 2;
+        const int32_t Base = Team == 0 ? (Pass == 0 ? Fp + 2 : Edge)
+                                       : WorldHeight.ToInt() - (Pass == 0 ? Fp + 2 : Edge);
+        // Pass 1 stays BOUNDED to just past the opening frontier, as the original was: sweeping the
+        // full map instead let it fall back to spots far up the field it never used to consider, and
+        // that alone swung hard from 23/24 to 8/16 against medium. Derived from InitialFrontier so it
+        // still scales, and equals the old 14 rows at the default 35. Pass 2 is unbounded because by
+        // then nothing legal was found anywhere nearer.
+        const int32_t Rows = Pass == 0 ? (S.Cv.InitialFrontier.ToInt() + 21) / RowStep
+                                       : WorldHeight.ToInt() / RowStep + 2;
+        for (int32_t R = 0; R < Rows; ++R) {
+            const int32_t Y = Base + Dir * R * RowStep;
+            if (Y < 0 || Y > WorldHeight.ToInt()) break;
+            for (int32_t X = XStart; X <= MaxX; X += XStep)
+                if (S.CanPlaceBuilding(Team, Type, F(X), F(Y))) { OX = F(X); OY = F(Y); return true; }
         }
+    }
     return false;
 }
 
@@ -95,25 +125,23 @@ bool AiPlaceSpot(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY)
 // hash-safe and identical on both peers.
 bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed TargetY, Fixed& OX,
                  Fixed& OY) {
-    // Offsets ordered by increasing distance. Coarse steps of 3 were fine while the mine clearance
-    // equalled the footprint (3), but they put a CLIFF in the clearance knob (#157): the nearest
-    // offsets are 6 then 9, so a clearance anywhere in (6, 9] made the AI skip from 6 straight to 9
-    // and every cart trip got 50% longer. Measured: clearance 6 -> hard beats easy 8-0; clearance
-    // 6.5 -> hard LOSES 0-8, purely from that quantisation, not from the map.
+    // ORDER IS BALANCE. This search picks where every building goes, so changing the ORDER in which
+    // candidates are tried changes the AI's whole layout and therefore its strength — replacing this
+    // table with a uniformly generated ring was arithmetically fine and cost hard 12 of 16 against
+    // medium. So the measured table stays exactly as it is, and robustness is added AFTER it.
     //
-    // So the rings are finer where it matters — 7, 8 and the 5/6 diagonals now exist, letting the AI
-    // sit JUST outside whatever the clearance is instead of overshooting to the next multiple of 3.
-    // Still a bounded hand-ordered table (~45 entries, integer, nearest-first) rather than a search:
-    // this runs on the expand branch and each candidate costs a CanPlaceBuilding scan.
+    // Table first (unchanged, nearest-first, tuned): fine where it matters — 7, 8 and the 5/6
+    // diagonals exist so the AI can sit JUST outside the default clearance instead of overshooting to
+    // the next multiple of 3 (that quantisation cliff cost hard 8-0 -> 0-8 between clearance 6 and 6.5).
     static const int32_t Dx[] = {
-        0,                                   // 0
-        3, -3,  0,  0,   3, -3,  3, -3,      // 3, 4.24
-        6, -6,  0,  0,                       // 6
-        0,  0,  7, -7,   5, -5,  5, -5,      // 7, 7.07
-        0,  0,  8, -8,   6, -6,  6, -6,      // 8, 8.49
-        0,  0,  9, -9,                       // 9
-        0,  0, 12, -12,  9, -9,  9, -9,      // 12, 12.73
-       12, -12, 12, -12};                    // 16.97
+        0,
+        3, -3,  0,  0,   3, -3,  3, -3,
+        6, -6,  0,  0,
+        0,  0,  7, -7,   5, -5,  5, -5,
+        0,  0,  8, -8,   6, -6,  6, -6,
+        0,  0,  9, -9,
+        0,  0, 12, -12,  9, -9,  9, -9,
+       12, -12, 12, -12};
     static const int32_t Dy[] = {
         0,
         0,  0,  3, -3,   3,  3, -3, -3,
@@ -126,11 +154,27 @@ bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed 
     static_assert(sizeof(Dx) == sizeof(Dy), "AiPlaceNear ring: Dx/Dy must pair up");
     constexpr int32_t Ring = static_cast<int32_t>(sizeof(Dx) / sizeof(Dx[0]));
     const int32_t Tx = TargetX.ToInt(), Ty = TargetY.ToInt();
-    for (int32_t I = 0; I < Ring; ++I) {
-        const int32_t X = Tx + Dx[I], Y = Ty + Dy[I];
-        if (X < 2 || X > WorldWidth.ToInt() - 2 || Y < 2 || Y > WorldHeight.ToInt() - 2) continue;
-        if (S.CanPlaceBuilding(Team, Type, F(X), F(Y))) { OX = F(X); OY = F(Y); return true; }
-    }
+    const int32_t Lo = 2, HiX = WorldWidth.ToInt() - 2, HiY = WorldHeight.ToInt() - 2;
+    auto Try = [&](int32_t X, int32_t Y) {
+        if (X < Lo || X > HiX || Y < Lo || Y > HiY) return false;
+        if (!S.CanPlaceBuilding(Team, Type, F(X), F(Y))) return false;
+        OX = F(X); OY = F(Y); return true;
+    };
+    for (int32_t I = 0; I < Ring; ++I)
+        if (Try(Tx + Dx[I], Ty + Dy[I])) return true;
+
+    // Then, ONLY if the table found nothing: keep sweeping outward to whatever the live clearance and
+    // footprint actually demand. The table stops near 17 units, so tuning rps.build.mine_clearance
+    // above that used to make every candidate illegal and the AI simply stopped expanding — a knob
+    // able to switch the AI off. This never runs at default tuning, so it cannot move the balance.
+    const int32_t Clear = S.Cv.MineClearance.ToInt();
+    const int32_t TwoFp = 2 * S.Cv.BuildingFootprint.ToInt();
+    const int32_t MaxR = (Clear > TwoFp ? Clear : TwoFp) + 12;
+    static const int32_t Ux[8] = {7, 0, -7, 0, 5, -5, 5, -5};
+    static const int32_t Uy[8] = {0, 7, 0, -7, 5, 5, -5, -5};
+    for (int32_t R = 14; R <= MaxR; R += 2)
+        for (int32_t D = 0; D < 8; ++D)
+            if (Try(Tx + R * Ux[D] / 7, Ty + R * Uy[D] / 7)) return true;
     return false;
 }
 
@@ -211,6 +255,9 @@ void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
     // Distinct RNG stream from the sim's; salted by team so two AIs (AI-vs-AI) jitter apart.
     Rng_ = Lur::Sim::SplitMix64(Seed ^ 0xA1C0DEull ^ (static_cast<uint64_t>(Team) + 1) * 0x9E3779B97F4A7C15ull);
     NextReactTick_ = 0;
+    ClusterType_ = UnitNone;
+    ClusterLeft_ = 0;
+    ClusterUntil_ = 0;
     CounterEnemy_ = UnitNone;
     State_ = EState::Opening;
     for (int32_t I = 0; I < RingSize; ++I) Ring_[I][0] = Ring_[I][1] = Ring_[I][2] = 0;
@@ -221,12 +268,18 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const AiKnobs K = KnobsFor(S.Cv, Tier_);
 
     // --- Scan the board once: my economy/army + the TRUE enemy soldier composition. ---
-    int32_t MyMiners = 0, MySoldiers = 0;
+    int32_t MyMiners = 0, MySoldiers = 0, MyCombatBldg = 0;
     int32_t TrueEnemy[3] = {0, 0, 0};  // rock, paper, scissor
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         const uint8_t Ty = S.Type[I];
         if (S.Team[I] == MyTeam_) {
+            // Combat CAPACITY, counted separately and correctly. (The MyMiners/MySoldiers tallies
+            // just below are deliberately left alone: they lump buildings in with units and the HQ
+            // in with soldiers, and every tier's ratio knob was measured against that quirk — fixing
+            // it here would silently re-balance all three tiers.)
+            if (S.IsBuilding(I) && !S.IsHomeBase(I) && Ty >= UnitRock && Ty <= UnitScissor)
+                ++MyCombatBldg;
             if (Ty == UnitMiner) ++MyMiners; else ++MySoldiers;
         } else if (Ty >= UnitRock && Ty <= UnitScissor) {
             ++TrueEnemy[Ty - UnitRock];
@@ -260,7 +313,15 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
                 CounterEnemy_ = DomType;
             } else if (DomType != CounterEnemy_) {
                 const int32_t CurCount = Seen[CounterEnemy_ - UnitRock];
-                if (Seen[Dom] >= CurCount + K.Hysteresis) CounterEnemy_ = DomType;
+                if (Seen[Dom] >= CurCount + K.Hysteresis) {
+                    CounterEnemy_ = DomType;
+                    // RE-TARGET a live cluster onto the new counter. Parallel production is only
+                    // valuable if it is parallel production of the RIGHT thing — finishing a cluster
+                    // of the old counter after the enemy composition moved is the building-scale
+                    // version of "a deep queue of the wrong type is dead gold", and far more
+                    // expensive, because a building is worth many units.
+                    if (ClusterLeft_ > 0) ClusterType_ = CounterTo(CounterEnemy_);
+                }
             }
         }
         // Schedule the next reaction with +/- jitter (seeded, deterministic).
@@ -294,7 +355,21 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         case EState::Opening: Want = UnitMiner; break;
         case EState::AllIn:   Want = Soldier; break;
         case EState::Building:
-            Want = (MyMiners < K.WorkerTarget) ? static_cast<uint8_t>(UnitMiner) : Soldier;
+            // DEFENCE FLOOR: stand up K.DefenceFloor combat buildings before chasing the economy
+            // target. Without it, economy-first means a timely attack lands while there is not one
+            // soldier building on the map, and the tier has to start production from scratch under
+            // fire -- which is precisely how an uncapped worker_target lost to medium. It costs a
+            // little tempo and buys the right to be greedy afterwards.
+            // OPPORTUNISTIC, not blocking. Making the floor take priority outright deadlocked the
+            // tier: from tick one it wanted a 1500 combat building while holding 600 and no miners,
+            // so it built no economy, earned nothing, and never afforded the building it was waiting
+            // for. Economy stays the default and a combat building is snapped up the moment one is
+            // affordable, until the floor is met -- capacity gets bought out of surplus rather than
+            // out of the income that pays for it.
+            Want = (MyCombatBldg < K.DefenceFloor &&
+                    S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, Soldier))
+                       ? Soldier
+                       : (MyMiners < K.WorkerTarget) ? static_cast<uint8_t>(UnitMiner) : Soldier;
             break;
         case EState::Reacting: {
             // Hold a soldier:worker ratio (percent of army that should be soldiers), but never
@@ -322,6 +397,44 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
         return;
     }
+    int32_t MyBuildings = 0;
+    for (int32_t J = 0; J < S.Count; ++J)
+        if (S.IsAlive(J) && S.IsBuilding(J) && !S.IsHomeBase(J) && S.Team[J] == MyTeam_)
+            ++MyBuildings;
+
+    // 1b. BUILD CLUSTER (player strategy, adopted). A standing intent to finish several buildings of
+    // ONE type before queueing anything at them — one placement per tick, never several, so the
+    // action rate stays something a human could match.
+    //
+    // The point is NOT just a faster ramp. Adding a building, queueing at it, adding another, queueing
+    // again feeds units out ONE AT A TIME into whatever is already standing there — small cannon fodder
+    // walking into a big army, which is exactly the "hard's army declines late" symptom in the
+    // recordings (113 -> 93 -> 70). Finishing the cluster first means the counter arrives as a WAVE.
+    // While the intent is live the AI deliberately does not queue: the silence is the whole point.
+    if (ClusterLeft_ > 0 && ClusterType_ != UnitNone) {
+        if (Tick >= ClusterUntil_) {
+            ClusterLeft_ = 0;   // could not fund it in time — drop the intent rather than stall forever
+        } else if (S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, ClusterType_) &&
+                   (K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings)) {
+            Fixed X, Y, Tx, Ty;
+            bool Have = false;
+            if (ClusterType_ == UnitMiner) {
+                if (AiBestMineTarget(S, MyTeam_, Tx, Ty))
+                    Have = AiPlaceNear(S, MyTeam_, ClusterType_, Tx, Ty, X, Y);
+            } else {
+                AiFrontTarget(S, MyTeam_, Tx, Ty);
+                Have = AiPlaceNear(S, MyTeam_, ClusterType_, Tx, Ty, X, Y);
+            }
+            if (!Have) Have = AiPlaceSpot(S, MyTeam_, ClusterType_, X, Y);
+            if (Have) {
+                Out[Count++] = InputEvent::Place(MyTeam_, ClusterType_, X, Y);
+                --ClusterLeft_;
+                return;
+            }
+            ClusterLeft_ = 0;   // nowhere legal left for this type; stop pretending
+        }
+    }
+
     // 2. Produce Want — spreading the work, and BUYING CAPACITY when it runs out (#144).
     //
     // Two rules, one event per tick (so a rich AI still spends over several ticks rather than in a
@@ -345,7 +458,27 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // first-timer issuing ~10 queue commands a match is a 20x throughput gap in decisions alone.
     const int32_t Depth = K.QueueDepth > 0 ? K.QueueDepth : 1;
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
-    const bool CanAffordAnother = Gold >= Price * Factor / 100;   // Price <= a few thousand: no overflow
+    // Below the floor the expansion MARGIN is skipped: buy the building the moment it is affordable
+    // rather than waiting to hold ExpandGoldFactor% of its price. A floor that waits for a comfortable
+    // bank is not a floor -- the whole point is to have capacity standing before the attack, and the
+    // attack does not wait for the AI to feel rich.
+    const bool NeedDefence = MyCombatBldg < K.DefenceFloor && Want != UnitMiner;
+    // Keep back enough for a few UNITS, in the units' own currency. The percentage margin was
+    // described as keeping "a reserve for units", but a percentage of a BUILDING price knows nothing
+    // about what a unit costs: quadruple the unit costs and the AI bought camp, camp, camp and
+    // stranded itself on 200 gold with a 400 miner it could never afford -- zero income, forever.
+    // A reserve denominated in buildings cannot protect a purchase denominated in units.
+    // The guard is deliberately MINIMAL: refuse the purchase only if it would leave the AI unable to
+    // afford even ONE unit. A flat 3-unit reserve also worked, but it fired at default tuning too and
+    // that is a balance change — it made hard fractionally stingier about expanding and cost it 15 of
+    // 32 against medium. A robustness guard that is not a no-op in the normal case is a re-tune in
+    // disguise. This version only ever triggers in the pathological case it exists for (quadruple the
+    // unit costs and the AI used to buy camp, camp, camp and strand itself with no income at all).
+    const int32_t WantUnitCost = S.Units[Want].Cost > 0 ? S.Units[Want].Cost : 1;
+    const bool LeavesEnoughForAUnit = Gold - Price >= WantUnitCost;
+    const bool CanAffordAnother = LeavesEnoughForAUnit &&
+                                  (NeedDefence ? (Gold >= Price)
+                                               : (Gold >= Price * Factor / 100));
     // EXPAND on SURPLUS, not on saturation. The earlier saturation test (all buildings already
     // carrying Depth work) could never fire, because queueing drains faster than a
     // one-decision-per-tick AI refills — so it never concluded it needed capacity and sat on its
@@ -357,10 +490,6 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // that count IS the army-throughput multiplier. Capping it is what makes a 200-unit flood
     // arithmetically impossible rather than merely slower. The HQ is excluded (it produces
     // nothing), so the cap counts exactly the buildings that generate units.
-    int32_t MyBuildings = 0;
-    for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J) && S.IsBuilding(J) && !S.IsHomeBase(J) && S.Team[J] == MyTeam_)
-            ++MyBuildings;
     const bool UnderCap = K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings;
     // The exemption is "I have NO producing buildings at all" — the forced opening camp — NOT "I have
     // none OF THIS TYPE". Per-type would silently floor the cap at one building per unit type (four),
@@ -387,6 +516,14 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         if (!Have) Have = AiPlaceSpot(S, MyTeam_, Want, X, Y);
         if (Have) {
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
+            // Commit to the rest of the cluster. Combat types only: mining camps are placed against
+            // specific deposits, so a run of them just fights AiBestMineTarget for the same ground.
+            const int32_t Cluster = K.BuildCluster > 1 ? K.BuildCluster : 1;
+            if (Cluster > 1 && Want != UnitMiner) {
+                ClusterType_ = Want;
+                ClusterLeft_ = Cluster - 1;
+                ClusterUntil_ = Tick + 300;   // 30s of patience, then give up and go back to units
+            }
             return;
         }
         // No legal spot anywhere — fall through and put the gold into units instead.

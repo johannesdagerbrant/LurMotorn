@@ -36,7 +36,7 @@ struct AiKnobs {
         // showed the shared values were the dominant term in how brutal easy feels: it out-economised
         // first-timers ~3x and converted the bank into 90-220 soldiers. Volume is now per-tier so
         // easy's ramp can be paced to a real beginner's.
-        QueueDepth, MaxBuildings;
+        QueueDepth, MaxBuildings, DefenceFloor, BuildCluster;
 };
 AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier);
 
@@ -76,6 +76,13 @@ private:
     uint32_t            NextReactTick_ = 0;    // cadence gate for the enemy-read re-decision
     uint8_t             CounterEnemy_ = UnitNone;  // enemy type we're currently countering (hysteresis)
     EState              State_ = EState::Opening;
+    // BUILD CLUSTER: a standing intent to add several buildings of ONE type in quick succession,
+    // one per tick — never several in a tick, which would be an action rate no human could match.
+    // Production is flat per building, so ramping a counter means ramping BUILDINGS, and adding them
+    // one at a time interleaved with queueing made that ramp glacial.
+    uint8_t             ClusterType_ = UnitNone;
+    int32_t             ClusterLeft_ = 0;
+    uint32_t            ClusterUntil_ = 0;      // tick deadline, so a cluster it cannot fund is dropped
 };
 
 }  // namespace Rps

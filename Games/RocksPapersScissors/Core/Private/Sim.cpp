@@ -1059,6 +1059,23 @@ void Sim::InitWithCvs(uint64_t InSeed, CvSnapshot InCv) {
     // 0/1). It's the win target — destroy the enemy's to win. Auto-placed (never dragged), so it's
     // there from the first frame while the player still drags mining camps to build the economy.
     for (uint8_t T = 0; T < 2; ++T) SpawnHomeBase(*this, T);
+    // PLAYABILITY CHECK. footprint, mine_clearance, the mine rows and the HQ position are all tunable
+    // and they compete for the same ground — push two of them far enough and the opening band has no
+    // legal spot left at all. That is not an AI bug (a human cannot place either), but it used to be
+    // SILENT: the AI just sat there having built nothing, which reads as a broken AI rather than an
+    // impossible map. Costs one coarse sweep per match, dev builds only.
+    for (uint8_t T = 0; T < 2; ++T) {
+        bool Any = false;
+        for (int32_t X = 0; X <= WorldWidth.ToInt() && !Any; X += 2)
+            for (int32_t Y = 0; Y <= WorldHeight.ToInt() && !Any; Y += 2)
+                if (CanPlaceBuilding(T, UnitMiner, F(X), F(Y))) Any = true;
+        if (!Any)
+            Lur::Log::Info("RPS map: team %u has NO legal opening placement — footprint %d / "
+                           "mine_clearance %d / mine rows %d,%d leave no buildable ground. Neither "
+                           "the AI nor a player can open; loosen one of them.",
+                           static_cast<unsigned>(T), Cv.BuildingFootprint.ToInt(),
+                           Cv.MineClearance.ToInt(), Cv.MineRowHome.ToInt(), Cv.MineRowSafe.ToInt());
+    }
     // #135/§9: the match starts with ONLY gold — no start-miners, no start buildings. Each team
     // must place its mining camp (the forced first building, ApplyPlace) to begin producing;
     // gold flows once that camp's miners are out and mining. The pre-tick-0 opening is the
