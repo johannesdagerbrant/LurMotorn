@@ -608,6 +608,82 @@ int RunReplay(const char* Path, int EveryTicks) {
     const uint64_t Hash = Rps::ReplayMatch(R, *S);
     Lur::Log::Info("  replayed to tick %u, hash %016llx", S->Tick, static_cast<unsigned long long>(Hash));
 
+    // ---- SHADOW AI: what would TODAY's AI decide on the board this match actually reached? ----
+    // The one question a win tally cannot answer. --aivs measures the AI against another AI and
+    // --aibeginner against someone who does nothing; neither plays like the person who beat it. The
+    // recording does — it IS that person's match — so we re-step it and run a fresh AiController
+    // alongside, fed the real board every tick, with its events THROWN AWAY (the recorded events
+    // drive the sim, so the board stays bit-identical to the match that happened).
+    //
+    // That makes it an observer, not a counterfactual: it cannot tell you the AI would have WON,
+    // only what it would have decided at each moment the loser was losing. For a decision defect —
+    // committing to an attack the enemy's production answers on its own — that is the whole
+    // question. Reading "allin at 150s" against a player holding 11 soldiers and 12 buildings is
+    // the bug, in one line, on the actual board.
+    {
+        auto Sh = std::make_unique<Rps::Sim>();
+        Sh->InitWithCvs(R.Seed, R.Cv);
+        const uint8_t AiTeam = static_cast<uint8_t>(1 - R.HumanTeam);
+        Rps::AiController Shadow;
+        Shadow.Init(R.Seed, AiTeam, R.Tier >= 0 && R.Tier < 3 ? static_cast<Rps::EAiTier>(R.Tier)
+                                                              : Rps::EAiTier::Hard);
+        std::size_t Next = 0, NextCen = 0;
+        int32_t FirstAllin = -1, Diverged = -1;
+        int StateTicks[4] = {};
+        for (uint32_t T = 0; T < R.EndTick; ++T) {
+            // FIDELITY GATE. A recording is only replayable by the build that made it: the sim is
+            // deterministic, so ANY sim change (a different cart-targeting tie-break is enough)
+            // sends the re-simulation down a different match from the same seed and events, and a
+            // self-consistent StateHash will not tell you — it only proves two replays agree with
+            // each other. The RECORDED census is the live truth, so compare against that. Past the
+            // first disagreement the shadow is watching a board that never existed, and its verdict
+            // means nothing.
+            while (NextCen < R.Census.size() && R.Census[NextCen].Tick < T) ++NextCen;
+            if (Diverged < 0 && NextCen < R.Census.size() && R.Census[NextCen].Tick == T) {
+                const Rps::RecordedCensus& C = R.Census[NextCen];
+                int32_t W[2] = {}, So[2] = {}, B[2] = {};
+                for (int32_t I = 0; I < Sh->Count; ++I) {
+                    if (!Sh->IsAlive(I)) continue;
+                    const int Tm = Sh->Team[I] & 1;
+                    if (Sh->Kind[I] == Rps::KindBuilding) ++B[Tm];
+                    else if (Sh->Kind[I] == Rps::KindUnit) {
+                        if (Sh->Type[I] == Rps::UnitMiner) ++W[Tm]; else ++So[Tm];
+                    }
+                }
+                const int H = R.HumanTeam & 1, A = 1 - H;
+                if (W[H] != C.Workers[0] || So[H] != C.Soldiers[0] || B[H] != C.Buildings[0] ||
+                    W[A] != C.Workers[1] || So[A] != C.Soldiers[1] || B[A] != C.Buildings[1])
+                    Diverged = static_cast<int32_t>(T);
+            }
+            Rps::InputEvent Ev[2 * Rps::MaxEventsPerTick];
+            int N = 0;
+            Shadow.DecideEvents(*Sh, Sh->Tick, Ev, Rps::MaxEventsPerTick, N);  // read-only; N ignored
+            const int St = static_cast<int>(Shadow.State());
+            if (St >= 0 && St < 4) ++StateTicks[St];
+            if (Shadow.State() == Rps::AiController::EState::AllIn && FirstAllin < 0)
+                FirstAllin = static_cast<int32_t>(T);
+            N = 0;
+            while (Next < R.Events.size() && R.Events[Next].Tick == T) {
+                if (N < static_cast<int>(2 * Rps::MaxEventsPerTick)) Ev[N++] = R.Events[Next].Event;
+                ++Next;
+            }
+            Sh->StepEvents(Ev, N);
+        }
+        if (Diverged >= 0) {
+            Lur::Log::Info("  shadow AI: UNUSABLE — re-simulation left the recorded match at tick %d "
+                           "(%.1fs). This build's sim is not the one that recorded it (%s); the census "
+                           "above is still live truth, the shadow verdict is not.",
+                           Diverged, static_cast<double>(Diverged) / Rps::TickRateHz, R.BuildFp.c_str());
+        } else {
+            Lur::Log::Info("  shadow AI (today's logic, on the REAL board — census matched all "
+                           "%zu samples): first ALL-IN %s | ticks open/build/react/allin %d/%d/%d/%d",
+                           R.Census.size(),
+                           FirstAllin < 0 ? "never"
+                                          : (std::to_string(static_cast<double>(FirstAllin) / Rps::TickRateHz) + "s").c_str(),
+                           StateTicks[0], StateTicks[1], StateTicks[2], StateTicks[3]);
+        }
+    }
+
     // The recorded census: the live truth, including the AI's internals.
     const char* States[] = {"open", "build", "react", "allin"};
     const char* Types[] = {"miner", "rock", "paper", "scissor"};

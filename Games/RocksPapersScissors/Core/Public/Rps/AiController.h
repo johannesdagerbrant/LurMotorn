@@ -83,6 +83,10 @@ private:
     uint8_t             ClusterType_ = UnitNone;
     int32_t             ClusterLeft_ = 0;
     uint32_t            ClusterUntil_ = 0;      // tick deadline, so a cluster it cannot fund is dropped
+    // High-water mark of the economy, so losses can be told apart from never having built it.
+    // "Restore what you HAD" is a floor the AI can always meet; "reach the target" is not — as an
+    // unconditional floor the target would refuse to make a single soldier against an early rush.
+    int32_t             PeakMiners_ = 0;
 };
 
 }  // namespace Rps

@@ -260,6 +260,7 @@ void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
     ClusterUntil_ = 0;
     CounterEnemy_ = UnitNone;
     State_ = EState::Opening;
+    PeakMiners_ = 0;
     for (int32_t I = 0; I < RingSize; ++I) Ring_[I][0] = Ring_[I][1] = Ring_[I][2] = 0;
 }
 
@@ -268,11 +269,18 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const AiKnobs K = KnobsFor(S.Cv, Tier_);
 
     // --- Scan the board once: my economy/army + the TRUE enemy soldier composition. ---
-    int32_t MyMiners = 0, MySoldiers = 0, MyCombatBldg = 0;
+    int32_t MyMiners = 0, MySoldiers = 0, MyCombatBldg = 0, FoeCombatBldg = 0;
     int32_t TrueEnemy[3] = {0, 0, 0};  // rock, paper, scissor
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         const uint8_t Ty = S.Type[I];
+        // Enemy SOLDIER-PRODUCING buildings: the replacement rate an attack has to out-kill (see
+        // the all-in gate). Counted exactly, not through the staleness/precision mirror, because a
+        // building is static and huge — a human sees the enemy's production the moment they look at
+        // it, and the fuzzed mirror exists to model reading a MOVING army.
+        if (S.Team[I] != MyTeam_ && S.IsBuilding(I) && !S.IsHomeBase(I) &&
+            Ty >= UnitRock && Ty <= UnitScissor)
+            ++FoeCombatBldg;
         if (S.Team[I] == MyTeam_) {
             // Combat CAPACITY, counted separately and correctly. (The MyMiners/MySoldiers tallies
             // just below are deliberately left alone: they lump buildings in with units and the HQ
@@ -334,26 +342,54 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // --- FSM state from live counts + the (held) enemy read. ---
     int32_t EnemyArmy = 0;
     for (int32_t T = 0; T < 3; ++T) EnemyArmy += TrueEnemy[T];  // pressure signal (own-side, not fuzzed)
+    // The soldier type to build: the counter to what we're tracking, or Rock until we've seen an
+    // enemy (a neutral opener — it beats scissor, loses to paper, a coin-flip default). Resolved
+    // BEFORE the FSM now, because the all-in gate below needs its speed and build time.
+    const uint8_t Soldier =
+        CounterEnemy_ != UnitNone ? CounterTo(CounterEnemy_) : static_cast<uint8_t>(UnitRock);
+
+    if (MyMiners > PeakMiners_) PeakMiners_ = MyMiners;   // high-water mark (see the econ floor)
+    // ALL-IN is gated on the enemy's REPLACEMENT RATE, not on an absolute unit lead. An attack has
+    // to walk the gap between the two frontiers, and production is FLAT PER BUILDING (#132), so
+    // while it walks, the defender's soldier buildings each add a unit every BuildTicks. A lead
+    // smaller than that is spent before it lands. This is measured, not tuned: the 2026-07-27
+    // recordings show hard committing at ~150s on a 26-unit lead over a player holding 11 soldiers
+    // and 11.6 buildings — the player's own production alone answered it — and since AllIn produces
+    // soldiers EXCLUSIVELY, the failed commitment also stopped hard's economy dead. Its workers then
+    // fell 109 -> 75 and its army 61 -> 47 while the player tripled. It lost 14 of 19 that way.
+    // AllinLead stays as the floor on top of that (a small edge is still not a commitment).
+    const Fixed Gap = Abs(S.FrontierT1 - S.FrontierT0);          // the no-man's land to cross
+    const Fixed Speed = S.Units[Soldier].Speed;
+    const int32_t WalkTicks = Speed.Raw > 0 ? (Gap / Speed).ToInt() : 0;
+    const int32_t Bt = S.Units[Soldier].BuildTicks > 0 ? S.Units[Soldier].BuildTicks : 1;
+    const int32_t Incoming = FoeCombatBldg * WalkTicks / Bt;     // units that arrive during the walk
     if (MyMiners < K.OpenWorkers) {
         State_ = EState::Opening;
-    } else if (MySoldiers - EnemyArmy >= K.AllinLead && MySoldiers > 0) {
-        State_ = EState::AllIn;              // clearly ahead -> commit everything to soldiers
+    } else if (MySoldiers - EnemyArmy >= K.AllinLead + Incoming && MySoldiers > 0) {
+        State_ = EState::AllIn;              // can out-kill their production -> commit
     } else if (EnemyArmy > 0) {
         State_ = EState::Reacting;           // contested -> army-biased, keep some economy
     } else {
         State_ = EState::Building;           // safe -> grow economy, trickle soldiers
     }
 
-    // The soldier type to build: the counter to what we're tracking, or Rock until we've seen
-    // an enemy (a neutral opener — it beats scissor, loses to paper, a coin-flip default).
-    const uint8_t Soldier =
-        CounterEnemy_ != UnitNone ? CounterTo(CounterEnemy_) : static_cast<uint8_t>(UnitRock);
-
     // --- Pick ONE type to press this tick per state (continuous production, gold-gated). ---
+    // ECONOMY FLOOR, checked in the two states that otherwise bias soldiers unconditionally:
+    // REPLACE WHAT WAS KILLED before going back to army. The recorded losses show why — the
+    // player's raiders rank an enemy CART top priority (TargetPrefer), so hard's carts died faster
+    // than a ratio rule would ever rebuy them: in Reacting the soldier bias is `soldiers < ratio %
+    // of total`, and a DECAYING army never reaches the ratio, so it never asks for a miner again.
+    // Economy decay then feeds army decay. Floored on the high-water mark (capped by the tier's own
+    // target) so this only ever restores losses: flooring on WorkerTarget outright would refuse to
+    // build a single soldier against an early rush, which is a much worse failure.
+    const int32_t EconFloor = (PeakMiners_ < K.WorkerTarget ? PeakMiners_ : K.WorkerTarget) *
+                              S.Cv.AiEconFloorPct / 100;
     uint8_t Want = UnitMiner;
     switch (State_) {
         case EState::Opening: Want = UnitMiner; break;
-        case EState::AllIn:   Want = Soldier; break;
+        case EState::AllIn:
+            Want = MyMiners < EconFloor ? static_cast<uint8_t>(UnitMiner) : Soldier;
+            break;
         case EState::Building:
             // DEFENCE FLOOR: stand up K.DefenceFloor combat buildings before chasing the economy
             // target. Without it, economy-first means a timely attack lands while there is not one
@@ -377,6 +413,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             const int32_t Total = MySoldiers + MyMiners + 1;
             const bool WantSoldier = MySoldiers * 100 < K.SoldierRatio * Total;
             Want = (MyMiners < K.OpenWorkers)  ? static_cast<uint8_t>(UnitMiner)
+                   : (MyMiners < EconFloor)    ? static_cast<uint8_t>(UnitMiner)  // restore losses
                    : WantSoldier               ? Soldier
                                                : static_cast<uint8_t>(UnitMiner);
             break;

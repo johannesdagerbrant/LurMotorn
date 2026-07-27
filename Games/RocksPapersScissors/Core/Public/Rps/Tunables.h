@@ -626,6 +626,18 @@ LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 8, CVarFlagAffectsGameplay,
 LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffectsGameplay,
          "Gold needed to add a building, as a percent of its cost (200 = can afford two)");
 
+// How much of a RAIDED economy the AI rebuilds before going back to army, as a percent of the
+// economy it had at its peak (capped by the tier's worker_target). This is loss REPLACEMENT, not
+// growth: 100 = rebuy every dead cart, 0 = the old behaviour (never rebuy once the soldier bias is
+// on). It exists because the two army-biased states are blind to economy DECAY — Reacting asks for
+// soldiers while `soldiers < ratio % of total` and AllIn asks for nothing else at all, so a
+// decaying army keeps the bias on forever and the carts are never replaced. Measured on the
+// 2026-07-27 recordings: after hard's failed 150s commitment its workers fell 109 -> 75 and its
+// army followed, 61 -> 47, while the player tripled both. Shared, not per-tier: replacing what was
+// killed is competence, not difficulty, and easy is paced by its volume knobs instead.
+LUR_CVAR(CvAiEconFloorPct, "rps.ai.econ_floor_pct", 100, CVarFlagAffectsGameplay,
+         "Percent of its PEAK economy the AI rebuys after losses before resuming army production");
+
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
 // into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
 // LUR_RPS_GAMEPLAY_CVARS X-list below. They change what the BUILD does, not what the SIM computes,
@@ -752,7 +764,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(AiFrontSetback,          CvAiFrontSetback)          \
     IX(AiQueueDepth,            CvAiQueueDepth)            \
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)      \
-    FX(MineSpreadSlack,         CvMineSpreadSlack)
+    FX(MineSpreadSlack,         CvMineSpreadSlack)         \
+    IX(AiEconFloorPct,          CvAiEconFloorPct)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
