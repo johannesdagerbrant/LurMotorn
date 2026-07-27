@@ -498,7 +498,7 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
 // human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
 LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 1);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -534,7 +534,7 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 1);
 // unfixed hole): economy-first with no combat capacity standing means a timely attack arrives while
 // hard has zero soldier buildings and must start them from scratch, and worker_target is inert after
 // contact so no knob could reach it. The floor is capacity, not intent.
-LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 1);
+LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -573,15 +573,35 @@ LUR_CVAR(CvAiMineServedRadius, "rps.ai.mine_served_radius", F(7), CVarFlagAffect
 // that close to the leading edge sit in contested ground and get razed. The human gets away with it
 // because he plants forward BEHIND a mass he already has; the AI plants forward and then loses the
 // building. Forward production is only safe once there is an army in front of it.
+// How many units the AI must be able to STOCK each building of a cluster with before it commits to
+// that cluster. This is what makes clustering safe: the first attempt committed on nothing but intent,
+// so a poor AI spent its ticks placing empty buildings and queued nothing, and the silence lost it
+// 4 of 16 against medium. Gating on "can I fill them" means it only goes quiet when it can afford the
+// wave that follows -- which is the whole point of the strategy it is copying.
+// MINER queue depth, separate from the combat queue depth and deliberately SHALLOW. Copied from the
+// player's opening: he queues only ~2 carts per camp at a time -- enough to keep every camp producing,
+// while the gold that a deeper queue would have swallowed accrues toward the NEXT CAMP instead. The
+// AI was using its combat depth (8) for carts, so its opening gold sat locked in one camp's queue and
+// its second camp came late. Production is flat per building, so early gold spent on CAMPS compounds
+// and the same gold spent on a deep cart queue does not: parallel mining beats a long line at one camp.
+LUR_CVAR(CvAiMinerQueueDepth, "rps.ai.miner_queue_depth", 2, CVarFlagAffectsGameplay,
+         "Carts the AI keeps queued per mining camp (shallow, so gold banks toward the next camp)");
+LUR_CVAR(CvAiClusterFillUnits, "rps.ai.cluster_fill_units", 10, CVarFlagAffectsGameplay,
+         "Units the AI must be able to afford per building before committing to a cluster");
 LUR_CVAR(CvAiFrontSetback, "rps.ai.front_setback", F(8), CVarFlagAffectsGameplay,
          "How far behind its own frontier the AI builds combat buildings (world units)");
 LUR_CVAR(CvAiQueueDepth, "rps.ai.queue_depth", 8, CVarFlagAffectsGameplay,
          "Units the AI keeps queued per building before it wants more capacity");
-// 130, down from 200: at 200 it hoarded twice a building's price before adding capacity, which is why
-// hard finished matches sitting on gold with too few buildings to spend it. Left SHARED on purpose —
-// easy and medium are already bounded by their per-tier max_buildings (4 / 12), so eager expansion
-// lifts hard without disturbing the strict tier ordering.
-LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 130, CVarFlagAffectsGameplay,
+// 200. I lowered this to 130 believing hard hoarded; measured across the finished behaviour it is a
+// SHARP optimum and 130 was simply wrong. Once the shallow miner queue was in, eager expansion made
+// hard sprawl into 14 buildings with ONE soldier -- all capacity, never converted -- and it lost 4/16
+// to medium. Thrift is no better: at 300+ it under-expands into a 19-worker, 3-building economy and
+// loses 5/16. At 200 it banks enough to answer with quick, expensive counters and takes 15/16 and
+// 16/16. Left SHARED: easy and medium are bounded by their per-tier max_buildings (4 / 12).
+//   130 -> 4/16   (wrk 110, sol 1,  bld 14)
+//   200 -> 15/16  (wrk 114, sol 47, bld 16)
+//   300 -> 5/16   (wrk 19,  sol 4,  bld 3)
+LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffectsGameplay,
          "Gold needed to add a building, as a percent of its cost (200 = can afford two)");
 
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
@@ -696,6 +716,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     LUR_AI_TIER_IDS(IX, Medium)                            \
     LUR_AI_TIER_IDS(IX, Hard)                              \
     FX(AiMineServedRadius,      CvAiMineServedRadius)      \
+    IX(AiMinerQueueDepth,       CvAiMinerQueueDepth)       \
+    IX(AiClusterFillUnits,      CvAiClusterFillUnits)      \
     FX(AiFrontSetback,          CvAiFrontSetback)          \
     IX(AiQueueDepth,            CvAiQueueDepth)            \
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)

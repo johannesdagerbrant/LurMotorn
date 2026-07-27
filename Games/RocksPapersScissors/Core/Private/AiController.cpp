@@ -414,7 +414,8 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     if (ClusterLeft_ > 0 && ClusterType_ != UnitNone) {
         if (Tick >= ClusterUntil_) {
             ClusterLeft_ = 0;   // could not fund it in time — drop the intent rather than stall forever
-        } else if (S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, ClusterType_) &&
+        } else if (S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, ClusterType_) +
+                                              S.Cv.AiClusterFillUnits * S.Units[ClusterType_].Cost &&
                    (K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings)) {
             Fixed X, Y, Tx, Ty;
             bool Have = false;
@@ -456,7 +457,10 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // PER-TIER batch size now (K.QueueDepth), not the shared rps.ai.queue_depth. The shared value
     // was the single biggest reason easy buried a beginner: batching 8 at a time against a
     // first-timer issuing ~10 queue commands a match is a 20x throughput gap in decisions alone.
-    const int32_t Depth = K.QueueDepth > 0 ? K.QueueDepth : 1;
+    // Carts use the SHALLOW miner depth, soldiers the tier's own depth. Keeping every camp ticking
+    // over on a short queue while the surplus banks toward another camp is the whole opening.
+    const int32_t RawDepth = Want == UnitMiner ? S.Cv.AiMinerQueueDepth : K.QueueDepth;
+    const int32_t Depth = RawDepth > 0 ? RawDepth : 1;
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
     // Below the floor the expansion MARGIN is skipped: buy the building the moment it is affordable
     // rather than waiting to hold ExpandGoldFactor% of its price. A floor that waits for a comfortable
@@ -518,11 +522,22 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
             // Commit to the rest of the cluster. Combat types only: mining camps are placed against
             // specific deposits, so a run of them just fights AiBestMineTarget for the same ground.
-            const int32_t Cluster = K.BuildCluster > 1 ? K.BuildCluster : 1;
-            if (Cluster > 1 && Want != UnitMiner) {
+            // SIZE THE CLUSTER TO THE ECONOMY. Commit to at most K.BuildCluster buildings, and only
+            // to as many as it can also STOCK with ClusterFillUnits units each -- a cluster it cannot
+            // fill is just a quiet period followed by empty buildings. Poor -> 1 (no clustering at
+            // all, so nothing changes when it is broke); rich -> the full cluster, which is exactly
+            // when a human commits to parallel production of a counter.
+            // The fill guarantee is checked PER BUILDING as each one is placed (see the cluster
+            // branch above), not as a lump sum up front. Demanding the whole cluster's gold at once
+            // made clustering unreachable: 2 x (1500 + 10 x 50) is over 3000 banked, and hard never
+            // holds that because it spends eagerly — the feature simply never fired, at any fill
+            // value. "In quick succession" means the buildings arrive as income allows, each one
+            // still stocked when it lands; the patience window bounds how long that may take.
+            const int32_t FillCost = S.Cv.AiClusterFillUnits * WantUnitCost;
+            if (K.BuildCluster > 1 && Want != UnitMiner && Gold >= Price + FillCost) {
                 ClusterType_ = Want;
-                ClusterLeft_ = Cluster - 1;
-                ClusterUntil_ = Tick + 300;   // 30s of patience, then give up and go back to units
+                ClusterLeft_ = K.BuildCluster - 1;   // this tick places the first of them
+                ClusterUntil_ = Tick + 300;          // 30s of patience, then back to producing units
             }
             return;
         }
