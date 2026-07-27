@@ -224,8 +224,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
     // building still reads as "this team, this type" at a glance; only its intensity yields.
     // Applied via HSV rather than an alpha fade: fading toward the background washed the colour out
     // and made two teams' buildings converge on the same murky grey, losing the ownership read.
-    // darker + more desaturated again (was 0.55/0.70). With the +1/+5 labels sitting CENTRED
-    // over the icon, the building is deliberately a BACKDROP: knocking the art back is what makes
+    // darker + more desaturated again (was 0.55/0.70). With the +1/+5 labels sitting ON
+    // the icon, the building is deliberately a BACKDROP: knocking the art back is what makes
     // the controls read on top of it without needing a plate behind them. This is the other way to
     // solve the occlusion — recede the art rather than move the UI off it.
     constexpr float BldgSat = 0.42f;   // vs 1.0 for units
@@ -787,8 +787,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     }
 
     // #140 per-building UI, present on EVERY local building all the time. Each shows: a HEALTH bar
-    // ABOVE; two TALL x1/x5 buttons stacked to its LEFT, pulled IN so they overlap the icon a bit
-    // (semi-transparent, so the building reads through); and — while producing — an "N/max" queue
+    // ABOVE; the +1/+5 buttons on a diagonal INSIDE the icon (bottom-left / top-right) with the unit
+    // price in the freed bottom-right corner; and — while producing — an "N/max" queue
     // count + next-unit PROGRESS bar BELOW. Buttons dim when unaffordable; their rects are captured
     // for OnProductionButton (tapped on the input thread). All world-anchored, so they scroll along.
     {
@@ -819,18 +819,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float CtrlW = BldgPx + 6.0f * HS;
         const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
         const float Bh = 48.0f * HS;   // a little bigger — bigger target AND a bigger label
-        const float LabelPx = 31.0f * HS;   // named once — the digit bias below is derived from it
-        // PERCEPTUAL correction, not a geometry fix. The boxes are mathematically symmetric
-        // (centres land on Bx-Half and Bx+Half), but the label is "+N": the DIGIT, which is the part
-        // you actually read, sits on the RIGHT of the pair. On the left button that puts the digit
-        // toward the building; on the right button it puts it away — so the right button reads as
-        // further out even though it isn't. Nudge buttons right of centre inward by about half a '+'
-        // advance to make the two look equidistant.
-        const float DigitBias = 0.29f * LabelPx;
+        const float LabelPx = 31.0f * HS;   // the "+N" label, sized once
         // the price row moved from ABOVE the icon to BELOW it, immediately above the progress
         // bar. One constant for its height so the price and the queue/progress row below it are
         // positioned from the same number and cannot drift into each other.
         const float PriceRowH = 15.0f * HS;
+        // The queue/progress row's height, hoisted out of its own block: the price is now placed
+        // FROM this number (it tucks into the icon's bottom-right, just clear of the row), so both
+        // must read it from the same place or they drift apart the moment one is retuned.
+        const float QRowH = 20.0f * HS;
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
         // #107: latch a press stamped by the input thread, else age the flash out. Reading it here
@@ -898,7 +895,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // Row is 20*HS tall, so a centre one half-height above the bottom edge puts its whole
                 // height inside the icon. Derived from the edge, not a magic offset, so it stays put
                 // if the icon size changes.
-                const float QRowH = 20.0f * HS;
                 // Centre ON the icon's bottom edge: the row straddles it, half over the art and half
                 // below. (This is the "fully inside" position moved back down by half a row height —
                 // the two cancel, so it is simply the edge.)
@@ -929,45 +925,44 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             PB.Slot = I;
             const int32_t UnitCost = Snap.Units[Bty].Cost;
             const bool AffordOne = Snap.Gold[My] >= UnitCost;
-            // Reading order down the building (playtest 2026-07-25): health bar above the icon, then
-            // the x1/x5 pair ON it, then the price of ONE unit under the buttons, then the queue +
-            // progress row under the icon on its own plate. Everything is inside the building's own
+            // Layout ON the building: health bar above the icon, then the four quadrants of the icon
+            // itself — +5 top-right, +1 bottom-left, the price of ONE unit bottom-right — and the
+            // queue + progress row straddling the bottom edge. Everything is inside the building's own
             // footprint, so a cluster never lands on a neighbour's art — which is what happened when
             // the price floated above the icon.
-            // the buttons straddle the icon's EDGES rather than sitting inside its width. Each
-            // button's centre lands exactly on an edge (left button on Bx-Half, right on Bx+Half), so
-            // exactly half of it overlaps the icon. That also opens up the icon's middle, which is
-            // where its art is most recognisable — the pair frames the building instead of covering it.
-            // Interpolated across the edges so a third button (x20) would space itself correctly too.
-            const float EdgeSpan = 2.0f * Half;
-            const float BtnDen = static_cast<float>(ProdBtnPerBldg > 1 ? ProdBtnPerBldg - 1 : 1);
-            // The buttons sit at the BOTTOM of the icon so their lower edge is right above the queue/
-            // progress plate — thumb and readout together — with the unit price above them at the
-            // icon's top. (Price and buttons swapped after seeing it on the phone.)
-            // VERTICALLY CENTRED on the icon, not tucked at its bottom edge — the buttons are
-            // the primary thing on a building now, so they sit at its middle and the (receded) art
-            // reads around them.
-            const float Top = By - Bh * 0.5f;
+            // The buttons no longer straddle the icon's edges — they sit FULLY INSIDE the footprint,
+            // on a DIAGONAL: +1 in the bottom-left, +5 in the top-right. One column per button
+            // (ColW = footprint / count), and the row alternates with K, which is what buys them their
+            // height: Bh is ~2/3 of the icon, so two buttons could never share a column, but on a
+            // diagonal each one's vertical overrun lands in the *other* button's column. Nothing
+            // leaves the footprint, so a cluster can never reach a neighbour's art — the failure mode
+            // the edge-straddling pair had — and the freed corner is where the price goes.
+            const float ColW = 2.0f * Half / static_cast<float>(ProdBtnPerBldg);
             {
                 // WAY smaller, and NO plate. The plates were the real occluders — the building's
                 // art was legible through a glyph but not through three stacked translucent panels.
-                // The price is reference information, not a control, so it yields the most space.
-                // the price stacks directly ABOVE the progress row, which now occupies the
-                // icon's bottom 20*HS. Both are measured from the same icon-bottom edge so they cannot
-                // drift into each other. Narrow enough (coin + 2-3 digits, centred on Bx) to sit in
-                // the gap between the two edge-straddling buttons.
-                // Down by the same half-row the progress bar moved, plus a few px, so the gap between
-                // the two closes slightly as they both slide toward the icon's bottom edge.
-                const float CostY = (By + Half) - 20.0f * HS - PriceRowH * 0.5f - 1.0f * HS
-                                  + 10.0f * HS + 4.0f * HS;
+                // The price is reference information, not a control, so it yields the most space —
+                // which is why it takes the ONE corner the diagonal button pair leaves free:
+                // BOTTOM-RIGHT. +1 owns the bottom-left column and +5 the top-right one, so anything
+                // on the centre line would be under a thumb target; the bottom-right band is the only
+                // quiet spot left inside the footprint.
+                // Vertically it is measured UP from the icon's bottom edge, clearing the queue/
+                // progress row that straddles that edge (QRowH is shared with it, so they can't drift).
+                const float CostY = (By + Half) - QRowH * 0.5f - PriceRowH * 0.5f;
                 const float Cs = 11.0f * HS;
                 char CBuf[12];
                 std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
-                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, Bx - 11.0f * HS, CostY, Cs);
+                // Right-anchored as a GROUP: the coin is a fixed step left of the digits and the digits
+                // run left-to-right from there, so a 1-, 2- or 3-digit price keeps the coin still (the
+                // eye finds the currency in the same place on every building) and the widest of them
+                // still lands inside the icon's right half — 31*HS back from the right edge leaves
+                // room for coin + ~3 digits, and Half is ~36.5*HS at every resolution.
+                const float GlyphX = Bx + Half - 31.0f * HS;
+                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, GlyphX, CostY, Cs);
                 // A dark offset copy behind the text replaces the plate: the plate existed because
                 // gold-on-cyan was unreadable, and that problem does not go away just because the
                 // panel did. One extra text draw per building, and it works over any art.
-                TextShadowed(CBuf, Bx - 3.0f * HS, CostY - 7.0f * HS, 40.0f * HS, 14.0f * HS,
+                TextShadowed(CBuf, GlyphX + 8.0f * HS, CostY - 7.0f * HS, 40.0f * HS, 14.0f * HS,
                              12.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left);
             }
             // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
@@ -984,10 +979,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const float PulseK = (1.0f + 0.16f * Throb) * (1.0f - 0.18f * Press);
                 const float Lift = Press > Throb ? Press : Throb;   // brightness: the stronger of the two
                 const int PulseStep = static_cast<int>(Lift * (PulseSteps - 1) + 0.5f);
-                float CxEdge = Bx - Half + EdgeSpan * (static_cast<float>(K) / BtnDen);
-                if (CxEdge > Bx) CxEdge -= DigitBias;   // see DigitBias — right side only
-                const float BX = CxEdge - Bw * 0.5f;   // centre ON the edge -> 50% overlap
-                PB.R[K][0] = BX; PB.R[K][1] = Top; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
+                // Column K of the footprint, Bw centred in it (they are equal today — CtrlW - BGap is
+                // exactly BldgPx — but centring means a retuned BGap narrows the buttons instead of
+                // pushing the last one out through the right edge).
+                const float BX = Bx - Half + ColW * static_cast<float>(K) + (ColW - Bw) * 0.5f;
+                // Even K hugs the icon's BOTTOM edge, odd K its TOP edge — the diagonal.
+                const float BtnTop = (K % 2 == 0) ? (By + Half - Bh) : (By - Half);
+                PB.R[K][0] = BX; PB.R[K][1] = BtnTop; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
                 if (BtnPulse) {   // remember it for the GUI-layer pointing hand
                     PulseBtnActive_ = true;
                     for (int R4 = 0; R4 < 4; ++R4) PulseBtnRect_[R4] = PB.R[K][R4];
@@ -995,7 +993,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
-                const float Cx = BX + Bw * 0.5f, Cy = Top + Bh * 0.5f;
+                const float Cx = BX + Bw * 0.5f, Cy = BtnTop + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
                 // NO plate. It was carrying three jobs — persistent background, #107 press
                 // flash, #143 onboarding throb — so removing it means the feedback moves onto the
@@ -1018,7 +1016,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
                 char L[8];
                 std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
-                TextShadowed(L, bx, by2, bw, bh, 31.0f * HS * PulseK,   // a little bigger
+                TextShadowed(L, bx, by2, bw, bh, LabelPx * PulseK,
                              Afford ? Glow(Ico) : DimC, EHAlign::Center);
             }
         }
