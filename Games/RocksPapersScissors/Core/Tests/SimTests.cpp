@@ -545,6 +545,90 @@ static void TestCartDepositsAtNearestMinerBuilding() {
     CHECK(S.PosX[2] > F(20));                           // went to the NEAR camp (x=26), not the far (x=8)
 }
 
+// Cart spread: two carts with two NEAR-EQUIDISTANT deposits take ONE EACH, so a glance counts
+// them. Three legs, because the point is that the spread is free and NOT a cap: (a) slack 3
+// spreads across a deposit 2 units farther, (b) slack 1 does NOT — the second cart stacks rather
+// than walk, so the budget really is what bounds the travel, (c) with only one deposit in budget
+// EVERY cart takes it, however many that is — crowding is preferred against, never forbidden.
+static void TestCartsSpreadAcrossNearbyMines() {
+    // (a) budget 3 covers the 2-unit-farther deposit -> one cart each.
+    {
+        static Sim S;
+        S.Init(0);
+        ClearField(S);                     // wipes every mine; we place two by hand
+        S.Cv.MineSpreadSlack = F(3);       // explicit, so the test doesn't ride the default
+        S.MineX[0] = F(16); S.MineY[0] = F(15); S.MineGold[0] = MineGoldCapacity;  // travel 5
+        S.MineX[1] = F(16); S.MineY[1] = F(13); S.MineGold[1] = MineGoldCapacity;  // travel 7
+        PlaceUnit(S, 0, F(16), F(20), 0, UnitMiner);
+        PlaceUnit(S, 1, F(17), F(20), 0, UnitMiner);
+        S.Count = 2;
+        S.StepEvents(nullptr, 0);
+        CHECK(S.Target[0] == 0);                    // nearest, and it was empty
+        CHECK(S.Target[1] == 1);                    // stepped over to the empty one
+    }
+    // (b) budget 1 does not reach it -> both stack on the nearest (the old rule).
+    {
+        static Sim S;
+        S.Init(0);
+        ClearField(S);
+        S.Cv.MineSpreadSlack = F(1);
+        S.MineX[0] = F(16); S.MineY[0] = F(15); S.MineGold[0] = MineGoldCapacity;  // travel 5
+        S.MineX[1] = F(16); S.MineY[1] = F(13); S.MineGold[1] = MineGoldCapacity;  // travel 7 > 5+1
+        PlaceUnit(S, 0, F(16), F(20), 0, UnitMiner);
+        PlaceUnit(S, 1, F(17), F(20), 0, UnitMiner);
+        S.Count = 2;
+        S.StepEvents(nullptr, 0);
+        CHECK(S.Target[0] == 0 && S.Target[1] == 0);
+    }
+    // (c) NO ceiling: 10 carts, one deposit in budget and one far away -> all 10 take the near
+    // one. The old 6-per-mine cap sent carts 7..10 on the long walk; nothing does now.
+    {
+        static Sim S;
+        S.Init(0);
+        ClearField(S);
+        S.Cv.MineSpreadSlack = F(3);
+        S.MineX[0] = F(17); S.MineY[0] = F(15); S.MineGold[0] = MineGoldCapacity;  // travel 5
+        S.MineX[1] = F(17); S.MineY[1] = F(30); S.MineGold[1] = MineGoldCapacity;  // travel 10 > 5+3
+        const int Carts = 10;
+        for (int K = 0; K < Carts; ++K) PlaceUnit(S, K, F(17), F(20), 0, UnitMiner);
+        S.Count = Carts;
+        S.StepEvents(nullptr, 0);
+        int32_t OnNear = 0;
+        for (int K = 0; K < Carts; ++K) if (S.Target[K] == 0) ++OnNear;
+        CHECK(OnNear == Carts);
+    }
+    // (d) the ROW rule, which is what stops a generous slack from emptying a row into the next
+    // one: a deposit in ANOTHER row is taken only when it is no farther than the nearest. Mines
+    // are index-contiguous per row, so index MinesPerCluster is the first mine of row 1.
+    const int32_t OtherRow = MinesPerCluster;
+    {   // farther + another row -> refused even though the slack covers the distance
+        static Sim S;
+        S.Init(0);
+        ClearField(S);
+        S.Cv.MineSpreadSlack = F(8);
+        S.MineX[0] = F(16); S.MineY[0] = F(15); S.MineGold[0] = MineGoldCapacity;         // travel 5
+        S.MineX[OtherRow] = F(16); S.MineY[OtherRow] = F(9); S.MineGold[OtherRow] = MineGoldCapacity;  // 11
+        PlaceUnit(S, 0, F(16), F(20), 0, UnitMiner);
+        PlaceUnit(S, 1, F(16), F(20), 0, UnitMiner);
+        S.Count = 2;
+        S.StepEvents(nullptr, 0);
+        CHECK(S.Target[0] == 0 && S.Target[1] == 0);   // both stay in their own row
+    }
+    {   // exact tie across rows -> allowed, because it costs nothing (a camp between two rows)
+        static Sim S;
+        S.Init(0);
+        ClearField(S);
+        S.Cv.MineSpreadSlack = F(8);
+        S.MineX[0] = F(16); S.MineY[0] = F(15); S.MineGold[0] = MineGoldCapacity;         // travel 5
+        S.MineX[OtherRow] = F(16); S.MineY[OtherRow] = F(25); S.MineGold[OtherRow] = MineGoldCapacity;  // 5
+        PlaceUnit(S, 0, F(16), F(20), 0, UnitMiner);
+        PlaceUnit(S, 1, F(16), F(20), 0, UnitMiner);
+        S.Count = 2;
+        S.StepEvents(nullptr, 0);
+        CHECK(S.Target[0] == 0 && S.Target[1] == OtherRow);
+    }
+}
+
 // #135/§12.4: with NO own miner building, a gold-carrying cart is STRANDED — it holds the gold
 // (there is no camp fallback now) and idles until a miner building exists, then deposits.
 static void TestCartStrandedWithoutMinerBuilding() {
@@ -835,6 +919,7 @@ int main() {
     TestSoldierTargetsEnemyBuildingByType();
     TestScissorDestroysPaperBuildingWithCounter();
     TestCartDepositsAtNearestMinerBuilding();
+    TestCartsSpreadAcrossNearbyMines();
     TestCartStrandedWithoutMinerBuilding();
     TestEventPlaceAndQueueApply();
     TestEventQueuePartialByGold();

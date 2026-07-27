@@ -158,7 +158,7 @@ LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagA
 // cares about.
 //
 // 6 is derived, and it is also a CEILING the map imposes. What has to be visible is the ring of
-// carts WORKING the mine: camp icon radius 3.45 + the carts' working spread (~2, WorkersPerMine
+// carts WORKING the mine: camp icon radius 3.45 + the carts' working spread (~2, half a dozen
 // diggers separated around the deposit) = 5.45, so 6.
 //
 // Do not raise it without re-tuning the AI ladder. Mines within a row are only 5-6 apart in X, so
@@ -182,9 +182,12 @@ LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagA
 LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  1200,     CVarFlagAffectsGameplay, "Opening gold: one mining camp (600) + 6 miner carts (100 ea)");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
-// Playtest 2026-07-19: several carts may work one deposit at once — the cap is the
-// "room around it" proxy; separation steering spreads the diggers into a ring.
-constexpr int32_t WorkersPerMine = 6;
+// There is NO cap on carts per deposit. There used to be (WorkersPerMine = 6, a "room around
+// it" proxy), but it was never a real ceiling — the acquisition fallback let carts pile on a
+// full mine anyway when nothing else was near, so all the cap actually did was send the 7th
+// cart on a long walk. Crowding is now shaped by preference, not prohibition: see
+// rps.mine.spread_slack, which spreads carts over near-equidistant deposits so the count is
+// readable, and mine.repel_radius, which rings them around the deposit instead of stacking them.
 constexpr int32_t DigTicks = 15;           // 1.5 s to fill a carry (default for the CVar below)
 // How fast a cart gathers (#122): ticks to fill one carry. Lower = faster mining. Default =
 // the constant above, so the economy is unchanged until edited.
@@ -348,6 +351,25 @@ constexpr Fixed TargetBand = F(12);
 LUR_CVAR(CvMineDigRange,    "rps.mine.dig_range",    FRound(22, 10), CVarFlagAffectsGameplay, "How close a cart must be to dig (world units)");
 LUR_CVAR(CvMineRepelRadius, "rps.mine.repel_radius", F(3, 2),        CVarFlagAffectsGameplay, "Soft-obstacle radius pushing units off a deposit (keep < dig_range)");
 LUR_CVAR(CvMineVisualSize,  "rps.mine.visual_size",  FRound(22, 10), CVarFlagNone,            "Drawn mine DIAMETER in world units (render only — never synced)");
+// READABILITY knob, not an economy one, and a PREFERENCE, not a cap — any number of carts may
+// still work one deposit. Carts pile onto whichever deposit is nearest, and a stack of eight
+// overlapping carts cannot be counted at a glance. This is the extra ONE-WAY walk (world units)
+// a cart will accept in order to take a less crowded deposit: within the budget it picks the
+// least crowded, outside it distance wins outright. So the spread is free — a cart never sets
+// off across the field to be alone, it only steps to a neighbour it was already about as close to.
+// Sized against the layout: mines sit ~5 units apart along a row, and from a camp a few units
+// Sized against the layout: mines sit 5-6 apart along a row, and a cart parked on one of them is
+// therefore 5-6 from its neighbour — so anything under ~6 cannot spread a camp that hugs a mine,
+// which is the case that actually looks like a pile. 8 reaches one neighbour each way (sometimes
+// two). Travel cost is Slack / MinerSpeed ticks (8 / 0.4 = 20 ticks = 2 s one way) and it is only
+// ever paid instead of joining a crowd. 0 = compare only exact ties.
+// This budget CANNOT be raised into "cross the field": the acquisition rule additionally refuses
+// any deposit in a different mine ROW unless it is no farther than the nearest one, so the spread
+// stays inside the cluster the cart is working however large the slack gets. Measured cost of the
+// spread (--aidiag hard, deterministic): slack 2 is ~free (2nd building 59.0 s vs 58.6 s), slack 3
+// is ~6% (62.1 s), and larger slacks trade more economy for a smaller pile — spread was chosen
+// over throughput deliberately here, so raise it if the count still reads badly on the phone.
+LUR_CVAR(CvMineSpreadSlack, "rps.mine.spread_slack", F(8),           CVarFlagAffectsGameplay, "Extra one-way walk a cart accepts for a less crowded deposit in the SAME mine row (world units; 0 = nearest only)");
 // The two STARTER rows, as a distance in from each team's own end (so they mirror by construction).
 // #157 put them hard against the edge to seal the ground behind them; these expose that choice.
 // BuildMap WARNS (it does not assert — these are yours to tune) when a value stops sealing: the
@@ -509,8 +531,8 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2);
 // measured knee, not a preference.
 //
 // worker_target 22, down from 45 (#157). The mine clearance widening (3 -> 6) made income bound by
-// cart TRAVEL rather than miner count — and WorkersPerMine caps 6 diggers per deposit, so a target of
-// 45 needed 8 served mines that the wider clearance no longer lets it place. It was buying miners it
+// cart TRAVEL rather than miner count — and the then-cap of 6 diggers per deposit (since removed)
+// meant a target of 45 needed 8 served mines that the wider clearance no longer lets it place. It was buying miners it
 // could not employ, and starving its army to do it: at 45 it LOST to medium 3-7. At 22 the ladder is
 // hard>medium 14-6, medium>easy 17-3, hard>easy 20-0 (20 matches/pairing). This knob is coupled to
 // rps.build.mine_clearance — re-measure both together.
@@ -524,8 +546,8 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2);
 //     appear in the fight while hard's walk the map.
 // Hard then LOSES units faster than it replaces them (army 113->93->70) and ends sitting on gold.
 // It was never out-thought, it was throttled: worker_target stopped its economy dead at ~94 while his
-// compounded to 213. So worker_target 110 (his 138s figure; WorkersPerMine 6 x 48 mines allows ~288,
-// so the mines are not the ceiling) and queue_depth 20 so a big bank actually converts.
+// compounded to 213. So worker_target 110 (his 138s figure; even the old 6-per-mine cap x 48 mines
+// allowed ~288, so the mines are not the ceiling) and queue_depth 20 so a big bank actually converts.
 // queue_depth stays 8, NOT the 20 I tried: measured hard 8/12 vs medium at depth 8, 4/12 at 12 and
 // 0/12 at 20. The note above already predicted it — a deep queue commits gold to a TYPE, and hard is
 // the tier that re-counters fastest, so it is the tier a deep queue punishes most. Raising it was a
@@ -708,6 +730,7 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(MineClearance,           CvMineClearance)           \
     FX(MineDigRange,            CvMineDigRange)            \
     FX(MineRepelRadius,         CvMineRepelRadius)         \
+    FX(MineSpreadSlack,         CvMineSpreadSlack)         \
     FX(MineRowHome,             CvMineRowHome)             \
     FX(MineRowSafe,             CvMineRowSafe)             \
     FX(InitialFrontier,         CvInitialFrontier)         \

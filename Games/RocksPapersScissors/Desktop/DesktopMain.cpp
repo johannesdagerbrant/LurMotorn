@@ -401,15 +401,27 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
     Ai1.Init(Seed, 1, Tier);
     // Census of one team: gold, alive miners, alive soldiers, producing buildings (the HQ excluded —
     // it produces nothing, so counting it would hide "this AI never built anything").
-    struct Census { int Gold, Workers, Soldiers, Buildings; };
+    // Mines/Max are the CART SPREAD (rps.mine.spread_slack): how many distinct deposits this
+    // team's carts are assigned to, and the worst pile on one of them. Max is the readability
+    // number — it is what the player has to count on screen — and it trades against the economy
+    // columns beside it, so the two must be read together when tuning the slack.
+    struct Census { int Gold, Workers, Soldiers, Buildings, Mines, Max; };
     auto Look = [&](uint8_t T) {
-        Census C{S->Teams[T].Gold, 0, 0, 0};
+        Census C{S->Teams[T].Gold, 0, 0, 0, 0, 0};
+        int Per[Rps::NumMines] = {};
         for (int32_t I = 0; I < S->Count; ++I) {
             if (!S->IsAlive(I) || S->Team[I] != T) continue;
             if (S->Kind[I] == Rps::KindBuilding) ++C.Buildings;
             else if (S->Kind[I] == Rps::KindUnit) {
-                if (S->Type[I] == Rps::UnitMiner) ++C.Workers; else ++C.Soldiers;
+                if (S->Type[I] == Rps::UnitMiner) {
+                    ++C.Workers;
+                    if (S->Target[I] >= 0) ++Per[S->Target[I]];
+                } else ++C.Soldiers;
             }
+        }
+        for (int M = 0; M < Rps::NumMines; ++M) {
+            if (Per[M] > 0) ++C.Mines;
+            if (Per[M] > C.Max) C.Max = Per[M];
         }
         return C;
     };
@@ -417,7 +429,7 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
     Lur::Log::Info("AI diag: tier=%s seed=0x%llx cap=%d ticks (%.0fs at %d Hz)",
                    Names[static_cast<int>(Tier)], static_cast<unsigned long long>(Seed), MaxTicks,
                    static_cast<double>(MaxTicks) / Rps::TickRateHz, Rps::TickRateHz);
-    Lur::Log::Info("  tick |    t0 gold  wrk  sol  bld |    t1 gold  wrk  sol  bld");
+    Lur::Log::Info("  tick |    t0 gold  wrk  sol  bld  mine  max |    t1 gold  wrk  sol  bld  mine  max");
     for (int T = 0; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
         Rps::InputEvent E0[Rps::MaxEventsPerTick], E1[Rps::MaxEventsPerTick];
         int C0 = 0, C1 = 0;
@@ -435,8 +447,9 @@ int RunAiDiag(Rps::EAiTier Tier, uint64_t Seed, int MaxTicks, int EveryTicks) {
         if (TSoldier < 0 && A.Soldiers > 0) TSoldier = T;
         if (EveryTicks > 0 && T % EveryTicks == 0) {
             const Census B = Look(1);
-            Lur::Log::Info("%6d | %9d %4d %4d %4d | %9d %4d %4d %4d", T, A.Gold, A.Workers,
-                           A.Soldiers, A.Buildings, B.Gold, B.Workers, B.Soldiers, B.Buildings);
+            Lur::Log::Info("%6d | %9d %4d %4d %4d %5d %4d | %9d %4d %4d %4d %5d %4d", T, A.Gold,
+                           A.Workers, A.Soldiers, A.Buildings, A.Mines, A.Max, B.Gold, B.Workers,
+                           B.Soldiers, B.Buildings, B.Mines, B.Max);
         }
     }
     auto Ms = [](int T) { return T < 0 ? -1.0 : static_cast<double>(T) / Rps::TickRateHz; };

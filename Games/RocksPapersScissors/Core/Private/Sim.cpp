@@ -367,22 +367,58 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
     }
     return BestId;
 }
-int32_t NearestFreeMine(const Sim& S, int32_t I, const int32_t* Occ) {
-    // Always pick the NEAREST mine (playtest 2026-07-20: carts were hauling past nearby
-    // mines). Prefer one under the digger cap; but if every gold-bearing mine is crowded,
-    // fall back to the nearest gold-bearing mine anyway — a cart NEVER idles while gold
-    // exists somewhere, so it keeps moving instead of standing still. Occupancy is the
-    // precomputed per-mine count (O(1) here) — with the dense field, a per-mine unit scan
-    // would be O(mines×units) per acquisition.
-    int32_t BestFree = -1; int64_t BestFreeD = INT64_MAX;
-    int32_t BestAny = -1;  int64_t BestAnyD = INT64_MAX;
+// Travel time to a mine. CHEBYSHEV, not Euclidean, because movement is Chebyshev-normalized
+// (design §5: a step covers Speed in max(|dx|,|dy|), so a diagonal is ~1.4x faster in Euclidean
+// terms). This metric therefore IS ticks-to-arrive, which is what a travel budget must be
+// measured in — and it matches the dig-range test in WorkerSeek, which is Chebyshev too. No
+// sqrt, so Fixed::Sqrt stays unbuilt.
+Fixed TravelTo(const Sim& S, int32_t I, int32_t Mine) {
+    return Max(Abs(S.MineX[Mine] - S.PosX[I]), Abs(S.MineY[Mine] - S.PosY[I]));
+}
+int32_t NearestLeastCrowdedMine(const Sim& S, int32_t I, const int32_t* Occ) {
+    // Nearest-always (playtest 2026-07-20: carts were hauling past nearby mines), refined by a
+    // READABILITY rule: among the deposits that are ABOUT AS CLOSE as the nearest one, take the
+    // one with the fewest carts already assigned. That is the whole rule — there is deliberately
+    // NO per-mine cap. A pile of carts on one deposit is uncountable at a glance; spreading them
+    // over the two or three near-equidistant deposits of a cluster (~5 units apart, so from a
+    // camp they differ by ~3) makes the number readable, and costs a fraction of a second.
+    //
+    // Two bounds on "about as close", because a pure distance budget CANNOT express the rule
+    // that matters. BuildMap lays mines out in rows of MinesPerCluster: ~5-6 apart along a row,
+    // and the starter rows are 6 apart (row_home 3 / row_safe 9). So the sideways neighbour and
+    // a mine in the next row are the SAME distance away — no threshold separates them. What
+    // separates them is the layout itself:
+    //   * SAME ROW as the nearest deposit: the full MineSpreadSlack budget. A cart sitting on
+    //     top of a mine is ~5-6 from its neighbour, so the budget has to be that big to spread
+    //     at all, and spending it stays inside the cluster the cart is already working.
+    //   * ANOTHER ROW: only if it is no FARTHER than the nearest deposit. That admits the free
+    //     case (a camp between two rows, both equidistant) and forbids the expensive one — a
+    //     cart abandoning a row it is standing in to cross to the next one.
+    // Rows are index-contiguous out of BuildMap, so "same row" is one integer divide.
+    //
+    // Occupancy is the precomputed per-mine count (O(1) here); a per-mine unit scan would be
+    // O(mines x units) per acquisition. Ties break to the closer deposit, then — iteration
+    // order with strict < — to the lower mine index, so the choice is deterministic for lockstep.
+    Fixed Near{0}; int32_t NearId = -1;
     for (int32_t Tr = 0; Tr < NumMines; ++Tr) {
         if (S.MineGold[Tr] <= 0) continue;  // depleted mines are gone (#84)
-        const int64_t D = Dist2(S.PosX[I], S.PosY[I], S.MineX[Tr], S.MineY[Tr]);
-        if (D < BestAnyD) { BestAnyD = D; BestAny = Tr; }
-        if (Occ[Tr] < WorkersPerMine && D < BestFreeD) { BestFreeD = D; BestFree = Tr; }
+        const Fixed D = TravelTo(S, I, Tr);
+        if (NearId < 0 || D < Near) { Near = D; NearId = Tr; }
     }
-    return BestFree >= 0 ? BestFree : BestAny;
+    if (NearId < 0) return -1;   // the map is mined out — nothing to acquire
+    const Fixed Budget = Near + S.Cv.MineSpreadSlack;
+    const int32_t NearRow = NearId / MinesPerCluster;
+    int32_t Best = -1, BestOcc = 0; Fixed BestD{0};
+    for (int32_t Tr = 0; Tr < NumMines; ++Tr) {
+        if (S.MineGold[Tr] <= 0) continue;
+        const Fixed D = TravelTo(S, I, Tr);
+        if (D > Budget) continue;                                        // not worth the walk
+        if (Tr / MinesPerCluster != NearRow && D > Near) continue;        // don't leave the row
+        if (Best < 0 || Occ[Tr] < BestOcc || (Occ[Tr] == BestOcc && D < BestD)) {
+            Best = Tr; BestOcc = Occ[Tr]; BestD = D;
+        }
+    }
+    return Best;   // >= 0: the budget always contains the nearest deposit
 }
 void TargetAcquire(Sim& S, const Grid& G) {
     // Mine occupancy computed ONCE (O(units)) then read O(1)/mine — with the dense field a
@@ -396,7 +432,7 @@ void TargetAcquire(Sim& S, const Grid& G) {
         if (S.IsBuilding(I)) continue;  // #133: buildings don't acquire targets (they're targeted — #134)
         if (S.Type[I] == UnitMiner) {
             if (S.Target[I] < 0) {
-                const int32_t M = NearestFreeMine(S, I, Occ);  // nearest gold, prefer uncrowded
+                const int32_t M = NearestLeastCrowdedMine(S, I, Occ);  // nearest gold, prefer uncrowded
                 S.Target[I] = M;
                 if (M >= 0) ++Occ[M];  // claim it so later carts this tick see the higher count
             }
