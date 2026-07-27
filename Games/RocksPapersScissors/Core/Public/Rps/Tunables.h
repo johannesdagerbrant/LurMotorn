@@ -668,6 +668,15 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
 // and build-checked against the 256 cap; until then this hand-list is the source, and the
 // id is declaration order, which agrees across peers because the build-fingerprint gate
 // guarantees identical builds.)
+//
+// APPEND new ids at the END; never insert one mid-list. The id is declaration order, and a flight
+// recording stores its whole latched set as `cv <id> <raw>` lines (MatchRecord) — so inserting an
+// entry shifts every id after it and every OLDER recording silently replays with the wrong values
+// slid one slot along. It cost an afternoon: rps.mine.spread_slack was inserted next to the other
+// mine knobs, and yesterday's recordings then replayed with mine rows of "5/35" that no one had
+// ever set (row_home had been handed row_safe's value, row_safe the frontier's, and so on down the
+// list). Replay does not refuse on a fingerprint mismatch, so nothing warns you. Grouping a knob
+// with its family is worth less than being able to read last week's match.
 #define LUR_RPS_GAMEPLAY_CVARS(FX, IX)                    \
     FX(SeparationStrength,      CvSeparationStrength)      \
     FX(EnemySeparationStrength, CvEnemySeparationStrength) \
@@ -730,7 +739,6 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(MineClearance,           CvMineClearance)           \
     FX(MineDigRange,            CvMineDigRange)            \
     FX(MineRepelRadius,         CvMineRepelRadius)         \
-    FX(MineSpreadSlack,         CvMineSpreadSlack)         \
     FX(MineRowHome,             CvMineRowHome)             \
     FX(MineRowSafe,             CvMineRowSafe)             \
     FX(InitialFrontier,         CvInitialFrontier)         \
@@ -743,7 +751,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiClusterFillUnits,      CvAiClusterFillUnits)      \
     FX(AiFrontSetback,          CvAiFrontSetback)          \
     IX(AiQueueDepth,            CvAiQueueDepth)            \
-    IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)
+    IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)      \
+    FX(MineSpreadSlack,         CvMineSpreadSlack)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
