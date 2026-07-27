@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include "Lur/Core/Assert.h"          // LUR_ASSERT_MSG — trap a row/tier decode disagreement
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
@@ -436,9 +437,9 @@ void GameView::DevTap(float XPx, float YPx) {
 int GameView::OnTap(float XPx, float YPx) {
     if (!Ready) return -1;
     if (Selector.OnTap(XPx, YPx)) {
-        // A settled selection on an AI row (indices 3..5) starts a single-player match at that
-        // tier (#127); the main polls TakeAiTier(). Peer/same-device rows have no target yet
-        // (#85 follow-up). TookSelection() is the one-shot latch.
+        // A settled selection on an AI row starts a single-player match at that tier (#127); the
+        // main polls TakeAiTier(). Peer/same-device rows have no target yet (#85 follow-up).
+        // TookSelection() is the one-shot latch.
         if (Selector.TookSelection()) {
             // Decode the ROW back to an opponent. The AI rows sit below the linked row + header
             // when a peer is up, so the offset is not fixed (headers are never selectable, so the
@@ -449,7 +450,19 @@ int GameView::OnTap(float XPx, float YPx) {
                 PeerRowPicked_ = true;                                // #2: switch to the peer match
             } else {
                 const int Tier = Sel - AiRow(0);
-                if (Tier >= 0 && Tier <= 2) {
+                // Bound by AiTierCount, NEVER a literal. This read "Tier <= 2" and it is exactly
+                // how a fourth tier ships broken: the row was DRAWN and the widget highlighted it,
+                // but the pick was dropped here, so the match kept running the previous tier and
+                // the next list rebuild snapped the highlight back to SelAiTier_ — "I picked
+                // Perhaps Impossible, it played like Easy, then the menu said Easy again".
+                // Headers are not selectable and the peer row is handled above, so a settled
+                // selection that is NOT a valid tier means the row table and this decode disagree.
+                // Trap it instead of silently ignoring the tap — silence is what shipped a dropdown
+                // row that did nothing.
+                LUR_ASSERT_MSG(Tier >= 0 && Tier < AiTierCount,
+                               "selector row %d decoded to tier %d (AiTierCount=%d)", Sel, Tier,
+                               AiTierCount);
+                if (Tier >= 0 && Tier < AiTierCount) {
                     SelPeer_ = false;
                     SelAiTier_ = Tier;
                     AiTierPicked_ = Tier;                             // #2: (re)start solo at this tier
