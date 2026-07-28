@@ -9,7 +9,7 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
                     Cv.AiEasyPrecision, Cv.AiEasyCadence, Cv.AiEasyJitter, Cv.AiEasyHysteresis,
                     Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio,
                     Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings, Cv.AiEasyDefenceFloor,
-                    Cv.AiEasyBuildCluster, Cv.AiEasyMinerQueue, Cv.AiEasyWaveLead};
+                    Cv.AiEasyBuildCluster, Cv.AiEasyMinerQueue, Cv.AiEasyWaveLead, Cv.AiEasyCounterChest};
         case EAiTier::PerhapsImpossible:
             return {Cv.AiPerhapsImpossibleOpenWorkers, Cv.AiPerhapsImpossibleWorkerTarget,
                     Cv.AiPerhapsImpossibleStaleness, Cv.AiPerhapsImpossiblePrecision,
@@ -17,20 +17,20 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
                     Cv.AiPerhapsImpossibleHysteresis, Cv.AiPerhapsImpossibleAllinLead,
                     Cv.AiPerhapsImpossibleSoldierRatio, Cv.AiPerhapsImpossibleQueueDepth,
                     Cv.AiPerhapsImpossibleMaxBuildings, Cv.AiPerhapsImpossibleDefenceFloor,
-                    Cv.AiPerhapsImpossibleBuildCluster, Cv.AiPerhapsImpossibleMinerQueue, Cv.AiPerhapsImpossibleWaveLead};
+                    Cv.AiPerhapsImpossibleBuildCluster, Cv.AiPerhapsImpossibleMinerQueue, Cv.AiPerhapsImpossibleWaveLead, Cv.AiPerhapsImpossibleCounterChest};
         case EAiTier::Hard:
             return {Cv.AiHardOpenWorkers, Cv.AiHardWorkerTarget, Cv.AiHardStaleness,
                     Cv.AiHardPrecision, Cv.AiHardCadence, Cv.AiHardJitter, Cv.AiHardHysteresis,
                     Cv.AiHardAllinLead, Cv.AiHardSoldierRatio,
                     Cv.AiHardQueueDepth, Cv.AiHardMaxBuildings, Cv.AiHardDefenceFloor,
-                    Cv.AiHardBuildCluster, Cv.AiHardMinerQueue, Cv.AiHardWaveLead};
+                    Cv.AiHardBuildCluster, Cv.AiHardMinerQueue, Cv.AiHardWaveLead, Cv.AiHardCounterChest};
         case EAiTier::Medium:
         default:
             return {Cv.AiMediumOpenWorkers, Cv.AiMediumWorkerTarget, Cv.AiMediumStaleness,
                     Cv.AiMediumPrecision, Cv.AiMediumCadence, Cv.AiMediumJitter,
                     Cv.AiMediumHysteresis, Cv.AiMediumAllinLead, Cv.AiMediumSoldierRatio,
                     Cv.AiMediumQueueDepth, Cv.AiMediumMaxBuildings, Cv.AiMediumDefenceFloor,
-                    Cv.AiMediumBuildCluster, Cv.AiMediumMinerQueue, Cv.AiMediumWaveLead};
+                    Cv.AiMediumBuildCluster, Cv.AiMediumMinerQueue, Cv.AiMediumWaveLead, Cv.AiMediumCounterChest};
     }
 }
 
@@ -197,10 +197,21 @@ bool AiPlaceNear(const Sim& S, uint8_t Team, uint8_t Type, Fixed TargetX, Fixed 
 bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
     const int32_t ServedRadius = S.Cv.AiMineServedRadius.ToInt();   // see rps.ai.mine_served_radius
     const Fixed Limit = Team == 0 ? S.FrontierT0 : S.FrontierT1;
+    // SERVABLE, not merely nearest. Nearest-first has a trap the furthest-forward rule never hit: a
+    // deposit can be unclaimed AND unclaimable — at mine rows 1/5 with mine_clearance 6 there is no
+    // legal camp spot around the home row at all, so the AI proposed the same illegal target every
+    // tick and its economy froze at 15 workers with 3930 gold banked (caught by
+    // TestAiExpandsCapacity the moment the owner's tuning became the default). So walk candidates
+    // outward and take the first one a camp can actually be placed near. Bounded to MaxTries so a
+    // pathological map costs a handful of ring searches, not one per deposit.
+    constexpr int32_t MaxTries = 8;
+    uint64_t Tried = 0;
+    for (int32_t Try = 0; Try < MaxTries; ++Try) {
     int32_t Best = -1;
-    Fixed BestY{0};
+    Fixed BestDepth{0};
     for (int32_t M = 0; M < NumMines; ++M) {
         if (S.MineGold[M] <= 0) continue;
+        if ((Tried >> M) & 1ull) continue;          // already rejected: no legal spot near it
         // Must be inside our own buildable depth, or the placement can only ever be refused.
         if (Team == 0 ? S.MineY[M] > Limit : S.MineY[M] < Limit) continue;
         bool Served = false;
@@ -213,14 +224,28 @@ bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
             if (Adx <= ServedRadius && Ady <= ServedRadius) Served = true;   // Chebyshev, like the grid
         }
         if (Served) continue;
-        // Furthest forward wins (team 0 = larger Y). First index wins a tie, so it stays deterministic.
-        const bool Ahead = Best < 0 || (Team == 0 ? S.MineY[M] > BestY : S.MineY[M] < BestY);
-        if (Ahead) { BestY = S.MineY[M]; Best = M; }
+        // NEAREST unclaimed row wins — it used to be the furthest FORWARD, and that walked the
+        // economy into the contested half. The frontier follows our frontmost SURVIVOR, so a single
+        // soldier deep in enemy ground makes an enemy-half mine "buildable", and the camp planted
+        // there dies with the carts working it. Measured on the owner's 2026-07-27 recordings: the
+        // AI's camps sat at a median depth of 106-134 (midfield is 120) while HIS sat at 51-67 —
+        // and its building count fell 21 -> 3-9 over a match while his grew to 31. He described the
+        // same rule in words: leave a camp at every mine row as the frontline advances. Filling
+        // outward from home cannot re-mine a worked row, because Served already excluded those, and
+        // it shortens every cart trip on top. First index wins a tie, so it stays deterministic.
+        const Fixed Depth = Team == 0 ? S.MineY[M] : WorldHeight - S.MineY[M];
+        if (Best < 0 || Depth < BestDepth) { BestDepth = Depth; Best = M; }
     }
-    if (Best < 0) return false;
-    OX = S.MineX[Best];
-    OY = S.MineY[Best];
-    return true;
+        if (Best < 0) return false;                 // nothing unclaimed left anywhere
+        Fixed Px, Py;
+        if (AiPlaceNear(S, Team, UnitMiner, S.MineX[Best], S.MineY[Best], Px, Py)) {
+            OX = S.MineX[Best];
+            OY = S.MineY[Best];
+            return true;
+        }
+        Tried |= 1ull << Best;                      // unclaimable — try the next row out
+    }
+    return false;
 }
 
 // Where to build for the fight: JUST BEHIND our own leading edge, on the flank the enemy army is
@@ -429,7 +454,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         case EState::AllIn:
             Want = MyMiners < EconFloor ? static_cast<uint8_t>(UnitMiner) : Soldier;
             break;
-        case EState::Building:
+        case EState::Building: {
             // DEFENCE FLOOR: stand up K.DefenceFloor combat buildings before chasing the economy
             // target. Without it, economy-first means a timely attack lands while there is not one
             // soldier building on the map, and the tier has to start production from scratch under
@@ -441,11 +466,18 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             // for. Economy stays the default and a combat building is snapped up the moment one is
             // affordable, until the floor is met -- capacity gets bought out of surplus rather than
             // out of the income that pays for it.
-            Want = (MyCombatBldg < K.DefenceFloor &&
-                    S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, Soldier))
+            // "Opportunistic" has to mean out of SURPLUS, so require enough for the combat building
+            // AND the next camp. Keyed on the combat building's price alone it stopped being
+            // opportunistic the moment one cost less than a camp (rock 1000 vs camp 600 under the
+            // owner's tunables): the floor then won every tick and the economy never expanded at all
+            // — 47 carts from a single camp, with the army built on top of an economy that never grew.
+            const int32_t FloorAndCamp =
+                BuildingCostFor(S.Cv, Soldier) + BuildingCostFor(S.Cv, UnitMiner);
+            Want = (MyCombatBldg < K.DefenceFloor && S.Teams[MyTeam_].Gold >= FloorAndCamp)
                        ? Soldier
                        : (MyMiners < K.WorkerTarget) ? static_cast<uint8_t>(UnitMiner) : Soldier;
             break;
+        }
         case EState::Reacting: {
             // Hold a soldier:worker ratio (percent of army that should be soldiers), but never
             // starve the opening economy.
@@ -668,9 +700,57 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         int32_t N = Depth - Cap_.Queue;
         const int32_t Room = S.Cv.BuildingQueueMax - Cap_.Queue;
         if (N > Room) N = Room;
-        const int32_t Affordable = Gold / UnitCost;
+        // COUNTER CHEST: while contested, keep a counter BUILDING's price out of the unit queue, so
+        // a composition switch is answered by placing one at the front instead of waiting out
+        // income. Production is flat per building, so the building is worth far more than the four
+        // or five units the same gold buys — but only if the money is there at the moment the enemy
+        // changes shape. Held only while we own NO building of the type we currently counter (once
+        // it stands, there is nothing to save for), and never in the Building state, where the
+        // opening is supposed to spend everything on expanding.
+        const int32_t ChestPct = K.CounterChest < 0 ? 0 : K.CounterChest;
+        // CONTESTED states only. Keyed on "not Building" this deadlocked the tier at tick 0: in
+        // Opening it reserved a rock building's 1000 out of an 800 purse, so it could not buy a cart,
+        // never mined, and sat at 0 workers for the whole match (2399 idle ticks, measured). There is
+        // nothing to counter before an enemy army exists.
+        const bool SaveForCounter = ChestPct > 0 &&
+                                    (State_ == EState::Reacting || State_ == EState::AllIn) &&
+                                    SurveyType(S, MyTeam_, Soldier).Owned == 0;
+        const int32_t Chest = SaveForCounter ? BuildingCostFor(S.Cv, Soldier) * ChestPct / 100 : 0;
+        const int32_t Spendable = Gold > Chest ? Gold - Chest : 0;
+        const int32_t Affordable = Spendable / UnitCost;
         if (N > Affordable) N = Affordable;
         if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Cap_.Slot, N);
+    }
+
+    // ---- NEVER STAND IDLE: if the wanted type produced no action, grow the economy instead ----
+    // Measured under the owner's own tunables (--aidiag hard, 1800 ticks): the AI emitted NOTHING on
+    // 1121 ticks in Reacting and ended on 3930 unspent gold with 15 workers and 2 buildings. The
+    // cause is a dead end, not poverty: it wants the counter to what it sees, owns no building of
+    // that type — so there is nothing to queue at — and cannot yet afford the first one, which under
+    // these costs can be 4000 (scissor). So it saved, and did nothing at all, for two minutes.
+    //
+    // A player in that position keeps spamming carts while the bank fills, which is exactly what the
+    // owner described. Carts are the cheapest thing on the board and they PAY FOR the building being
+    // saved for, so this is strictly better than silence. The counter chest is still respected: only
+    // gold above the reserve is spent here, so saving still completes — a tier with chest 0 simply
+    // spends it all, which is what the measured lower rungs do.
+    if (Count == 0 && Want != UnitMiner) {
+        const TypeCapacity Camps = SurveyType(S, MyTeam_, UnitMiner);
+        const int32_t ChestPct = K.CounterChest < 0 ? 0 : K.CounterChest;
+        const bool SaveForCounter = ChestPct > 0 &&
+                                    (State_ == EState::Reacting || State_ == EState::AllIn) &&
+                                    SurveyType(S, MyTeam_, Soldier).Owned == 0;
+        const int32_t Chest = SaveForCounter ? BuildingCostFor(S.Cv, Soldier) * ChestPct / 100 : 0;
+        const int32_t Spendable = Gold > Chest ? Gold - Chest : 0;
+        const int32_t CartCost = S.Units[UnitMiner].Cost > 0 ? S.Units[UnitMiner].Cost : 1;
+        if (Camps.Slot >= 0 && Camps.Queue < MinerDepth) {
+            int32_t N = MinerDepth - Camps.Queue;
+            const int32_t Room = S.Cv.BuildingQueueMax - Camps.Queue;
+            if (N > Room) N = Room;
+            const int32_t Affordable = Spendable / CartCost;
+            if (N > Affordable) N = Affordable;
+            if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Camps.Slot, N);
+        }
     }
 }
 

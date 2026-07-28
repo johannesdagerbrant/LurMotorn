@@ -62,7 +62,13 @@ struct AiKnobs {
         // tier did — spends the whole walk (~34s at the opening frontier) building soldiers it did
         // not need yet, out of income it could have compounded. Ticks of lead before arrival;
         // 0 keeps the old sighting behaviour, which is what the measured lower tiers are tuned on.
-        WaveLead;
+        WaveLead,
+        // COUNTER CHEST (owner's suggestion, 2026-07-27): percent of a counter BUILDING's price to
+        // keep banked while contested, so a composition switch is answered by PLACING at the front
+        // rather than by waiting out income. Every coin queued as units is a coin that cannot buy
+        // the building the next wave needs. 0 = spend it all, which is what the measured lower tiers
+        // do today.
+        CounterChest;
 };
 AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier);
 

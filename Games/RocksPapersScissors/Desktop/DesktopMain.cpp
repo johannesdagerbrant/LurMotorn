@@ -426,6 +426,9 @@ int RunAiDiag(Rps::EAiTier Tier, Rps::EAiTier Tier1, uint64_t Seed, int MaxTicks
         return C;
     };
     int TCamp = -1, TMiner = -1, TBldg = -1, TSoldier = -1;   // milestone ticks (-1 = never)
+    int32_t AskPlace = 0, GotPlace = 0, AskPlaceUnits = 0, AskQueue = 0, AskQueueUnits = 0;
+    int32_t IdleTicks[4] = {};
+    int64_t IdleGold[4] = {};
     Lur::Log::Info("AI diag: t0=%s t1=%s seed=0x%llx cap=%d ticks (%.0fs at %d Hz)",
                    Rps::AiTierName(Tier), Rps::AiTierName(Tier1), static_cast<unsigned long long>(Seed), MaxTicks,
                    static_cast<double>(MaxTicks) / Rps::TickRateHz, Rps::TickRateHz);
@@ -439,7 +442,21 @@ int RunAiDiag(Rps::EAiTier Tier, Rps::EAiTier Tier1, uint64_t Seed, int MaxTicks
         int NC = 0;
         for (int I = 0; I < C0; ++I) Comb[NC++] = E0[I];
         for (int I = 0; I < C1; ++I) Comb[NC++] = E1[I];
+        // What the AI ASKED for, next to what it GOT. A place event the sim refuses is a silent
+        // no-op (ApplyPlace is deliberately a deterministic no-op on an illegal spot), so "it never
+        // expanded" and "it asked 900 times and was refused 900 times" look identical from the
+        // census — and they are completely different bugs.
+        // IDLE ticks, attributed by FSM state. An AI that emits nothing is neither expanding nor
+        // producing, and the census cannot distinguish "poor" from "had gold and no legal action".
+        if (C0 == 0) { const int St0 = static_cast<int>(Ai0.State()); if (St0 >= 0 && St0 < 4) { ++IdleTicks[St0]; IdleGold[St0] += S->Teams[0].Gold; } }
+        const int32_t BldBefore = Look(0).Buildings;
+        for (int I = 0; I < C0; ++I) {
+            if (Comb[I].Team != 0) continue;
+            if (Comb[I].Kind == Rps::EventPlaceBuilding) { ++AskPlace; AskPlaceUnits += Comb[I].Type == Rps::UnitMiner ? 1 : 0; }
+            else { ++AskQueue; AskQueueUnits += Comb[I].Y; }
+        }
         S->StepEvents(Comb, NC);
+        if (Look(0).Buildings > BldBefore) ++GotPlace;
         const Census A = Look(0);
         if (TCamp < 0 && S->HasMinerCamp(0)) TCamp = T;
         if (TMiner < 0 && A.Workers > 0) TMiner = T;
@@ -457,6 +474,11 @@ int RunAiDiag(Rps::EAiTier Tier, Rps::EAiTier Tier1, uint64_t Seed, int MaxTicks
                    "first soldier %.1fs   (-1.0 = NEVER)",
                    Rps::AiTierName(Tier), Ms(TCamp), Ms(TMiner), Ms(TBldg), Ms(TSoldier));
     const Census A = Look(0), B = Look(1);
+    Lur::Log::Info("  t0 ASKED: place x%d (camps %d) -> %d landed | queue x%d for %d units",
+                   AskPlace, AskPlaceUnits, GotPlace, AskQueue, AskQueueUnits);
+    Lur::Log::Info("  t0 IDLE ticks (emitted nothing) open/build/react/allin %d/%d/%d/%d | avg gold while idle in build %lld",
+                   IdleTicks[0], IdleTicks[1], IdleTicks[2], IdleTicks[3],
+                   static_cast<long long>(IdleTicks[1] > 0 ? IdleGold[1] / IdleTicks[1] : 0));
     Lur::Log::Info("  final: t0 gold=%d wrk=%d sol=%d bld=%d | t1 gold=%d wrk=%d sol=%d bld=%d | "
                    "result=%u at tick %u",
                    A.Gold, A.Workers, A.Soldiers, A.Buildings, B.Gold, B.Workers, B.Soldiers,

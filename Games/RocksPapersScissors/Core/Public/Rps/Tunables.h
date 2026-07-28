@@ -92,7 +92,7 @@ constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 // Speed is Fixed. Range/Cooldown and the RPS Beats relation stay compile-time in UnitTable
 // (Beats is wire/order-load-bearing, not a number to twiddle). The Sim latches these into
 // Sim::Units[] (DeriveUnits) each tick. ----
-LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      100,      CVarFlagAffectsGameplay, "Gold to queue a miner cart");
+LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      50,      CVarFlagAffectsGameplay, "Gold to queue a miner cart");
 LUR_CVAR(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
 LUR_CVAR(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
 LUR_CVAR(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
@@ -100,12 +100,12 @@ LUR_CVAR(CvMinerBuild,     "rps.unit.miner.build_time",50,       CVarFlagAffects
 LUR_CVAR(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
 LUR_CVAR(CvRockHp,         "rps.unit.rock.hp",         100,      CVarFlagAffectsGameplay, "Rock hit points");
 LUR_CVAR(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
-LUR_CVAR(CvRockDamage,     "rps.unit.rock.damage",     7,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
+LUR_CVAR(CvRockDamage,     "rps.unit.rock.damage",     6,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
 LUR_CVAR(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
 LUR_CVAR(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
-LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        50,       CVarFlagAffectsGameplay, "Paper hit points");
-LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     F(1),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
-LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    9,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
+LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        40,       CVarFlagAffectsGameplay, "Paper hit points");
+LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     FRound(125, 100),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    8,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
 LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
 LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
 LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      80,       CVarFlagAffectsGameplay, "Scissor hit points");
@@ -134,12 +134,12 @@ LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffects
 // against a different game. ----
 LUR_CVAR(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
 LUR_CVAR(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   600, CVarFlagAffectsGameplay, "Gold to place a mining camp");
-LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",      300, CVarFlagAffectsGameplay, "Rock building hit points");
-LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",   1500, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",      500, CVarFlagAffectsGameplay, "Rock building hit points");
+LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",   1000, CVarFlagAffectsGameplay, "Gold to place a Rock building");
 LUR_CVAR(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
-LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  2000, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  2500, CVarFlagAffectsGameplay, "Gold to place a Paper building");
 LUR_CVAR(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
-LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",3250, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",4000, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
 // Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
 // gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
@@ -147,7 +147,7 @@ LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",3250, CVarFlagA
 // design: HP well above any other building (placeholder ~3x the toughest combat building).
 LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
-LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     40,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
+LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     20,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
 LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
 LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
 LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
@@ -173,13 +173,13 @@ LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagA
 LUR_CVAR(CvMineClearance,         "rps.build.mine_clearance",F(6),     CVarFlagAffectsGameplay, "Min building-centre distance from a live mine (world units)");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
-LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(35), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
+LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(40), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
 // Opening gold (§12.6): sized to buy the forced opening and nothing else — one mining camp
 // (MinerBuildingCost 600) + six miner carts (6 x MinerCost 100) = 1200 exactly. A combat building
 // is gated on the first miner unit anyway (ApplyPlace) AND now costs more than the whole opening
 // purse, so a player cannot open with military under any spend order. Keep this in step with those
 // two costs if they change — the "exactly one camp + N carts" property is the point, not the number.
-LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  1200,     CVarFlagAffectsGameplay, "Opening gold: one mining camp (600) + 6 miner carts (100 ea)");
+LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  800,     CVarFlagAffectsGameplay, "Opening gold: one mining camp (600) + 6 miner carts (100 ea)");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // There is NO cap on carts per deposit. There used to be (WorkersPerMine = 6, a "room around
@@ -293,7 +293,7 @@ LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", FRound(1, 10), CVarFlagAff
 // with a smoothstep fade; no floats, no libs). WNoise is its amplitude; NoiseTimeScale is
 // ticks→lattice (smaller = slower, smoother drift).
 LUR_CVAR(CvNoiseTimeScale, "rps.boid.noise_time_scale", F(1, 12), CVarFlagAffectsGameplay, "Noise temporal frequency (lattice cells/tick)");
-LUR_CVAR(CvWNoise, "rps.boid.w_noise", F(2, 5), CVarFlagAffectsGameplay, "Wander amplitude (world-units of pull)");
+LUR_CVAR(CvWNoise, "rps.boid.w_noise", FRound(6, 10), CVarFlagAffectsGameplay, "Wander amplitude (world-units of pull)");
 // Fractal (fBm) noise levers (#123): stack N octaves of the value noise, each at Lacunarity x
 // the frequency and Gain x the amplitude, normalized. Octaves=1 is exactly the single-octave
 // wander above (bit-identical default) — turn it up for richer, less repetitive drift.
@@ -349,8 +349,8 @@ constexpr Fixed TargetBand = F(12);
 // BUILDING may be placed — that is rps.build.mine_clearance (placement) and rps.build.footprint,
 // which are a separate family from repulsion.
 LUR_CVAR(CvMineDigRange,    "rps.mine.dig_range",    FRound(22, 10), CVarFlagAffectsGameplay, "How close a cart must be to dig (world units)");
-LUR_CVAR(CvMineRepelRadius, "rps.mine.repel_radius", F(3, 2),        CVarFlagAffectsGameplay, "Soft-obstacle radius pushing units off a deposit (keep < dig_range)");
-LUR_CVAR(CvMineVisualSize,  "rps.mine.visual_size",  FRound(22, 10), CVarFlagNone,            "Drawn mine DIAMETER in world units (render only — never synced)");
+LUR_CVAR(CvMineRepelRadius, "rps.mine.repel_radius", F(2),           CVarFlagAffectsGameplay, "Soft-obstacle radius pushing units off a deposit (keep < dig_range)");
+LUR_CVAR(CvMineVisualSize,  "rps.mine.visual_size",  F(4),           CVarFlagNone,            "Drawn mine DIAMETER in world units (render only — never synced)");
 // READABILITY knob, not an economy one, and a PREFERENCE, not a cap — any number of carts may
 // still work one deposit. Carts pile onto whichever deposit is nearest, and a stack of eight
 // overlapping carts cannot be counted at a glance. This is the extra ONE-WAY walk (world units)
@@ -376,8 +376,8 @@ LUR_CVAR(CvMineSpreadSlack, "rps.mine.spread_slack", F(8),           CVarFlagAff
 // seal holds while row < 1.5 x footprint + mine_clearance, i.e. below 10.5 at the defaults.
 // Only the two starter rows are knobs. midfield/contested stay derived from WorldHeight so they
 // keep scaling with the map instead of freezing at an absolute Y.
-LUR_CVAR(CvMineRowHome,     "rps.mine.row_home",     F(3),           CVarFlagAffectsGameplay, "Starter row 1: distance in from each team's end (world units)");
-LUR_CVAR(CvMineRowSafe,     "rps.mine.row_safe",     F(9),           CVarFlagAffectsGameplay, "Starter row 2: distance in from each team's end (world units)");
+LUR_CVAR(CvMineRowHome,     "rps.mine.row_home",     F(1),           CVarFlagAffectsGameplay, "Starter row 1: distance in from each team's end (world units)");
+LUR_CVAR(CvMineRowSafe,     "rps.mine.row_safe",     F(5),           CVarFlagAffectsGameplay, "Starter row 2: distance in from each team's end (world units)");
 
 // ---- Spatial grid (design §5) — cell size in whole world units. This is a PURE
 // perf knob: any value yields bit-identical results to brute force (rps_sim_tests
@@ -437,7 +437,7 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // is moot but harmless. Difficulty = information quality (staleness/precision) + reaction
 // cadence; the strategy knobs (open/worker/ratio/allin) shape the FSM. One macro emits the nine
 // knobs for a tier so the three stay in lockstep. ----
-#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB, DF, BC, MQ, WL)                                    \
+#define LUR_AI_TIER(Tier, Pfx, OW, WT, ST, PR, CA, JI, HY, AL, SR, QD, MB, DF, BC, MQ, WL, CR)                                    \
     LUR_CVAR(CvAi##Tier##OpenWorkers,  "rps.ai." Pfx ".open_workers",  OW, CVarFlagAffectsGameplay, "Miners to open with before soldiers");        \
     LUR_CVAR(CvAi##Tier##WorkerTarget, "rps.ai." Pfx ".worker_target", WT, CVarFlagAffectsGameplay, "Target miner count (economy)");               \
     LUR_CVAR(CvAi##Tier##Staleness,    "rps.ai." Pfx ".staleness",     ST, CVarFlagAffectsGameplay, "Enemy-read delay in ticks (higher = slower to react)"); \
@@ -452,7 +452,8 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##DefenceFloor, "rps.ai." Pfx ".defence_floor", DF, CVarFlagAffectsGameplay, "Combat buildings to stand up BEFORE chasing the economy target"); \
     LUR_CVAR(CvAi##Tier##BuildCluster, "rps.ai." Pfx ".build_cluster", BC, CVarFlagAffectsGameplay, "Buildings of one type it commits to in quick succession (1 = no clustering)"); \
     LUR_CVAR(CvAi##Tier##MinerQueue,   "rps.ai." Pfx ".miner_queue",    MQ, CVarFlagAffectsGameplay, "Carts queued per camp per batch (0 = use the shared rps.ai.miner_queue_depth)"); \
-    LUR_CVAR(CvAi##Tier##WaveLead,     "rps.ai." Pfx ".wave_lead",      WL, CVarFlagAffectsGameplay, "Ticks before an incoming wave LANDS that it switches to countering (0 = on first sighting)")
+    LUR_CVAR(CvAi##Tier##WaveLead,     "rps.ai." Pfx ".wave_lead",      WL, CVarFlagAffectsGameplay, "Ticks before an incoming wave LANDS that it switches to countering (0 = on first sighting)"); \
+    LUR_CVAR(CvAi##Tier##CounterChest, "rps.ai." Pfx ".counter_chest", CR, CVarFlagAffectsGameplay, "Percent of a counter BUILDING's price kept banked while contested (0 = spend it all on units)")
 // ---- The ladder is now STRICTLY ORDERED BY DESIGN: the better tier always beats the lesser one. ----
 // That replaces the old goal of a 77-83% adjacent-rung win rate. It is delivered by a monotonic
 // PRODUCTION-VOLUME ladder — queue_depth 8/5/3 and max_buildings unlimited/12/4 for hard/medium/easy —
@@ -521,8 +522,8 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // One thing these knobs CANNOT do is match the beginner's 5 workers at 60s — easy sits at 11 in every
 // configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
 // human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
-LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1, 0, 0);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 0);
+LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1, 0, 0, 0);
+LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 0, 0);
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -558,7 +559,7 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 
 // unfixed hole): economy-first with no combat capacity standing means a timely attack arrives while
 // hard has zero soldier buildings and must start them from scratch, and worker_target is inert after
 // contact so no knob could reach it. The floor is capacity, not intent.
-LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 0);
+LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 0, 0);
 // ---- "Perhaps Impossible": the ladder's top rung, tuned to the OWNER'S OWN WINNING BUILD ----
 // It gets NO information hard does not have (staleness 0, precision 1 — hard already holds the
 // maximum, and there is nothing above "sees the board now, exactly"), and no extra actions: same
@@ -587,14 +588,28 @@ LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 
 // allin_lead 80 (vs 10) keeps it from throwing that army away early, on top of the production-rate
 // gate; jitter 0 because the top rung does not get a random reaction delay.
 //
-// HONEST STATUS: against hard in AI-vs-AI this is currently EVEN (23 of 48 across both sides, with
-// a side asymmetry — 23/24 as team 0, 0/24 as team 1 — that is NOT explained yet; a hard-vs-hard
-// mirror on the same seeds is 10-14, so it is not simply a positional bias in the harness). It is
-// tuned against the recordings of ONE human, and AI-vs-AI is a different opponent, so "beats him"
-// is unverified until he plays it and the recording is read back. Do not trust an 8-match sweep
-// here: the sim is deterministic, so on fixed seeds queue_depth 4 measured 15/16 and 5 measured
-// 1/16 — that is chaos, not signal. Use both side orders and 24+ seeds.
-LUR_AI_TIER(PerhapsImpossible, "impossible", 5, 110, 0, 1, 12, 0, 1, 80, 55, 4, 0, 5, 4, 0, 60);
+// MEASURED, and it is hard's exact numbers plus ONE change: counter_chest 100. Every pairing below
+// is 48 matches, both side orders, under these defaults (the owner's own tunables):
+//     hard's numbers verbatim        24/48   (dead even — it IS hard, which is the control)
+//     + counter_chest 100            34/48   <- shipped
+//     + wave_lead 60                  1/48   (reacting late is FATAL against an early attacker)
+// The chest is the owner's own suggestion — "keep money to build counter unit buildings at the
+// frontline more reactively" — and it is the only thing that measured better than the rung below.
+// Production is flat per building, so a counter building is worth far more than the four or five
+// units the same coin buys; holding its price back means a composition switch is answered by
+// PLACING at the front instead of waiting out income.
+//
+// wave_lead stays at 0 (off) despite being the strategy he described, and the reason is worth
+// keeping: he holds his economy until the wave is nearly on him because his opponent is an AI that
+// converts early and predictably. Against an opponent that attacks at ~85s with 30 units, the same
+// patience is just a free head start — 1 win in 48. The knob remains per-tier for tuning on the
+// phone, but it does not ship on.
+//
+// STILL UNVERIFIED: whether this beats HIM. AI-vs-AI is a different opponent, and the two previous
+// attempts at this tier both measured fine and then felt like hard in his hands. Do not trust a
+// small sweep here either: the sim is deterministic, so fixed seeds flip outcomes chaotically —
+// queue_depth 4 once measured 15/16 and 5 measured 1/16 on the same seeds. Both orders, 24+ seeds.
+LUR_AI_TIER(PerhapsImpossible, "impossible", 5, 110, 0, 1, 12, 2, 1, 10, 55, 8, 0, 5, 3, 0, 0, 100);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -708,7 +723,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(Ai##Tier##DefenceFloor, CvAi##Tier##DefenceFloor) \
     IX(Ai##Tier##BuildCluster, CvAi##Tier##BuildCluster) \
     IX(Ai##Tier##MinerQueue,   CvAi##Tier##MinerQueue) \
-    IX(Ai##Tier##WaveLead,     CvAi##Tier##WaveLead)
+    IX(Ai##Tier##WaveLead,     CvAi##Tier##WaveLead) \
+    IX(Ai##Tier##CounterChest, CvAi##Tier##CounterChest)
 
 
 // ---- #112: the AffectsGameplay CVar set, defined ONCE and expanded four ways ----

@@ -357,7 +357,10 @@ static void TestBuildingSoaHashedAndCopyable() {
     const uint64_t H3 = S.StateHash();
     S.FrontierT0 = F(42);                     CHECK(S.StateHash() != H3);
     const uint64_t H4 = S.StateHash();
-    S.FrontierT1 = F(200);                    CHECK(S.StateHash() != H4);
+    // NOT F(200): initial_frontier is 40, so FrontierT1 already IS 240-40 = 200 and assigning it
+    // changes nothing. The test is "every field is mixed into the hash", so it needs a value the
+    // field does not already hold.
+    S.FrontierT1 = F(199);                    CHECK(S.StateHash() != H4);
     const uint64_t H5 = S.StateHash();
 
     // memcpy snapshot (the rollback mechanism) preserves every new field bit-for-bit.
@@ -366,7 +369,7 @@ static void TestBuildingSoaHashedAndCopyable() {
     CHECK(Snap.StateHash() == H5);
     CHECK(Snap.Kind[0] == KindBuilding && Snap.IsBuilding(0));
     CHECK(Snap.Queue[0] == 7 && Snap.BuildProgress[0] == 13);
-    CHECK(Snap.FrontierT0 == F(42) && Snap.FrontierT1 == F(200));
+    CHECK(Snap.FrontierT0 == F(42) && Snap.FrontierT1 == F(199));
 }
 
 // ---- #132 building production: FLAT cadence, no stack acceleration ----
