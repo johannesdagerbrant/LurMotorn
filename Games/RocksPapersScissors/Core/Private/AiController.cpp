@@ -348,7 +348,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const AiKnobs K = KnobsFor(S.Cv, Tier_);
 
     // --- Scan the board once: my economy/army + the TRUE enemy soldier composition. ---
-    int32_t MyMiners = 0, MySoldiers = 0, MyCombatBldg = 0, FoeCombatBldg = 0;
+    int32_t MyMiners = 0, MySoldiers = 0, MyCombatBldg = 0, FoeCombatBldg = 0, FoeWorkers = 0;
     int32_t TrueEnemy[3] = {0, 0, 0};  // rock, paper, scissor
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
@@ -368,6 +368,11 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             if (S.IsBuilding(I) && !S.IsHomeBase(I) && Ty >= UnitRock && Ty <= UnitScissor)
                 ++MyCombatBldg;
             if (Ty == UnitMiner) ++MyMiners; else ++MySoldiers;
+        } else if (Ty == UnitMiner && !S.IsBuilding(I)) {
+            // Enemy CARTS. Counted exactly, for the same reason enemy soldier buildings are: a cart
+            // is not a moving army being scouted, it is a visible standing economy, and the commit
+            // test below needs it — an economy is latent reinforcement.
+            ++FoeWorkers;
         } else if (Ty >= UnitRock && Ty <= UnitScissor) {
             ++TrueEnemy[Ty - UnitRock];
         }
@@ -514,8 +519,68 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     const int32_t WalkTicks = Speed.Raw > 0 ? (Gap / Speed).ToInt() : 0;
     const int32_t Bt = S.Units[Soldier].BuildTicks > 0 ? S.Units[Soldier].BuildTicks : 1;
     const int32_t Incoming = FoeCombatBldg * WalkTicks / Bt;     // units that arrive during the walk
+    // TOP TIER: Lanchester with reinforcement, and the reinforcement term is the ENEMY'S ECONOMY.
+    //
+    // The linear test above has the right idea and the wrong arithmetic, and a first attempt at
+    // fixing it with standing soldier buildings as rho_enemy measured exactly neutral — because at
+    // the moment the AI commits, the owner has zero soldiers AND zero soldier buildings, so rho really
+    // is 0 and the model correctly says "attack wins". It is right about the instant and wrong about
+    // the future: his fourteen mining camps are production he has not bought yet.
+    //
+    // So bound reinforcement by what their economy can FUND, not by what they happen to have built.
+    // Buildings are a constraint an opponent buys their way out of during the walk; income is the one
+    // they cannot. Derived from observable state and Cv only — cart count (visible on screen, like
+    // their buildings), CarryCapacity, dig_ticks, unit cost — so it re-derives itself when the economy
+    // is tuned and it reads nothing a human could not.
+    //
+    //   u = alpha*A - rho_B ;  v = beta*B - rho_A ;  A wins iff  beta*u^2 > alpha*v^2 ? u>0 : v<=0
+    //
+    // Reduces exactly to the classic alpha*A^2 > beta*B^2 when neither side reinforces.
+    bool OutproducesThem = false;
+    if (Tier_ == EAiTier::PerhapsImpossible) {
+        const uint8_t FoeType = CounterEnemy_ != UnitNone ? CounterEnemy_ : static_cast<uint8_t>(UnitRock);
+        const int32_t FoeHp = S.Units[FoeType].MaxHp > 0 ? S.Units[FoeType].MaxHp : 1;
+        const int32_t MyHp = S.Units[Soldier].MaxHp > 0 ? S.Units[Soldier].MaxHp : 1;
+        const int32_t Mult = S.Cv.CounterMultiplier > 0 ? S.Cv.CounterMultiplier : 1;
+        // Our soldier counters theirs by construction, so it lands the multiplier and they do not —
+        // that asymmetry is most of why committing can ever be right.
+        constexpr int64_t Scale = 1024;
+        // The multiplier applies only if our type ACTUALLY beats theirs — before an enemy army exists
+        // Soldier defaults to Rock against a presumed Rock, and claiming a 3x counter bonus in a
+        // mirror inflated our kill rate threefold in exactly the situation the AI over-commits in.
+        const int64_t MyMult = UnitTable[Soldier].Beats == FoeType ? Mult : 1;
+        const int64_t FoeMult = UnitTable[FoeType].Beats == Soldier ? Mult : 1;
+        const int64_t Alpha = static_cast<int64_t>(S.Units[Soldier].Attack) * MyMult * Scale / FoeHp;
+        const int64_t Beta = static_cast<int64_t>(S.Units[FoeType].Attack) * FoeMult * Scale / MyHp;
+        // A cart's cycle is dig + walk; the walk varies with camp placement, so approximate it as
+        // comparable to the dig. Erring SHORT is deliberate — it overestimates their income, which
+        // makes the AI commit less readily, and a missed attack is cheaper than a lost army.
+        const int64_t Cycle = 2 * (S.Cv.DigTicks > 0 ? S.Cv.DigTicks : 1);
+        const int64_t FoeCost = S.Units[FoeType].Cost > 0 ? S.Units[FoeType].Cost : 1;
+        const int64_t RhoFunded = static_cast<int64_t>(FoeWorkers) * CarryCapacity * Scale / (Cycle * FoeCost);
+        const int64_t RhoBuilt = static_cast<int64_t>(FoeCombatBldg) * Scale / Bt;
+        const int64_t RhoB = RhoFunded > RhoBuilt ? RhoFunded : RhoBuilt;   // they will buy the capacity
+        const int64_t RhoA = static_cast<int64_t>(MyCombatBldg) * Scale / Bt;
+        // FIGHT THE ARMY THAT WILL BE THERE, not the one that is there now. An attack does not land
+        // for WalkTicks (~34s at the opening frontier) and the defender reinforces for every one of
+        // them, while our own new units have the same walk ahead of them and arrive as a trickle.
+        // Without this the test is a snapshot: it saw 64 of ours against 0 of theirs and committed,
+        // when what actually met the attack was several hundred units their economy funded during
+        // the walk. This term is the whole difference between the previous two attempts and this one.
+        const int64_t FoeAtContact =
+            EnemyArmy + RhoB * (WalkTicks > 0 ? WalkTicks : 0) / Scale;
+        const int64_t U = Alpha * MySoldiers - RhoB;
+        const int64_t V = Beta * FoeAtContact - RhoA;
+        OutproducesThem = (Beta * U * U > Alpha * V * V) ? (U > 0) : (V <= 0);
+    }
     if (MyMiners < K.OpenWorkers) {
         State_ = EState::Opening;
+    } else if (Tier_ == EAiTier::PerhapsImpossible) {
+        // AllinLead stays as a floor: a model saying "you win" on a two-unit edge is still not a
+        // reason to switch the economy off.
+        State_ = (OutproducesThem && MySoldiers - EnemyArmy >= K.AllinLead && MySoldiers > 0)
+                     ? EState::AllIn
+                     : (EnemyArmy > 0 && WaveLanding) ? EState::Reacting : EState::Building;
     } else if (MySoldiers - EnemyArmy >= K.AllinLead + Incoming && MySoldiers > 0) {
         State_ = EState::AllIn;              // can out-kill their production -> commit
     } else if (EnemyArmy > 0 && WaveLanding) {
