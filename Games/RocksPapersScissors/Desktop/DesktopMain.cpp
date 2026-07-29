@@ -32,6 +32,7 @@
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Loopback.h"
 #include "Rps/AiController.h"
+#include "OwnerBot.h"   // the scripted owner line the top tier is scored against
 #include "Rps/MatchRecord.h"   // #144: --replay a device recording
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
@@ -483,6 +484,70 @@ int RunAiDiag(Rps::EAiTier Tier, Rps::EAiTier Tier1, uint64_t Seed, int MaxTicks
                    "result=%u at tick %u",
                    A.Gold, A.Workers, A.Soldiers, A.Buildings, B.Gold, B.Workers, B.Soldiers,
                    B.Buildings, static_cast<unsigned>(S->Result), S->Tick);
+    return 0;
+}
+
+// The OWNER diagnostic: the AI against a scripted re-implementation of the line that actually beats
+// it (OwnerBot.h). The tier's target is "he wins about 1 in 10", and this is the only harness that
+// reports that number — --aivs plays the wrong opponent and --aibeginner plays no opponent at all.
+//
+// Read the win column, but read the CAMP and BUILDING columns too: he wins on capacity (34 buildings
+// to the AI's 8) and on where his camps go (depth 121 vs 37), so those are the terms that have to
+// move, not just the tally.
+int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) {
+#if !LUR_SHIPPING
+    Lur::Core::LoadCVarConfig("rps-cvars.cfg");
+#endif
+    Rps::OwnerBot::Params P{};
+    Lur::Log::Info("AI-vs-OWNER: tier=%s, %d matches, cap %d ticks (%.0fs) | owner line: %d camps, "
+                   "army from t%d, +%d/+%d batches, 1 act/%d ticks",
+                   Rps::AiTierName(Tier), Matches, MaxTicks,
+                   static_cast<double>(MaxTicks) / Rps::TickRateHz, P.CampTarget, P.ArmyStartTick,
+                   P.EarlyBatch, P.LateBatch, P.ActEveryTicks);
+    int OwnerWins = 0, AiWins = 0, Unresolved = 0;
+    long long SumTicks = 0, SumOwnerBld = 0, SumAiBld = 0, SumOwnerWrk = 0, SumAiWrk = 0;
+    for (int M = 0; M < Matches; ++M) {
+        const uint64_t Seed = BaseSeed + static_cast<uint64_t>(M);
+        auto S = std::make_unique<Rps::Sim>();
+        S->Init(Seed);
+        Rps::AiController Ai;
+        Ai.Init(Seed, 1, Tier);
+        Rps::OwnerBot Owner;
+        Owner.Init(0, P);
+        int T = 0;
+        for (; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
+            Rps::InputEvent E[2 * Rps::MaxEventsPerTick];
+            int N = 0;
+            Owner.DecideEvents(*S, S->Tick, E, Rps::MaxEventsPerTick, N);
+            // Same gate the real solo path applies: the AI holds until the player commits a camp.
+            if (S->HasMinerCamp(0)) {
+                int C = 0;
+                Ai.DecideEvents(*S, S->Tick, E + N, static_cast<int>(Rps::MaxEventsPerTick) - N, C);
+                N += C;
+            }
+            S->StepEvents(E, N);
+        }
+        int32_t Bld[2] = {}, Wrk[2] = {};
+        for (int32_t I = 0; I < S->Count; ++I) {
+            if (!S->IsAlive(I)) continue;
+            const int Tm = S->Team[I] & 1;
+            if (S->IsBuilding(I)) { if (!S->IsHomeBase(I)) ++Bld[Tm]; }
+            else if (S->Type[I] == Rps::UnitMiner) ++Wrk[Tm];
+        }
+        SumTicks += T; SumOwnerBld += Bld[0]; SumAiBld += Bld[1];
+        SumOwnerWrk += Wrk[0]; SumAiWrk += Wrk[1];
+        if (S->Result == Rps::ResultTeam0Wins) ++OwnerWins;
+        else if (S->Result == Rps::ResultTeam1Wins) ++AiWins;
+        else ++Unresolved;
+    }
+    const double Inv = Matches > 0 ? 1.0 / Matches : 0.0;
+    Lur::Log::Info("AI-vs-OWNER RESULT: owner %d | %s %d | unresolved %d  (of %d)", OwnerWins,
+                   Rps::AiTierName(Tier), AiWins, Unresolved, Matches);
+    Lur::Log::Info("  owner win rate %.0f%% (target ~10%%) | avg %.0fs | avg bld owner=%.1f ai=%.1f "
+                   "| avg wrk owner=%.1f ai=%.1f",
+                   Matches > 0 ? 100.0 * OwnerWins / Matches : 0.0,
+                   SumTicks * Inv / Rps::TickRateHz, SumOwnerBld * Inv, SumAiBld * Inv,
+                   SumOwnerWrk * Inv, SumAiWrk * Inv);
     return 0;
 }
 
@@ -1124,6 +1189,7 @@ int main(int argc, char** argv) {
     Rps::EAiTier AiTier = Rps::EAiTier::Medium;  // solo opponent difficulty (#124)
     bool AiVs = false;                           // #128 headless AI-vs-AI tier harness
     bool AiDiag = false;                         // #152 headless AI milestone/census diagnostic
+    bool AiOwner = false;                        // tier vs the scripted owner line (OwnerBot.h)
     bool AiBeginner = false;                     // #155 headless AI-vs-first-timer arrival clock
     Rps::EAiTier AiDiagTier1 = Rps::EAiTier::Medium;  // --aidiag a:b -> team 1's tier
     int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
@@ -1164,6 +1230,10 @@ int main(int argc, char** argv) {
             // from --aivs cannot.
             AiDiagTier1 = C == std::string::npos ? AiTier : ParseTier(V.substr(C + 1));
         }
+        else if (A == "--aiowner" && I + 1 < argc) {   // tier vs the owner's measured fast line
+            AiOwner = true;
+            AiTier = ParseTier(argv[++I]);
+        }
         else if (A == "--aibeginner" && I + 1 < argc) {  // #155 tier vs a camp-then-idle first-timer
             AiBeginner = true;
             AiTier = ParseTier(argv[++I]);
@@ -1189,6 +1259,7 @@ int main(int argc, char** argv) {
     if (ReplayPath != nullptr) return RunReplay(ReplayPath, DiagEvery);
 #endif
     if (AiDiag) return RunAiDiag(AiTier, AiDiagTier1, Seed, MaxTicks, DiagEvery);
+    if (AiOwner) return RunAiOwner(AiTier, Seed, Matches, MaxTicks);
     if (AiBeginner) return RunAiBeginner(AiTier, Seed, Matches, MaxTicks, DiagEvery);
     if (AiVs) return RunAiVs(AiVsA, AiVsB, Seed, Matches, MaxTicks);
     if (Ble) return RunBle(RadioExe.c_str(), Auto, MaxFrames, Seed);
