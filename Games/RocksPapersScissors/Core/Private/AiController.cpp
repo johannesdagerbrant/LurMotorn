@@ -48,6 +48,52 @@ int32_t Quantize(int32_t C, int32_t Bucket) {
     if (Bucket <= 1) return C;
     return ((C + Bucket / 2) / Bucket) * Bucket;
 }
+// What ONE of our type I is worth against ONE enemy of type J: our effective strength minus theirs,
+// where strength is damage x health (the Lanchester form) and damage carries the RPS multiplier.
+// Derived from Cv/UnitTable, so it re-derives itself when the balance is tuned — the scissor change
+// on 2026-07-28 (hp 80->60, damage 12->15) moves these numbers with no code edit.
+int64_t MatchupValue(const Sim& S, uint8_t I, uint8_t J) {
+    const int32_t Mult = S.Cv.CounterMultiplier > 0 ? S.Cv.CounterMultiplier : 1;
+    const int32_t Out = S.Units[I].Attack * (UnitTable[I].Beats == J ? Mult : 1);
+    const int32_t In = S.Units[J].Attack * (UnitTable[J].Beats == I ? Mult : 1);
+    return static_cast<int64_t>(Out) * S.Units[I].MaxHp - static_cast<int64_t>(In) * S.Units[J].MaxHp;
+}
+// BEST RESPONSE TO THE WHOLE ENEMY COMPOSITION — argmax_i (A.q)_i, not counter(argmax_j q_j).
+//
+// Countering the single most numerous enemy type is wrong three ways, and the owner exploited all
+// three on 2026-07-28. It discards every enemy type except the mode, so against his near-uniform
+// army (rock 5.8 / paper 5.3 / scissor 4.6 buildings) one pure counter is 3x against a third of the
+// field and 1/3x against another third. It is a period-3 orbit against anyone who adapts. And it
+// hands the opponent a STEERING HANDLE: the mode is the one thing he controls for free, so leading
+// with Paper forced the AI to want Scissor — the 4000-gold building — on demand.
+//
+// Weighting every enemy type by its count removes the handle, because no single type can capture the
+// decision any more. Ties keep the lowest index, so it stays deterministic. Scores are int64: counts
+// reach the hundreds and MatchupValue is a product of two stats, so int32 would overflow.
+uint8_t BestResponse(const Sim& S, const int32_t Seen[3], int64_t& OutMargin) {
+    int64_t Score[3] = {0, 0, 0};
+    int64_t PerUnitMax = 1;
+    for (int32_t I = 0; I < 3; ++I) {
+        for (int32_t J = 0; J < 3; ++J) {
+            const int64_t V = MatchupValue(S, static_cast<uint8_t>(UnitRock + I),
+                                           static_cast<uint8_t>(UnitRock + J));
+            const int64_t Mag = V < 0 ? -V : V;
+            if (Mag > PerUnitMax) PerUnitMax = Mag;
+            if (Seen[J] > 0) Score[I] += static_cast<int64_t>(Seen[J]) * V;
+        }
+    }
+    // Deliberately NOT normalised by building price. Dividing the score by the building's cost was
+    // tried, on the reasoning that capacity is the binding constraint and a Scissor building is 4x a
+    // Rock one — but it measured WORSE (11-5 against hard, vs 12-4 raw), because it talks the AI out
+    // of the expensive answer exactly when the enemy army genuinely is the one Scissor hard-counters.
+    // The missing term is amortisation over a building's LIFETIME, not division by its price; until
+    // that exists, raw strength is the better of the two available approximations.
+    int32_t Best = 0;
+    for (int32_t I = 1; I < 3; ++I)
+        if (Score[I] > Score[Best]) Best = I;
+    OutMargin = PerUnitMax;   // one enemy unit's worth of score — the unit hysteresis is denominated in
+    return static_cast<uint8_t>(UnitRock + Best);
+}
 // Survey (Team, Type)'s production capacity: how many such buildings are alive, and which of them
 // has the SHALLOWEST queue (ties -> lowest slot, so it stays deterministic).
 //
@@ -341,6 +387,46 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         const int32_t Bucket = K.Precision;
         int32_t Seen[3] = {Quantize(Ring_[RSlot][0], Bucket), Quantize(Ring_[RSlot][1], Bucket),
                            Quantize(Ring_[RSlot][2], Bucket)};
+        // TOP TIER: best response to the whole mixture. Everything below it keeps the measured
+        // argmax path — the ladder's ordering was established against that behaviour and this is a
+        // strategy change, not a bug fix (contrast the chest clamp, which was shared).
+        //
+        // It reuses CounterEnemy_ rather than adding a member, by storing the enemy type our chosen
+        // soldier BEATS: `Soldier = CounterTo(CounterEnemy_)` then reproduces the choice exactly, and
+        // the telemetry, the hysteresis and the cluster re-target all keep working untouched.
+        if (Tier_ == EAiTier::PerhapsImpossible) {
+            const int32_t Total = Seen[0] + Seen[1] + Seen[2];
+            if (Total > 0) {
+                int64_t PerUnit = 1;
+                const uint8_t Want_ = BestResponse(S, Seen, PerUnit);
+                const uint8_t AsIf = UnitTable[Want_].Beats;   // CounterTo(AsIf) == Want_
+                if (CounterEnemy_ == UnitNone) {
+                    CounterEnemy_ = AsIf;
+                } else if (AsIf != CounterEnemy_) {
+                    // Hysteresis, in the same currency as before: the challenger must beat the
+                    // incumbent by K.Hysteresis ENEMY UNITS' worth of score, not by a bare epsilon.
+                    // Without a margin the score version chatters far more than argmax did, because
+                    // it moves continuously with every count instead of only when the mode flips.
+                    const uint8_t Cur = CounterTo(CounterEnemy_);
+                    int64_t SNew = 0, SCur = 0;
+                    for (int32_t J = 0; J < 3; ++J) {
+                        const uint8_t Jt = static_cast<uint8_t>(UnitRock + J);
+                        SNew += static_cast<int64_t>(Seen[J]) * MatchupValue(S, Want_, Jt);
+                        if (Cur != UnitNone) SCur += static_cast<int64_t>(Seen[J]) * MatchupValue(S, Cur, Jt);
+                    }
+
+
+
+
+
+
+                    if (SNew > SCur + static_cast<int64_t>(K.Hysteresis) * PerUnit) {
+                        CounterEnemy_ = AsIf;
+                        if (ClusterLeft_ > 0) ClusterType_ = CounterTo(CounterEnemy_);
+                    }
+                }
+            }
+        } else {
         // Dominant enemy soldier type (ties resolve rock < paper < scissor — deterministic).
         int32_t Dom = 0;
         for (int32_t T = 1; T < 3; ++T)
@@ -365,6 +451,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
                 }
             }
         }
+        }   // end of the pre-top-tier argmax path
         // Schedule the next reaction with +/- jitter (seeded, deterministic).
         int32_t Delay = K.Cadence;
         if (K.Jitter > 0) Delay += static_cast<int32_t>(Rng_.NextBounded(static_cast<uint32_t>(2 * K.Jitter + 1))) - K.Jitter;
