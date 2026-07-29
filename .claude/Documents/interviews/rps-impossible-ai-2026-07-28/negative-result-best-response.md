@@ -65,6 +65,37 @@ because it measured better.
 them the other way round, and that was wrong. No composition change should be judged until there is
 a sparring partner that plays like the person who beat it 31–0.
 
+## The rescue path (late research, 2026-07-29)
+
+The industry strand returned after this was written, and it contains the mechanism that fixes the
+over-picking directly. **The good production AIs do not pick a type at all — they hold a
+distribution and cap each type's share.** Three independent implementations:
+
+- **Zero-K / BAR CircuitAI** (`data/config/response.json`): units carry *roles*; a scouted threat
+  multiplies the base distribution rather than replacing it, and every role carries a
+  **`max_percent` ceiling on its share of the army** (riot ≤ 45%, transport ≤ 30%). Production
+  *samples* the distribution instead of taking an argmax. A hard cap on any single counter's share is
+  precisely what stops the AI hard-countering into a composition that then hard-counters it.
+- **0 A.D. Petra** (`attackPlan.js`): a least-satisfied-quota scheduler — sort candidate types by
+  `(have + queued) / targetSize − priority`, train whichever is proportionally furthest from quota,
+  and push satisfied types to the bottom with `+= 1000`. Mixes by construction; cannot over-invest;
+  one knob (`priority`) biases the mix without breaking it.
+- **Age of Empires IV** (GDC 2022): pick the unit that most improves a learned combat-fitness oracle
+  `ComputeCF(mine + candidate, scouted enemy)`. Because CF is nonlinear over a heterogeneous army,
+  the third copy of the best counter is worth less than the first copy of the second-best — **the mix
+  emerges from the nonlinearity with no explicit "build a mix" rule.**
+
+All three avoid the trap my patch fell into, and for the same reason: **the failure was taking an
+argmax of a scalar score at all.** Scoring types and picking the best one keeps *every* pathology of
+the argmax it replaced — it just changes which single type gets over-bought. Petra's quota scheduler
+is the cheapest of the three to implement here and needs no value function at all.
+
+Also relevant to whether the 10% target is even reachable: **Prismata's fair AI — built by David
+Churchill, in a turn-based perfect-information game with no micro, running 3 s of MCTS — reached the
+top 25% of ranked humans and no further**, with experts still beating it consistently. That is the
+best-case empirical ceiling for a hand-built non-cheating RTS AI, and it is *below expert*. Worth
+holding in mind before promising 90%.
+
 Two corollaries worth carrying forward:
 
 - The payoff function needs a **cost-amortisation** term, not a cost-division term. Something closer
