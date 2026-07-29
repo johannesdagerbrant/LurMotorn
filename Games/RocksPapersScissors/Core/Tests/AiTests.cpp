@@ -264,6 +264,82 @@ static void TestChestNeverPricesOutEveryAction() {
     CHECK(Longest < 40);
 }
 
+// #158: the top tier must hold a DISTRIBUTION, not pick a type. This is the regression test for the
+// dominant remaining loss mechanism — measured with --aiowner, the argmax tier fielded ONE soldier
+// type (peak one-type share 100%, all three alive at the end in only 4 of 16 matches) against an
+// opponent rotating all three, so a third of his army hard-countered everything it had at
+// counter_mult 3. It lost 12 of 16 that way.
+//
+// The assertion is on the SET of types it produces, not on a win rate: a win rate needs a whole match
+// and a sparring partner, while "does it ever ask for more than one type" is exactly the property the
+// change is about and it is decidable in a few hundred ticks.
+//
+// Events are applied BY HAND rather than through StepEvents, and deliberately: stepping the sim would
+// run combat, and then what the test measured would be attrition rather than the production decision.
+// A placement becomes a building and a queue command becomes queue depth, which is all the quota
+// scheduler reads — so this drives the real decision loop with none of the noise.
+static void TestTopTierHoldsAMixedComposition() {
+    // Both arms run in ONE process off the same board, so nothing but the CVar differs.
+    const int32_t WasEnabled = CvAiMixEnable.Get();
+    int32_t Distinct[2] = {0, 0};
+    for (int Arm = 0; Arm < 2; ++Arm) {
+        CvAiMixEnable.Set(Arm == 0 ? 0 : 1);          // arm 0 = the old argmax, arm 1 = the mix
+        Sim S;
+        S.Init(0x158);                                 // latches the CVar into S.Cv
+        // A MIXED enemy army, the owner's own measured shape — near-equal thirds. Any single counter
+        // is 3x against a third of it and 1/3x against another third, which is the whole problem.
+        Inject(S, 0, UnitRock, 18);
+        Inject(S, 0, UnitPaper, 17);
+        Inject(S, 0, UnitScissor, 15);
+        Inject(S, 1, UnitMiner, 40);                   // past worker_target, so it wants soldiers
+        InjectBuilding(S, 1, UnitMiner, F(4), F(230)); // its opening camp, so it is past the forced one
+        AiController Ai;
+        Ai.Init(0x158, 1, EAiTier::PerhapsImpossible);
+        bool Asked[3] = {false, false, false};
+        // Gold is EARNED and SPENT, not pinned. Pinning it rich broke the first version of this test in
+        // a way worth recording: the place branch fires whenever another building is affordable, so an
+        // infinite purse made the AI place a building every single tick and never queue — and since the
+        // quota reads units plus QUEUED work, its counts stayed at zero, the ranking stayed a tie, and
+        // the tie-break picked Rock forever. A budget is what makes the AI alternate between buying
+        // capacity and filling it, which is the loop the scheduler actually lives in.
+        S.Teams[1].Gold = 2000;
+        for (uint32_t T = 0; T < 600; ++T) {
+            S.Teams[1].Gold += 300;                    // a strong economy, comfortably able to reach 4000
+            InputEvent E[MaxEventsPerTick];
+            const int C = AiTick(Ai, S, T, E);
+            for (int I = 0; I < C; ++I) {
+                if (E[I].Kind == EventPlaceBuilding) {
+                    const uint8_t Ty = E[I].Type;
+                    S.Teams[1].Gold -= BuildingCostFor(S.Cv, Ty);
+                    if (Ty >= UnitRock && Ty <= UnitScissor) Asked[Ty - UnitRock] = true;
+                    InjectBuilding(S, 1, Ty, Fixed{E[I].X}, Fixed{E[I].Y});
+                } else if (E[I].Kind == EventQueueUnits) {
+                    const int32_t Slot = E[I].X;
+                    if (Slot >= 0 && Slot < S.Count) {
+                        const uint8_t Ty = S.Type[Slot];
+                        int32_t N = E[I].Y;
+                        const int32_t Room = S.Cv.BuildingQueueMax - S.Queue[Slot];
+                        if (N > Room) N = Room;
+                        // Queue depth is what the quota scheduler counts as supply in flight.
+                        S.Queue[Slot] += N;
+                        S.Teams[1].Gold -= N * S.Units[Ty].Cost;
+                        if (Ty >= UnitRock && Ty <= UnitScissor) Asked[Ty - UnitRock] = true;
+                    }
+                }
+            }
+            if (S.Teams[1].Gold < 0) S.Teams[1].Gold = 0;
+        }
+        for (int K = 0; K < 3; ++K)
+            if (Asked[K]) ++Distinct[Arm];
+    }
+    CvAiMixEnable.Set(WasEnabled);                     // leave the global as we found it
+    // THE POINT OF THE TEST, and it fails with the feature switched off: the argmax arm commits to a
+    // single type, the mix arm produces all three. If arm 0 ever reports 3 the mechanism under test
+    // has stopped being the thing that makes the difference, and this test has stopped being evidence.
+    CHECK(Distinct[1] == 3);
+    CHECK(Distinct[0] == 1);
+}
+
 static void TestCapYieldsForAFirstCombatBuilding() {
     Sim S;
     S.Init(0x1234);
@@ -363,6 +439,7 @@ int main() {
     TestAiVsAiDeterminism();
     TestAiExpandsCapacity();
     TestChestNeverPricesOutEveryAction();
+    TestTopTierHoldsAMixedComposition();
     TestCapYieldsForAFirstCombatBuilding();
     TestCapReservesASlotForCombat();
 #if LUR_INTERNAL

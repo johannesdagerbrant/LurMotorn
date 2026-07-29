@@ -506,6 +506,13 @@ int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) 
                    P.EarlyBatch, P.LateBatch, P.ActEveryTicks);
     int OwnerWins = 0, AiWins = 0, Unresolved = 0;
     long long SumTicks = 0, SumOwnerBld = 0, SumAiBld = 0, SumOwnerWrk = 0, SumAiWrk = 0;
+    // #158 acceptance evidence, and it has to be measured rather than eyeballed off a 300-tick trace:
+    // whether all three soldier types are still alive at the end (a mix that collapses under attrition
+    // is not a mix), and the PEAK share any one type reached at any sample — the share cap governs the
+    // target, so the realised drift away from it is the number that says whether the cap is doing its
+    // job or being outvoted by the fallback.
+    long long SumAiSol[3] = {0, 0, 0};
+    int AllThreeAlive = 0, PeakSharePct = 0;
     for (int M = 0; M < Matches; ++M) {
         const uint64_t Seed = BaseSeed + static_cast<uint64_t>(M);
         auto S = std::make_unique<Rps::Sim>();
@@ -515,26 +522,52 @@ int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) 
         Rps::OwnerBot Owner;
         Owner.Init(0, P);
         int T = 0;
+        int MatchPeakShare = 0;
         // One match -> print the census. A win tally says WHO won; only the trajectory says which
         // term lost it, and "the AI ends on 74 workers to the owner's 330" is not the same bug as
         // "the AI ends on 520 workers", which is what the device recordings showed against a human.
         const bool Trace = Matches == 1;
+        // The COMPOSITION columns are why this trace exists in its current form (#158). The tally
+        // said the AI lost while ahead on workers AND buildings, which rules out every economic
+        // explanation and leaves only "what is its army made of" — and an aggregate soldier count
+        // cannot answer that. r/p/s are units per type; the AI's target mix (permille -> percent) is
+        // printed beside its actuals, so "the plan is wrong" and "it is failing to execute the plan"
+        // are visibly different failures.
         if (Trace)
-            Lur::Log::Info("  tick | owner: gold  wrk  sol  bld | ai: gold  wrk  sol  bld | ai state");
+            Lur::Log::Info("  tick | owner: wrk bld | r/p/s | ai: wrk bld | r/p/s | want r/p/s | state");
         for (; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
             if (Trace && (T % 300) == 0) {
-                int32_t G[2] = {S->Teams[0].Gold, S->Teams[1].Gold}, W[2] = {}, So[2] = {}, B[2] = {};
+                int32_t W[2] = {}, B[2] = {}, Sq[2][3] = {};
                 for (int32_t I = 0; I < S->Count; ++I) {
                     if (!S->IsAlive(I)) continue;
                     const int Tm = S->Team[I] & 1;
+                    const uint8_t Ty = S->Type[I];
                     if (S->IsBuilding(I)) { if (!S->IsHomeBase(I)) ++B[Tm]; }
-                    else if (S->Type[I] == Rps::UnitMiner) ++W[Tm];
-                    else ++So[Tm];
+                    else if (Ty == Rps::UnitMiner) ++W[Tm];
+                    else if (Ty >= Rps::UnitRock && Ty <= Rps::UnitScissor) ++Sq[Tm][Ty - Rps::UnitRock];
                 }
                 static const char* StN[] = {"open", "build", "react", "allin"};
                 const int St = static_cast<int>(Ai.State());
-                Lur::Log::Info("  %5d | %6d %4d %4d %4d | %6d %4d %4d %4d | %s", T, G[0], W[0], So[0],
-                               B[0], G[1], W[1], So[1], B[1], St >= 0 && St < 4 ? StN[St] : "?");
+                Lur::Log::Info("  %5d | %14d %3d | %4d/%4d/%4d | %8d %3d | %4d/%4d/%4d | %3d/%3d/%3d | %s",
+                               T, W[0], B[0], Sq[0][0], Sq[0][1], Sq[0][2], W[1], B[1], Sq[1][0],
+                               Sq[1][1], Sq[1][2], Ai.MixShare(0) / 10, Ai.MixShare(1) / 10,
+                               Ai.MixShare(2) / 10, St >= 0 && St < 4 ? StN[St] : "?");
+            }
+            // Peak-share sampling runs on EVERY match, not just the traced one, and on a finer grid
+            // than the trace: a cap breach is a transient, and a 300-tick trace of one seed would
+            // miss it. Once the AI has an army worth talking about (a 3-unit army is trivially 100%
+            // of one type and says nothing about the mix).
+            if ((T % 100) == 0) {
+                int32_t Q[3] = {};
+                for (int32_t I = 0; I < S->Count; ++I) {
+                    if (!S->IsAlive(I) || S->IsBuilding(I) || (S->Team[I] & 1) != 1) continue;
+                    const uint8_t Ty = S->Type[I];
+                    if (Ty >= Rps::UnitRock && Ty <= Rps::UnitScissor) ++Q[Ty - Rps::UnitRock];
+                }
+                const int32_t Tot = Q[0] + Q[1] + Q[2];
+                if (Tot >= 10)
+                    for (int K = 0; K < 3; ++K)
+                        if (Q[K] * 100 / Tot > MatchPeakShare) MatchPeakShare = Q[K] * 100 / Tot;
             }
             Rps::InputEvent E[2 * Rps::MaxEventsPerTick];
             int N = 0;
@@ -547,15 +580,20 @@ int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) 
             }
             S->StepEvents(E, N);
         }
-        int32_t Bld[2] = {}, Wrk[2] = {};
+        int32_t Bld[2] = {}, Wrk[2] = {}, AiSol[3] = {};
         for (int32_t I = 0; I < S->Count; ++I) {
             if (!S->IsAlive(I)) continue;
             const int Tm = S->Team[I] & 1;
+            const uint8_t Ty = S->Type[I];
             if (S->IsBuilding(I)) { if (!S->IsHomeBase(I)) ++Bld[Tm]; }
-            else if (S->Type[I] == Rps::UnitMiner) ++Wrk[Tm];
+            else if (Ty == Rps::UnitMiner) ++Wrk[Tm];
+            else if (Tm == 1 && Ty >= Rps::UnitRock && Ty <= Rps::UnitScissor) ++AiSol[Ty - Rps::UnitRock];
         }
         SumTicks += T; SumOwnerBld += Bld[0]; SumAiBld += Bld[1];
         SumOwnerWrk += Wrk[0]; SumAiWrk += Wrk[1];
+        for (int K = 0; K < 3; ++K) SumAiSol[K] += AiSol[K];
+        if (AiSol[0] > 0 && AiSol[1] > 0 && AiSol[2] > 0) ++AllThreeAlive;
+        if (MatchPeakShare > PeakSharePct) PeakSharePct = MatchPeakShare;
         if (S->Result == Rps::ResultTeam0Wins) ++OwnerWins;
         else if (S->Result == Rps::ResultTeam1Wins) ++AiWins;
         else ++Unresolved;
@@ -568,6 +606,10 @@ int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) 
                    Matches > 0 ? 100.0 * OwnerWins / Matches : 0.0,
                    SumTicks * Inv / Rps::TickRateHz, SumOwnerBld * Inv, SumAiBld * Inv,
                    SumOwnerWrk * Inv, SumAiWrk * Inv);
+    Lur::Log::Info("  ai final army r/p/s = %.1f/%.1f/%.1f | all three alive at end in %d/%d | peak "
+                   "one-type share %d%%",
+                   SumAiSol[0] * Inv, SumAiSol[1] * Inv, SumAiSol[2] * Inv, AllThreeAlive, Matches,
+                   PeakSharePct);
     return 0;
 }
 

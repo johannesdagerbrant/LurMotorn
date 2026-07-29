@@ -94,6 +94,99 @@ uint8_t BestResponse(const Sim& S, const int32_t Seen[3], int64_t& OutMargin) {
     OutMargin = PerUnitMax;   // one enemy unit's worth of score — the unit hysteresis is denominated in
     return static_cast<uint8_t>(UnitRock + Best);
 }
+// TARGET MIX — a DISTRIBUTION over the three soldier types, in permille (#158).
+//
+// This exists because BestResponse above, correct as it is, still returns ONE type, and one type is
+// the loss mechanism: the owner fields all three, so a third of his army hard-counters ours at
+// counter_mult 3 no matter which one we pick. Two attempts to fix that by scoring types better both
+// measured worse, and the lesson was that the argmax itself was the defect — see Tunables.h at
+// rps.ai.mix_enable, and negative-result-best-response.md.
+//
+// STEP 1: the NASH BASE, closed-form. In an antisymmetric 3-cycle the equilibrium is "play each type
+// in proportion to the strength of the matchup it is NOT part of". Proof, for A[i][j] the payoff of i
+// against j with the cycle P>R (a1), S>P (a2), R>S (a3): equalising every row of A.p gives
+// a1*p_P = a3*p_S and a1*p_R = a2*p_S, hence p ~ (a2, a3, a1) for (R, P, S). Three multiplies, no LP.
+//
+// The cycle is DERIVED from UnitTable rather than written down, so a rebalance that reversed the
+// relation could not leave a stale table behind: for each type I, the matchup it sits out is the one
+// between the OTHER two, whichever way round that pair beats.
+//
+// STEP 2: the TILT, off by default. Nash is safe, not strong. Only the enemy's OVER-supply of a type
+// is exploitable, so the term is keyed on (their count - what a Nash opponent would field), never on
+// the raw count: raw counts make this the plain best response, which against a uniform enemy is the
+// pure-Scissor over-pick this whole function exists to remove.
+//
+// STEP 3: the CAP, which is the tuning axis (CircuitAI's max_percent). Ceiling any one type and
+// redistribute the remainder over the rest, repeating until stable — at most two clamps for three
+// types. This is the part that structurally prevents hard-countering into a shape that counters us.
+//
+// Integer/int64 throughout, no allocation, and a floor of 1 permille per type so no type is ever
+// permanently excluded (which is what keeps all three alive, an acceptance criterion in its own right).
+void TargetMix(const Sim& S, const int32_t Seen[3], int32_t Out[3]) {
+    constexpr int64_t Scale = 1000;                  // permille
+    int64_t W[3] = {1, 1, 1};
+    for (int32_t I = 0; I < 3; ++I) {
+        const int32_t J = (I + 1) % 3, K = (I + 2) % 3;
+        const uint8_t Jt = static_cast<uint8_t>(UnitRock + J), Kt = static_cast<uint8_t>(UnitRock + K);
+        // The matchup I sits out, oriented so the winner is the first argument.
+        const int64_t A = UnitTable[Jt].Beats == Kt ? MatchupValue(S, Jt, Kt) : MatchupValue(S, Kt, Jt);
+        W[I] = A > 0 ? A : 1;                        // a non-positive margin must not zero a type out
+    }
+    // STEP 2: blend in the exploit of their deviation from equilibrium, if the tilt is on.
+    const int32_t Tilt = S.Cv.AiMixTiltPct < 0 ? 0 : (S.Cv.AiMixTiltPct > 100 ? 100 : S.Cv.AiMixTiltPct);
+    if (Tilt > 0) {
+        const int64_t Total = static_cast<int64_t>(Seen[0]) + Seen[1] + Seen[2];
+        const int64_t SumW = W[0] + W[1] + W[2];
+        int64_t Ex[3] = {0, 0, 0};
+        for (int32_t J = 0; J < 3; ++J) {
+            const int64_t Fair = Total * W[J] / SumW;      // what a Nash opponent would field of J
+            const int64_t Over = Seen[J] - Fair;
+            if (Over <= 0) continue;                       // under-supplied types are not exploitable
+            const uint8_t Jt = static_cast<uint8_t>(UnitRock + J);
+            const uint8_t Ct = CounterTo(Jt);
+            if (Ct == UnitNone) continue;
+            Ex[Ct - UnitRock] += Over * MatchupValue(S, Ct, Jt);
+        }
+        const int64_t SumEx = Ex[0] + Ex[1] + Ex[2];
+        if (SumEx > 0) {
+            // Both terms normalised to Scale first, so the blend weights mean what they say rather
+            // than being dominated by whichever term happens to carry bigger raw numbers.
+            for (int32_t I = 0; I < 3; ++I) {
+                const int64_t N = W[I] * Scale / SumW;
+                const int64_t E = Ex[I] * Scale / SumEx;
+                W[I] = ((100 - Tilt) * N + Tilt * E) / 100;
+                if (W[I] < 1) W[I] = 1;
+            }
+        }
+    }
+    // STEP 3: normalise to Scale under a per-type ceiling. Below 34% three types cannot fill the
+    // distribution between them, so the knob is clamped up rather than allowed to under-fill.
+    int32_t CapPct = S.Cv.AiMixCapPct;
+    if (CapPct < 34) CapPct = 34;
+    if (CapPct > 100) CapPct = 100;
+    const int64_t CapRaw = CapPct * Scale / 100;
+    bool Capped[3] = {false, false, false};
+    int64_t Rem = Scale;
+    for (int32_t Pass = 0; Pass < 3; ++Pass) {
+        int64_t SumFree = 0;
+        for (int32_t I = 0; I < 3; ++I)
+            if (!Capped[I]) SumFree += W[I];
+        if (SumFree <= 0) break;
+        int32_t Worst = -1;
+        for (int32_t I = 0; I < 3; ++I) {
+            if (Capped[I]) continue;
+            Out[I] = static_cast<int32_t>(Rem * W[I] / SumFree);
+            if (Out[I] > CapRaw && (Worst < 0 || Out[I] > Out[Worst])) Worst = I;
+        }
+        if (Worst < 0) break;                        // nothing over the ceiling — the split is stable
+        Out[Worst] = static_cast<int32_t>(CapRaw);
+        Capped[Worst] = true;
+        Rem -= CapRaw;
+        if (Rem < 0) Rem = 0;
+    }
+    for (int32_t I = 0; I < 3; ++I)
+        if (Out[I] < 1) Out[I] = 1;                  // never write a type out of the plan entirely
+}
 // Survey (Team, Type)'s production capacity: how many such buildings are alive, and which of them
 // has the SHALLOWEST queue (ties -> lowest slot, so it stays deterministic).
 //
@@ -115,6 +208,87 @@ TypeCapacity SurveyType(const Sim& S, uint8_t Team, uint8_t Type) {
         if (C.Slot < 0 || S.Queue[I] < C.Queue) { C.Slot = I; C.Queue = S.Queue[I]; }
     }
     return C;
+}
+// LEAST-SATISFIED QUOTA (0 A.D. Petra, attackPlan.js): the soldier type proportionally furthest
+// behind its target share. Sorting by (have + queued) / target and taking the front is what makes
+// this MIX BY CONSTRUCTION — every type that falls behind becomes the next thing produced, so no
+// type can be over-bought, which is exactly the failure mode of every argmax-of-a-score.
+//
+// "have + queued", not "have": a batch already ordered at a building is supply in flight, and
+// ignoring it made the AI re-order the same type for as long as the queue took to drain.
+//
+// Ratios are compared CROSS-MULTIPLIED (Have[J] * Target[I] < Have[I] * Target[J]) rather than by
+// dividing, so it is exact integer arithmetic with no rounding tie-breaks; a strict < keeps the
+// lowest index on a tie, which is what makes the opening deterministic (all counts 0 -> Rock, the
+// same neutral opener the argmax path picks).
+//
+// Rank all three, furthest-behind first, into Order. Both the PLAN and its FALLBACK read this same
+// ranking — see LeastSatisfied and BestQueueableSoldier below, and the note there about why those
+// have to be two separate decisions.
+void RankByQuota(const Sim& S, uint8_t Team, const int32_t Target[3], int32_t Order[3]) {
+    int64_t Have[3] = {0, 0, 0};
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || S.Team[I] != Team) continue;
+        const uint8_t Ty = S.Type[I];
+        if (Ty < UnitRock || Ty > UnitScissor) continue;
+        if (S.IsBuilding(I)) {
+            if (!S.IsHomeBase(I)) Have[Ty - UnitRock] += S.Queue[I];   // supply in flight
+        } else {
+            ++Have[Ty - UnitRock];
+        }
+    }
+    Order[0] = 0; Order[1] = 1; Order[2] = 2;
+    // Selection sort of three. A zero target can never be promoted (its right-hand side is 0, so the
+    // strict < fails), which pushes an excluded type to the bottom.
+    for (int32_t A = 0; A < 2; ++A)
+        for (int32_t B = A + 1; B < 3; ++B) {
+            const int32_t I = Order[A], J = Order[B];
+            if (Have[J] * Target[I] < Have[I] * Target[J]) { Order[A] = J; Order[B] = I; }
+        }
+}
+// The PLAN: the type furthest behind quota, whether or not it is affordable this tick.
+//
+// Affordability deliberately does NOT enter here, and getting that wrong cost two full measurement
+// rounds. Filtering the plan down to what is affordable right now sounds like the obvious robustness
+// fix, and it measured a pure-Rock army (356/0/0, worse than the argmax it replaced) — because a Rock
+// building is 1000 against Paper's 2500 and Scissor's 4000, so Rock is affordable essentially always
+// and an affordability-filtered plan simply never saves for anything else. The plan has to be allowed
+// to want what it cannot yet buy; that is what the counter chest is FOR.
+uint8_t LeastSatisfied(const Sim& S, uint8_t Team, const int32_t Target[3]) {
+    int32_t Order[3];
+    RankByQuota(S, Team, Target, Order);
+    return static_cast<uint8_t>(UnitRock + Order[0]);
+}
+// The FALLBACK, and the reason the plan and the fallback are two different things.
+//
+// While the plan saves for an expensive building there is nothing to queue at for that type, and the
+// never-stand-idle branch then spent the tick on CARTS — so against medium the tier queued 129 units
+// across a whole match (485 with the mix off) and ended on 3 soldiers: 0-16, down from 14-2. Petra
+// does not hit this because one 0 A.D. barracks trains every type it knows; here each type needs its
+// own building, so "furthest behind quota" and "buildable this instant" routinely disagree.
+//
+// The answer is not to compromise the plan but to spend the SURPLUS better: the next type down the
+// same ranking that we own a building of and can pay for. Paid out of Spendable, so the chest's
+// reserve is still untouchable and the expensive building still lands the moment income allows —
+// the AI saves for Scissor while making Rock, instead of saving for Scissor while making carts.
+// UnitNone if no type is queueable, in which case the cart fallback below still runs.
+uint8_t BestQueueableSoldier(const Sim& S, uint8_t Team, const int32_t Target[3], int32_t Spendable,
+                             int32_t Depth, int32_t& OutSlot, int32_t& OutQueue) {
+    int32_t Order[3];
+    RankByQuota(S, Team, Target, Order);
+    for (int32_t R = 0; R < 3; ++R) {
+        const int32_t Idx = Order[R];
+        if (Target[Idx] <= 0) continue;
+        const uint8_t T = static_cast<uint8_t>(UnitRock + Idx);
+        const TypeCapacity C = SurveyType(S, Team, T);
+        if (C.Slot < 0 || C.Queue >= Depth) continue;
+        const int32_t UnitCost = S.Units[T].Cost > 0 ? S.Units[T].Cost : 1;
+        if (Spendable < UnitCost) continue;
+        OutSlot = C.Slot;
+        OutQueue = C.Queue;
+        return T;
+    }
+    return UnitNone;
 }
 // First valid placement spot for the AI in its own band — a deterministic sweep of candidate
 // cells, first one CanPlaceBuilding accepts (avoids overlaps/mines/frontier). Buildings
@@ -338,6 +512,7 @@ void AiController::Init(uint64_t Seed, uint8_t Team, EAiTier Tier) {
     ClusterLeft_ = 0;
     ClusterUntil_ = 0;
     CounterEnemy_ = UnitNone;
+    MixShare_[0] = MixShare_[1] = MixShare_[2] = 0;   // zero = "no mix"; the top tier fills it in
     State_ = EState::Opening;
     PeakMiners_ = 0;
     for (int32_t I = 0; I < RingSize; ++I) Ring_[I][0] = Ring_[I][1] = Ring_[I][2] = 0;
@@ -400,6 +575,11 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         // soldier BEATS: `Soldier = CounterTo(CounterEnemy_)` then reproduces the choice exactly, and
         // the telemetry, the hysteresis and the cluster re-target all keep working untouched.
         if (Tier_ == EAiTier::PerhapsImpossible) {
+            // #158: the TARGET MIX is re-derived here, on the same cadence as the enemy read it is
+            // derived from — a distribution recomputed every tick would react faster than the tier's
+            // own information model allows. Computed even before an enemy exists, because the Nash
+            // base needs no observation; the tilt term is simply inert at zero counts.
+            if (S.Cv.AiMixEnable != 0) TargetMix(S, Seen, MixShare_);
             const int32_t Total = Seen[0] + Seen[1] + Seen[2];
             if (Total > 0) {
                 int64_t PerUnit = 1;
@@ -427,7 +607,13 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
 
                     if (SNew > SCur + static_cast<int64_t>(K.Hysteresis) * PerUnit) {
                         CounterEnemy_ = AsIf;
-                        if (ClusterLeft_ > 0) ClusterType_ = CounterTo(CounterEnemy_);
+                        // Re-targeting a live cluster onto the new single counter is right only while
+                        // there IS a single counter. Under the mix the cluster's type came from the
+                        // quota scheduler, and overwriting it with the argmax would reintroduce the
+                        // over-buy at building scale — where it is most expensive, since production is
+                        // flat per building. The quota picks the next cluster's type anyway.
+                        if (ClusterLeft_ > 0 && S.Cv.AiMixEnable == 0)
+                            ClusterType_ = CounterTo(CounterEnemy_);
                     }
                 }
             }
@@ -470,8 +656,21 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // The soldier type to build: the counter to what we're tracking, or Rock until we've seen an
     // enemy (a neutral opener — it beats scissor, loses to paper, a coin-flip default). Resolved
     // BEFORE the FSM now, because the all-in gate below needs its speed and build time.
-    const uint8_t Soldier =
+    uint8_t Soldier =
         CounterEnemy_ != UnitNone ? CounterTo(CounterEnemy_) : static_cast<uint8_t>(UnitRock);
+    // TOP TIER (#158): PRODUCE TOWARD THE DISTRIBUTION, never toward a chosen type. One line, and it
+    // is deliberately here rather than at the queue/place sites further down, because EVERY consumer
+    // of `Soldier` has to agree about what is being built or the mix leaks:
+    //   * the defence-floor affordability test prices the building it is actually about to place;
+    //   * the counter chest saves for that same building instead of one the AI no longer wants;
+    //   * the Lanchester commit gate models the army it is actually fielding (it already handles our
+    //     type NOT beating theirs — under a mix that is the common case, not an edge case);
+    //   * a committed cluster is a cluster of the type the quota asked for.
+    // Evaluated EVERY tick against live counts, unlike the target itself: the target is information
+    // (cadence-gated) but "what am I short of right now" is bookkeeping over our own board, which a
+    // player reads for free.
+    const bool Mixing = MixShare_[0] > 0 || MixShare_[1] > 0 || MixShare_[2] > 0;
+    if (Mixing) Soldier = LeastSatisfied(S, MyTeam_, MixShare_);
 
     if (MyMiners > PeakMiners_) PeakMiners_ = MyMiners;   // high-water mark (see the econ floor)
 
@@ -904,6 +1103,25 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // condition it was escaping: with a 4000 chest and a 50 cart, `Spendable/CartCost` was 0 and the
     // fallback emitted nothing. A fallback that respects the thing it is meant to bypass is not a
     // fallback. A tier with chest 0 still simply spends it all, which is what the lower rungs do.
+    // ...but under a MIX, spend the surplus on a soldier we CAN make before falling back to carts
+    // (#158). The plan is allowed to want a building it cannot yet afford — that is what the chest is
+    // for — and while it saves, this branch keeps the army growing in the next-most-starved type
+    // instead of going quiet. Out of Spendable, so the reserve it is saving is still untouchable.
+    // Skipped when Want is already queueable (Count != 0) and when the mix is off, so every measured
+    // lower rung is untouched.
+    if (Count == 0 && Want != UnitMiner && Mixing) {
+        int32_t Slot = -1, Queued = 0;
+        const uint8_t Alt = BestQueueableSoldier(S, MyTeam_, MixShare_, Spendable, Depth, Slot, Queued);
+        if (Alt != UnitNone && Alt != Want) {
+            const int32_t UnitCost = S.Units[Alt].Cost > 0 ? S.Units[Alt].Cost : 1;
+            int32_t N = Depth - Queued;
+            const int32_t Room = S.Cv.BuildingQueueMax - Queued;
+            if (N > Room) N = Room;
+            const int32_t Affordable = Spendable / UnitCost;
+            if (N > Affordable) N = Affordable;
+            if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Slot, N);
+        }
+    }
     if (Count == 0 && Want != UnitMiner) {
         const TypeCapacity Camps = SurveyType(S, MyTeam_, UnitMiner);
         if (Camps.Slot >= 0 && Camps.Queue < MinerDepth) {

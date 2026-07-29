@@ -92,6 +92,11 @@ public:
     // production-bound" are different bugs with different fixes.
     EState  State() const { return State_; }
     uint8_t CounterEnemy() const { return CounterEnemy_; }   // enemy type being countered, or UnitNone
+    // Target SHARE of the army for soldier type (UnitRock + I), in permille; 0 while the mix is off
+    // (every tier but the top one, or rps.ai.mix_enable 0). Exposed so a harness can assert the
+    // realised composition against the intent — "which type is it short of" is the diagnosis, and an
+    // end-state tally cannot give it.
+    int32_t MixShare(int32_t I) const { return I >= 0 && I < 3 ? MixShare_[I] : 0; }
 
 private:
 
@@ -107,6 +112,12 @@ private:
     Lur::Sim::SplitMix64 Rng_{0};
     uint32_t            NextReactTick_ = 0;    // cadence gate for the enemy-read re-decision
     uint8_t             CounterEnemy_ = UnitNone;  // enemy type we're currently countering (hysteresis)
+    // TARGET MIX (#158): the top tier's desired share of each soldier type, in permille, latched on
+    // a reaction tick like the enemy read it derives from. It is a DISTRIBUTION and not a choice —
+    // the AI produces whichever type is proportionally furthest behind its share, so the army
+    // composition IS the mixed strategy and no RNG is involved. All zero = the mix is off, in which
+    // case the single-type argmax path below runs unchanged (every tier but the top one).
+    int32_t             MixShare_[3] = {0, 0, 0};
     EState              State_ = EState::Opening;
     // BUILD CLUSTER: a standing intent to add several buildings of ONE type in quick succession,
     // one per tick — never several in a tick, which would be an action rate no human could match.

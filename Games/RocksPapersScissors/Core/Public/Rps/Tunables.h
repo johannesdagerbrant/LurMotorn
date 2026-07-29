@@ -707,6 +707,63 @@ LUR_CVAR(CvAiEconFloorPct, "rps.ai.econ_floor_pct", 100, CVarFlagAffectsGameplay
 LUR_CVAR(CvAiChestFloorUnits, "rps.ai.chest_floor_units", 10, CVarFlagAffectsGameplay,
          "Carts' worth of gold the counter chest may never reserve (0 = let the chest take everything)");
 
+// ---- MIXED COMPOSITION for the top tier (#158): hold a distribution, never pick a type ----
+// The top tier fielded ONE soldier type against an opponent fielding three, and that was the last
+// remaining loss mechanism after the commit gate was fixed (b34783e). Measured 2026-07-29 with
+// --aiowner: at t2700 the AI led on economy (427 carts vs 336) AND on capacity (30 buildings vs 18)
+// and still lost the army fight, because the owner-bot rotates Paper -> Rock -> Scissor so about a
+// third of his army hard-counters whatever single type the AI chose, at counter_mult 3.
+//
+// The obvious fix is not the fix, and this was established the expensive way. A BETTER argmax is
+// still an argmax: eb1b405 replaced CounterTo(argmax_j q_j) with the genuine best response
+// argmax_i (A.q)_i — worth doing, but it returns the best SINGLE type and the win rate did not move.
+// Two attempts to score types better both measured WORSE (see negative-result-best-response.md). The
+// failure was taking an argmax of a scalar score AT ALL: it keeps every pathology of the argmax it
+// replaces and merely changes which single type gets over-bought.
+//
+// So the mechanism is 0 A.D. Petra's LEAST-SATISFIED-QUOTA scheduler (attackPlan.js) — the cheapest
+// of the three shipped alternatives found, and the only one that needs no value function: hold a
+// target SHARE per type and each decision produce whichever type is proportionally furthest behind
+// its share. It mixes by construction and cannot over-invest.
+//
+// AND NO RNG IS NEEDED, which is what makes a mixed strategy legal in a deterministic sim. The usual
+// objection is that sampling a distribution breaks determinism — it does not apply here, because
+// THE ARMY COMPOSITION IS THE MIXTURE. Producing 50/36/14 realises that mixed strategy exactly, with
+// zero variance. This is continuous allocation, not a one-shot sample.
+//
+// Shared (not per-tier) CVars gated on PerhapsImpossible in code, for two reasons: the lower rungs'
+// ordering was measured against the argmax path and composition is strategy rather than a bug fix,
+// and LUR_AI_TIER_IDS expands mid-list so appending a per-tier knob would renumber every wire id
+// below it (ecb644c). These three are appended at the very END, which is the only safe place.
+LUR_CVAR(CvAiMixEnable, "rps.ai.mix_enable", 1, CVarFlagAffectsGameplay,
+         "Top tier produces toward a target DISTRIBUTION of soldier types (0 = old single-type argmax)");
+// The base distribution is the 3-cycle's NASH MIX, which has a closed form — no LP, three multiplies.
+// For an antisymmetric 3-cycle the equilibrium is "play each type in proportion to the strength of
+// the matchup it is NOT part of", derived from MatchupValue so it re-derives itself when the balance
+// is tuned. At the current stats (rock 100hp/6dmg, paper 40/8, scissor 60/15, mult 3) that is
+// rock 65 / paper 25 / scissor 10 — and note it lands on the CHEAP building without any cost term,
+// because the Scissor-beats-Paper matchup being devastating is exactly why you hold Rock to deter it.
+// That is the pathology the cost-division attempt was trying and failing to patch.
+//
+// THE CAP IS THE TUNING AXIS, and it is CircuitAI's `max_percent` (response.json: riot <= 45%,
+// transport <= 30%). It ceilings any one type's share and redistributes the remainder over the
+// others, which is what structurally stops the AI hard-countering into a composition that then
+// hard-counters IT. It also spans the whole space of reasonable mixes with ONE knob: 100 = pure Nash
+// (65/25/10), 34 = forced near-uniform thirds (34/34/32). Values below 34 cannot be satisfied by
+// three types at once and are clamped up.
+LUR_CVAR(CvAiMixCapPct, "rps.ai.mix_cap", 50, CVarFlagAffectsGameplay,
+         "Cap on any ONE soldier type's share of the target mix, percent (100 = pure Nash, 34 = thirds)");
+// How much of the target comes from EXPLOITING the enemy's deviation from their own equilibrium
+// rather than from sitting at ours. Nash is SAFE, not STRONG — Tavares et al. (AIIDE 2016) measured
+// pure Nash strategy selection at exactly its guaranteed 50.5% while epsilon-deviation scored 54.7%.
+// Only OVER-supply is exploitable, so the tilt is keyed on (Seen[j] - what a Nash opponent would
+// field of j), never on the raw count: keyed on the raw count it degenerates into the best response,
+// which against a uniform enemy is precisely the pure-Scissor over-pick this whole change exists to
+// remove. DEFAULT 0 — it is off until it measures better, which is the discipline the reverted patch
+// did not follow.
+LUR_CVAR(CvAiMixTiltPct, "rps.ai.mix_tilt", 0, CVarFlagAffectsGameplay,
+         "Percent of the target mix taken from exploiting the enemy's DEVIATION from equilibrium");
+
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
 // into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
 // LUR_RPS_GAMEPLAY_CVARS X-list below. They change what the BUILD does, not what the SIM computes,
@@ -839,7 +896,10 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(MineSpreadSlack,         CvMineSpreadSlack)         \
     IX(AiEconFloorPct,          CvAiEconFloorPct)          \
     LUR_AI_TIER_IDS(IX, PerhapsImpossible)                 \
-    IX(AiChestFloorUnits,       CvAiChestFloorUnits)
+    IX(AiChestFloorUnits,       CvAiChestFloorUnits)       \
+    IX(AiMixEnable,             CvAiMixEnable)             \
+    IX(AiMixCapPct,             CvAiMixCapPct)             \
+    IX(AiMixTiltPct,            CvAiMixTiltPct)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
