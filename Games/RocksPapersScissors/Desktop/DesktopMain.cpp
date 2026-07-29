@@ -515,7 +515,27 @@ int RunAiOwner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTicks) 
         Rps::OwnerBot Owner;
         Owner.Init(0, P);
         int T = 0;
+        // One match -> print the census. A win tally says WHO won; only the trajectory says which
+        // term lost it, and "the AI ends on 74 workers to the owner's 330" is not the same bug as
+        // "the AI ends on 520 workers", which is what the device recordings showed against a human.
+        const bool Trace = Matches == 1;
+        if (Trace)
+            Lur::Log::Info("  tick | owner: gold  wrk  sol  bld | ai: gold  wrk  sol  bld | ai state");
         for (; T < MaxTicks && S->Result == Rps::ResultOngoing; ++T) {
+            if (Trace && (T % 300) == 0) {
+                int32_t G[2] = {S->Teams[0].Gold, S->Teams[1].Gold}, W[2] = {}, So[2] = {}, B[2] = {};
+                for (int32_t I = 0; I < S->Count; ++I) {
+                    if (!S->IsAlive(I)) continue;
+                    const int Tm = S->Team[I] & 1;
+                    if (S->IsBuilding(I)) { if (!S->IsHomeBase(I)) ++B[Tm]; }
+                    else if (S->Type[I] == Rps::UnitMiner) ++W[Tm];
+                    else ++So[Tm];
+                }
+                static const char* StN[] = {"open", "build", "react", "allin"};
+                const int St = static_cast<int>(Ai.State());
+                Lur::Log::Info("  %5d | %6d %4d %4d %4d | %6d %4d %4d %4d | %s", T, G[0], W[0], So[0],
+                               B[0], G[1], W[1], So[1], B[1], St >= 0 && St < 4 ? StN[St] : "?");
+            }
             Rps::InputEvent E[2 * Rps::MaxEventsPerTick];
             int N = 0;
             Owner.DecideEvents(*S, S->Tick, E, Rps::MaxEventsPerTick, N);
