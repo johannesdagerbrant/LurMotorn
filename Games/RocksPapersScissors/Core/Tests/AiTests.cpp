@@ -231,6 +231,39 @@ static void TestAiExpandsCapacity() {
 // Injected rather than played out, because reaching it in a real match needs a passive opponent
 // AND income that outruns the miner queue (the owner's dig_range tuning supplied the second half;
 // stock cvars do not, which is why every existing test stayed green while easy was broken).
+// THE 4000-GOLD STALL (owner's 2026-07-28 recordings). counter_chest reserves a counter BUILDING's
+// price out of the unit queue — but building prices and unit prices differ by two orders of magnitude
+// (scissor building 4000, cart 50), so a 100% chest priced out EVERY action the top tier had,
+// including the never-stand-idle cart fallback that exists to prevent exactly that. Measured on the
+// device: 16-22s of total silence while holding 3695-3990 gold, idle 45% of his fastest (159s) win.
+//
+// It was STEERABLE, which is what makes it a test and not a tuning note: lead with Paper, the AI locks
+// Scissor as its counter, reserves 4000, and stops playing. Reproduce that exact board — Paper army,
+// AI owns no Scissor building, gold parked just under the 4000 it is saving for — and demand that the
+// AI emits SOMETHING. Silence is the bug.
+static void TestChestNeverPricesOutEveryAction() {
+    Sim S;
+    S.Init(0x1234);
+    Inject(S, 0, UnitPaper, 20);                        // Paper army -> counter is Scissor (4000)
+    Inject(S, 1, UnitMiner, 40);
+    InjectBuilding(S, 1, UnitMiner, F(4), F(230));      // a camp to queue carts at
+    // Just under the Scissor building it wants: the whole purse is inside the reserve.
+    S.Teams[1].Gold = BuildingCostFor(S.Cv, UnitScissor) - 55;
+    AiController Ai;
+    Ai.Init(0x1234, 1, EAiTier::PerhapsImpossible);
+    int Silent = 0, Longest = 0;
+    for (uint32_t T = 0; T < 400; ++T) {
+        InputEvent E[MaxEventsPerTick];
+        const int C = AiTick(Ai, S, T, E);
+        // Gold is pinned: this asks "given it CANNOT yet afford the building, does it still act?"
+        S.Teams[1].Gold = BuildingCostFor(S.Cv, UnitScissor) - 55;
+        if (C == 0) { if (++Silent > Longest) Longest = Silent; } else { Silent = 0; }
+    }
+    // Before the clamp this was 400/400 silent. A few quiet ticks are fine (a full queue is not a
+    // stall); minutes of nothing while holding a fortune is the failure.
+    CHECK(Longest < 40);
+}
+
 static void TestCapYieldsForAFirstCombatBuilding() {
     Sim S;
     S.Init(0x1234);
@@ -329,6 +362,7 @@ int main() {
     TestTierReactionSpeed();
     TestAiVsAiDeterminism();
     TestAiExpandsCapacity();
+    TestChestNeverPricesOutEveryAction();
     TestCapYieldsForAFirstCombatBuilding();
     TestCapReservesASlotForCombat();
 #if LUR_INTERNAL

@@ -695,28 +695,42 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // 8 buildings could produce ~5.3 units/s but it only ever asked for ~1.2/s.
     // Bounded by what it can pay for and by the building's queue cap; the sim re-checks both
     // deterministically, so an over-ask is a safe no-op rather than a cheat.
+    // COUNTER CHEST: while contested, keep a counter BUILDING's price out of the unit queue, so
+    // a composition switch is answered by placing one at the front instead of waiting out
+    // income. Production is flat per building, so the building is worth far more than the four
+    // or five units the same gold buys — but only if the money is there at the moment the enemy
+    // changes shape. Held only while we own NO building of the type we currently counter (once
+    // it stands, there is nothing to save for), and never in the Building state, where the
+    // opening is supposed to spend everything on expanding.
+    //
+    // COMPUTED ONCE, here, and shared by the queue below AND the never-stand-idle fallback under it.
+    // It used to be computed twice, identically, which is how the fallback ended up honouring the very
+    // reserve it exists to escape.
+    const int32_t ChestPct = K.CounterChest < 0 ? 0 : K.CounterChest;
+    // CONTESTED states only. Keyed on "not Building" this deadlocked the tier at tick 0: in
+    // Opening it reserved a rock building's 1000 out of an 800 purse, so it could not buy a cart,
+    // never mined, and sat at 0 workers for the whole match (2399 idle ticks, measured). There is
+    // nothing to counter before an enemy army exists.
+    const bool SaveForCounter = ChestPct > 0 &&
+                                (State_ == EState::Reacting || State_ == EState::AllIn) &&
+                                SurveyType(S, MyTeam_, Soldier).Owned == 0;
+    int32_t Chest = SaveForCounter ? BuildingCostFor(S.Cv, Soldier) * ChestPct / 100 : 0;
+    // ...CLAMPED so it can only ever eat SURPLUS (rps.ai.chest_floor_units). Unclamped, a chest
+    // denominated in a BUILDING price silently outlaws every action denominated in a UNIT price: the
+    // owner's 2026-07-28 recordings caught the AI holding 3695-3990 gold — against a 4000 scissor
+    // building — and emitting nothing for 16-22s, idle 45% of his fastest match. Worse, it is
+    // STEERABLE: lead with Paper and the AI locks Scissor, reserves 4000, and stops playing. Leaving a
+    // few carts' worth always spendable is what makes this a savings plan rather than an off switch.
+    const int32_t CartPrice = S.Units[UnitMiner].Cost > 0 ? S.Units[UnitMiner].Cost : 1;
+    const int32_t ChestFloor = S.Cv.AiChestFloorUnits * CartPrice;
+    if (Chest > Gold - ChestFloor) Chest = Gold > ChestFloor ? Gold - ChestFloor : 0;
+    const int32_t Spendable = Gold > Chest ? Gold - Chest : 0;
+
     if (Cap_.Slot >= 0 && Cap_.Queue < Depth) {
         const int32_t UnitCost = S.Units[Want].Cost > 0 ? S.Units[Want].Cost : 1;
         int32_t N = Depth - Cap_.Queue;
         const int32_t Room = S.Cv.BuildingQueueMax - Cap_.Queue;
         if (N > Room) N = Room;
-        // COUNTER CHEST: while contested, keep a counter BUILDING's price out of the unit queue, so
-        // a composition switch is answered by placing one at the front instead of waiting out
-        // income. Production is flat per building, so the building is worth far more than the four
-        // or five units the same gold buys — but only if the money is there at the moment the enemy
-        // changes shape. Held only while we own NO building of the type we currently counter (once
-        // it stands, there is nothing to save for), and never in the Building state, where the
-        // opening is supposed to spend everything on expanding.
-        const int32_t ChestPct = K.CounterChest < 0 ? 0 : K.CounterChest;
-        // CONTESTED states only. Keyed on "not Building" this deadlocked the tier at tick 0: in
-        // Opening it reserved a rock building's 1000 out of an 800 purse, so it could not buy a cart,
-        // never mined, and sat at 0 workers for the whole match (2399 idle ticks, measured). There is
-        // nothing to counter before an enemy army exists.
-        const bool SaveForCounter = ChestPct > 0 &&
-                                    (State_ == EState::Reacting || State_ == EState::AllIn) &&
-                                    SurveyType(S, MyTeam_, Soldier).Owned == 0;
-        const int32_t Chest = SaveForCounter ? BuildingCostFor(S.Cv, Soldier) * ChestPct / 100 : 0;
-        const int32_t Spendable = Gold > Chest ? Gold - Chest : 0;
         const int32_t Affordable = Spendable / UnitCost;
         if (N > Affordable) N = Affordable;
         if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Cap_.Slot, N);
@@ -731,23 +745,20 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     //
     // A player in that position keeps spamming carts while the bank fills, which is exactly what the
     // owner described. Carts are the cheapest thing on the board and they PAY FOR the building being
-    // saved for, so this is strictly better than silence. The counter chest is still respected: only
-    // gold above the reserve is spent here, so saving still completes — a tier with chest 0 simply
-    // spends it all, which is what the measured lower rungs do.
+    // saved for, so this is strictly better than silence.
+    //
+    // It shares the CLAMPED chest computed above, and the clamp is what makes this branch work at all.
+    // The reserve was previously recomputed here unclamped, so the escape hatch was gated on the same
+    // condition it was escaping: with a 4000 chest and a 50 cart, `Spendable/CartCost` was 0 and the
+    // fallback emitted nothing. A fallback that respects the thing it is meant to bypass is not a
+    // fallback. A tier with chest 0 still simply spends it all, which is what the lower rungs do.
     if (Count == 0 && Want != UnitMiner) {
         const TypeCapacity Camps = SurveyType(S, MyTeam_, UnitMiner);
-        const int32_t ChestPct = K.CounterChest < 0 ? 0 : K.CounterChest;
-        const bool SaveForCounter = ChestPct > 0 &&
-                                    (State_ == EState::Reacting || State_ == EState::AllIn) &&
-                                    SurveyType(S, MyTeam_, Soldier).Owned == 0;
-        const int32_t Chest = SaveForCounter ? BuildingCostFor(S.Cv, Soldier) * ChestPct / 100 : 0;
-        const int32_t Spendable = Gold > Chest ? Gold - Chest : 0;
-        const int32_t CartCost = S.Units[UnitMiner].Cost > 0 ? S.Units[UnitMiner].Cost : 1;
         if (Camps.Slot >= 0 && Camps.Queue < MinerDepth) {
             int32_t N = MinerDepth - Camps.Queue;
             const int32_t Room = S.Cv.BuildingQueueMax - Camps.Queue;
             if (N > Room) N = Room;
-            const int32_t Affordable = Spendable / CartCost;
+            const int32_t Affordable = Spendable / CartPrice;
             if (N > Affordable) N = Affordable;
             if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Camps.Slot, N);
         }

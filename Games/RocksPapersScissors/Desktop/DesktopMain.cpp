@@ -652,6 +652,7 @@ int RunReplay(const char* Path, int EveryTicks) {
         std::size_t Next = 0, NextCen = 0;
         int32_t FirstAllin = -1, Diverged = -1;
         int StateTicks[4] = {};
+        int32_t IdleTicks = 0, CurSilence = 0, LongestSilence = 0, SilenceGold = 0;
         for (uint32_t T = 0; T < R.EndTick; ++T) {
             // FIDELITY GATE. A recording is only replayable by the build that made it: the sim is
             // deterministic, so ANY sim change (a different cart-targeting tie-break is enough)
@@ -679,7 +680,22 @@ int RunReplay(const char* Path, int EveryTicks) {
             }
             Rps::InputEvent Ev[2 * Rps::MaxEventsPerTick];
             int N = 0;
-            Shadow.DecideEvents(*Sh, Sh->Tick, Ev, Rps::MaxEventsPerTick, N);  // read-only; N ignored
+            Shadow.DecideEvents(*Sh, Sh->Tick, Ev, Rps::MaxEventsPerTick, N);
+            // N is the whole point, not a leftover: a tick on which the AI emits NOTHING is the
+            // failure this harness exists to catch. The 2026-07-28 recordings had the top tier silent
+            // for 16-22s at a stretch while holding ~3945 gold (a scissor building is 4000), idle 45%
+            // of the owner's fastest win — and a state-occupancy readout cannot see that at all,
+            // because "Reacting" looks identical whether it is acting or frozen. So count silence, and
+            // count the LONGEST run of it, which is what actually loses the match.
+            if (N == 0) {
+                ++IdleTicks;
+                if (++CurSilence > LongestSilence) {
+                    LongestSilence = CurSilence;
+                    SilenceGold = Sh->Teams[AiTeam].Gold;
+                }
+            } else {
+                CurSilence = 0;
+            }
             const int St = static_cast<int>(Shadow.State());
             if (St >= 0 && St < 4) ++StateTicks[St];
             if (Shadow.State() == Rps::AiController::EState::AllIn && FirstAllin < 0)
@@ -703,6 +719,11 @@ int RunReplay(const char* Path, int EveryTicks) {
                            FirstAllin < 0 ? "never"
                                           : (std::to_string(static_cast<double>(FirstAllin) / Rps::TickRateHz) + "s").c_str(),
                            StateTicks[0], StateTicks[1], StateTicks[2], StateTicks[3]);
+            Lur::Log::Info("  shadow AI silence: idle %d/%u ticks (%d%%) | longest unbroken %.1fs, "
+                           "holding %d gold at that moment",
+                           IdleTicks, R.EndTick,
+                           R.EndTick > 0 ? 100 * IdleTicks / static_cast<int32_t>(R.EndTick) : 0,
+                           static_cast<double>(LongestSilence) / Rps::TickRateHz, SilenceGold);
         }
     }
 

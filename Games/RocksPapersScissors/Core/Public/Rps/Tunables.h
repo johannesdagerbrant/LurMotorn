@@ -691,6 +691,22 @@ LUR_CVAR(CvAiExpandGoldFactor, "rps.ai.expand_gold_factor", 200, CVarFlagAffects
 LUR_CVAR(CvAiEconFloorPct, "rps.ai.econ_floor_pct", 100, CVarFlagAffectsGameplay,
          "Percent of its PEAK economy the AI rebuys after losses before resuming army production");
 
+// A RESERVE MAY ONLY EVER CONSUME SURPLUS. The counter chest (rps.ai.<tier>.counter_chest) holds a
+// counter BUILDING's price back from the unit queue — but a building price and a unit price differ by
+// two orders of magnitude here (scissor building 4000, cart 50), so a 100% chest priced out EVERY
+// action the AI had, including the never-stand-idle cart fallback that exists to prevent exactly that.
+//
+// Measured on the owner's 2026-07-28 recordings, and it was a steerable hard exploit rather than a
+// rough edge: lead with Paper, the AI locks Scissor as its counter, reserves 4000, and then holds
+// 3695-3990 gold doing NOTHING for 16-22s — idle 45% of the whole match in his fastest (159s) win.
+// His kill time halved once he found it. See Docs/.../the-4000-gold-stall.md.
+//
+// So the chest is now clamped to leave a working float of this many CARTS spendable at all times.
+// Below the float the reserve simply does not exist; above it, it is honoured in full, which is what
+// it was always meant to mean — you save out of surplus, not out of your ability to act.
+LUR_CVAR(CvAiChestFloorUnits, "rps.ai.chest_floor_units", 10, CVarFlagAffectsGameplay,
+         "Carts' worth of gold the counter chest may never reserve (0 = let the chest take everything)");
+
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
 // into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
 // LUR_RPS_GAMEPLAY_CVARS X-list below. They change what the BUILD does, not what the SIM computes,
@@ -822,7 +838,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)      \
     FX(MineSpreadSlack,         CvMineSpreadSlack)         \
     IX(AiEconFloorPct,          CvAiEconFloorPct)          \
-    LUR_AI_TIER_IDS(IX, PerhapsImpossible)
+    LUR_AI_TIER_IDS(IX, PerhapsImpossible)                 \
+    IX(AiChestFloorUnits,       CvAiChestFloorUnits)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries
