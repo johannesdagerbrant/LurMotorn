@@ -108,9 +108,9 @@ LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     FRound(125, 100),     CVa
 LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    8,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
 LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
 LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
-LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      80,       CVarFlagAffectsGameplay, "Scissor hit points");
+LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      60,       CVarFlagAffectsGameplay, "Scissor hit points");
 LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 4),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
-LUR_CVAR(CvScissorDamage,  "rps.unit.scissor.damage",  12,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
+LUR_CVAR(CvScissorDamage,  "rps.unit.scissor.damage",  15,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
 LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 
 // ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
@@ -247,7 +247,7 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // weak separation let cohesion compress the blob into an unreadable mush). Strong push +
 // wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
 LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(24, 10), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
-LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3, 2), CVarFlagAffectsGameplay,
+LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3), CVarFlagAffectsGameplay,
          "Same-team push-apart strength; must beat cohesion at contact or the blob turns to mush");
 // Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
 // fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
@@ -266,10 +266,10 @@ LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFla
 // GROUP-UP pass (2026-07-20 playtest): same-type cohesion reaches FAR to find teammates
 // across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
 // lone spawn drifts toward its type over distance without the group compressing to mush.
-LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(15), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
+LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(10), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
 LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay,
          "Pull toward your OWN type's centre: keep it gentle, a soft wide gather not a hard clump");
-LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(9), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
+LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(5), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
 // Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
 // pile onto each other — same-type globs are the readable unit; the whole-army pull is a
 // barely-there nudge so they don't scatter to opposite corners.
@@ -285,7 +285,7 @@ LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
 // weight cut from 0.25 to 0.1 — flee EARLIER but far more GENTLY. The strong short-range version
 // read as units flinching on contact; a wide soft drift instead bends approach paths, so armies
 // slide around their counter rather than bouncing off it.
-LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(15), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
+LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(12), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
 LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", FRound(1, 10), CVarFlagAffectsGameplay,
          "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
@@ -298,17 +298,17 @@ LUR_CVAR(CvWNoise, "rps.boid.w_noise", FRound(6, 10), CVarFlagAffectsGameplay, "
 // the frequency and Gain x the amplitude, normalized. Octaves=1 is exactly the single-octave
 // wander above (bit-identical default) — turn it up for richer, less repetitive drift.
 LUR_CVAR(CvNoiseOctaves,     "rps.boid.noise_octaves",     1,       CVarFlagAffectsGameplay, "Noise octaves (1 = smooth; more = detailed)");
-LUR_CVAR(CvNoiseGain,        "rps.boid.noise_gain",        F(1, 2), CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
+LUR_CVAR(CvNoiseGain,        "rps.boid.noise_gain",        F(2),    CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
 LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(2),    CVarFlagAffectsGameplay, "Frequency multiply per octave");
 // Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
 // last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
 // Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
 // Lava-lamp: slower turns (MaxAccel down) + more glide (Damp up) = the viscous feel.
-LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(5), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
+LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(8), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
 LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay,
          "Match same-type neighbours' heading — turns a crowd into laminar flow");
-LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", FRound(10, 100), CVarFlagAffectsGameplay,
+LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", FRound(20, 100), CVarFlagAffectsGameplay,
          "Per-tick turn/accelerate clamp: lower = heavier, gloopier units (~0.7 s to reach speed)");
 LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay,
          "Momentum kept per tick in free flight: higher = more glide (the lava-lamp feel)");
