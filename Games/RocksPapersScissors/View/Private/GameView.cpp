@@ -1435,17 +1435,29 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     }
 
     // The opponent dropdown draws LAST so its open list overlays the panel.
-    Selector.Draw(Renderer, "Opponent", Pad, TopInsetPx + 4.0f * HS, WidthPx - 2.0f * Pad,
-                  24.0f * HS);
+    //
+    // NO CAPTION, and it OWNS the whole band between the OS inset and the status panel (feedback
+    // 2026-07-30). The word "Opponent" above a row that already names the opponent was a label for
+    // something self-evident, and it cost a third of the band to say it — so the pill was a thin
+    // strip with dead space above and below. Sized from PanelY rather than a repeated literal, so
+    // moving the panel moves this with it and the two can never overlap or drift apart.
+    //
+    // The OPEN LIST keeps compact rows: the pill is a header, the list is a list. Scaling five rows
+    // to a header-sized pill would push the bottom of the menu into the build plates.
+    const float SelTop = TopInsetPx + 2.0f * HS;
+    const float SelH   = PanelY - SelTop - 2.0f * HS;
+    Selector.Draw(Renderer, nullptr, Pad, SelTop, WidthPx - 2.0f * Pad, SelH, /*MenuRowH*/ 26.0f * HS);
 
     // #2: "opponent link established" — a peer linked while an AI match was running. Blink a green
-    // line just under the opponent bar for a few seconds (the player can pick the "Linked opponent"
-    // row to switch). Time it out here; NotifyPeerLinked() (main, on the link edge) re-arms it.
+    // line for a few seconds (the player can pick the "Linked opponent" row to switch). Time it out
+    // here; NotifyPeerLinked() (main, on the link edge) re-arms it.
+    // BELOW the status panel now: the bar it used to sit inside grew to fill its whole band, so at
+    // the old Y it drew on top of the opponent's name.
     if (PeerLinkBannerT_ > 0.0f) {
         PeerLinkBannerT_ -= DtSec;
         const float Blink = 0.5f + 0.5f * std::sin(PeerLinkBannerT_ * 8.0f);  // ~1.3 Hz throb
         const Color LinkC{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), Blink};
-        Text.Draw(Renderer, "opponent link established", Pad, TopInsetPx + 30.0f * HS,
+        Text.Draw(Renderer, "opponent link established", Pad, PanelY + PanelH + 6.0f * HS,
                   WidthPx - 2.0f * Pad, 16.0f * HS, 12.0f * HS, LinkC, EHAlign::Center,
                   EVAlign::Middle, false);
     }

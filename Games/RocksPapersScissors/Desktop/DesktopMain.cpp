@@ -29,6 +29,7 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Platform/Window.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Save/Store.h"        // persistent per-opponent W-L-D (ScoreBook)
 #include "Lur/Sim/Random.h"
 #include "Lur/Transport/Loopback.h"
 #include "Rps/AiController.h"
@@ -39,6 +40,7 @@
 #include "Rps/LockstepPeer.h"
 #include "Rps/SimRunner.h"
 #include "Rps/SoloInput.h"
+#include "Rps/ScoreBook.h"
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 #include "WindowsBleTransport.h"  // #101-E: PC becomes a real BLE opponent to the phone
@@ -952,8 +954,13 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     static Rps::Snapshot Snap;
     int Frame = 0;
     (void)Auto; (void)FoeOnly;  // #137b: the mask-based --auto/--autofoe soak retired (event soak = #144+)
-    // #2 session W-L-D per AI tier (desktop has no peer row); the current match's tier + a scored latch.
-    int SW[Rps::AiTierCount] = {}, SL[Rps::AiTierCount] = {}, SD[Rps::AiTierCount] = {};
+    // PERSISTENT W-L-D per AI tier (desktop has no peer row), the same ScoreBook the phones use, in
+    // the desktop's gitignored save dir next to chess's. It is the ONE source of truth here: the
+    // in-memory tally arrays this replaced meant the ladder reset every launch, which is the whole
+    // reason the numbers were worth nothing.
+    Lur::Save::Store ScoreStore(".lur-desktop-save/rps");
+    Rps::ScoreBook Scores;
+    Scores.Load(ScoreStore);
     int CurTier = static_cast<int>(AiTier);
     bool Scored = false;
     uint64_t PostMatchNs = 0;   // #149 wall time held on the win/lose screen
@@ -1080,11 +1087,17 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             Lur::Log::Info("solo AI match restarted (%s)", Rps::AiTierName(static_cast<Rps::EAiTier>(NewTier)));
         }
         // Tally the match result once it resolves, then keep the selector rows' scores current.
+        // Written straight through to disk: a result is worth persisting the instant it happens, and
+        // "save on exit" loses exactly the match you were curious about when the app is killed.
+        // UseAi gates the RECORD, not just the tally: --auto / --flockdemo have no AI opponent at all,
+        // so a result there is a soak/stress artefact and would otherwise write a permanent win
+        // against whatever tier happened to be the default.
         if (!Scored && HaveSnap && Snap.Result != Rps::ResultOngoing) {
             Scored = true;
-            if (Snap.Result == Rps::ResultTeam0Wins) ++SW[CurTier];
-            else if (Snap.Result == Rps::ResultTeam1Wins) ++SL[CurTier];
-            else ++SD[CurTier];
+            if (UseAi) {
+                Scores.RecordAi(CurTier, Snap.Result, /*MyTeam*/ 0);
+                Scores.Save(ScoreStore);
+            }
         }
         // #149: hold the win/lose screen for PostMatchHoldNs, then start a fresh match at the same
         // tier from Seed+1 — back in the pre-match state, waiting for your camp. Same restart path
@@ -1106,7 +1119,11 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         } else {
             PostMatchNs = 0;
         }
-        for (int T = 0; T < Rps::AiTierCount; ++T) View.SetAiScore(T, SW[T], SL[T], SD[T]);
+        for (int T = 0; T < Rps::AiTierCount; ++T) {
+            const Rps::Tally S = Scores.Ai(T);
+            View.SetAiScore(T, static_cast<int>(S.Wins), static_cast<int>(S.Losses),
+                            static_cast<int>(S.Draws));
+        }
         if (HaveSnap && W > 0 && H > 0) {
             const float GameW = static_cast<float>(W);
             const float VisibleH = static_cast<float>(H) / Ppu();

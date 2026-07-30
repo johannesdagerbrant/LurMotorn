@@ -6,14 +6,18 @@
 add_library(rps_core
     Core/Private/Sim.cpp
     Core/Private/AiController.cpp
+    # The persistent W-L-D record (per AI tier + per human opponent), on the same
+    # Modules/Save primitive as the device id.
+    Core/Private/ScoreBook.cpp
     # Dev-only single-player flight recorder (#144 tooling): compiles to nothing outside
     # LUR_INTERNAL, so Shipping links an empty translation unit.
     Core/Private/MatchRecord.cpp)
 
 target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
 # lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT;
-# lur::trace for LUR_TRACE_SCOPE (observational CPU scopes, #101 — no-op in Shipping).
-target_link_libraries(rps_core PUBLIC lur::sim lur::core lur::trace)
+# lur::trace for LUR_TRACE_SCOPE (observational CPU scopes, #101 — no-op in Shipping);
+# lur::save for the key->blob store + device-id helpers ScoreBook persists through.
+target_link_libraries(rps_core PUBLIC lur::sim lur::core lur::trace lur::save)
 target_compile_features(rps_core PUBLIC cxx_std_20)
 add_library(rps::core ALIAS rps_core)
 

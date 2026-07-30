@@ -28,6 +28,7 @@
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
+#include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 
@@ -102,9 +103,12 @@ Rps::Fixed WorldToFixed(float Wv) {
     // proven by 898999b).
     bool _InitWhileInactive;
     bool _BecameActive;
-    // #2 session score vs the linked peer (session-scoped) + a one-shot tally latch.
+    // Score vs the linked peer + a one-shot tally latch. These four are the DISPLAY copy; the
+    // all-time record behind them is _Scores, persisted through _Store (iOS is single-threaded here,
+    // so there is no handoff to arrange — the render loop owns all of it).
     int _PeerW, _PeerL, _PeerD;
     bool _Scored;
+    Rps::ScoreBook _Scores;
     // #2/#127 solo-vs-AI on iOS (single-threaded — the solo sim ticks in renderFrame). Mirrors the
     // Android session: auto-start Easy, a selector pick (re)starts a tier, a peer link offers a switch.
     Rps::Sim _SoloSim;
@@ -149,6 +153,16 @@ Rps::Fixed WorldToFixed(float Wv) {
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
     _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
+    // All-time W-L-D per AI tier / per rival. Seeded into the view's rows here so the dropdown shows
+    // the real record on its first open, not 0-0-0 until this session's first match resolves.
+    _Scores.Load(*_Store);
+    for (int T = 0; T < Rps::AiTierCount; ++T) {
+        const Rps::Tally S = _Scores.Ai(T);
+        _AiW[T] = static_cast<int>(S.Wins);
+        _AiL[T] = static_cast<int>(S.Losses);
+        _AiD[T] = static_cast<int>(S.Draws);
+        _View.SetAiScore(T, _AiW[T], _AiL[T], _AiD[T]);
+    }
 
     _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
     _Session.SetLogger([](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyRps: Net: %{public}s", M); });
@@ -386,9 +400,13 @@ Rps::Fixed WorldToFixed(float Wv) {
         }
         if (!_SoloScored && _SoloSim.Result != Rps::ResultOngoing && _SoloTier >= 0) {
             _SoloScored = true;
-            if (_SoloSim.Result == Rps::ResultTeam0Wins) ++_AiW[_SoloTier];
-            else if (_SoloSim.Result == Rps::ResultTeam1Wins) ++_AiL[_SoloTier];
-            else ++_AiD[_SoloTier];
+            // Persist first, then show what was persisted (so the row and the disk cannot disagree).
+            _Scores.RecordAi(_SoloTier, _SoloSim.Result, /*MyTeam*/ 0);
+            _Scores.Save(*_Store);
+            const Rps::Tally T = _Scores.Ai(_SoloTier);
+            _AiW[_SoloTier] = static_cast<int>(T.Wins);
+            _AiL[_SoloTier] = static_cast<int>(T.Losses);
+            _AiD[_SoloTier] = static_cast<int>(T.Draws);
             _View.SetAiScore(_SoloTier, _AiW[_SoloTier], _AiL[_SoloTier], _AiD[_SoloTier]);
         }
         // #149: hold the win/lose screen, then begin a FRESH match at the same tier from Seed+1 —
@@ -432,6 +450,15 @@ Rps::Fixed WorldToFixed(float Wv) {
             // histories, marker F=0 both ways). After Init so Init can't wipe it.
             _Lp.BeginResync();
             _Started = true; _Scored = false; _ScoredIdx = _Lp.MatchIndex();
+            // The peer's GUID is known now, so show the ALL-TIME record against THIS rival rather
+            // than 0-0-0 until the first match of the session ends.
+            {
+                const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
+                _PeerW = static_cast<int>(T.Wins);
+                _PeerL = static_cast<int>(T.Losses);
+                _PeerD = static_cast<int>(T.Draws);
+                _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
+            }
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
         if (_Started) _Lp.Tick(ElapsedNs);
@@ -442,9 +469,22 @@ Rps::Fixed WorldToFixed(float Wv) {
         if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
             _Scored = true;
             const uint8_t R = _Lp.GetSim().Result;
-            if (R == Rps::ResultDraw) ++_PeerD;
-            else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
-            else ++_PeerL;
+            // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed
+            // or absent id rather than inventing a rivalry row, so keep the session count in that case.
+            const std::string& PeerGuid = _Session.GetPeerGuid();
+            if (_Scores.RecordPeer(PeerGuid, _DeviceId, R, _Team)) {
+                _Scores.Save(*_Store);
+                const Rps::Tally T = _Scores.Peer(PeerGuid, _DeviceId);
+                _PeerW = static_cast<int>(T.Wins);
+                _PeerL = static_cast<int>(T.Losses);
+                _PeerD = static_cast<int>(T.Draws);
+            } else {
+                os_log(OS_LOG_DEFAULT, "OnlyRps: peer result not persisted (peer guid %zuB)",
+                       PeerGuid.size());
+                if (R == Rps::ResultDraw) ++_PeerD;
+                else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
+                else ++_PeerL;
+            }
             _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
         }
     }

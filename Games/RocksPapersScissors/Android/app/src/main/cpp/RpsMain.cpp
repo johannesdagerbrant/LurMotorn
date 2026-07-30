@@ -35,6 +35,7 @@
 #include "Rps/AiController.h"
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
 #include "Rps/LockstepPeer.h"
+#include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
 #include "Rps/Snapshot.h"
 #include "Rps/SoloInput.h"
 #include "Rps/Tunables.h"
@@ -135,6 +136,12 @@ struct AppState {
     std::atomic<int>     AiWins_[Rps::AiTierCount]{}, AiLosses_[Rps::AiTierCount]{},
                          AiDraws_[Rps::AiTierCount]{};  // vs each AI tier
     std::atomic<int>     PeerWins_{0}, PeerLosses_{0}, PeerDraws_{0};  // vs the linked peer
+    // PERSISTENT W-L-D, all-time: the atomics above are the thread-safe DISPLAY channel (sim thread
+    // writes, glue thread reads); this is the record on disk behind them. Loaded on the glue thread
+    // before the sim thread exists (thread creation is the handoff), and from then on read and
+    // written ONLY by the sim thread — which is where a result is decided and where the peer's GUID
+    // is known. The glue thread never touches it again.
+    Rps::ScoreBook       Scores;
 };
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
@@ -368,6 +375,16 @@ void android_main(android_app* App) {
     State.DataDir = DataDir != nullptr ? DataDir : ".";
     Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
     State.DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
+    // All-time W-L-D, loaded before the sim thread starts. Seeding the display atomics here is what
+    // makes the ladder show your real record the moment the dropdown first opens, instead of 0-0-0
+    // until the first match of this session finishes.
+    State.Scores.Load(Store);
+    for (int T = 0; T < Rps::AiTierCount; ++T) {
+        const Rps::Tally S = State.Scores.Ai(T);
+        State.AiWins_[T].store(static_cast<int>(S.Wins), std::memory_order_relaxed);
+        State.AiLosses_[T].store(static_cast<int>(S.Losses), std::memory_order_relaxed);
+        State.AiDraws_[T].store(static_cast<int>(S.Draws), std::memory_order_relaxed);
+    }
 
     auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
     State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
@@ -415,6 +432,11 @@ void android_main(android_app* App) {
     // ---- SIM thread (#91): owns Session + Lp; pumps BLE, ticks the sim, publishes
     // snapshots. Runs the datagram-driven service loop OFF the render/input thread. ----
     std::thread SimThread([&State] {
+        // This thread's own handle onto the save directory. A Store is a directory path plus
+        // atomic write-then-rename, so a second handle owns nothing the first one does — and it
+        // keeps the score file's ONLY writer on the thread that decides results and knows the peer's
+        // GUID. (The glue thread's handle is used once, for the device id, before this thread runs.)
+        Lur::Save::Store ScoreStore(State.DataDir);
         auto PrevTime = std::chrono::steady_clock::now();
         uint32_t LastPubTick = 0xFFFFFFFFu;
         bool SoloRunning = false;          // #127 solo AI match active (sim thread)
@@ -543,6 +565,15 @@ void android_main(android_app* App) {
             // deliberate way across — honoured below from ANY state, including a started AI match.
             const bool LinkEdge = PeerReady && !PrevPeerReady;
             PrevPeerReady = PeerReady;
+            // On the link edge the peer's GUID is finally known, so publish the ALL-TIME record
+            // against THIS rival into the display atomics. Without it the linked row would read
+            // 0-0-0 until the first match of the session ended, even with a long history on disk.
+            if (LinkEdge) {
+                const Rps::Tally T = State.Scores.Peer(State.Session.GetPeerGuid(), State.DeviceId);
+                State.PeerWins_.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                State.PeerLosses_.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                State.PeerDraws_.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+            }
             const bool ManualPick = State.SwitchToLinked.exchange(false, std::memory_order_acq_rel);
             const bool AutoSwitch = LinkEdge && !State.SoloSim.HasMinerCamp(0);  // unstarted AI match only
             if (SoloRunning && PeerReady && (AutoSwitch || ManualPick)) {
@@ -572,9 +603,15 @@ void android_main(android_app* App) {
                                  SoloRecFile.c_str());
                         }
 #endif
-                        if (State.SoloSim.Result == Rps::ResultTeam0Wins) State.AiWins_[SoloTier_].fetch_add(1);
-                        else if (State.SoloSim.Result == Rps::ResultTeam1Wins) State.AiLosses_[SoloTier_].fetch_add(1);
-                        else State.AiDraws_[SoloTier_].fetch_add(1);
+                        // Record to disk FIRST, then publish to the display atomics from the record —
+                        // so what the row shows is what was persisted, and a crash right after a
+                        // match cannot leave the two disagreeing.
+                        State.Scores.RecordAi(SoloTier_, State.SoloSim.Result, /*MyTeam*/ 0);
+                        State.Scores.Save(ScoreStore);
+                        const Rps::Tally T = State.Scores.Ai(SoloTier_);
+                        State.AiWins_[SoloTier_].store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                        State.AiLosses_[SoloTier_].store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                        State.AiDraws_[SoloTier_].store(static_cast<int>(T.Draws), std::memory_order_relaxed);
                     }
                     // #149: the result stands for PostMatchHoldNs, then a FRESH match at the same tier
                     // in the pre-match state (the AI waits for your camp; the camera re-locks itself).
@@ -761,10 +798,25 @@ void android_main(android_app* App) {
                     LinkedScored = true;
                     const uint8_t Me = State.LinkedTeam.load(std::memory_order_relaxed);
                     const uint8_t R = State.Lp.GetSim().Result;
-                    if (R == Rps::ResultDraw) State.PeerDraws_.fetch_add(1);
-                    else if ((R == Rps::ResultTeam0Wins && Me == 0) || (R == Rps::ResultTeam1Wins && Me == 1))
-                        State.PeerWins_.fetch_add(1);
-                    else State.PeerLosses_.fetch_add(1);
+                    // Per-RIVAL and persistent, keyed on the peer's device GUID — so the row reads
+                    // "your record against THIS person", not "against whoever is in the room". A
+                    // malformed/absent GUID is refused by RecordPeer rather than tallied against a
+                    // junk opponent, so fall back to publishing the in-memory count in that case.
+                    const std::string& PeerGuid = State.Session.GetPeerGuid();
+                    if (State.Scores.RecordPeer(PeerGuid, State.DeviceId, R, Me)) {
+                        State.Scores.Save(ScoreStore);
+                        const Rps::Tally T = State.Scores.Peer(PeerGuid, State.DeviceId);
+                        State.PeerWins_.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                        State.PeerLosses_.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                        State.PeerDraws_.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+                    } else {
+                        LOGI("peer result not persisted (peer guid %zuB) — session tally only",
+                             PeerGuid.size());
+                        if (R == Rps::ResultDraw) State.PeerDraws_.fetch_add(1);
+                        else if ((R == Rps::ResultTeam0Wins && Me == 0) || (R == Rps::ResultTeam1Wins && Me == 1))
+                            State.PeerWins_.fetch_add(1);
+                        else State.PeerLosses_.fetch_add(1);
+                    }
                 }
             }
 #if LUR_INTERNAL

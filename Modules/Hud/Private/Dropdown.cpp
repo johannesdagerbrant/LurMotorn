@@ -245,13 +245,16 @@ void Dropdown::DrawRowContent(Lur::Render::IRenderer* R, int ItemIndex,
 }
 
 void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
-                    float X, float Y, float W, float PillH) {
+                    float X, float Y, float W, float PillH, float MenuRowH) {
     RowRects.clear();
     RowItem.clear();
     if (Items.empty()) return;
 
-    const float TitleH = PillH * 0.52f;
+    // No caption -> no caption BAND. Reserving it anyway is a layout bug that only shows as a
+    // mysterious gap above the pill.
+    const float TitleH = Title != nullptr ? PillH * 0.52f : 0.0f;
     const float Gap    = PillH * 0.12f;
+    const float TitleGap = Title != nullptr ? Gap : 0.0f;
     using Lur::Text::EHAlign;
     using Lur::Text::EVAlign;
 
@@ -262,7 +265,7 @@ void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
     }
 
     // Collapsed pill: panel + border + the current selection's content + chevron.
-    const float PillY = Y + TitleH + Gap;
+    const float PillY = Y + TitleH + TitleGap;
     PillRect = {X, PillY, X + W, PillY + PillH};
     DrawBox(Renderer, QuadPanel, X, PillY, W, PillH);
     const float T = PillH * 0.05f;                     // border thickness
@@ -280,9 +283,11 @@ void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
 
     if (!Open) return;
 
-    // Open menu: measure total height (capped), draw the panel, then the rows.
+    // Open menu: measure total height (capped), draw the panel, then the rows. Rows are PillH
+    // unless the caller sized them separately (a header-sized pill with a compact list).
     const float MenuY = PillY + PillH + Gap;
-    const float RowH = PillH, HeaderH = PillH * 0.62f;
+    const float RowH = MenuRowH > 0.0f ? MenuRowH : PillH;
+    const float HeaderH = RowH * 0.62f;
     const int   N = static_cast<int>(Items.size()) < MaxRows
                         ? static_cast<int>(Items.size()) : MaxRows;
     float Total = 0.0f;
@@ -290,19 +295,21 @@ void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
 
     DrawBox(Renderer, QuadPanel, X, MenuY, W, Total);
 
+    // Every metric in the list scales with the ROW, not the pill — otherwise a pill sized to fill a
+    // header band drags the list's dividers and accent bars along with it.
     float Cy = MenuY;
     for (int i = 0; i < N; ++i) {
         const DropdownItem& It = Items[i];
         if (It.Header) {
-            if (i > 0) DrawBox(Renderer, QuadLine, X, Cy, W, PillH * 0.03f);  // divider
-            Text.Draw(Renderer, It.Label.c_str(), X + PillH * 0.30f, Cy, W, HeaderH,
-                      PillH * 0.26f, HeaderCol, EHAlign::Left, EVAlign::Middle, false);
+            if (i > 0) DrawBox(Renderer, QuadLine, X, Cy, W, RowH * 0.03f);  // divider
+            Text.Draw(Renderer, It.Label.c_str(), X + RowH * 0.30f, Cy, W, HeaderH,
+                      RowH * 0.26f, HeaderCol, EHAlign::Left, EVAlign::Middle, false);
             Cy += HeaderH;
             continue;
         }
         const bool Sel = (i == SelectedIdx);
         if (Sel) DrawBox(Renderer, QuadAccent, X, Cy + RowH * 0.18f,
-                         PillH * 0.07f, RowH * 0.64f);       // left accent bar
+                         RowH * 0.07f, RowH * 0.64f);       // left accent bar
         DrawRowContent(Renderer, i, X, Cy, W, RowH, Sel);
         RowRects.push_back({X, Cy, X + W, Cy + RowH});
         RowItem.push_back(i);
@@ -310,10 +317,11 @@ void Dropdown::Draw(Lur::Render::IRenderer* Renderer, const char* Title,
     }
 
     // Menu border.
-    DrawBox(Renderer, QuadLine, X, MenuY, W, T);
-    DrawBox(Renderer, QuadLine, X, MenuY + Total - T, W, T);
-    DrawBox(Renderer, QuadLine, X, MenuY, T, Total);
-    DrawBox(Renderer, QuadLine, X + W - T, MenuY, T, Total);
+    const float Mt = RowH * 0.05f;
+    DrawBox(Renderer, QuadLine, X, MenuY, W, Mt);
+    DrawBox(Renderer, QuadLine, X, MenuY + Total - Mt, W, Mt);
+    DrawBox(Renderer, QuadLine, X, MenuY, Mt, Total);
+    DrawBox(Renderer, QuadLine, X + W - Mt, MenuY, Mt, Total);
 }
 
 bool Dropdown::OnTap(float XPx, float YPx) {

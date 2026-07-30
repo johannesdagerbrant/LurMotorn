@@ -51,10 +51,19 @@ public:
 
     // Draw the "Title" caption, the collapsed pill showing the current selection, and
     // — when open — the list below it. (X,Y) is the widget's top-left; W its width;
-    // PillH the pill height (all other metrics derive from it). Caches the drawn rects
-    // for OnTap.
+    // PillH the pill height. Caches the drawn rects for OnTap.
+    //
+    // Title == nullptr draws NO caption and costs no vertical space: (X,Y) is then the
+    // pill's own top-left. (It used to reserve the caption band regardless, so a
+    // caption-less caller silently lost half a row of layout to nothing.)
+    //
+    // RowH sizes the OPEN LIST's rows, and defaults to PillH. Pass it when the pill is a
+    // header sized to fill a band — a trigger and its list are different things, and
+    // scaling 5 menu rows by whatever the header needed is not a layout, it's a side
+    // effect. Row CONTENT (dot, label, trailing score) scales with the row it is in, so
+    // the pill's content still grows with the pill.
     void Draw(Lur::Render::IRenderer* Renderer, const char* Title,
-              float X, float Y, float W, float PillH);
+              float X, float Y, float W, float PillH, float RowH = 0.0f);
 
     // Route a tap. Returns true if consumed: a tap on the pill (toggles open), or —
     // while open — a tap on any row (selects + closes) or elsewhere (closes). The

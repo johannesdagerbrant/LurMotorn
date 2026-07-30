@@ -13,3 +13,10 @@ add_executable(rps_ai_tests AiTests.cpp)
 target_link_libraries(rps_ai_tests PRIVATE rps::core)
 target_compile_features(rps_ai_tests PRIVATE cxx_std_20)
 add_test(NAME rps_ai_tests COMMAND rps_ai_tests)
+
+# Persistent W-L-D (ScoreBook): exercised THROUGH the real Lur::Save::Store in a temp dir, so the
+# test proves the wiring a main uses and not just the byte codec (#147's lesson).
+add_executable(rps_score_tests ScoreBookTests.cpp)
+target_link_libraries(rps_score_tests PRIVATE rps::core lur::save)
+target_compile_features(rps_score_tests PRIVATE cxx_std_20)
+add_test(NAME rps_score_tests COMMAND rps_score_tests)
