@@ -82,6 +82,19 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     Send = InSend;
     Ctx = InCtx;
     MatchIndex_ = 0;      // a fresh session; the restart path is the only other bump
+#if LUR_INTERNAL
+    // Clear the build-fingerprint verdict HERE and nowhere else, because Init is exactly where the
+    // mains re-exchange fingerprints (SendFingerprint sits next to their Lp.Init call). Pairing the
+    // two means the flag always describes the CURRENT peer's build.
+    //
+    // It used to persist for the life of the object, and that outlived the condition: after the peer
+    // was reinstalled from a matching commit, the phone that had not itself restarted still reported
+    // badbuild=1 against a build that no longer existed (seen 2026-07-30, one peer reading 1 and the
+    // other 0 for the same pair). A diagnostic that stays lit after the fault is one people learn to
+    // ignore. NOT cleared in BeginMatch: a post-match restart does not re-exchange, so clearing
+    // there would blank a REAL mismatch after the first match and never set it again.
+    BuildMismatch_ = false;
+#endif
     BeginMatch(Seed);
 }
 
