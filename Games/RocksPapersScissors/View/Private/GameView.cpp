@@ -135,6 +135,31 @@ Lur::Render::MeshHandle MakeGradientStrip(IRenderer* R, const GradStop* Stops, i
     return R->CreateMesh(V, static_cast<uint32_t>(2 * N), Idx, K);
 }
 
+// A filled disc inscribed in the unit rect (centre 0.5,0.5, radius 0.5), WHITE like MakeQuad so
+// the material tints it — which is what lets the +1/+5 buttons share the build plates' material
+// handle instead of a look-alike copy of its colour. Expressed as a triangle LIST, not a fan:
+// fans are outside the Vulkan portability subset MoltenVK runs (see CLAUDE.md).
+Lur::Render::MeshHandle MakeDiscMesh(IRenderer* R, int Segments) {
+    Lur::Render::Vertex V[64 + 2];
+    uint32_t Idx[3 * 64];
+    if (Segments > 64) Segments = 64;
+    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
+    const Lur::Math::Vec4 White{1.0f, 1.0f, 1.0f, 1.0f};
+    V[0] = {{0.5f, 0.5f, 0.0f}, Nrm, {0.5f, 0.5f}, White};   // centre
+    for (int I = 0; I <= Segments; ++I) {
+        const float A = 6.2831853f * static_cast<float>(I) / static_cast<float>(Segments);
+        const float X = 0.5f + 0.5f * std::cos(A), Y = 0.5f + 0.5f * std::sin(A);
+        V[1 + I] = {{X, Y, 0.0f}, Nrm, {X, Y}, White};
+    }
+    uint32_t K = 0;
+    for (int I = 0; I < Segments; ++I) {
+        Idx[K++] = 0;
+        Idx[K++] = static_cast<uint32_t>(1 + I);
+        Idx[K++] = static_cast<uint32_t>(2 + I);
+    }
+    return R->CreateMesh(V, static_cast<uint32_t>(Segments + 2), Idx, K);
+}
+
 }  // namespace
 
 float GameView::VisibleWorldHeight(float WidthPx, float HeightPx) {
@@ -161,6 +186,7 @@ float GameView::TopHudWorldUnits(float WidthPx) const {
 void GameView::CreateResources(IRenderer* Renderer) {
     const Lur::Render::Quad Q = Lur::Render::MakeQuad();  // white; the material tints it
     Quad = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
+    Disc = MakeDiscMesh(Renderer, 28);   // 28 segments: no straight edge visible at button size
 
     // Field backdrop + grid (#85): gradient meshes drawn under everything else.
     WhiteMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 1.0f});
@@ -243,6 +269,17 @@ void GameView::CreateResources(IRenderer* Renderer) {
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
             TeamTypeTintBldg[Tm][Ty] = Hsv(H, BldgSat, BldgVal);
             TypeTintMatBldg[Tm][Ty] = AtlasTinted(TeamTypeTintBldg[Tm][Ty]);
+            // The production bar's fill: HALFWAY between the building it grows on and the unit it is
+            // producing (feedback 2026-07-30) — literally the midpoint of the two HSV pairs above, on
+            // the SAME hue, so it reads as "this building becoming that unit". Gold was wrong for the
+            // job: gold is the currency everywhere else in this HUD, and a gold bar on a building said
+            // "income" rather than "progress".
+            // Interpolated in HSV, not RGB, for the same reason the building tint is: these two
+            // endpoints differ only in saturation and value, so the midpoint of THOSE is on the ramp
+            // between them, while an RGB average of a dark desaturated colour and a vivid one drifts
+            // off the hue.
+            ProgressMat[Tm][Ty] =
+                FlatMat(Renderer, Hsv(H, (BldgSat + 1.0f) * 0.5f, (BldgVal + 1.0f) * 0.5f));
         }
     // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
     // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
@@ -611,6 +648,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                        Mat4::Scale({Wpx, Hpx, 1.0f});
         Renderer->DrawMesh(Quad, Mat, M);
     };
+    // The same, for the disc mesh: a circle of diameter Dpx centred at (Cx, Cy).
+    auto BlitDisc = [&](Lur::Render::MaterialHandle Mat, float Cx, float Cy, float Dpx) {
+        const Mat4 M = Mat4::Translation({Cx - Dpx * 0.5f, Cy - Dpx * 0.5f, 0.0f}) *
+                       Mat4::Scale({Dpx, Dpx, 1.0f});
+        Renderer->DrawMesh(Disc, Mat, M);
+    };
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
     HealthBars_.clear();   // refilled each frame by the building/unit passes below
@@ -659,9 +702,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float Mx = SX(FW(Snap.MineX[T])), My = SY(FW(Snap.MineY[T]));
         BlitGlyph(GlyphMine, MineMat, Mx, My, MinePx);
         const float Frac = static_cast<float>(Snap.MineGold[T]) / static_cast<float>(MineGoldCapacity);
-        const float BarW = MinePx, BarH = 2.0f * HS, BarY = My - MinePx * 0.5f - 3.0f * HS;
-        Blit(HealthBg, Mx, BarY, BarW, BarH);
-        Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
+        // ONLY WHILE BEING DUG (feedback 2026-07-30): an untouched mine is full by definition, so a
+        // full bar over every deposit on the map was decoration — dozens of identical bars saying
+        // nothing, and the few that mattered (a reserve running out) were lost among them. Same rule
+        // the unit bars already follow.
+        if (Snap.MineGold[T] < MineGoldCapacity) {
+            const float BarW = MinePx, BarH = 2.0f * HS, BarY = My - MinePx * 0.5f - 3.0f * HS;
+            Blit(HealthBg, Mx, BarY, BarW, BarH);
+            Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
+        }
     }
 
     // #141 build-frontier lines: a dotted horizontal line in EACH team's colour at its high-water
@@ -834,7 +883,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float CtrlW = BldgPx + 6.0f * HS;
         const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
         const float Bh = 48.0f * HS;   // a little bigger — bigger target AND a bigger label
-        const float LabelPx = 31.0f * HS;   // the "+N" label, sized once
+        // The "+N" label, sized once — and now sized to sit INSIDE the button's circle. Bw is the
+        // narrow side (~36*HS), so the disc is that wide; "+5" at 24*HS is ~26*HS of glyphs, which
+        // clears the circle's edge at the mid-height where it is widest. It was 31*HS when the label
+        // WAS the button and had the whole rect to itself. Legibility does not suffer: a label on a
+        // solid disc reads at a smaller size than the same label floating on building art.
+        const float LabelPx = 24.0f * HS;
         // the price row moved from ABOVE the icon to BELOW it, immediately above the progress
         // bar. One constant for its height so the price and the queue/progress row below it are
         // positioned from the same number and cannot drift into each other.
@@ -885,11 +939,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const int32_t MaxHp = Home ? (Snap.HomeBaseMaxHp > 0 ? Snap.HomeBaseMaxHp : 1)
                                        : (Snap.BuildingMaxHp[Bty] > 0 ? Snap.BuildingMaxHp[Bty] : 1);
             const float HFrac = std::min(1.0f, std::max(0.0f, static_cast<float>(Snap.Hp[I]) / static_cast<float>(MaxHp)));
-            const float HbW = BSize * 0.85f, HbH = 3.0f * HS, HbY = By - BHalf - 5.0f * HS;
+            // ONLY WHEN HURT (feedback 2026-07-30), which is the rule the unit bars have always
+            // followed. A full bar over every structure — including both HQs and every camp you own —
+            // is a row of identical green lines that carries no information, and it buried the one
+            // that does: something of yours is under attack. Damage is now the ONLY thing that puts a
+            // bar on screen, so a bar appearing IS the alarm.
+            //
+            // NOTE this hides the home-base "win meter" until the siege starts, which is the intent:
+            // an untouched HQ at 100% is not a meter, it is a constant.
+            //
             // collected, not drawn here — flushed in the GUI layer so the instanced units
             // (drawn after this pass) cannot cover a building's own bar.
-            HealthBars_.push_back({HealthBg, Bx, HbY, HbW, HbH});
-            HealthBars_.push_back({HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH});
+            if (Snap.Hp[I] > 0 && Snap.Hp[I] < MaxHp) {
+                const float HbW = BSize * 0.85f, HbH = 3.0f * HS, HbY = By - BHalf - 5.0f * HS;
+                HealthBars_.push_back({HealthBg, Bx, HbY, HbW, HbH});
+                HealthBars_.push_back({HealthFg, Bx - HbW * 0.5f + HbW * HFrac * 0.5f, HbY, HbW * HFrac, HbH});
+            }
 
             if (Home) continue;                // #146: the HQ produces nothing — no x1/x5 buttons/queue
             if (Snap.Team[I] != My) continue;  // production controls: your buildings only
@@ -900,9 +965,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             if (IsFirstBldg && Snap.Queue[I] > 0) ProductionTaught_ = true;
             const bool Pulse = IsFirstBldg && Snap.Queue[I] == 0 && !ProductionTaught_;
 
-            // "N/max" (left) + next-unit PROGRESS bar (right), a row centred UNDER the building.
+            // The next-unit PROGRESS BAR, a row straddling the building's bottom edge, with the
+            // "N/max" queue count centred ON it.
+            //
+            // The bar now FILLS the row (feedback 2026-07-30): it used to be a 4*HS sliver in the
+            // right-hand two thirds, with the count squeezed into a 34*HS box beside it — so the
+            // element carrying the information you actually watch was the smallest thing in the
+            // stack, and the row's own plate read as the background of nothing. Track and fill are
+            // the whole row; the count sits on top of them, shadowed so it survives both the dark
+            // track and the gold fill sliding under it.
             if (Snap.Queue[I] > 0) {
-                const float QW = 34.0f * HS, RGap = 4.0f * HS;
                 // JUST below the icon. The price moved up onto the icon's lower end, so this row
                 // no longer has to clear it — it tucks straight under the bottom edge, and the whole
                 // per-building stack gets shorter (less chance of reaching the building below).
@@ -914,22 +986,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // below. (This is the "fully inside" position moved back down by half a row height —
                 // the two cancel, so it is simply the edge.)
                 const float RowY = By + Half;
-                const float GroupL = Bx - BldgPx * 0.5f;
-                // Its own translucent plate (playtest): the count and the bar sit over open field or
-                // over mine art, and on gold they were unreadable. Same plate as the buttons, so the
-                // building's controls read as one family.
+                // ONE rect for the whole row: the translucent plate (the count and the bar sit over
+                // open field or mine art, and on gold they were unreadable) IS the bar's track, so
+                // there is no second background to keep in sync with the first.
                 Blit(ProdBtnBg, Bx, RowY, CtrlW, QRowH);   // one height, shared with RowY above
-                char QB[16];
-                std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
-                Text.Draw(Renderer, QB, GroupL, RowY - 7.0f * HS, QW, 14.0f * HS, 12.0f * HS, Ico,
-                          EHAlign::Right, EVAlign::Middle, false);
+                Blit(BarBg, Bx, RowY, CtrlW, QRowH);       // the track: darkens the UNFILLED part
                 const int32_t Bt = Snap.Units[Bty].BuildTicks > 0 ? Snap.Units[Bty].BuildTicks : 1;
                 const float PFrac = std::min(1.0f, static_cast<float>(Snap.BuildProgress[I]) / static_cast<float>(Bt));
-                const float PbW = BldgPx - QW - RGap, PbH = 4.0f * HS;
-                const float PbX = GroupL + QW + RGap + PbW * 0.5f;
-                Blit(BarBg, PbX, RowY, PbW, PbH);
-                if (PbW * PFrac > 0.5f)
-                    Blit(GoldFlat, PbX - PbW * 0.5f + PbW * PFrac * 0.5f, RowY, PbW * PFrac, PbH);
+                if (CtrlW * PFrac > 0.5f)   // sub-pixel fills are not worth a draw call
+                    Blit(ProgressMat[My][Bty], Bx - CtrlW * 0.5f + CtrlW * PFrac * 0.5f, RowY,
+                         CtrlW * PFrac, QRowH);
+                char QB[16];
+                std::snprintf(QB, sizeof(QB), "%d/%d", Snap.Queue[I], Snap.BuildingQueueMax);
+                TextShadowed(QB, Bx - CtrlW * 0.5f, RowY - QRowH * 0.5f, CtrlW, QRowH, 14.0f * HS,
+                             Ico, EHAlign::Center);
             }
             // Playtest 2026-07-25: the cost is stated ONCE, centred above the icon, as the price of
             // ONE unit — it used to be repeated inside every button as that button's total, which
@@ -1010,12 +1080,24 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
                 const float Cx = BX + Bw * 0.5f, Cy = BtnTop + Bh * 0.5f;
                 const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
-                // NO plate. It was carrying three jobs — persistent background, #107 press
-                // flash, #143 onboarding throb — so removing it means the feedback moves onto the
-                // GLYPH. The hit rect above is untouched, so the button is exactly as easy to hit as
-                // before; only the paint is gone. (void) the step LUT index: the plate LUTs it fed
-                // are no longer drawn here.
-                (void)PulseStep;
+                // A CIRCULAR BACKGROUND, in the build plates' own material (feedback 2026-07-30):
+                // bare labels on the building art did not read as controls at all. It is the plate
+                // material HANDLE, not a copy of its colour — a drag ORIGIN and the button you press
+                // afterwards are the same family of thing, and sharing the handle means they cannot
+                // drift apart when the palette is retuned.
+                //
+                // This walks back the earlier "NO plate" decision, whose reason was occlusion — three
+                // stacked translucent panels per building hid the art. A circle inscribed in the hit
+                // rect covers about a fifth of what those panels did, and the art is knocked back by
+                // the building HSV tint anyway (see BldgSat/BldgVal), which was the other half of
+                // that fix. Diameter is the SMALLER of the rect's sides, so the two buttons on the
+                // diagonal cannot touch (their centres are ~44*HS apart, the disc ~36*HS across).
+                const float Dia = (bw < bh ? bw : bh);
+                BlitDisc(PlateBg, Cx, Cy, Dia);
+                // The press/pulse flash goes back onto the BACKGROUND, where it belongs: with a plate
+                // to light up, a press reads as the button lighting up rather than as its text
+                // brightening. PressPlate is the light LUT #107 added for exactly this.
+                if (PulseStep > 0) BlitDisc(PressPlate[PulseStep], Cx, Cy, Dia);
                 // Press now BRIGHTENS the label to white instead of darkening it. Darkening was only
                 // legible against the light press plate; with no plate a dark label on dark art just
                 // disappears at the moment you most need confirmation. The "pushed in" read comes

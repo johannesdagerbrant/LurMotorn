@@ -214,6 +214,12 @@ private:
     Lur::Render::MaterialHandle GhostMat[2] = {};
     Lur::Render::MaterialHandle GhostBadMat[2] = {};
     Lur::Render::MaterialHandle ProdBtnBg = 0;    // #140 semi-transparent production-button plate
+    // The production bar's fill, per (team, unit type): halfway between that team's BUILDING tint and
+    // its UNIT tint, so the bar reads as the one turning into the other.
+    Lur::Render::MaterialHandle ProgressMat[2][UnitCount] = {};
+    // A unit-rect disc (centre 0.5,0.5, r 0.5), white so a material tints it. The +1/+5 buttons draw
+    // it behind their label to look like buttons; nothing else needs a circle yet.
+    Lur::Render::MeshHandle Disc = 0;
     // #143 production pulse: the first building's x1/x5 buttons animate — the PLATE only in
     // opacity (transparent -> opaque, same base colour), the coin toward bright white glow; the
     // text colour glows toward white in code. The throb walks these step LUTs.
