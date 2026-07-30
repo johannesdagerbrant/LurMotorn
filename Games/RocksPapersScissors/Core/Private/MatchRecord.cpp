@@ -30,7 +30,7 @@ bool MatchRecorder::Begin(const char* Path, const Sim& S, int Tier, uint8_t Huma
         Lur::Log::Info("RPS rec: cannot open %s — match will not be recorded", Path);
         return false;
     }
-    std::fprintf(File_, "rec 1\n");
+    std::fprintf(File_, "rec 2\n");   // 2 = post-3-tier-collapse CVar ids (see LoadMatchRecording)
 #ifdef LUR_BUILD_FP
     std::fprintf(File_, "fp %s\n", LUR_BUILD_FP);
 #else
@@ -144,7 +144,16 @@ MatchRecording LoadMatchRecording(const char* Path) {
         if (!R.Census.empty() && R.Census.back().Tick > Last) Last = R.Census.back().Tick;
         R.EndTick = Last;
     }
-    R.Ok = R.Version == 1 && R.Seed != 0;
+    // VERSION 1 IS REFUSED, not tolerated. The 2026-07-30 ladder collapse deleted a 16-entry
+    // LUR_AI_TIER_IDS block from the middle of the gameplay CVar X-list, so the ids after it moved:
+    // every `cv <id>` line in a v1 file now names a different knob. That is precisely the failure
+    // this file's header warns about (mine rows of "5/35" nobody set), and it does not announce
+    // itself — the replay just runs a match with quietly wrong tunables. Loud is the only safe
+    // option, so v1 recordings are dead: keep them as text, don't replay them.
+    if (R.Version == 1)
+        Lur::Log::Error("RPS replay: %s is format v1 (pre-3-tier-collapse); its CVar ids no longer "
+                        "match this build and it will NOT be replayed", Path);
+    R.Ok = R.Version == 2 && R.Seed != 0;
     return R;
 }
 

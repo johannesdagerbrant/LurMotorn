@@ -10,14 +10,6 @@ AiKnobs KnobsFor(const CvSnapshot& Cv, EAiTier Tier) {
                     Cv.AiEasyAllinLead, Cv.AiEasySoldierRatio,
                     Cv.AiEasyQueueDepth, Cv.AiEasyMaxBuildings, Cv.AiEasyDefenceFloor,
                     Cv.AiEasyBuildCluster, Cv.AiEasyMinerQueue, Cv.AiEasyWaveLead, Cv.AiEasyCounterChest};
-        case EAiTier::PerhapsImpossible:
-            return {Cv.AiPerhapsImpossibleOpenWorkers, Cv.AiPerhapsImpossibleWorkerTarget,
-                    Cv.AiPerhapsImpossibleStaleness, Cv.AiPerhapsImpossiblePrecision,
-                    Cv.AiPerhapsImpossibleCadence, Cv.AiPerhapsImpossibleJitter,
-                    Cv.AiPerhapsImpossibleHysteresis, Cv.AiPerhapsImpossibleAllinLead,
-                    Cv.AiPerhapsImpossibleSoldierRatio, Cv.AiPerhapsImpossibleQueueDepth,
-                    Cv.AiPerhapsImpossibleMaxBuildings, Cv.AiPerhapsImpossibleDefenceFloor,
-                    Cv.AiPerhapsImpossibleBuildCluster, Cv.AiPerhapsImpossibleMinerQueue, Cv.AiPerhapsImpossibleWaveLead, Cv.AiPerhapsImpossibleCounterChest};
         case EAiTier::Hard:
             return {Cv.AiHardOpenWorkers, Cv.AiHardWorkerTarget, Cv.AiHardStaleness,
                     Cv.AiHardPrecision, Cv.AiHardCadence, Cv.AiHardJitter, Cv.AiHardHysteresis,
@@ -574,7 +566,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         // It reuses CounterEnemy_ rather than adding a member, by storing the enemy type our chosen
         // soldier BEATS: `Soldier = CounterTo(CounterEnemy_)` then reproduces the choice exactly, and
         // the telemetry, the hysteresis and the cluster re-target all keep working untouched.
-        if (Tier_ == EAiTier::PerhapsImpossible) {
+        if (Tier_ == EAiTier::Hard) {
             // #158: the TARGET MIX is re-derived here, on the same cadence as the enemy read it is
             // derived from — a distribution recomputed every tick would react faster than the tier's
             // own information model allows. Computed even before an enemy exists, because the Nash
@@ -736,7 +728,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     //
     // Reduces exactly to the classic alpha*A^2 > beta*B^2 when neither side reinforces.
     bool OutproducesThem = false;
-    if (Tier_ == EAiTier::PerhapsImpossible) {
+    if (Tier_ == EAiTier::Hard) {
         const uint8_t FoeType = CounterEnemy_ != UnitNone ? CounterEnemy_ : static_cast<uint8_t>(UnitRock);
         const int32_t FoeHp = S.Units[FoeType].MaxHp > 0 ? S.Units[FoeType].MaxHp : 1;
         const int32_t MyHp = S.Units[Soldier].MaxHp > 0 ? S.Units[Soldier].MaxHp : 1;
@@ -774,7 +766,7 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     }
     if (MyMiners < K.OpenWorkers) {
         State_ = EState::Opening;
-    } else if (Tier_ == EAiTier::PerhapsImpossible) {
+    } else if (Tier_ == EAiTier::Hard) {
         // AllinLead stays as a floor: a model saying "you win" on a two-unit edge is still not a
         // reason to switch the economy off.
         State_ = (OutproducesThem && MySoldiers - EnemyArmy >= K.AllinLead && MySoldiers > 0)

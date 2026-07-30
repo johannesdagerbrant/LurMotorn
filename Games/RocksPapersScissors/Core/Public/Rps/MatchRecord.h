@@ -15,7 +15,7 @@
 // be grepped, diffed and plotted, never something that ships or crosses the BLE link. Roughly a few
 // KB per match.
 //
-//   rec 1                       # format version
+//   rec 2                       # format version; v1 is REFUSED, see below
 //   fp <build fingerprint>      # refuse to trust a replay from a different build
 //   seed <hex>
 //   tier <0|1|2>  human <team>
@@ -23,6 +23,13 @@
 //   e <tick> <team> <kind> <type> <xraw> <yraw>     # one line per event, ticks with none are absent
 //   c <tick> <g0> <w0> <s0> <b0> <g1> <w1> <s1> <b1> <aistate> <aicounter>   # periodic census
 //   end <result> <tick>
+//
+// VERSION 2 (2026-07-30): the AI ladder went from four rungs to three, which deleted a 16-entry
+// block from the middle of the gameplay CVar X-list — so the wire ids in a `cv <id> <raw>` line no
+// longer mean what a v1 file meant by them. LoadMatchRecording therefore REFUSES v1 (Ok stays false
+// and it logs why) rather than replaying a match with tunables slid along the list, which is a
+// failure that shows up as plausible-looking nonsense. Recordings taken before that date are readable
+// text but no longer replayable; the tier they name no longer exists either.
 //
 // CAVEAT for re-fighting a recording against a NEW AI: queue events carry a building SLOT index,
 // and slots are shared across both teams in one array — so if a candidate AI places buildings

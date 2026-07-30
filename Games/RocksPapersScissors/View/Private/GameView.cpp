@@ -343,13 +343,12 @@ void GameView::RefreshSelector() {
     // hot-seat row: it's an AI or a linked opponent. Each row shows its session "W-L-D" score at
     // the right end. Picking any row (re)starts/switches to that match immediately (the main polls
     // TakeAiTier / TakePeerPick). Persistent peer enumeration + cross-launch scores ride #15-20.
-    // Green / amber / red / WHITE. The traffic-light run stops at red because red is as far as that
-    // metaphor goes — the fourth tier is off the scale, and white reads as "not on the ladder" at a
-    // glance rather than "even redder". It is also the brightest dot in the list, which is the point.
+    // Green / amber / red — a plain traffic light, one colour per rung. The off-the-scale WHITE dot
+    // went with the fourth tier when the ladder was re-cut to three (2026-07-30): red is the top of
+    // the metaphor again, and it now marks a tier that IS the old "Perhaps Impossible" build.
     const Color Dots[AiTierCount] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
                                      {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
-                                     {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f},
-                                     {Srgb(0xFF), Srgb(0xFF), Srgb(0xFF), 1.0f}};
+                                     {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f}};
     // ORDER (feedback 2026-07-25): the LINKED opponent sits at the TOP — a human peer is the main
     // event and the AI tiers are the fallback below it — with an "AI OPPONENTS" header between
     // them. The header is non-selectable and the widget draws a divider line above any header that

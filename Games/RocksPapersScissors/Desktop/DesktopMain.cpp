@@ -1262,7 +1262,10 @@ int main(int argc, char** argv) {
     auto ParseTier = [](const std::string& T) {
         if (T == "easy") return Rps::EAiTier::Easy;
         if (T == "hard") return Rps::EAiTier::Hard;
-        if (T == "impossible") return Rps::EAiTier::PerhapsImpossible;
+        // "impossible" is NOT accepted as an alias for the rung it named until 2026-07-30. It would
+        // now silently mean "hard", which is the same build — but so would the old "hard", and that
+        // one now means the rung BELOW. A command line in a week-old note must fail, not quietly
+        // measure a different pairing than the note claims.
         return Rps::EAiTier::Medium;
     };
     for (int I = 1; I < argc; ++I) {

@@ -89,17 +89,24 @@ static void TestOpening() {
 }
 
 static void TestCounterChoice() {
-    // Hard (staleness 0, exact) facing 6 enemy Rocks, ALREADY has a mining camp, past its
+    // Medium (staleness 0, exact) facing 6 enemy Rocks, ALREADY has a mining camp, past its
     // opening, gold to spend -> it builds the counter to Rock = Paper (places a Paper building,
     // since it has none yet).
+    //
+    // MEDIUM, NOT HARD, and the distinction is the point of the test rather than a detail: this
+    // asserts the SINGLE-COUNTER (argmax) decision, and since the 2026-07-30 ladder collapse the top
+    // rung is the #158 mixed-composition path, which deliberately does NOT answer one Rock army with
+    // one Paper building — it produces toward a distribution and opens on the tie-break type. Medium
+    // is the old hard verbatim (staleness 0, precision 1), so it is the strongest tier that still
+    // runs the behaviour under test. TestTopTierHoldsAMixedComposition covers the other path.
     Sim S;
     S.Init(0x1234);
     Inject(S, /*team*/ 0, UnitRock, 6);            // enemy army
-    Inject(S, /*team*/ 1, UnitMiner, 6);           // my economy, past Hard's OpenWorkers (5)
+    Inject(S, /*team*/ 1, UnitMiner, 6);           // my economy, past Medium's OpenWorkers (5)
     InjectBuilding(S, 1, UnitMiner, F(17), F(230));// AI already has its camp
     S.Teams[1].Gold = 100000;
     AiController Ai;
-    Ai.Init(0x1234, 1, EAiTier::Hard);
+    Ai.Init(0x1234, 1, EAiTier::Medium);
     InputEvent E[MaxEventsPerTick];
     const int C = AiTick(Ai, S, 0, E);
     CHECK(C == 1 && E[0].Kind == EventPlaceBuilding && E[0].Type == UnitPaper);
@@ -125,14 +132,19 @@ static uint32_t FirstCounterTick(EAiTier Tier) {
 }
 
 static void TestTierReactionSpeed() {
-    // Difficulty = information quality + cadence: Hard (current, exact, fast) locks the counter
+    // Difficulty = information quality + cadence: Medium (current, exact, fast) locks the counter
     // essentially immediately; Easy (stale, fuzzy, slow) takes many ticks to react to the same
     // army. This IS the fair-but-adjustable design.
-    const uint32_t Hard = FirstCounterTick(EAiTier::Hard);
+    //
+    // Medium is the fast end of this comparison, not Hard — same reason as TestCounterChoice: it
+    // probes "when does it first place the COUNTER building", which is a question only the argmax
+    // path answers, and Medium holds the maximum information any tier gets (staleness 0, precision 1)
+    // so the contrast with Easy is undiminished.
+    const uint32_t Fast = FirstCounterTick(EAiTier::Medium);
     const uint32_t Easy = FirstCounterTick(EAiTier::Easy);
-    CHECK(Hard == 0);            // sees the current board, reacts at once
+    CHECK(Fast == 0);            // sees the current board, reacts at once
     CHECK(Easy > 60);            // must wait out its staleness before the mirror shows the army
-    CHECK(Hard < Easy);
+    CHECK(Fast < Easy);
 }
 
 // Two AIs in one process (the #128 harness) must be deterministic: same seeds -> same match.
@@ -175,10 +187,12 @@ static void TestAiVsAiDeterminism() {
 // side that gets pushed back loses building space and collapses, so pinning the assertions to team 0
 // made this test a coin flip on who won. What it guards is that a competently-played AI side buys
 // capacity and converts it — not that both sides do.
-// Runs on HARD, not medium. Difficulty is now carried by a per-tier production-VOLUME ladder, and
-// medium is deliberately capped (max_buildings 12, queue_depth 5) — so asserting unbounded capacity
-// growth on it would assert against the tiering itself. Hard is the uncapped tier, and "buys capacity
-// and converts it" is exactly the property hard is supposed to have.
+// Runs on HARD, not easy. Difficulty is carried by a per-tier production-VOLUME ladder, and easy is
+// deliberately capped (max_buildings 4, queue_depth 3) — so asserting unbounded capacity growth on it
+// would assert against the tiering itself. Hard is uncapped (max_buildings 0), and "buys capacity and
+// converts it" is exactly the property the top rung is supposed to have. (This note said "not medium"
+// before the 2026-07-30 collapse, when medium was the capped middle rung; medium is now the old hard
+// and is uncapped too, so easy is the tier this test could not run on.)
 static void TestAiExpandsCapacity() {
     Sim S;
     S.Init(0x144);
@@ -250,7 +264,7 @@ static void TestChestNeverPricesOutEveryAction() {
     // Just under the Scissor building it wants: the whole purse is inside the reserve.
     S.Teams[1].Gold = BuildingCostFor(S.Cv, UnitScissor) - 55;
     AiController Ai;
-    Ai.Init(0x1234, 1, EAiTier::PerhapsImpossible);
+    Ai.Init(0x1234, 1, EAiTier::Hard);
     int Silent = 0, Longest = 0;
     for (uint32_t T = 0; T < 400; ++T) {
         InputEvent E[MaxEventsPerTick];
@@ -294,7 +308,7 @@ static void TestTopTierHoldsAMixedComposition() {
         Inject(S, 1, UnitMiner, 40);                   // past worker_target, so it wants soldiers
         InjectBuilding(S, 1, UnitMiner, F(4), F(230)); // its opening camp, so it is past the forced one
         AiController Ai;
-        Ai.Init(0x158, 1, EAiTier::PerhapsImpossible);
+        Ai.Init(0x158, 1, EAiTier::Hard);
         bool Asked[3] = {false, false, false};
         // Gold is EARNED and SPENT, not pinned. Pinning it rich broke the first version of this test in
         // a way worth recording: the place branch fires whenever another building is affordable, so an

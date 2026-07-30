@@ -454,6 +454,15 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
     LUR_CVAR(CvAi##Tier##MinerQueue,   "rps.ai." Pfx ".miner_queue",    MQ, CVarFlagAffectsGameplay, "Carts queued per camp per batch (0 = use the shared rps.ai.miner_queue_depth)"); \
     LUR_CVAR(CvAi##Tier##WaveLead,     "rps.ai." Pfx ".wave_lead",      WL, CVarFlagAffectsGameplay, "Ticks before an incoming wave LANDS that it switches to countering (0 = on first sighting)"); \
     LUR_CVAR(CvAi##Tier##CounterChest, "rps.ai." Pfx ".counter_chest", CR, CVarFlagAffectsGameplay, "Percent of a counter BUILDING's price kept banked while contested (0 = spend it all on units)")
+// ---- READ THIS FIRST: the ladder was RE-CUT on 2026-07-30 and every note below predates it ----
+// Three rungs, not four. The old top rung ("Perhaps Impossible") is now **Hard**, the old Hard is now
+// **Medium**, and the old Medium was deleted. So the tier NAMES in the prose below no longer point at
+// the CVars of the same name: a measurement that says "hard beats medium 14-6" was taken on what are
+// now MEDIUM and (a deleted) tier. The numbers themselves moved with their rung, unchanged — nothing
+// was re-tuned by the rename — so each block's own comment still describes the block it sits on. Read
+// "hard" in an old note as "the rung this comment is attached to", never as "rps.ai.hard.*".
+// (Rationale for the collapse: EAiTier in AiController.h.)
+//
 // ---- The ladder is now STRICTLY ORDERED BY DESIGN: the better tier always beats the lesser one. ----
 // That replaces the old goal of a 77-83% adjacent-rung win rate. It is delivered by a monotonic
 // PRODUCTION-VOLUME ladder — queue_depth 8/5/3 and max_buildings unlimited/12/4 for hard/medium/easy —
@@ -523,7 +532,9 @@ constexpr int32_t NumMines = MinesPerTeam * 2;   // 48
 // configuration, because the AI decides every tick and simply hits the gold-limited maximum. The
 // human's 5 is hesitation, not economics; closing that needs a decision throttle, not a volume cap.
 LUR_AI_TIER(Easy,   "easy",   4, 24,  60, 4, 50, 15, 3, 20, 40, 3,  4, 0, 1, 0, 0, 0);
-LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 0, 0);
+// ---- MEDIUM = what was HARD until 2026-07-30. Numbers unchanged; only the rung's name moved. ----
+// Everything from here to the LUR_AI_TIER line below was written about this build under the name
+// "hard", and the deleted middle rung is the "medium" its measurements are quoted against.
 // Hard's economy knobs come from a MEASURED human win (2026-07-25 flight recordings, #144): the
 // player beat it in 2:49 running 108 workers to its 20 and a 43%-worker army, while hard's
 // worker_target of 10 and 70% soldier bias capped its economy at ~30% and starved the compounding
@@ -559,8 +570,12 @@ LUR_AI_TIER(Medium, "medium", 4, 22,  20, 2, 20, 6,  2, 15, 65, 5, 12, 1, 2, 0, 
 // unfixed hole): economy-first with no combat capacity standing means a timely attack arrives while
 // hard has zero soldier buildings and must start them from scratch, and worker_target is inert after
 // contact so no knob could reach it. The floor is capacity, not intent.
-LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 0, 0);
-// ---- "Perhaps Impossible": the ladder's top rung, tuned to the OWNER'S OWN WINNING BUILD ----
+LUR_AI_TIER(Medium, "medium", 5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 0, 0);
+// ---- HARD: the ladder's top rung, tuned to the OWNER'S OWN WINNING BUILD ----
+// Called "Perhaps Impossible" until 2026-07-30, and every note below was written under that name —
+// so "hard" in this block means the rung BELOW it (now Medium), which is the control its 34/48 was
+// measured against. It is still the tier the code special-cases as the top one (the mixed
+// composition and the reinforcement-aware commit gate in AiController both key on EAiTier::Hard).
 // It gets NO information hard does not have (staleness 0, precision 1 — hard already holds the
 // maximum, and there is nothing above "sees the board now, exactly"), and no extra actions: same
 // one event per tick, same event types a thumb issues. Every number below is a build-order choice,
@@ -609,7 +624,7 @@ LUR_AI_TIER(Hard,   "hard",   5, 110, 0,  1, 12, 2,  1, 10, 55, 8,  0, 5, 3, 0, 
 // attempts at this tier both measured fine and then felt like hard in his hands. Do not trust a
 // small sweep here either: the sim is deterministic, so fixed seeds flip outcomes chaotically —
 // queue_depth 4 once measured 15/16 and 5 measured 1/16 on the same seeds. Both orders, 24+ seeds.
-LUR_AI_TIER(PerhapsImpossible, "impossible", 5, 110, 0, 1, 12, 2, 1, 10, 55, 8, 0, 5, 3, 0, 0, 100);
+LUR_AI_TIER(Hard, "hard", 5, 110, 0, 1, 12, 2, 1, 10, 55, 8, 0, 5, 3, 0, 0, 100);
 #undef LUR_AI_TIER
 
 // ---- AI production/expansion knobs (#144), shared by ALL tiers on purpose ----
@@ -731,10 +746,10 @@ LUR_CVAR(CvAiChestFloorUnits, "rps.ai.chest_floor_units", 10, CVarFlagAffectsGam
 // THE ARMY COMPOSITION IS THE MIXTURE. Producing 50/36/14 realises that mixed strategy exactly, with
 // zero variance. This is continuous allocation, not a one-shot sample.
 //
-// Shared (not per-tier) CVars gated on PerhapsImpossible in code, for two reasons: the lower rungs'
-// ordering was measured against the argmax path and composition is strategy rather than a bug fix,
-// and LUR_AI_TIER_IDS expands mid-list so appending a per-tier knob would renumber every wire id
-// below it (ecb644c). These three are appended at the very END, which is the only safe place.
+// Shared (not per-tier) CVars gated on the TOP RUNG (EAiTier::Hard) in code, for two reasons: the
+// lower rungs' ordering was measured against the argmax path and composition is strategy rather than a
+// bug fix, and LUR_AI_TIER_IDS expands mid-list so appending a per-tier knob would renumber every wire
+// id below it (ecb644c). These three are appended at the very END, which is the only safe place.
 LUR_CVAR(CvAiMixEnable, "rps.ai.mix_enable", 1, CVarFlagAffectsGameplay,
          "Top tier produces toward a target DISTRIBUTION of soldier types (0 = old single-type argmax)");
 // The base distribution is the 3-cycle's NASH MIX, which has a closed form — no LP, three multiplies.
@@ -818,6 +833,13 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
 // ever set (row_home had been handed row_safe's value, row_safe the frontier's, and so on down the
 // list). Replay does not refuse on a fingerprint mismatch, so nothing warns you. Grouping a knob
 // with its family is worth less than being able to read last week's match.
+//
+// THE ONE DELIBERATE VIOLATION (2026-07-30): collapsing the ladder to three rungs deleted a whole
+// 16-id LUR_AI_TIER_IDS block, so the four ids that followed it (chest floor + the three mix knobs)
+// moved down by 16 — exactly the silent slide described above. It is safe only because the recording
+// format version went to 2 in the same change and LoadMatchRecording now REFUSES version 1, so a
+// pre-collapse recording fails loudly instead of replaying with values slid along the list. If you
+// ever have to renumber again, bump that version in the same commit or don't do it.
 #define LUR_RPS_GAMEPLAY_CVARS(FX, IX)                    \
     FX(SeparationStrength,      CvSeparationStrength)      \
     FX(EnemySeparationStrength, CvEnemySeparationStrength) \
@@ -895,7 +917,6 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiExpandGoldFactor,      CvAiExpandGoldFactor)      \
     FX(MineSpreadSlack,         CvMineSpreadSlack)         \
     IX(AiEconFloorPct,          CvAiEconFloorPct)          \
-    LUR_AI_TIER_IDS(IX, PerhapsImpossible)                 \
     IX(AiChestFloorUnits,       CvAiChestFloorUnits)       \
     IX(AiMixEnable,             CvAiMixEnable)             \
     IX(AiMixCapPct,             CvAiMixCapPct)             \

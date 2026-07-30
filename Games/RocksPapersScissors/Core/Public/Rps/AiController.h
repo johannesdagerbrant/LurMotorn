@@ -27,18 +27,31 @@ namespace Rps {
 
 // APPEND-ONLY: the value is stored in flight recordings (`tier <n>`) and in the per-tier score
 // arrays, so renumbering an existing tier silently relabels history.
-enum class EAiTier : uint8_t { Easy = 0, Medium = 1, Hard = 2, PerhapsImpossible = 3 };
+//
+// THE LADDER WAS COLLAPSED FROM FOUR RUNGS TO THREE (2026-07-30, owner's call), and this is the one
+// time the append-only rule was deliberately broken — so the rename is worth recording, because
+// every number and comment in Tunables.h that says "hard" now means what "Perhaps Impossible" used
+// to be:
+//   * the old "Perhaps Impossible" (its measured build: the owner's own, + counter_chest 100 + the
+//     #158 mixed composition) became **Hard**;
+//   * the old Hard (worker_target 110, uncapped volume, argmax counters) became **Medium**;
+//   * the old Medium (worker_target 22, max_buildings 12) was DELETED outright.
+// Why: the top rung had stopped being a novelty name and become the real "hard", and the rung it
+// beat 34/48 was the honest "medium"; the old medium sat close enough to easy to be a wasted row in
+// a three-row menu. The one hard cost is that recordings from before the collapse no longer load —
+// MatchRecord's format version went to 2 precisely so they FAIL rather than replay with tier knobs
+// slid one rung along (see MatchRecord.h).
+enum class EAiTier : uint8_t { Easy = 0, Medium = 1, Hard = 2 };
 // One source of truth for "how many tiers are there". Every per-tier array (score tallies, the
 // opponent selector's rows, the harness name tables) sizes off this — the alternative is a literal
 // 3 in a dozen places, and a new tier then works everywhere except the one place that was missed.
-constexpr int AiTierCount = 4;
+constexpr int AiTierCount = 3;
 // Display names, indexed by EAiTier. The UI shows these verbatim.
 inline const char* AiTierName(EAiTier T) {
     switch (T) {
-        case EAiTier::Easy:              return "Easy";
-        case EAiTier::Medium:            return "Medium";
-        case EAiTier::Hard:              return "Hard";
-        case EAiTier::PerhapsImpossible: return "Perhaps Impossible";
+        case EAiTier::Easy:   return "Easy";
+        case EAiTier::Medium: return "Medium";
+        case EAiTier::Hard:   return "Hard";
     }
     return "?";
 }
