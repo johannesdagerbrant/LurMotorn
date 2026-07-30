@@ -18,6 +18,7 @@
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Text/BuiltinFonts.h"
+#include "Lur/Text/TextLayout.h"      // MeasureText — centring the coin+price group in a button
 #include "Rps/Tunables.h"
 
 // The design-lock glyph set (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html): indices
@@ -162,25 +163,50 @@ Lur::Render::MeshHandle MakeDiscMesh(IRenderer* R, int Segments) {
 
 }  // namespace
 
+namespace {
+// ---- TOP-HUD BAND METRICS, in HS units, defined ONCE ----
+// The opponent bar and the status panel stack with no gap, and the camera's scroll limit
+// (TopHudWorldUnits) has to know how tall that stack is. These were three literals in two functions,
+// which is how the camera limit ends up describing a layout that no longer exists — moving the panel
+// silently left the enemy camp reachable behind the chrome.
+constexpr float TopBarTopHs = 2.0f;    // gap between the OS inset and the opponent bar
+constexpr float TopBarHs    = 36.0f;   // the opponent bar itself (3/4 of the 48 it first shipped at)
+constexpr float TopPanelHs  = 30.0f;   // the gold | population | clock panel, flush under the bar
+constexpr float TopHudHs    = TopBarTopHs + TopBarHs + TopPanelHs;   // inset -> panel's bottom edge
+
+// The minimap strip's width. It owns the screen's right edge for the WHOLE height below the top
+// panel, so the build plates are laid out in what is left — hence a constant both of them read.
+constexpr float MiniStripHs = 12.0f;
+
+// One build plate's width. Derived in one place because two callers need it: Render draws the row,
+// and BottomHudWorldUnits turns it into the camera's bottom scroll limit. It was the same four-term
+// expression copied into both, so narrowing the row for the minimap would have moved the plates
+// without moving the limit that keeps your own camp clear of them.
+float PlateWidthPx(float WidthPx, float HS) {
+    const float Pad = 8.0f * HS, Gap = 6.0f * HS, GroupGap = 4.0f * Gap;
+    const float RowW = WidthPx - MiniStripHs * HS;   // everything left of the minimap strip
+    return (RowW - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
+}
+}  // namespace
+
 float GameView::VisibleWorldHeight(float WidthPx, float HeightPx) {
     return HeightPx / Ppu(WidthPx);
 }
 
 float GameView::BottomHudWorldUnits(float WidthPx) const {
     const float HS = HudScale(WidthPx);
-    const float Pad = 8.0f * HS, Gap = 6.0f * HS;
-    const float GroupGap = 4.0f * Gap;
-    const float PlateW = (WidthPx - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
+    const float Pad = 8.0f * HS;
     // nav-bar inset + plate block + group header + a margin so the camp sits WELL
     // above the plates
-    return (BottomInsetPx + Pad + PlateW * 1.02f + 20.0f * HS + 3.0f * Pad) / Ppu(WidthPx);
+    return (BottomInsetPx + Pad + PlateWidthPx(WidthPx, HS) * 1.02f + 20.0f * HS + 3.0f * Pad) /
+           Ppu(WidthPx);
 }
 
 float GameView::TopHudWorldUnits(float WidthPx) const {
     const float HS = HudScale(WidthPx);
-    // status-bar inset + dropdown block + status panel + a margin, mirroring the
+    // status-bar inset + the opponent bar + status panel + a margin, mirroring the
     // bottom: the ENEMY camp must clear the top chrome at max scroll-up.
-    return (TopInsetPx + 82.0f * HS + 24.0f * HS) / Ppu(WidthPx);
+    return (TopInsetPx + (TopHudHs + 24.0f) * HS) / Ppu(WidthPx);
 }
 
 void GameView::CreateResources(IRenderer* Renderer) {
@@ -269,17 +295,21 @@ void GameView::CreateResources(IRenderer* Renderer) {
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
             TeamTypeTintBldg[Tm][Ty] = Hsv(H, BldgSat, BldgVal);
             TypeTintMatBldg[Tm][Ty] = AtlasTinted(TeamTypeTintBldg[Tm][Ty]);
-            // The production bar's fill: HALFWAY between the building it grows on and the unit it is
-            // producing (feedback 2026-07-30) — literally the midpoint of the two HSV pairs above, on
-            // the SAME hue, so it reads as "this building becoming that unit". Gold was wrong for the
-            // job: gold is the currency everywhere else in this HUD, and a gold bar on a building said
-            // "income" rather than "progress".
-            // Interpolated in HSV, not RGB, for the same reason the building tint is: these two
-            // endpoints differ only in saturation and value, so the midpoint of THOSE is on the ramp
-            // between them, while an RGB average of a dark desaturated colour and a vivid one drifts
-            // off the hue.
+            // The production bar's fill: the SAME HUE as the building and the unit, knocked back one
+            // more step — darker and less saturated than the BUILDING (feedback 2026-07-30), the way
+            // the building is darker and less saturated than its units. So the ramp reads unit >
+            // building > progress bar, brightest to dimmest, and the bar identifies what it is
+            // producing without competing with either.
+            //
+            // It first shipped as the MIDPOINT of building and unit, which put the bar BRIGHTER than
+            // the building it sits on — a big block of near-unit colour in the middle of the icon,
+            // pulling the eye to the least urgent thing on screen. One knock-back factor, applied to
+            // both channels, so the relationship survives a palette retune.
+            // Still HSV, not RGB: these endpoints differ only in saturation and value, so scaling
+            // THOSE stays on the hue, while scaling RGB drifts off it.
+            constexpr float BarKnock = 0.7f;
             ProgressMat[Tm][Ty] =
-                FlatMat(Renderer, Hsv(H, (BldgSat + 1.0f) * 0.5f, (BldgVal + 1.0f) * 0.5f));
+                FlatMat(Renderer, Hsv(H, BldgSat * BarKnock, BldgVal * BarKnock));
         }
     // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
     // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
@@ -887,13 +917,16 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // The two lines inside a button, sized once. The disc is 0.75 of the narrow side of the hit
         // rect (Bw ~36*HS) so it is ~27*HS across, and it now carries the quantity AND its price —
         // two lines in a circle, which is what sets these sizes. Each line is measured against the
-        // CHORD at its own offset from the centre, not the diameter: "+5" at 11*HS is ~12*HS of
-        // glyphs and a 4-digit total at 9*HS is ~20*HS, both inside the ~25*HS chord at +/-0.19 D.
+        // CHORD at its own offset from the centre, not the diameter: the chord at +/-0.19 D is still
+        // ~0.92 of it, about 25*HS. "+5" at 11*HS is ~12*HS of glyphs; the price line is a coin plus
+        // digits, so at 8*HS it is ~8 (coin) + 1.2 (gap) + 12 (three digits) = 21*HS, and a four-digit
+        // total still lands inside 25. That last sum is why the price is 8 and not 9: the coin costs
+        // the line a digit's worth of width.
         // (31*HS back when the bare label WAS the button and owned the whole rect; 24*HS when the
         // disc arrived with one line.) Legibility survives the drop because a label on a solid disc
         // reads at a smaller size than the same label floating on building art.
         const float LabelPx = 11.0f * HS;
-        const float PricePx = 9.0f * HS;
+        const float PricePx = 8.0f * HS;
         // The queue/progress row's height. (PriceRowH went with the standalone corner price label —
         // the price lives inside the buttons now, so there is no separate row to keep clear of.)
         const float QRowH = 20.0f * HS;
@@ -1119,6 +1152,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 InteractBtn Btn;
                 Btn.Cx = DCx; Btn.Cy = DCy; Btn.Dia = Dia;
                 Btn.Flash = PulseStep > 0 ? PressPlate[PulseStep] : 0;
+                Btn.CoinMat = Afford ? GoldIconMat : PlateIconDim;
                 Btn.LabelPx = LabelPx * PulseK;
                 Btn.PricePx = PricePx * PulseK;
                 Btn.LabelCol = Afford ? Glow(Ico) : DimC;
@@ -1198,8 +1232,22 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float LineH = B.Dia * 0.38f;
         TextShadowed(B.Label, B.Cx - B.Dia * 0.5f, B.Cy - LineH, B.Dia, LineH, B.LabelPx,
                      B.LabelCol, Lur::Text::EHAlign::Center);
-        TextShadowed(B.Price, B.Cx - B.Dia * 0.5f, B.Cy, B.Dia, LineH, B.PricePx, B.PriceCol,
-                     Lur::Text::EHAlign::Center);
+        // The price line is a COIN + DIGITS centred as one group (feedback 2026-07-30): the number is
+        // gold, but only the coin says the number is MONEY, and this is the one place in the HUD where
+        // a bare figure could be read as a count. Measured rather than guessed — the group's width
+        // depends on how many digits the total has, and a hardcoded offset would drift the pair off
+        // centre the moment a cost gains one.
+        const int PriceLen = static_cast<int>(std::strlen(B.Price));
+        float PriceW = 0.0f, PriceH = 0.0f;
+        int PriceLines = 0;
+        Lur::Text::MeasureText(Font, B.Price, PriceLen, B.Dia, B.PricePx, /*Wrap*/ false, PriceW,
+                               PriceH, PriceLines);
+        const float CoinPx = B.PricePx;              // coin reads as one more "digit" of the group
+        const float CoinGap = B.PricePx * 0.15f;
+        const float GroupL = B.Cx - (CoinPx + CoinGap + PriceW) * 0.5f;
+        BlitGlyph(GlyphGold, B.CoinMat, GroupL + CoinPx * 0.5f, B.Cy + LineH * 0.5f, CoinPx);
+        TextShadowed(B.Price, GroupL + CoinPx + CoinGap, B.Cy, PriceW, LineH, B.PricePx, B.PriceCol,
+                     Lur::Text::EHAlign::Left);
     }
     if (SelectorDirty) RefreshSelector();
 
@@ -1212,8 +1260,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const float Pad = 8.0f * HS;
     char Buf[64];
 
-    // Status panel — below the OS status bar (TopInsetPx) and the dropdown pill.
-    const float PanelY = TopInsetPx + 52.0f * HS, PanelH = 30.0f * HS;
+    // ---- The top HUD stack: opponent bar, then the status panel FLUSH under it ----
+    // No gap between the two (feedback 2026-07-30): they are one block of chrome, and the sliver of
+    // field showing between them read as a seam rather than as breathing room. The bar's own height
+    // is the pivot for that — it shrank to 3/4 and the panel followed it up, so the whole stack got
+    // shorter rather than the gap moving somewhere else.
+    const float SelTop = TopInsetPx + TopBarTopHs * HS;
+    const float SelH   = TopBarHs * HS;
+    const float PanelY = SelTop + SelH, PanelH = TopPanelHs * HS;
     Blit(PanelMat, WidthPx * 0.5f, PanelY + PanelH * 0.5f, WidthPx, PanelH);
     Blit(PanelEdge, WidthPx * 0.5f, PanelY + PanelH, WidthPx, 1.0f * HS);
     const float Mid = PanelY + PanelH * 0.5f;
@@ -1250,9 +1304,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // Grouping (#85 playtest): the miner (mining-camp) plate stands apart with a GOLD frame under a
     // gold-token header — "gathers gold" — while rock/paper/scissors share a backing strip under a
     // crossed-swords header — "produce warriors".
+    // THE ROW ENDS WHERE THE MINIMAP BEGINS (feedback 2026-07-30). The strip now runs to the bottom
+    // of the screen, so the plates yield the width instead of being overdrawn: they are laid out in
+    // WidthPx - MiniStripHs and every plate is that much narrower. Shifting them left without
+    // narrowing them would have been the same collision one plate further along.
     const float Gap = 6.0f * HS;
     const float GroupGap = 4.0f * Gap;
-    const float PlateW = (WidthPx - 2.0f * Pad - GroupGap - 2.0f * Gap) / 4.0f;
+    const float PlateW = PlateWidthPx(WidthPx, HS);
     const float PlateH2 = PlateW * 1.02f;
     const float PlateY = HeightPx - BottomInsetPx - Pad - PlateH2;
     const float HeadH = 16.0f * HS;
@@ -1436,10 +1494,15 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // units + camps (absolute team colours) and live deposits (gold); the bright
     // window is exactly what the camera shows. One extra instanced draw.
     {
-        const float StripW = 12.0f * HS;
+        // FULL HEIGHT (feedback 2026-07-30): from the status panel's bottom edge to the last pixel of
+        // the screen. It used to stop short of the build plates, which cost it a third of its length
+        // and — because the map is drawn to scale along it — a third of the resolution with which it
+        // could show where anything was. The plates were narrowed to clear it (PlateWidthPx), so the
+        // two no longer share any pixels and the draw order between them stops mattering.
+        const float StripW = MiniStripHs * HS;
         const float StripX = WidthPx - StripW;
-        const float StripY = PanelY + PanelH + 4.0f * HS;
-        const float StripB = PlateY - HeadH - 8.0f * HS;
+        const float StripY = PanelY + PanelH;
+        const float StripB = HeightPx;
         const float StripH = StripB - StripY;
         const float WH = FW(WorldHeight);
         Blit(PanelMat, StripX + StripW * 0.5f, StripY + StripH * 0.5f, StripW, StripH);
@@ -1548,17 +1611,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
 
     // The opponent dropdown draws LAST so its open list overlays the panel.
     //
-    // NO CAPTION, and it OWNS the whole band between the OS inset and the status panel (feedback
-    // 2026-07-30). The word "Opponent" above a row that already names the opponent was a label for
-    // something self-evident, and it cost a third of the band to say it — so the pill was a thin
-    // strip with dead space above and below. Sized from PanelY rather than a repeated literal, so
-    // moving the panel moves this with it and the two can never overlap or drift apart.
+    // NO CAPTION (feedback 2026-07-30). The word "Opponent" above a row that already names the
+    // opponent was a label for something self-evident, and it cost a third of the band to say it.
+    //
+    // EDGE TO EDGE, and 3/4 of the height it first shipped at — the two go together: a bar pinned to
+    // both screen edges reads as a title bar rather than as a widget, and a title bar does not need
+    // 48*HS of height to be found. Height shrank from the BOTTOM (the top gap is fixed at
+    // TopBarTopHs), which is what let the status panel move up flush against it.
+    //
+    // Full width means no side padding at all: X = 0, W = WidthPx. Every other HUD element insets by
+    // Pad; this one deliberately does not.
     //
     // The OPEN LIST keeps compact rows: the pill is a header, the list is a list. Scaling five rows
     // to a header-sized pill would push the bottom of the menu into the build plates.
-    const float SelTop = TopInsetPx + 2.0f * HS;
-    const float SelH   = PanelY - SelTop - 2.0f * HS;
-    Selector.Draw(Renderer, nullptr, Pad, SelTop, WidthPx - 2.0f * Pad, SelH, /*MenuRowH*/ 26.0f * HS);
+    Selector.Draw(Renderer, nullptr, 0.0f, SelTop, WidthPx, SelH, /*MenuRowH*/ 26.0f * HS);
 
     // #2: "opponent link established" — a peer linked while an AI match was running. Blink a green
     // line for a few seconds (the player can pick the "Linked opponent" row to switch). Time it out

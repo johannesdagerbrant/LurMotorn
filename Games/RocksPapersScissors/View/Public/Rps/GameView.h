@@ -285,6 +285,7 @@ private:
     struct InteractBtn {
         float Cx, Cy, Dia;                       // the disc
         Lur::Render::MaterialHandle Flash = 0;   // press/pulse overlay, 0 = none
+        Lur::Render::MaterialHandle CoinMat = 0; // the gold coin left of the price (dimmed if too dear)
         Lur::Render::Color LabelCol{}, PriceCol{};
         float LabelPx = 0.0f, PricePx = 0.0f;
         char  Label[8] = {};                     // "+1" / "+5"
