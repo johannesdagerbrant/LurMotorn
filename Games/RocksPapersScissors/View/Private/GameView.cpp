@@ -654,9 +654,21 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                        Mat4::Scale({Dpx, Dpx, 1.0f});
         Renderer->DrawMesh(Disc, Mat, M);
     };
+    // Text with a dark offset copy behind it. Every label that sits on the FIELD (building art, mine
+    // art, open ground) needs this: it is what the translucent plates used to do, and the legibility
+    // problem outlived the plates. Function-scope rather than local to the building pass because the
+    // interactables sub-layer re-draws its labels during the GUI flush (see Interactables_).
+    const Color ShadowC{0.0f, 0.0f, 0.0f, 0.75f};
+    auto TextShadowed = [&](const char* S, float X, float Y, float W, float H, float Px, Color C,
+                            Lur::Text::EHAlign HA) {
+        const float O = 1.5f * HS;   // offset: enough to separate, small enough not to smear
+        Text.Draw(Renderer, S, X + O, Y + O, W, H, Px, ShadowC, HA, Lur::Text::EVAlign::Middle, false);
+        Text.Draw(Renderer, S, X, Y, W, H, Px, C, HA, Lur::Text::EVAlign::Middle, false);
+    };
 
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
-    HealthBars_.clear();   // refilled each frame by the building/unit passes below
+    HealthBars_.clear();     // refilled each frame by the building/unit passes below
+    Interactables_.clear();  // ditto — the press targets, flushed on top of everything world-drawn
     PulseBtnActive_ = false;   // set below if a +1 button is pulsing this frame
 
     // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
@@ -862,17 +874,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
         const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
-        // with the translucent plates gone, every label sits directly on the building's art, so
-        // each one gets a dark offset copy behind it. That is what the plates were actually for
-        // (gold-on-cyan was unreadable) — the legibility problem outlives the panel, so it needs its
-        // own answer. Two text draws for a handful of short labels; no new material or pipeline.
-        const Color ShadowC{0.0f, 0.0f, 0.0f, 0.75f};
-        auto TextShadowed = [&](const char* S, float X, float Y, float W, float H, float Px, Color C,
-                                EHAlign HA) {
-            const float O = 1.5f * HS;   // offset: enough to separate, small enough not to smear
-            Text.Draw(Renderer, S, X + O, Y + O, W, H, Px, ShadowC, HA, EVAlign::Middle, false);
-            Text.Draw(Renderer, S, X, Y, W, H, Px, C, HA, EVAlign::Middle, false);
-        };
         // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of big squares, not a slim stacked
         // column. ONE width (CtrlW) governs the whole control stack — cost plate, button row, queue
         // plate — so every outline down the building lines up instead of three ragged widths, and the
@@ -883,19 +884,18 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float CtrlW = BldgPx + 6.0f * HS;
         const float Bw = (CtrlW - BGap) / static_cast<float>(ProdBtnPerBldg);
         const float Bh = 48.0f * HS;   // a little bigger — bigger target AND a bigger label
-        // The "+N" label, sized once — and now sized to sit INSIDE the button's circle. Bw is the
-        // narrow side (~36*HS), so the disc is that wide; "+5" at 24*HS is ~26*HS of glyphs, which
-        // clears the circle's edge at the mid-height where it is widest. It was 31*HS when the label
-        // WAS the button and had the whole rect to itself. Legibility does not suffer: a label on a
-        // solid disc reads at a smaller size than the same label floating on building art.
-        const float LabelPx = 24.0f * HS;
-        // the price row moved from ABOVE the icon to BELOW it, immediately above the progress
-        // bar. One constant for its height so the price and the queue/progress row below it are
-        // positioned from the same number and cannot drift into each other.
-        const float PriceRowH = 15.0f * HS;
-        // The queue/progress row's height, hoisted out of its own block: the price is now placed
-        // FROM this number (it tucks into the icon's bottom-right, just clear of the row), so both
-        // must read it from the same place or they drift apart the moment one is retuned.
+        // The two lines inside a button, sized once. The disc is 0.75 of the narrow side of the hit
+        // rect (Bw ~36*HS) so it is ~27*HS across, and it now carries the quantity AND its price —
+        // two lines in a circle, which is what sets these sizes. Each line is measured against the
+        // CHORD at its own offset from the centre, not the diameter: "+5" at 11*HS is ~12*HS of
+        // glyphs and a 4-digit total at 9*HS is ~20*HS, both inside the ~25*HS chord at +/-0.19 D.
+        // (31*HS back when the bare label WAS the button and owned the whole rect; 24*HS when the
+        // disc arrived with one line.) Legibility survives the drop because a label on a solid disc
+        // reads at a smaller size than the same label floating on building art.
+        const float LabelPx = 11.0f * HS;
+        const float PricePx = 9.0f * HS;
+        // The queue/progress row's height. (PriceRowH went with the standalone corner price label —
+        // the price lives inside the buttons now, so there is no separate row to keep clear of.)
         const float QRowH = 20.0f * HS;
         ProdBtnCount_ = 0;
         PulseT_ += DtSec;              // #143 production-pulse throb clock
@@ -1023,33 +1023,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // leaves the footprint, so a cluster can never reach a neighbour's art — the failure mode
             // the edge-straddling pair had — and the freed corner is where the price goes.
             const float ColW = 2.0f * Half / static_cast<float>(ProdBtnPerBldg);
-            {
-                // WAY smaller, and NO plate. The plates were the real occluders — the building's
-                // art was legible through a glyph but not through three stacked translucent panels.
-                // The price is reference information, not a control, so it yields the most space —
-                // which is why it takes the ONE corner the diagonal button pair leaves free:
-                // BOTTOM-RIGHT. +1 owns the bottom-left column and +5 the top-right one, so anything
-                // on the centre line would be under a thumb target; the bottom-right band is the only
-                // quiet spot left inside the footprint.
-                // Vertically it is measured UP from the icon's bottom edge, clearing the queue/
-                // progress row that straddles that edge (QRowH is shared with it, so they can't drift).
-                const float CostY = (By + Half) - QRowH * 0.5f - PriceRowH * 0.5f;
-                const float Cs = 11.0f * HS;
-                char CBuf[12];
-                std::snprintf(CBuf, sizeof(CBuf), "%d", UnitCost);
-                // Right-anchored as a GROUP: the coin is a fixed step left of the digits and the digits
-                // run left-to-right from there, so a 1-, 2- or 3-digit price keeps the coin still (the
-                // eye finds the currency in the same place on every building) and the widest of them
-                // still lands inside the icon's right half — 31*HS back from the right edge leaves
-                // room for coin + ~3 digits, and Half is ~36.5*HS at every resolution.
-                const float GlyphX = Bx + Half - 31.0f * HS;
-                BlitGlyph(GlyphGold, AffordOne ? GoldIconMat : PlateIconDim, GlyphX, CostY, Cs);
-                // A dark offset copy behind the text replaces the plate: the plate existed because
-                // gold-on-cyan was unreadable, and that problem does not go away just because the
-                // panel did. One extra text draw per building, and it works over any art.
-                TextShadowed(CBuf, GlyphX + 8.0f * HS, CostY - 7.0f * HS, 40.0f * HS, 14.0f * HS,
-                             12.0f * HS, AffordOne ? GoldC : DimC, EHAlign::Left);
-            }
+            // THE PRICE MOVED INSIDE THE BUTTONS (feedback 2026-07-30) and the standalone corner
+            // label is gone. It used to state the cost of ONE unit once, in the bottom-right corner
+            // the diagonal pair leaves free — but each button now shows the cost of ITS OWN quantity
+            // (unit cost x1 under +1, x5 under +5), which makes the old label an exact duplicate of
+            // the +1 button's second line. Two numbers saying the same thing, one of them crowded
+            // against a disc, is worse than one number in the place you are about to press.
+            (void)AffordOne;   // affordability is now per button (Price = UnitCost * ProdMult[K])
             // #143/#146 production pulse (the first camp only, until taught): ONLY the x1 button
             // throbs — right after the first camp x5 is unaffordable, so pulsing it would beg for a
             // buy the player can't make. The plate + "x1"/price brighten on the beat; the gold COIN
@@ -1071,15 +1051,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // Even K hugs the icon's BOTTOM edge, odd K its TOP edge — the diagonal.
                 const float BtnTop = (K % 2 == 0) ? (By + Half - Bh) : (By - Half);
                 PB.R[K][0] = BX; PB.R[K][1] = BtnTop; PB.R[K][2] = Bw; PB.R[K][3] = Bh;  // hit rect: unscaled
-                if (BtnPulse) {   // remember it for the GUI-layer pointing hand
-                    PulseBtnActive_ = true;
-                    for (int R4 = 0; R4 < 4; ++R4) PulseBtnRect_[R4] = PB.R[K][R4];
-                }
                 const int32_t Price = UnitCost * ProdMult[K];
                 const bool Afford = Snap.Gold[My] >= Price;
                 // Draw everything about the button's CENTRE, scaled by PulseK (1.0 unless pulsing).
                 const float Cx = BX + Bw * 0.5f, Cy = BtnTop + Bh * 0.5f;
-                const float bw = Bw * PulseK, bh = Bh * PulseK, bx = Cx - bw * 0.5f, by2 = Cy - bh * 0.5f;
                 // A CIRCULAR BACKGROUND, in the build plates' own material (feedback 2026-07-30):
                 // bare labels on the building art did not read as controls at all. It is the plate
                 // material HANDLE, not a copy of its colour — a drag ORIGIN and the button you press
@@ -1087,17 +1062,35 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 // drift apart when the palette is retuned.
                 //
                 // This walks back the earlier "NO plate" decision, whose reason was occlusion — three
-                // stacked translucent panels per building hid the art. A circle inscribed in the hit
-                // rect covers about a fifth of what those panels did, and the art is knocked back by
-                // the building HSV tint anyway (see BldgSat/BldgVal), which was the other half of
-                // that fix. Diameter is the SMALLER of the rect's sides, so the two buttons on the
-                // diagonal cannot touch (their centres are ~44*HS apart, the disc ~36*HS across).
-                const float Dia = (bw < bh ? bw : bh);
-                BlitDisc(PlateBg, Cx, Cy, Dia);
-                // The press/pulse flash goes back onto the BACKGROUND, where it belongs: with a plate
+                // stacked translucent panels per building hid the art. A disc at THIS size covers a
+                // fraction of what those panels did, and the art is knocked back by the building HSV
+                // tint anyway (see BldgSat/BldgVal), which was the other half of that fix.
+                //
+                // 0.75 OF THE INSCRIBED CIRCLE, shrunk toward the icon's OWN CORNER (feedback
+                // 2026-07-30): +1 pivots on the bottom-left corner, +5 on the top-right — the corners
+                // they already sat nearest. Scaling about the pivot rather than about the button's own
+                // centre is what keeps them pinned in their corners as they shrink, instead of both
+                // drifting toward the middle of the icon (where they would meet). It also opens the
+                // gap between them from "nearly touching" to ~2x their own diameter, which is what
+                // makes room for a second line of text inside each one.
+                constexpr float BtnShrink = 0.75f;
+                const float PivX = (K % 2 == 0) ? (Bx - Half) : (Bx + Half);
+                const float PivY = (K % 2 == 0) ? (By + Half) : (By - Half);
+                const float Dia = (Bw < Bh ? Bw : Bh) * BtnShrink * PulseK;
+                const float DCx = PivX + (Cx - PivX) * BtnShrink;
+                const float DCy = PivY + (Cy - PivY) * BtnShrink;
+                if (BtnPulse) {   // remember it for the GUI-layer pointing hand
+                    PulseBtnActive_ = true;
+                    // The DISC's box, not the hit rect: the hand points at what the player can see,
+                    // and those are no longer the same rectangle (see the note on the hit rect below).
+                    PulseBtnRect_[0] = DCx - Dia * 0.5f; PulseBtnRect_[1] = DCy - Dia * 0.5f;
+                    PulseBtnRect_[2] = Dia;              PulseBtnRect_[3] = Dia;
+                }
+                // NOT DRAWN HERE — queued for the interactables sub-layer, so a neighbouring
+                // building's progress bar (drawn later in this same loop) can never cover a button.
+                // The press/pulse flash rides along on the BACKGROUND, where it belongs: with a plate
                 // to light up, a press reads as the button lighting up rather than as its text
                 // brightening. PressPlate is the light LUT #107 added for exactly this.
-                if (PulseStep > 0) BlitDisc(PressPlate[PulseStep], Cx, Cy, Dia);
                 // Press now BRIGHTENS the label to white instead of darkening it. Darkening was only
                 // legible against the light press plate; with no plate a dark label on dark art just
                 // disappears at the moment you most need confirmation. The "pushed in" read comes
@@ -1107,14 +1100,32 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     return {C.R + (1.0f - C.R) * Lift2, C.G + (1.0f - C.G) * Lift2,
                             C.B + (1.0f - C.B) * Lift2, 1.0f};
                 };
-                // The label IS the button now, so it stays big and centred in the (unchanged) hit
-                // rect: the visual shrank to a glyph but the target did not.
-                // "+1"/"+5", not "x1"/"x5" (visual polish): the button ADDS that many to the queue, it does
-                // not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
-                char L[8];
-                std::snprintf(L, sizeof(L), "+%d", ProdMult[K]);
-                TextShadowed(L, bx, by2, bw, bh, LabelPx * PulseK,
-                             Afford ? Glow(Ico) : DimC, EHAlign::Center);
+                // TWO LINES INSIDE THE DISC: the quantity, and under it what that quantity COSTS.
+                // "+1"/"+5", not "x1"/"x5" (visual polish): the button ADDS that many to the queue, it
+                // does not multiply anything. "x5" read as a rate or a multiplier on some other quantity.
+                //
+                // The price is this button's OWN total (UnitCost * ProdMult[K]), which is the number
+                // you are actually spending when you press it — a single "cost of one" elsewhere on
+                // the icon made the +5 press an arithmetic exercise. Both lines are offset +/-0.19 of
+                // the diameter from the centre: far enough apart that the two never touch, close
+                // enough that the widest line (a 4-digit +5 total) still clears the circle, since the
+                // chord that far off centre is still ~0.92 of the diameter.
+                //
+                // THE HIT RECT IS DELIBERATELY BIGGER THAN THE DISC and stays the full column-half
+                // (set above, unscaled). Shrinking the target with the paint would undo the playtest
+                // lesson that made these thumb-sized in the first place; the two rects cannot overlap
+                // each other because the columns are disjoint, so the only cost is that a tap on bare
+                // art near the corner still counts — which is a feature on a phone.
+                InteractBtn Btn;
+                Btn.Cx = DCx; Btn.Cy = DCy; Btn.Dia = Dia;
+                Btn.Flash = PulseStep > 0 ? PressPlate[PulseStep] : 0;
+                Btn.LabelPx = LabelPx * PulseK;
+                Btn.PricePx = PricePx * PulseK;
+                Btn.LabelCol = Afford ? Glow(Ico) : DimC;
+                Btn.PriceCol = Afford ? Glow(GoldC) : DimC;
+                std::snprintf(Btn.Label, sizeof(Btn.Label), "+%d", ProdMult[K]);
+                std::snprintf(Btn.Price, sizeof(Btn.Price), "%d", Price);
+                Interactables_.push_back(Btn);
             }
         }
     }
@@ -1167,10 +1178,29 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
     Renderer->BeginGui();
-    // EVERY health bar, drawn in the GUI layer so nothing in the world can occlude it.
-    // Positions were already computed in screen pixels during the world pass and the GUI camera is
-    // the same pixel-space ortho, so they land exactly where they were measured.
+    // ---- THE GUI LAYER'S SUB-LAYER ORDER, and it is a rule rather than an accident ----
+    //   1. promoted world overlays  — health/reserve bars: above the field, below anything pressable
+    //   2. INTERACTABLES            — every world-anchored press target (the production buttons)
+    //   3. screen-space HUD chrome  — status panel + the build plates along the bottom
+    //   4. the opponent dropdown    — last, because an OPEN menu outranks everything, itself included
+    //
+    // (2) is above (1) because a control you can hit must never be hidden by decoration, and below
+    // (3) because the chrome is screen-space furniture that world content scrolls UNDER — a building
+    // near the bottom edge must not paint its buttons over the plates. Within (2) nothing overlaps:
+    // the two buttons per building sit in opposite corners of its footprint.
+    //
+    // Positions were computed in screen pixels during the world pass and the GUI camera is the same
+    // pixel-space ortho, so everything lands exactly where it was measured.
     for (const BarQuad& B : HealthBars_) Blit(B.Mat, B.X, B.Y, B.W, B.H);
+    for (const InteractBtn& B : Interactables_) {
+        BlitDisc(PlateBg, B.Cx, B.Cy, B.Dia);
+        if (B.Flash != 0) BlitDisc(B.Flash, B.Cx, B.Cy, B.Dia);
+        const float LineH = B.Dia * 0.38f;
+        TextShadowed(B.Label, B.Cx - B.Dia * 0.5f, B.Cy - LineH, B.Dia, LineH, B.LabelPx,
+                     B.LabelCol, Lur::Text::EHAlign::Center);
+        TextShadowed(B.Price, B.Cx - B.Dia * 0.5f, B.Cy, B.Dia, LineH, B.PricePx, B.PriceCol,
+                     Lur::Text::EHAlign::Center);
+    }
     if (SelectorDirty) RefreshSelector();
 
     using Lur::Text::EHAlign;

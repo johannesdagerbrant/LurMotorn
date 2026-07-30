@@ -273,6 +273,24 @@ private:
     // The vector is a member so it is allocated once and reused, not per frame.
     struct BarQuad { Lur::Render::MaterialHandle Mat; float X, Y, W, H; };
     std::vector<BarQuad> HealthBars_;
+    // ---- INTERACTABLES: the GUI layer's topmost world-anchored sub-layer ----
+    // Anything the player can press must end up ON TOP of the read-only art around it, and "draw it
+    // later in the loop" cannot deliver that when the things being drawn are PER BUILDING: building
+    // N's controls were painted before building N+1's progress bar, so a neighbour's bar covered the
+    // buttons you were aiming at. Ordering has to be a property of the LAYER, not of loop order.
+    //
+    // So the production buttons are collected here during the world pass (in screen pixels, like the
+    // health bars) and flushed as their own pass — see the sub-layer order documented at the flush.
+    // A press target is never occluded by anything except another press target.
+    struct InteractBtn {
+        float Cx, Cy, Dia;                       // the disc
+        Lur::Render::MaterialHandle Flash = 0;   // press/pulse overlay, 0 = none
+        Lur::Render::Color LabelCol{}, PriceCol{};
+        float LabelPx = 0.0f, PricePx = 0.0f;
+        char  Label[8] = {};                     // "+1" / "+5"
+        char  Price[12] = {};                    // that quantity's total cost
+    };
+    std::vector<InteractBtn> Interactables_;
     // visual polish onboarding: the rect of the +1 button that is currently PULSING (the first camp's, until
     // production is taught). Captured in the world pass and consumed in the GUI layer, where the
     // pointing hand is drawn — the hand has to be a GUI element or the world would draw over it.
