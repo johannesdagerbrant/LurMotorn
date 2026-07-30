@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <ctime>     // the flight recorder's per-match filename stamp
 #include <string>
 #include <vector>
 
@@ -28,6 +29,7 @@
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/LockstepPeer.h"
+#include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
@@ -84,6 +86,7 @@ Rps::Fixed WorldToFixed(float Wv) {
     Lur::Net::Session _Session;
     Rps::LockstepPeer _Lp;
     Lur::Save::Store* _Store;
+    std::string _SaveDir;      // Application Support — the Store's dir, kept for the .rec paths
     std::string _DeviceId;
     Rps::Snapshot _Snap;
     bool _Started;
@@ -125,6 +128,19 @@ Rps::Fixed WorldToFixed(float Wv) {
     bool _PeerEverReady;       // rising-edge latch for the peer-link notice
     bool _PrevPeerReady;       // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
     int _AiW[Rps::AiTierCount], _AiL[Rps::AiTierCount], _AiD[Rps::AiTierCount];
+#if LUR_INTERNAL
+    // #144 SOLO FLIGHT RECORDER — parity with Android, which has had it since #156 made it a dev-build
+    // default. Without it an iPhone playtest is unreadable afterwards: you get the score and nothing
+    // about how the match got there, while the same session on the Galaxy replays tick for tick. Every
+    // recording is one file per match in Application Support, next to the score book.
+    //
+    // Read the switch ONCE per match, at Begin: toggling mid-match cannot truncate a half-written
+    // file, and every other recorder call no-ops on an unopened file, so skipping Begin is the gate.
+    Rps::MatchRecorder _SoloRec;
+    int _SoloMatchNo;
+    uint64_t _RecCensusNs;
+    std::string _SoloRecFile;
+#endif
 }
 
 - (void)loadView {
@@ -151,7 +167,8 @@ Rps::Fixed WorldToFixed(float Wv) {
     NSArray<NSString*>* Dirs =
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
-    _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
+    _SaveDir = std::string(Dir.UTF8String);
+    _Store = new Lur::Save::Store(_SaveDir);
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
     // All-time W-L-D per AI tier / per rival. Seeded into the view's rows here so the dropdown shows
     // the real record on its first open, not 0-0-0 until this session's first match resolves.
@@ -225,6 +242,26 @@ Rps::Fixed WorldToFixed(float Wv) {
 }
 
 - (void)onBecameActive { _BecameActive = true; }  // handled on the next renderFrame
+
+#if LUR_INTERNAL
+// Open a recording for a match that is (re)starting. Mirrors the Android lambda of the same name,
+// including the TIMESTAMPED filename: a per-session counter restarted at 1 every launch and silently
+// overwrote the previous session's files. The ordinal stays as a suffix purely to be collision-proof,
+// since two matches can start inside one second (re-picking a tier restarts instantly).
+- (void)soloRecBegin:(int)Tier {
+    _SoloRecFile.clear();
+    if (!Rps::CvFlightRecorder.Get()) return;
+    const std::time_t Now = std::time(nullptr);
+    std::tm Tm{};
+    localtime_r(&Now, &Tm);
+    char Stamp[24];
+    std::strftime(Stamp, sizeof(Stamp), "%Y%m%d-%H%M%S", &Tm);
+    _SoloRecFile = _SaveDir + "/rps-match-" + Stamp + "-" + std::to_string(++_SoloMatchNo) + ".rec";
+    _SoloRec.Begin(_SoloRecFile.c_str(), _SoloSim, Tier, /*human*/ 0);
+    _RecCensusNs = 0;
+    os_log(OS_LOG_DEFAULT, "OnlyRps: REC started -> %{public}s", _SoloRecFile.c_str());
+}
+#endif
 
 // #73 heal: the renderer was initialised while the app wasn't active, so its
 // CAMetalLayer is bound to a window-server surface that is never composited —
@@ -320,6 +357,9 @@ Rps::Fixed WorldToFixed(float Wv) {
         _SoloAccumNs = 0; _LastTick = 0xFFFFFFFFu; _Started = false; _Team = 0; _CamInit = false;
         _SoloPending.clear();
         os_log(OS_LOG_DEFAULT, "OnlyRps: solo AI match (re)started (tier %d)", _PendingTier);
+#if LUR_INTERNAL
+        [self soloRecBegin:_PendingTier];   // one recording per match, opened as the match opens
+#endif
         _PendingTier = -1;
     }
 
@@ -380,6 +420,12 @@ Rps::Fixed WorldToFixed(float Wv) {
                 _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Kept,
                                      Rps::MaxEventsPerTick - Kept, AiCount);
                 _SoloSim.StepEvents(Evs, Kept + AiCount);
+#if LUR_INTERNAL
+                // The opening camps are ONE tick's batch (yours and the AI's together) and it is the
+                // tick the whole replay is anchored on — dropping it would leave a recording whose
+                // first event is unexplained.
+                _SoloRec.Events(_SoloSim.Tick - 1, Evs, Kept + AiCount);
+#endif
             }
         } else {
         _SoloAccumNs += ElapsedNs;
@@ -396,10 +442,38 @@ Rps::Fixed WorldToFixed(float Wv) {
                 Count += AiCount;
             }
             _SoloSim.StepEvents(Evs, Count);
+#if LUR_INTERNAL
+            // #144: the COMBINED batch (yours + the AI's), recorded at the tick it was applied on, so
+            // a dev machine replays this match bit-for-bit (Rps::ReplayMatch).
+            _SoloRec.Events(_SoloSim.Tick - 1, Evs, Count);
+#endif
         }
+#if LUR_INTERNAL
+        // #144 telemetry: a census every 2 s into the recording AND the syslog, so the match is
+        // readable live and replayable afterwards. The AI's own state + countered type go in it — a
+        // recording that shows only what it BUILT cannot tell "mis-countered" from "production-bound".
+        _RecCensusNs += ElapsedNs;
+        if (_RecCensusNs >= 2'000'000'000ull) {
+            _RecCensusNs = 0;
+            _SoloRec.Census(_SoloSim, /*human*/ 0, static_cast<int>(_SoloAi.State()),
+                            static_cast<int>(_SoloAi.CounterEnemy()));
+        }
+#endif
         }
         if (!_SoloScored && _SoloSim.Result != Rps::ResultOngoing && _SoloTier >= 0) {
             _SoloScored = true;
+#if LUR_INTERNAL
+            // Finalise BEFORE the tally, exactly as Android does: a recording without its `end` line
+            // replays as an abandoned match, and the last census is what makes the final state
+            // readable without replaying at all.
+            if (_SoloRec.IsOpen()) {
+                _SoloRec.Census(_SoloSim, 0, static_cast<int>(_SoloAi.State()),
+                                static_cast<int>(_SoloAi.CounterEnemy()));
+                _SoloRec.End(_SoloSim);
+                os_log(OS_LOG_DEFAULT, "OnlyRps: REC match finished: result=%u tick=%u -> %{public}s",
+                       static_cast<unsigned>(_SoloSim.Result), _SoloSim.Tick, _SoloRecFile.c_str());
+            }
+#endif
             // Persist first, then show what was persisted (so the row and the disk cannot disagree).
             _Scores.RecordAi(_SoloTier, _SoloSim.Result, /*MyTeam*/ 0);
             _Scores.Save(*_Store);
@@ -420,6 +494,9 @@ Rps::Fixed WorldToFixed(float Wv) {
                 _SoloScored = false; _SoloPostNs = 0; _SoloAccumNs = 0;
                 _SoloPending.clear();
                 os_log(OS_LOG_DEFAULT, "OnlyRps: solo next match begins (tier %d)", _SoloTier);
+#if LUR_INTERNAL
+                [self soloRecBegin:_SoloTier];   // the auto-restart is a new match: a new recording
+#endif
             }
         } else {
             _SoloPostNs = 0;
