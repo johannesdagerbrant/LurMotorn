@@ -554,6 +554,52 @@ static void TestBuildFingerprintGate() {
 }
 #endif
 
+// ---- A DESYNC MUST NOT FREEZE THE GAME: it declares a draw and the session recovers ----
+// Every other test here asserts a desync does NOT happen, which is the right thing to assert and is
+// also exactly why this shipped broken: nothing covered what happens WHEN one does. Observed on two
+// phones 2026-07-30 — both peers pinned at tick 8180 with different hashes, datagrams still flowing,
+// no message on screen, no way out but killing the app. Desync gated the exec loop and only
+// BeginMatch cleared it, and a match that never ends never reaches BeginMatch.
+//
+// The divergence is injected by handing A an anchor for a tick it has ALREADY hashed, carrying a
+// hash that cannot be right. That is precisely the input CrossCheck consumes, so this exercises the
+// real detection path rather than poking the flag.
+static void TestDesyncDeclaresADrawAndRecovers() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x9001, 0, Enqueue, &Qa);
+    B.Init(0x9001, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted());
+    // Run past an anchor tick (they land every 10th) so A has a hash of its own to compare against.
+    for (int I = 0; I < 12; ++I) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced() && A.GetSim().Result == ResultOngoing);
+    const uint32_t AnchorTick = (A.ExecTick() / 10) * 10;   // the most recent anchor A emitted
+    Lur::Serialization::BitWriter W;
+    Lur::Serialization::WriteVarUint(W, AnchorTick);
+    W.WriteBits(0xDEADBEEFu, 32);                           // a hash A cannot possibly have produced
+    const std::vector<uint8_t>& Bad = W.Finish();
+    A.OnMessage(MsgAnchor, Bad.data(), Bad.size());
+
+    // THE POINT: detected, and resolved as a DRAW rather than as a stall.
+    CHECK(A.Desynced());
+    CHECK(A.GetSim().Result == ResultDraw);
+
+    // AND IT RECOVERS. The post-match hold expires, BeginMatch runs, the latch clears and a fresh
+    // match is waiting for camps again — the loop the freeze could never reach.
+    const uint32_t MatchBefore = A.MatchIndex();
+    A.Tick(PostMatchHoldNs + OneTickNs);
+    CHECK(!A.Desynced());
+    CHECK(A.MatchIndex() == MatchBefore + 1);
+    CHECK(!A.MatchStarted());                               // fresh match: awaiting both camps
+    CHECK(A.GetSim().Result == ResultOngoing);
+}
+
 // ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
 static void TestLockstepExecuteCapBounded() {
     Outbox Qa, Qb;
@@ -1028,6 +1074,7 @@ int main() {
     TestCvarSyncSurvivesResync();
     TestBuildFingerprintGate();
 #endif
+    TestDesyncDeclaresADrawAndRecovers();
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();

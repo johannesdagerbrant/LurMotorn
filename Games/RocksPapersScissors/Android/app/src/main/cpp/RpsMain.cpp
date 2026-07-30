@@ -25,6 +25,7 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Core/CVarConfig.h"  // #115: persist + load tuned cvars
+#include "Lur/Core/Log.h"         // the engine logger — routed into logcat below
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
@@ -43,6 +44,20 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyRps", __VA_ARGS__)
 
 namespace {
+
+// THE ENGINE LOGGER HAD NO SINK ON EITHER PHONE, so every Lur::Log::Info/Error inside the engine and
+// the netcode fell back to stdout/stderr — which Android discards for an app. Everything the shim
+// logs itself goes through LOGI and was visible, so the hole was invisible: the engine's own voice
+// was simply muted on device.
+//
+// It cost a real diagnosis (2026-07-30). The two phones were running builds from different commits;
+// #112's build-fingerprint gate DID fire and called Lur::Log::Error to say so, and nobody ever saw
+// the line. The pair then played for 13 minutes and desynced, and the first question — "were the
+// builds even the same?" — had no answer in the log. One function pointer fixes it for every
+// engine-side message, present and future.
+void EngineLogSink(bool Error, const char* Line, void* /*User*/) {
+    __android_log_print(Error ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO, "OnlyRps", "%s", Line);
+}
 
 // Both phones derive the SAME match seed so their sims match. The seed is currently
 // gameplay-inert (v1 map is fixed + mirrored, no RNG in the tick — spec §2); a
@@ -370,6 +385,9 @@ void android_main(android_app* App) {
     App->userData = &State;
     App->onAppCmd = HandleCmd;
     App->onInputEvent = HandleInput;
+
+    // FIRST: give the engine logger a home, before anything can try to report a problem.
+    Lur::Log::Init(&EngineLogSink, "OnlyRps");
 
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
     State.DataDir = DataDir != nullptr ? DataDir : ".";
@@ -830,10 +848,16 @@ void android_main(android_app* App) {
                     // nobody could tell which state was wrong. Pre-match these MUST be identical on
                     // both peers; comparing one line per phone is the whole test, no taps required.
                     const Rps::Sim& DS = State.Lp.GetSim();
-                    LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d presented=%u hash=%08x gold=%d "
+                    // `badbuild` is here because it was the FIRST question asked when the pair
+                    // desynced on 2026-07-30 and the log could not answer it. #112 detects a
+                    // fingerprint mismatch and sets BuildMismatch(); nothing read it (the gate's own
+                    // comment claims the app aborts on it — no app ever did), and its log line went
+                    // to an unsinked stderr. One field on the line everyone already reads.
+                    LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
                          "frontier=%d started=%d",
                          State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
-                         State.Lp.Desynced() ? 1 : 0, State.PresentedFrames.load(std::memory_order_relaxed),
+                         State.Lp.Desynced() ? 1 : 0, State.Lp.BuildMismatch() ? 1 : 0,
+                         State.PresentedFrames.load(std::memory_order_relaxed),
                          static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                          DS.Teams[State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
                          DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0);

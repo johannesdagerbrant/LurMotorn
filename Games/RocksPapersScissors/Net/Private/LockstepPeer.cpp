@@ -366,8 +366,29 @@ void LockstepPeer::EmitAnchor() {
 void LockstepPeer::CrossCheck(uint32_t Tick) {
     const auto Mine = MyHash.find(Tick);
     const auto Theirs = PeerHash.find(Tick);
-    if (Mine != MyHash.end() && Theirs != PeerHash.end() && Mine->second != Theirs->second)
-        Desync = true;  // reliable transport + deterministic sim => a mismatch is always a bug
+    if (Mine == MyHash.end() || Theirs == PeerHash.end() || Mine->second == Theirs->second) return;
+    if (Desync) return;                 // already declared — don't re-log on every later anchor
+    // A mismatch under a reliable transport + a deterministic sim is always a bug. But the RESPONSE
+    // to it has to be a playable one, and until now it was not: Desync gates the exec loop, nothing
+    // ever cleared it, and the match simply stopped. Both phones then rendered their last frame
+    // forever with no message — observed 2026-07-30, both peers pinned at tick 8180 with different
+    // hashes, datagrams still flowing, no way out but killing the app.
+    //
+    // DECLARE A DRAW, which is what this class's own header always said it would do. Everything
+    // needed was already here and the desync path just never joined it: a decided match runs the
+    // #149 post-match hold and then BeginMatch, and BeginMatch is what clears Desync. So one
+    // assignment turns a permanent freeze into "this match ends level, the next one starts".
+    //
+    // A draw is also the only outcome that can be declared SYMMETRICALLY. Both peers cross-check the
+    // same anchor tick and both see the same mismatch, so both reach this line and both record the
+    // same result — which is the consistency rule (CLAUDE.md: a contested outcome must resolve the
+    // same way on both screens). Awarding the win to either side would need agreement about whose
+    // state was right, and a desync is exactly the situation where that cannot be established.
+    Desync = true;
+    Lur::Log::Error("RPS: DESYNC at tick %u — mine %08x, peer %08x. Declaring a DRAW and restarting; "
+                    "this is a bug (identical builds should never diverge).",
+                    Tick, Mine->second, Theirs->second);
+    TheSim.Result = ResultDraw;
 }
 
 // Resync chunk tags: 0/1 = the team-0/team-1 history streams; 0xFF = the frontier marker.

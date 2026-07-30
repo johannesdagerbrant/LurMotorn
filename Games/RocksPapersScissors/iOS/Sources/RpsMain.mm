@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
+#include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -53,6 +54,16 @@ float WorldHeightF() {
 }
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
+}
+// The engine logger had NO sink on either phone, so every Lur::Log::Info/Error from inside the engine
+// and the netcode went to a stderr nobody reads. The shim's own os_log calls were visible, which is
+// what hid it — the engine's voice was muted while the app looked chatty. It cost a diagnosis on
+// 2026-07-30: the #112 build-fingerprint gate fired, said so via Lur::Log::Error, and the line went
+// nowhere. %{public}s is mandatory — a plain %s is redacted to <private> unless Xcode is attached,
+// which is never our case (see the iOS notes in CLAUDE.md).
+void EngineLogSink(bool Error, const char* Line, void* /*User*/) {
+    if (Error) os_log_error(OS_LOG_DEFAULT, "OnlyRps: %{public}s", Line);
+    else       os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s", Line);
 }
 // View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
 // over the wire, so no float crosses the determinism boundary.
@@ -150,6 +161,8 @@ Rps::Fixed WorldToFixed(float Wv) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
+    // FIRST: give the engine logger a home, before anything can try to report a problem.
+    Lur::Log::Init(&EngineLogSink, "OnlyRps");
     _LastTick = 0xFFFFFFFFu;
 
     CAMetalLayer* Layer = [self metalLayer];
@@ -602,10 +615,14 @@ Rps::Fixed WorldToFixed(float Wv) {
             // the peer's line exactly. The anchor cross-check only begins once the match does, so
             // before either camp is placed a divergence was otherwise invisible.
             const Rps::Sim& DS = _SoloActive ? _SoloSim : _Lp.GetSim();
-            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d presented=%u "
+            // badbuild= mirrors Android's: #112 detects a build-fingerprint mismatch and sets
+            // BuildMismatch(), but nothing read it and its own log line had no sink — so when this
+            // pair desynced on 2026-07-30, "were the two builds even the same?" was unanswerable.
+            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u "
                    "hash=%08x gold=%d frontier=%d started=%d",
                    _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                    _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
+                   _Lp.BuildMismatch() ? 1 : 0,
                    _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
                    static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                    DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),

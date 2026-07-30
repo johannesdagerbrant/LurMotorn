@@ -122,6 +122,9 @@ public:
 
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
+    // A hash mismatch was seen at an anchor. NOT a terminal state any more: CrossCheck declares the
+    // match a DRAW when it trips, so the normal post-match hold + restart runs and clears this. Read
+    // it for diagnostics ("that draw was a desync, not a real draw"), not as "the session is over".
     bool Desynced() const { return Desync; }
     bool Stalled() const { return TheSim.Tick < WallTicks; }  // behind wallclock = waiting on peer
 
