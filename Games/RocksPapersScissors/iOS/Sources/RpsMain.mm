@@ -590,6 +590,9 @@ Rps::Fixed WorldToFixed(float Wv) {
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
         if (_Started) _Lp.Tick(ElapsedNs);
+        // #161: tell the player a desync repair is in flight — the match holds and may rewind a second
+        // of play, which is worse than the freeze it replaced if it happens without explanation.
+        _View.SetRecovering(_Started && !_SoloActive && _Lp.Recovering());
         // #149: one Lp spans many matches now (it holds the win screen, then rebuilds), so the
         // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
         if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }

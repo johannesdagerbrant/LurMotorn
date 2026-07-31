@@ -153,6 +153,12 @@ public:
     // #2: a peer linked while an AI match is running — blink "opponent link established" on the
     // opponent bar (the player can then pick the linked row to switch). One-shot; view times it out.
     void NotifyPeerLinked();
+    // #161: a desync repair is in flight (LockstepPeer::Recovering). The match holds for a moment and
+    // may rewind a second or two of play when it resumes, so the player has to be TOLD: unexplained,
+    // that reads as a glitch or as the opponent cheating. Per-frame, not a one-shot — it must vanish
+    // the instant the repair lands, and the honest signal for "we are fixing something" is the actual
+    // state, not a timer.
+    void SetRecovering(bool On) { Recovering_ = On; }
 #if !LUR_SHIPPING
     // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
     // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
@@ -324,6 +330,7 @@ private:
     int  AiScoreW_[AiTierCount] = {}, AiScoreL_[AiTierCount] = {}, AiScoreD_[AiTierCount] = {};
     int  PeerScoreW_ = 0, PeerScoreL_ = 0, PeerScoreD_ = 0;
     float PeerLinkBannerT_ = 0.0f;        // #2 "opponent link established" blink countdown (seconds)
+    bool  Recovering_ = false;            // #161 a desync repair is in flight — say so on screen
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap

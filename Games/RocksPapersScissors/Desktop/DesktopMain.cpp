@@ -272,8 +272,15 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
             HandlePeerInput(*B, Rng, Auto, ElapsedNs, AutoB);
             A->Lp.Tick(ElapsedNs);  // produce + send input, execute up to the ceiling
             B->Lp.Tick(ElapsedNs);
+            // #161: the workbench must SHOW the repair the phones show, and in both windows — the
+            // two-window loopback is where a recovery gets watched side by side.
+            A->View.SetRecovering(A->Lp.Recovering());
+            B->View.SetRecovering(B->Lp.Recovering());
             if (A->Lp.Desynced() || B->Lp.Desynced())
-                Lur::Log::Error("DESYNC detected (tick A=%u B=%u)", A->Lp.ExecTick(), B->Lp.ExecTick());
+                Lur::Log::Error("DESYNC detected (tick A=%u B=%u, recovery attempt %d/%d)",
+                                A->Lp.ExecTick(), B->Lp.ExecTick(),
+                                A->Lp.RecoveryAttempts() + B->Lp.RecoveryAttempts(),
+                                Rps::LockstepPeer::MaxDesyncRecoveries);
         }
 
         const float DtSec = static_cast<float>(ElapsedNs) / 1.0e9f;
@@ -1327,7 +1334,10 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
             // event-based soak (random place/queue) re-lands with the input UI in #139/#140.
             (void)Auto; (void)Rng; (void)AutoAccumNs;
             Lp.Tick(ElapsedNs);  // produce + send input, execute to the ceiling
-            if (Lp.Desynced()) Lur::Log::Error("DESYNC (tick %u)", Lp.ExecTick());
+            // No View here — the BLE rig peer is headless. The log line is the readout (#161).
+            if (Lp.Desynced())
+                Lur::Log::Error("DESYNC (tick %u, recovery attempt %d/%d)", Lp.ExecTick(),
+                                Lp.RecoveryAttempts(), Rps::LockstepPeer::MaxDesyncRecoveries);
         }
 
         QualAccumNs += ElapsedNs;

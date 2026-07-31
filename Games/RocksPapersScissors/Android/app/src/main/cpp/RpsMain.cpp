@@ -111,6 +111,10 @@ struct AppState {
     std::atomic<uint8_t>    LinkedTeam{0};
     std::atomic<uint32_t>   PublishedTick{0};    // sim -> glue: consume only on a new tick
     std::atomic<uint32_t>   PresentedFrames{0};  // glue -> sim: for the LOCKSTEP diag
+    // #161: a desync repair is in flight. Published as an atomic because the glue thread must never
+    // touch Lp (it owns input + render only), and the player needs to be told on screen — an
+    // unexplained hold that then rewinds a second of play reads as a glitch or as cheating.
+    std::atomic<bool>       Recovering{false};   // sim -> glue (drives View.SetRecovering)
 
     Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
@@ -825,6 +829,7 @@ void android_main(android_app* App) {
 #endif
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
+                State.Recovering.store(State.Lp.Recovering(), std::memory_order_relaxed);  // #161 -> HUD
                 // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can
                 // show it while we wait for the opponent. Clears itself the moment the match starts
                 // (the real camp is then in the snapshot, with its production buttons).
@@ -1037,6 +1042,8 @@ void android_main(android_app* App) {
             State.View.SetPeerScore(State.PeerWins_.load(std::memory_order_relaxed),
                                     State.PeerLosses_.load(std::memory_order_relaxed),
                                     State.PeerDraws_.load(std::memory_order_relaxed));
+            // #161: "resyncing with opponent" while a desync repair is in flight.
+            State.View.SetRecovering(State.Recovering.load(std::memory_order_relaxed));
             // Copy the latest published tick out only when it CHANGED — between ticks we
             // re-render the held snapshot with a fresh alpha (deletes the per-frame copy).
             const uint32_t Pub = State.PublishedTick.load(std::memory_order_acquire);

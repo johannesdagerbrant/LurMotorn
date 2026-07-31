@@ -112,6 +112,36 @@ public:
     void BeginResync();
     bool AwaitingResync() const { return Awaiting; }
 
+    // ---- #161: a desync RECOVERS the match; it does not end it ----
+    // e6d6abf declared a draw when the anchor cross-check tripped. That was a stopgap for a worse bug
+    // (both phones froze forever with no message) and explicitly not the wanted behaviour: it throws
+    // the match away, and a draw is a lie about what happened.
+    //
+    // Who is right, with no referee and no host: the peer whose device GUID is lower keeps its
+    // timeline; the other rebuilds from it. MyTeam already IS that comparison — every path derives
+    // Team = MyGuid < PeerGuid ? 0 : 1 — so both peers reach the same verdict locally with nothing
+    // negotiated, which is what a tie-break has to be when the two sides disagree about reality.
+    //
+    // How: replay the winner's INPUT HISTORY, not a state transfer. The history is already chunked for
+    // the reconnect path and is kilobytes; a Sim is hundreds of KB, which over BLE is a ~100 s stall.
+    // The trade is that replay converges when the cause was a LOST INPUT (which #159 showed it is, at
+    // least sometimes) and cannot when the cause is genuine nondeterminism — it faithfully reproduces
+    // that. Hence the bound below. Note it converges regardless of WHICH peer lost data, because both
+    // end up replaying one identical history; the discarded timeline may have been the more complete
+    // one. That is deliberate — consistency, not fairness (CLAUDE.md), and the players share a room.
+    static constexpr int MaxDesyncRecoveries = 3;
+    // A recovery that never completes is the freeze again by another name, so the wait is bounded too
+    // (the winner's history may never arrive — a dead peer, a lost chunk).
+    static constexpr uint64_t DesyncRecoveryTimeoutNs = 4'000'000'000ull;
+
+    // A recovery is in flight: state is not trusted and nothing is executed. The view shows this as
+    // "resyncing" — a recovery that silently rewinds several seconds of play reads as a glitch or as
+    // cheating, so the player has to be told something is being repaired.
+    bool Recovering() const { return Recovering_; }
+    // Recoveries attempted THIS match (reset by BeginMatch). Reaching MaxDesyncRecoveries is what
+    // finally declares the draw — that is the only place a draw legitimately lives.
+    int RecoveryAttempts() const { return RecoveryAttempts_; }
+
     // #148: how long a peer may hold production/execution waiting for the other side's frontier
     // marker before resuming on its own state. A restarted app cannot send that marker (Session
     // fires its resync handler only on a reconnect EDGE, which a fresh launch never takes), and
@@ -252,6 +282,21 @@ private:
     void RebuildFromHistory(uint32_t Frontier);  // Incoming[0/1] -> fresh sim + timeline at Frontier
     void ReseedFrom(uint32_t Frontier);          // truncate to Frontier + a fresh Delay pre-seed
 
+    // #161 recovery. Two entry points, one mechanism:
+    //   * BeginRecovery — the anchor cross-check found two different states. Both peers reach this on
+    //     the same anchor, so the GUID tie-break (MyTeam) decides who hands over and who rebuilds
+    //     with nothing negotiated.
+    //   * RequestRecovery — WE know we are the incomplete one (#163's sequence gap named a frame that
+    //     never arrived). The peer has seen nothing wrong, so it must be asked; and because the gap is
+    //     caught before the hole's tick executes, this path repairs the timeline BEFORE any divergence
+    //     exists. No bad state, no anchor alarm, nothing lost.
+    void BeginRecovery(const char* Why);
+    void RequestRecovery(uint32_t MissingTick);
+    void OfferHistoryToLoser();   // hand over our timeline and re-base to the same frontier
+    void FinishRecovery();        // converged: resume play
+    void FailRecovery(const char* Why);  // budget or patience spent -> the draw, as the LAST resort
+    bool IsRecoverySurvivor() const { return MyTeam == 0; }  // lower device GUID keeps its timeline
+
     Sim TheSim;
     Lur::Sim::TickClock Clock{TickRateHz};
     uint32_t Delay = InputDelayTicks;
@@ -277,6 +322,15 @@ private:
     bool     PreMatchStalled_ = false;
     uint64_t PreMatchWaitNs_ = 0;   // time spent ready-but-unpaired (only accrues while LocalReady_)
     uint32_t PeerTickNext_ = 0;     // exec tick of the next produced frame the peer owes us
+
+    // #161 recovery state. Separate from Awaiting (the reconnect exchange) because the two differ in
+    // what they mean and in how they end: a reconnect resumes on OUR state when it times out, while a
+    // recovery that times out must NOT — our state is the one known to be suspect.
+    bool     Recovering_ = false;
+    bool     RecoveryAdopting_ = false;  // we are the one rebuilding (waiting for the survivor's history)
+    int      RecoveryAttempts_ = 0;
+    uint64_t RecoveryNs_ = 0;
+    uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
 
     bool Recording = false;
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)

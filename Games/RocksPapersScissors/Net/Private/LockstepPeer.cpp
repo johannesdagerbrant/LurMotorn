@@ -11,6 +11,14 @@
 
 namespace Rps {
 
+// Resync chunk tags: 0 = the combined history stream; 0xFF = the frontier marker; 0xFE = #161's
+// "I have lost input, send me your history" request. Declared up here because the recovery paths
+// below both build and consume them.
+namespace {
+constexpr uint8_t ResyncTagMarker  = 0xFF;
+constexpr uint8_t ResyncTagRequest = 0xFE;
+}  // namespace
+
 // #147: the ONE way this class (re)creates its Sim. Every fresh-sim path — match start, the
 // pre-tick-0 cvar sync, and the resync rebuild — must derive the Init-dependent hashed state
 // (frontier high-water, opening gold, home-base Y) from the MERGED cvar set. Latching this peer's
@@ -72,6 +80,13 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     PeerCamp_ = InputEvent{};
     AwaitingNs = 0;
     ReoffersLeft = 0;   // no resync round is in flight in a fresh match (BeginResync arms it)
+    // #161: the recovery budget is PER MATCH. A match that needed two repairs should not start the
+    // next one already one attempt from a draw — and a fresh match cannot be mid-recovery.
+    Recovering_ = false;
+    RecoveryAdopting_ = false;
+    RecoveryAttempts_ = 0;
+    RecoveryNs_ = 0;
+    RecoveryCarryNs_ = 0;
 #if LUR_INTERNAL
     // #147: ResetSim above already honours a merged set that arrived BEFORE this Init — on iOS that
     // is the normal order, not a race: one renderFrame pumps the session inbox (delivering the
@@ -129,12 +144,61 @@ void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
 }
 
 void LockstepPeer::Tick(uint64_t ElapsedNs) {
+    // A DECIDED MATCH OUTRANKS EVERY OTHER HOLD, and it is FIRST for that reason (#161). This block
+    // used to sit below the resync/recovery early-returns, and that ordering reproduced the very freeze
+    // this issue exists to remove: a peer that drew and then entered a recovery (a stale input gap is
+    // enough) returned early from every subsequent Tick, so the post-match hold — the only thing that
+    // reaches BeginMatch and clears the latches — never ran again. Once the result is in there is
+    // nothing left to repair, so no in-flight exchange may outlive it.
+    //
+    // #149: hold the win/lose screen, then begin a FRESH match that waits for both camps again. The two
+    // peers detect the result on the same TICK but time this hold on their own clocks, so they rebuild a
+    // few ms apart. That is safe — and ONLY because the new match holds until both camps are in (#139).
+    // Do not try to make the restart bit-synchronous. Seed+1 keeps the peers agreeing (both hold the
+    // same seed) while giving each match its own variety.
+    if (MatchStarted_ && TheSim.Result != ResultOngoing) {
+        PostMatchNs_ += ElapsedNs;
+        if (PostMatchNs_ >= PostMatchHoldNs) {
+            const uint64_t NextSeed = TheSim.Seed + 1;
+            BeginMatch(NextSeed);
+            ++MatchIndex_;
+            Lur::Log::Info("RPS: match %u begins (seed 0x%llx) — awaiting both camps", MatchIndex_,
+                           static_cast<unsigned long long>(NextSeed));
+        }
+        return;
+    }
     // #148: a resync exchange holds production/execution — but it must NEVER hold forever. The
     // survivor of an app restart waited on a marker the newcomer could not send (Session fires its
     // resync handler only on a reconnect EDGE, which a freshly launched app never takes), and with
     // no timeout here that phone was wedged permanently: the reported "still paused on the phone
     // that kept running". Consistency over completeness — on giving up we keep OUR state, and the
     // peer rebuilds from it when it next offers/asks.
+    // #161: a recovery in flight is bounded independently of the reconnect exchange, and it must NOT
+    // end the way that one does. A stalled reconnect resumes on our own state, which is right when our
+    // state is merely stale; here our state is the one known to be suspect, so resuming on it would
+    // re-establish the divergence and the anchor would trip again immediately. Out of patience means
+    // out of options: take the draw (the last resort), which at least resolves identically on both
+    // screens and lets the session restart.
+    if (Recovering_) {
+        RecoveryNs_ += ElapsedNs;
+        if (RecoveryNs_ >= DesyncRecoveryTimeoutNs) {
+            FailRecovery("the survivor's history never arrived");
+            return;
+        }
+        // CARRY the held wall time rather than dropping it. The survivor keeps ticking through the
+        // exchange while we are frozen, so time discarded here is time we can never make up: WallTicks
+        // is the execution target and the ceiling is min(WallTicks, ...), so the adopter would resume
+        // permanently one tick behind — and a second recovery would put it two behind, compounding.
+        // Giving the time back produces a short catch-up burst instead, which the design already
+        // guarantees is result-neutral (scheduling never changes results, §3's sprint law) and which
+        // Execute's per-call cap keeps from starving input.
+        RecoveryCarryNs_ += ElapsedNs;
+        return;   // hold production and execution until the repair lands
+    }
+    if (RecoveryCarryNs_ != 0) {
+        ElapsedNs += RecoveryCarryNs_;
+        RecoveryCarryNs_ = 0;
+    }
     if (Awaiting) {
         AwaitingNs += ElapsedNs;
         if (AwaitingNs < ResyncStallTimeoutNs) return;
@@ -152,25 +216,6 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // match is still pending OR just started here, no wall tick is produced yet, so both peers
     // begin advancing from WallTicks==0 on their NEXT Tick — symmetric, no start-skew (one peer
     // readies during its own Tick, the other during a delivered message).
-    // #149: the match is decided — hold the win/lose screen, then begin a FRESH match that waits
-    // for both camps again. Checked before anything touches the timeline: once the result is in,
-    // nothing more should be produced, sent or executed on it.
-    //
-    // The two peers detect the result on the same TICK but time this hold on their own clocks, so
-    // they rebuild a few ms apart. That is safe — and ONLY because the new match holds until both
-    // camps are in (#139). Do not try to make the restart bit-synchronous. Seed+1 keeps the peers
-    // agreeing (both hold the same seed) while giving each match its own variety.
-    if (MatchStarted_ && TheSim.Result != ResultOngoing) {
-        PostMatchNs_ += ElapsedNs;
-        if (PostMatchNs_ >= PostMatchHoldNs) {
-            const uint64_t NextSeed = TheSim.Seed + 1;
-            BeginMatch(NextSeed);
-            ++MatchIndex_;
-            Lur::Log::Info("RPS: match %u begins (seed 0x%llx) — awaiting both camps", MatchIndex_,
-                           static_cast<unsigned long long>(NextSeed));
-        }
-        return;
-    }
     if (!MatchStarted_) { PreMatchTick(ElapsedNs); return; }
     const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
     for (uint32_t I = 0; I < N; ++I) {
@@ -419,43 +464,137 @@ void LockstepPeer::EmitAnchor() {
     CrossCheck(T);  // peer's anchor for T may already be in hand
 }
 
+// ---- #161: recovery ----------------------------------------------------------------------------
+// A desync must RECOVER the match, not end it. e6d6abf's draw was a stopgap for a worse bug (both
+// phones frozen forever) and threw away a perfectly playable match to escape it.
+//
+// The survivor is decided by the GUID tie-break, which MyTeam already encodes (Team = MyGuid <
+// PeerGuid ? 0 : 1 on every path), so both peers reach the same verdict with nothing negotiated —
+// essential, because a desync is exactly the situation where the two sides cannot agree about
+// anything derived from state. The loser replays the survivor's input history through a fresh sim.
+void LockstepPeer::BeginRecovery(const char* Why) {
+    if (Recovering_) return;                 // one round at a time; the timeout ends it
+    if (TheSim.Result != ResultOngoing) return;  // a decided match has nothing left to repair
+    if (RecoveryAttempts_ >= MaxDesyncRecoveries) {
+        FailRecovery("recovery budget spent");
+        return;
+    }
+    ++RecoveryAttempts_;
+    Recovering_ = true;
+    RecoveryNs_ = 0;
+    MyHash.clear();  // anchors from before the repair say nothing about the state after it
+    PeerHash.clear();
+    if (IsRecoverySurvivor()) {
+        RecoveryAdopting_ = false;
+        Lur::Log::Info("RPS: recovering (%s) — we hold the lower device id, so our timeline survives; "
+                       "handing it to the peer (attempt %d/%d, tick %u)",
+                       Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
+        OfferHistoryToLoser();
+        // Our own state stands, so stop gating execution on it. We will still sit at the ceiling until
+        // the peer resumes producing, which is ordinary lockstep waiting rather than a stall.
+        Desync = false;
+        Recovering_ = false;
+        return;
+    }
+    RecoveryAdopting_ = true;
+    IncomingHistory.clear();
+    Awaiting = true;    // hold production AND execution: our state is the one known to be suspect
+    AwaitingNs = 0;
+    Lur::Log::Info("RPS: recovering (%s) — peer holds the lower device id, rebuilding from its history "
+                   "(attempt %d/%d, our tick %u)",
+                   Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
+}
+
+// #163's gap detector named a frame that never arrived, so WE know we are the incomplete peer while
+// the other has seen nothing wrong. It cannot deduce that, so ask. The gap is caught before the hole's
+// tick executes (the ceiling is gated on PeerEvents.size(), which the missing frame never grew), so
+// this repairs the timeline while both sims are still identical — the divergence never happens.
+void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
+    if (Recovering_ || Awaiting) return;
+    if (TheSim.Result != ResultOngoing) return;  // the match is over; the peer's later frames are noise
+    if (RecoveryAttempts_ >= MaxDesyncRecoveries) return;  // a lost frame is not worth ending a match
+    ++RecoveryAttempts_;
+    Recovering_ = true;
+    RecoveryAdopting_ = true;
+    RecoveryNs_ = 0;
+    IncomingHistory.clear();
+    Awaiting = true;
+    AwaitingNs = 0;
+    MyHash.clear();
+    PeerHash.clear();
+    Lur::Log::Info("RPS: input gap at tick %u — asking the peer for its history before the hole is "
+                   "executed, so nothing diverges (attempt %d/%d)",
+                   MissingTick, RecoveryAttempts_, MaxDesyncRecoveries);
+    Lur::Serialization::BitWriter W;
+    Lur::Serialization::WriteVarUint(W, MissingTick);
+    const std::vector<uint8_t>& MB = W.Finish();
+    std::vector<uint8_t> Req;
+    Req.reserve(MB.size() + 1);
+    Req.push_back(ResyncTagRequest);
+    Req.insert(Req.end(), MB.begin(), MB.end());
+    if (Send) Send(Ctx, MsgResyncChunk, Req.data(), Req.size());
+}
+
+// Hand our timeline over and re-base to the frontier we just published. BOTH sides must truncate to
+// the same frontier and re-add the delay slack, or the loser's next produced frame lands at an index
+// we no longer expect — which is the same misalignment the recovery exists to repair.
+void LockstepPeer::OfferHistoryToLoser() {
+    SendResyncOffer();
+    ReseedFrom(TheSim.Tick);
+}
+
+void LockstepPeer::FinishRecovery() {
+    Recovering_ = false;
+    RecoveryAdopting_ = false;
+    RecoveryNs_ = 0;
+    Awaiting = false;
+    AwaitingNs = 0;
+    Desync = false;   // the ONLY place besides BeginMatch that clears it: we are provably converged
+    Lur::Log::Info("RPS: recovered — resuming from the peer's timeline at tick %u", TheSim.Tick);
+}
+
+// The last resort, and the only legitimate home for a draw. Reached when the attempt budget is spent
+// (input replay cannot fix genuine nondeterminism — it reproduces it) or when the survivor's history
+// never arrives. A draw is the one outcome that can be declared SYMMETRICALLY: awarding the win needs
+// agreement about whose state was right, which is precisely what a desync destroys.
+void LockstepPeer::FailRecovery(const char* Why) {
+    Recovering_ = false;
+    RecoveryAdopting_ = false;
+    Awaiting = false;
+    RecoveryNs_ = 0;
+    RecoveryCarryNs_ = 0;   // the match is over; there is nothing left to catch up to
+    Desync = true;
+    Lur::Log::Error("RPS: recovery FAILED (%s) after %d attempt(s) — ending the match as a draw at tick "
+                    "%u. Recovery converges on a lost input and cannot on nondeterminism, so this is "
+                    "the signal to look for the latter (a float in sim state, a compiler difference).",
+                    Why, RecoveryAttempts_, TheSim.Tick);
+    TheSim.Result = ResultDraw;   // #149's post-match hold + restart then clears the latch
+}
+
 void LockstepPeer::CrossCheck(uint32_t Tick) {
     const auto Mine = MyHash.find(Tick);
     const auto Theirs = PeerHash.find(Tick);
     if (Mine == MyHash.end() || Theirs == PeerHash.end() || Mine->second == Theirs->second) return;
-    if (Desync) return;                 // already declared — don't re-log on every later anchor
-    // A mismatch under a reliable transport + a deterministic sim is always a bug. But the RESPONSE
-    // to it has to be a playable one, and until now it was not: Desync gates the exec loop, nothing
-    // ever cleared it, and the match simply stopped. Both phones then rendered their last frame
-    // forever with no message — observed 2026-07-30, both peers pinned at tick 8180 with different
-    // hashes, datagrams still flowing, no way out but killing the app.
+    if (Desync || Recovering_) return;   // already handling it — don't re-trip on every later anchor
+    // A mismatch under a reliable transport + a deterministic sim is always a bug. The RESPONSE has to
+    // be a playable one, and it has been wrong twice: first Desync simply gated the exec loop and
+    // nothing ever cleared it, so the match STOPPED (2026-07-30, both peers pinned at tick 8180 with
+    // different hashes, datagrams still flowing, no message on screen, no way out but killing the app);
+    // then e6d6abf declared a draw to escape that freeze, which is survivable but throws away a
+    // playable match and tells the players something untrue about it.
     //
-    // DECLARE A DRAW — and this is a STOPGAP, not the destination. See **#161**: the owner's call is
-    // that a desync must RECOVER the match, not end it. The draw exists because the alternative it
-    // replaced was worse (a permanent freeze), and because everything it needs was already here: a
-    // decided match runs the #149 post-match hold and then BeginMatch, and BeginMatch is what clears
-    // Desync. One assignment turned a frozen session into "this match ends level, the next starts".
-    //
-    // When recovery lands, a draw should survive only as the bounded last resort after recovery has
-    // failed — #161 has the design questions (who is right, replay input vs transfer state, what the
-    // player sees, how many attempts).
-    //
-    // A draw is also the only outcome that can be declared SYMMETRICALLY. Both peers cross-check the
-    // same anchor tick and both see the same mismatch, so both reach this line and both record the
-    // same result — which is the consistency rule (CLAUDE.md: a contested outcome must resolve the
-    // same way on both screens). Awarding the win to either side would need agreement about whose
-    // state was right, and a desync is exactly the situation where that cannot be established.
+    // #161: RECOVER. Gate execution while the repair runs — our state may be the wrong one — and let
+    // the tie-break decide whose timeline survives. Both peers cross-check the SAME anchor tick and
+    // both see the same mismatch, so both reach this line and both compute the same survivor, which is
+    // the consistency rule (a contested outcome must resolve the same way on both screens). A draw
+    // still exists, but only after recovery has failed its bounded attempts.
     Desync = true;
-    Lur::Log::Error("RPS: DESYNC at tick %u — mine %08x, peer %08x. Declaring a DRAW and restarting; "
-                    "this is a bug (identical builds should never diverge).",
+    Lur::Log::Error("RPS: DESYNC at tick %u — mine %08x, peer %08x. Recovering (this is still a bug: "
+                    "identical builds should never diverge).",
                     Tick, Mine->second, Theirs->second);
-    TheSim.Result = ResultDraw;
+    BeginRecovery("anchor hash mismatch");
 }
 
-// Resync chunk tags: 0/1 = the team-0/team-1 history streams; 0xFF = the frontier marker.
-namespace {
-constexpr uint8_t ResyncTagMarker = 0xFF;
-}  // namespace
 
 void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
     if (Type == MsgInput) {
@@ -487,7 +626,9 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // Detection lands BEFORE the hole's tick executes — the ceiling is gated on PeerEvents.size(),
         // which the missing frame never grew — so it is early enough to recover from rather than
         // diagnose after the fact. Acting on it is #161; this commit only makes it visible.
-        if (!Awaiting) {
+        // A decided match is exempt: our sim has stopped while the peer may still be producing, so an
+        // "expected next tick" no longer means anything and every later frame would read as a gap.
+        if (!Awaiting && TheSim.Result == ResultOngoing) {
             const uint32_t Missing = (Seq - (PeerTickNext_ & 0xFFu)) & 0xFFu;
             if (Missing != 0) {
                 ++InputGaps_;
@@ -498,6 +639,13 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
                                 "#159's divergence.",
                                 PeerTickNext_, Seq, PeerTickNext_ & 0xFFu, Missing);
                 PeerTickNext_ += Missing;  // re-base past the hole: count the gap once, not forever
+                // #161: ACT on it. We are provably the incomplete peer and the other side has seen
+                // nothing wrong, so it must be asked — and because detection beat execution to the
+                // hole, this repairs the timeline while both sims are still identical. Return without
+                // buffering: appending this frame at the hole's index is exactly the misalignment
+                // being repaired.
+                RequestRecovery(LastGapTick_);
+                if (Recovering_) return;
             }
             ++PeerTickNext_;
         }
@@ -545,17 +693,50 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         if (Tag == 0) {  // #137: a chunk of the peer's combined event history
             uint32_t Ft = 0;
             DecodeEventResyncChunk(Data + 1, N - 1, Ft, IncomingHistory);  // reliable order -> append
+        } else if (Tag == ResyncTagRequest) {
+            // #161: the peer detected a gap in OUR stream and is asking for our history. It has
+            // already stopped executing, so nothing is racing; hand the timeline over and re-base to
+            // the same frontier so its next produced frame lands where we expect it.
+            //
+            // If we are ALSO recovering as the adopter (both directions lost frames, or a desync trip
+            // crossed with a gap), the tie-break settles it: only the survivor answers, and the other
+            // keeps waiting rather than the two swapping histories forever.
+            Lur::Serialization::BitReader R(Data + 1, N - 1);
+            const uint32_t MissingTick = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+            if (!R.IsOk()) return;
+            if (RecoveryAdopting_ && !IsRecoverySurvivor()) return;
+            Lur::Log::Info("RPS: peer lost our frame for tick %u and asked for the history — sending it "
+                           "from our frontier %u", MissingTick, TheSim.Tick);
+            OfferHistoryToLoser();
         } else if (Tag == ResyncTagMarker) {
             Lur::Serialization::BitReader R(Data + 1, N - 1);
             const uint32_t F = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
-            if (R.IsOk() && F > TheSim.Tick && IncomingHistory.size() >= F) {
-                RebuildFromHistory(F);  // peer is ahead -> adopt its history
+            // #161: while ADOPTING, take the survivor's history whatever its frontier is relative to
+            // ours. The reconnect rule ("only if the peer is ahead") cannot serve here: a desync has
+            // both peers at the SAME tick with different states, so `F > TheSim.Tick` is false on both
+            // sides and neither would ever yield — which is why the existing machinery, though it was
+            // all present, never converged anything on a hash mismatch.
+            const bool Adopt = R.IsOk() && IncomingHistory.size() >= F &&
+                               (RecoveryAdopting_ || F > TheSim.Tick);
+            if (Adopt) {
+                RebuildFromHistory(F);
+                if (Recovering_) { FinishRecovery(); return; }
             } else {
                 IncomingHistory.clear();  // we're ahead / short -> keep ours
+                // #161: the peer published a frontier we are ALREADY standing on. Offering a history
+                // means it has re-based its own timeline to that frontier, so we must re-base to the
+                // same one or its next produced frame lands at an index we no longer expect — a fresh
+                // misalignment created by the repair. This matters even when we saw nothing wrong
+                // ourselves (a mismatch the peer detected and we did not), which is precisely the case
+                // the reconnect rule never had to consider. Only when our sim is exactly AT F: with the
+                // sim ahead of F, re-basing would rewind the timeline under already-executed ticks.
+                if (R.IsOk() && F == TheSim.Tick) {
+                    ReseedFrom(F);
+                }
                 // #148: the peer is BEHIND us — a restarted app rejoins at F=0. It cannot catch up
                 // unless we hand it our history, and our first offer may have been thrown away by
                 // its own Lp.Init (which clears IncomingHistory). So re-offer, once per round.
-                if (R.IsOk() && F < TheSim.Tick && ReoffersLeft > 0) {
+                else if (R.IsOk() && F < TheSim.Tick && ReoffersLeft > 0) {
                     --ReoffersLeft;
                     SendResyncOffer();
                 }

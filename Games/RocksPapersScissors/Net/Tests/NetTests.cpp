@@ -94,11 +94,17 @@ static void TestEventBatchFuzz() {
 // Y=16 clears all three with margin; mirrored for team 1.
 static const Fixed CampTestX = F(17);
 static Fixed CampTestY(uint8_t Team) { return Team == 0 ? F(16) : F(WorldHeight.ToInt() - 16); }
+// Slot 2/3 is each team's OPENING CAMP, not 0/1: #146 auto-places the two home bases at slots 0/1
+// before tick 0, and tick 0's two camps land next. This said 0/1 (a comment from before the home bases
+// existed), and ApplyQueue REJECTS the home base — it produces nothing — so every queue event these
+// lockstep tests "exercised over the wire" was a decoded no-op. The codec coverage was real; the
+// gameplay-effect coverage was not, which is worth more here: an event that changes nothing cannot
+// expose a misaligned or dropped input stream.
 static void DriveInput(LockstepPeer& P, uint8_t Team, int TickIdx) {
     if (TickIdx == 3)
         P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, CampTestX, CampTestY(Team)));
     else if (TickIdx == 15)
-        P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
+        P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 2 : 3, 5));
 }
 
 // Replay a recorded/reassembled EVENT stream (combined batch per tick) into a fresh sim -> hash.
@@ -819,17 +825,198 @@ static void TestProducedCampLookAlikeIsNotDropped() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 }
 
-// ---- A DESYNC MUST NOT FREEZE THE GAME: it declares a draw and the session recovers ----
+// Re-encode ONE of the sender's produced frames with an extra event injected, keeping the sequence
+// byte and appending rather than replacing — so nothing looks lost, no gap is reported, and the two
+// sims genuinely diverge. That is the shape #159 captured on hardware: a long clean match, then one
+// peer's executed stream containing an event the other's does not, with the link reporting nothing.
+// Injecting a real divergence matters — a test that only forges a bad ANCHOR proves the detector
+// fires but cannot prove two different states are brought back together.
+static bool TamperOneInput(Outbox& From, LockstepPeer& To, uint8_t ForgedTeam) {
+    bool Did = false;
+    for (auto& M : From.Q) {
+        if (!Did && M.first == MsgInput) {
+            BitReader R(M.second.data(), M.second.size());
+            const uint32_t Seq = R.ReadBits(8);
+            InputEvent Buf[MaxEventsPerTick];
+            const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+            if (Cnt >= 0 && Cnt + 1 < MaxEventsPerTick) {
+                // Slot 2/3 is each team's OPENING CAMP: Init auto-places the two home bases at slots
+                // 0/1 (#146) and tick 0's two camps land next. Queueing at the camp really does move
+                // state (gold down, queue up) — queueing at the HOME BASE is rejected, so it would
+                // inject nothing and the test would prove nothing.
+                Buf[Cnt] = InputEvent::Queue(ForgedTeam, ForgedTeam == 0 ? 2 : 3, 4);
+                BitWriter W;
+                W.WriteBits(Seq, 8);
+                EncodeEventBatch(W, Buf, Cnt + 1);
+                const std::vector<uint8_t>& B = W.Finish();
+                To.OnMessage(MsgInput, B.data(), B.size());
+                Did = true;
+                continue;
+            }
+        }
+        To.OnMessage(M.first, M.second.data(), M.second.size());
+    }
+    From.Q.clear();
+    return Did;
+}
+
+// ---- #161: A DESYNC MUST RECOVER THE MATCH. Owner direction, replacing e6d6abf's draw ----
+// e6d6abf made a desync end the match as a draw. That was a stopgap for something worse (both phones
+// froze forever, tick 8180, datagrams still flowing, no way out but killing the app) but it throws
+// the match away, and a draw is a lie about what happened.
+//
+// The rule: the peer whose device GUID is lower keeps its timeline and the other rebuilds from it.
+// MyTeam already IS that comparison on every path (Team = MyGuid < PeerGuid ? 0 : 1), so both peers
+// compute the same survivor locally with nothing negotiated. Note it converges regardless of WHICH
+// side lost data — both end up replaying one identical history — so consistency holds even when the
+// discarded timeline was the more complete one. That is the stated priority: consistency, not
+// fairness (there is no referee to appeal to, and the players share a room).
+static void TestDesyncRecoversToACommonStateAndKeepsPlaying() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1610, 0, Enqueue, &Qa);
+    B.Init(0x1610, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    for (int I = 0; I < 10; ++I) {  // play cleanly, and bank gold so the forged queue has an effect
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    // Diverge for real: B executes an event A never sent. (It lands InputDelayTicks later, so the two
+    // states are still equal on the very next line — the divergence appears when the tick executes.)
+    A.Tick(OneTickNs);
+    B.Tick(OneTickNs);
+    CHECK(TamperOneInput(Qa, B, 0));
+    Deliver(Qb, A);
+
+    // Play on: the next anchor cross-check trips on BOTH peers and recovery runs. Recovery having run
+    // at all is also the proof the injection LANDED — a forged event the sim rejected would change no
+    // state, trip no anchor, and leave this at zero.
+    for (int I = 0; I < 30; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.RecoveryAttempts() >= 1);      // the divergence was detected, not absorbed
+    CHECK(B.RecoveryAttempts() >= 1);
+
+    // THE POINT: one state again, and the match is still being played.
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(B.GetSim().Result == ResultOngoing);
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    // And it keeps playing in lockstep from the recovery point onward, with real input — a recovery
+    // that converges and then wedges at the ceiling would satisfy every check above.
+    const uint32_t Resumed = A.ExecTick();
+    for (int I = 0; I < 60; ++I) {
+        if (I % 13 == 4) {
+            A.QueueLocalEvent(InputEvent::Queue(0, 0, 2));
+            B.QueueLocalEvent(InputEvent::Queue(1, 1, 2));
+        }
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.ExecTick() > Resumed + 40);
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    CHECK(A.RecoveryAttempts() == 1);      // one divergence, one recovery — it did not re-trip
+}
+
+// ---- #161: recovery must be BOUNDED, and the draw survives as the last resort ----
+// "A recovery loop that never converges is the freeze again by another name." Input-history replay
+// cannot converge if the cause is genuine nondeterminism rather than lost input — it faithfully
+// reproduces the divergence — so the attempt count has to be capped and the terminal outcome defined.
+// That is the one place a draw legitimately lives: after recovery has failed, not instead of trying.
+static void TestDesyncRecoveryIsBoundedThenDraws() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1611, 0, Enqueue, &Qa);
+    B.Init(0x1611, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 10; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+
+    // Re-diverge on EVERY delivery, so no recovery can ever succeed — the pathological case.
+    int Rounds = 0;
+    for (; Rounds < 400 && A.GetSim().Result == ResultOngoing; ++Rounds) {
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        if (!TamperOneInput(Qa, B, 0)) Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(Rounds < 400);                                        // it TERMINATED — no infinite loop
+    CHECK(A.RecoveryAttempts() <= LockstepPeer::MaxDesyncRecoveries);
+    // BOTH peers must reach the SAME verdict. Both cross-check the same anchors, so both spend their
+    // budget on the same trip — an asymmetric ending (one drawing, one playing on) would be the
+    // consistency rule broken, and worse than either outcome on its own.
+    CHECK(A.GetSim().Result == ResultDraw);                     // the bounded last resort
+    CHECK(B.GetSim().Result == ResultDraw);
+    // And the draw still recovers the SESSION, which is what e6d6abf bought and must not be lost:
+    // the post-match hold expires, a fresh match begins, and the latch clears.
+    const uint32_t Before = A.MatchIndex();
+    A.Tick(PostMatchHoldNs + OneTickNs);
+    CHECK(A.MatchIndex() == Before + 1);
+    CHECK(!A.Desynced());
+    CHECK(A.RecoveryAttempts() == 0);                           // the budget is per match
+    CHECK(!A.MatchStarted());
+}
+
+// ---- #161 + #163: a LOST frame recovers without the sims ever diverging at all ----
+// The best outcome available, and the reason the sequence byte was worth a byte per frame: the gap is
+// detected when the NEXT frame arrives, and the ceiling is gated on PeerEvents.size(), so the hole's
+// tick has not executed yet. Recovery therefore happens BEFORE any divergence exists — no bad state,
+// no anchor alarm, no lost work. This is the exact hardware case from #163 observation 2 (an input
+// executed on the iPhone at tick 4528, absent from the Galaxy, link reporting nothing).
+static void TestLostInputRecoversBeforeDiverging() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1612, 0, Enqueue, &Qa);
+    B.Init(0x1612, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 6; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+
+    // A's next frame carries real input and is LOST.
+    A.QueueLocalEvent(InputEvent::Queue(0, 0, 3));
+    A.Tick(OneTickNs);
+    B.Tick(OneTickNs);
+    DeliverDroppingNthInput(Qa, B, 0);
+    Deliver(Qb, A);
+
+    for (int I = 0; I < 30; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(B.InputGaps() == 1);                  // the loss was seen
+    CHECK(!A.Desynced() && !B.Desynced());      // and never became a divergence
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    // Recovering from the peer's history means the input that was dropped is not lost from the match
+    // either: B rebuilt on A's stream, which contains it.
+    CHECK(A.ExecTick() > InputDelayTicks + 10);
+}
+
+// ---- A DESYNC MUST NOT FREEZE THE GAME: it recovers, and a draw is only the last resort ----
 // Every other test here asserts a desync does NOT happen, which is the right thing to assert and is
 // also exactly why this shipped broken: nothing covered what happens WHEN one does. Observed on two
 // phones 2026-07-30 — both peers pinned at tick 8180 with different hashes, datagrams still flowing,
 // no message on screen, no way out but killing the app. Desync gated the exec loop and only
 // BeginMatch cleared it, and a match that never ends never reaches BeginMatch.
 //
+// This covers the LONE-PEER trip, which is not a real-world shape (both peers cross-check the same
+// anchor, so both see a genuine divergence) but is the one that pins down the failure mode: the peer
+// must not be left holding a flag that nothing clears. #161 replaced the instant draw with recovery,
+// so what is asserted here is that the trip is no longer terminal and that it always REACHES an
+// outcome — converged or, once the attempt budget is spent, drawn — instead of stopping.
+//
 // The divergence is injected by handing A an anchor for a tick it has ALREADY hashed, carrying a
 // hash that cannot be right. That is precisely the input CrossCheck consumes, so this exercises the
 // real detection path rather than poking the flag.
-static void TestDesyncDeclaresADrawAndRecovers() {
+static void TestDesyncIsNeverTerminal() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
     A.Init(0x9001, 0, Enqueue, &Qa);
@@ -851,18 +1038,60 @@ static void TestDesyncDeclaresADrawAndRecovers() {
     const std::vector<uint8_t>& Bad = W.Finish();
     A.OnMessage(MsgAnchor, Bad.data(), Bad.size());
 
-    // THE POINT: detected, and resolved as a DRAW rather than as a stall.
-    CHECK(A.Desynced());
-    CHECK(A.GetSim().Result == ResultDraw);
-
-    // AND IT RECOVERS. The post-match hold expires, BeginMatch runs, the latch clears and a fresh
-    // match is waiting for camps again — the loop the freeze could never reach.
-    const uint32_t MatchBefore = A.MatchIndex();
-    A.Tick(PostMatchHoldNs + OneTickNs);
-    CHECK(!A.Desynced());
-    CHECK(A.MatchIndex() == MatchBefore + 1);
-    CHECK(!A.MatchStarted());                               // fresh match: awaiting both camps
+    // Detected, and NOT resolved as an instant draw any more: the match is still alive while recovery
+    // is attempted. That is the behaviour change #161 asked for.
+    CHECK(A.RecoveryAttempts() == 1);
     CHECK(A.GetSim().Result == ResultOngoing);
+
+    // A holds the lower device id, so ITS timeline is the survivor — nothing to adopt, nothing to wait
+    // for. It hands its history over and plays on, which for a forged mismatch (A's state was in fact
+    // fine) is the right answer: the match is not thrown away.
+    for (int I = 0; I < 20; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced());
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    // The other side of the same coin, and the one that could still freeze: forge the mismatch into the
+    // ADOPTER, whose repair depends on a history the peer has no reason to send. It must reach an
+    // outcome anyway. A permanent hold is the original bug wearing a new hat, so the timeout converts
+    // it into the draw — the bounded last resort — and the session then restarts.
+    Outbox Qc, Qd;
+    LockstepPeer C, D;
+    C.Init(0x9002, 0, Enqueue, &Qc);
+    D.Init(0x9002, 1, Enqueue, &Qd);
+    PlaceCampsAndStart(C, D, Qc, Qd);
+    for (int I = 0; I < 12; ++I) {
+        C.Tick(OneTickNs); D.Tick(OneTickNs); Deliver(Qc, D); Deliver(Qd, C);
+    }
+    const uint32_t DAnchor = (D.ExecTick() / 10) * 10;
+    Lur::Serialization::BitWriter W2;
+    Lur::Serialization::WriteVarUint(W2, DAnchor);
+    W2.WriteBits(0xDEADBEEFu, 32);
+    const std::vector<uint8_t>& Bad2 = W2.Finish();
+    D.OnMessage(MsgAnchor, Bad2.data(), Bad2.size());
+    CHECK(D.RecoveryAttempts() == 1);
+    CHECK(D.GetSim().Result == ResultOngoing);   // still not an instant draw
+
+    uint64_t Held = 0;
+    while (D.GetSim().Result == ResultOngoing && Held < 120 * OneTickNs) {
+        C.Tick(OneTickNs);
+        D.Tick(OneTickNs);
+        Deliver(Qc, D);
+        Deliver(Qd, C);
+        Held += OneTickNs;
+    }
+    CHECK(D.GetSim().Result == ResultDraw);
+    CHECK(Held <= LockstepPeer::DesyncRecoveryTimeoutNs + 4 * OneTickNs);  // bounded, and by THAT bound
+
+    // And the session recovers from that draw, which is what e6d6abf bought and must not regress.
+    const uint32_t MatchBefore = D.MatchIndex();
+    D.Tick(PostMatchHoldNs + OneTickNs);
+    CHECK(!D.Desynced());
+    CHECK(D.MatchIndex() == MatchBefore + 1);
+    CHECK(!D.MatchStarted());                               // fresh match: awaiting both camps
+    CHECK(D.GetSim().Result == ResultOngoing);
 }
 
 // ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
@@ -938,14 +1167,18 @@ static void TestLockstepDetectsDivergence() {
     // Corrupt A's state (simulate a lost input / a determinism bug on one peer).
     const_cast<Sim&>(A.GetSim()).Teams[0].Gold += 999;
 
-    for (int I = 0; I < 15 && !A.Desynced(); ++I) {  // run to the next anchor
+    for (int I = 0; I < 15 && A.RecoveryAttempts() == 0; ++I) {  // run to the next anchor
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
         Deliver(Qb, A);
     }
-    CHECK(A.Desynced());  // anchor hash mismatch caught within ~1 s
-    CHECK(B.Desynced());
+    // Both peers cross-check the same anchor, so both must SEE it — detection on one side only would
+    // leave the pair unable to agree on a repair. Asserted via RecoveryAttempts rather than
+    // Desynced(): since #161 the flag is transient by design (it gates execution while the repair
+    // runs and is cleared on convergence), so it is no longer a record that a divergence happened.
+    CHECK(A.RecoveryAttempts() >= 1);  // anchor hash mismatch caught within ~1 s
+    CHECK(B.RecoveryAttempts() >= 1);
 }
 
 // ---- Starve one side: the other stalls at the ceiling, then resumes cleanly ----
@@ -1337,7 +1570,10 @@ int main() {
     TestProducedCampLookAlikeIsNotDropped();     // #160
     TestLostInputFrameIsDetectedAndLocated();    // #163
     TestPreMatchStallIsReported();               // #163
-    TestDesyncDeclaresADrawAndRecovers();
+    TestDesyncRecoversToACommonStateAndKeepsPlaying();  // #161
+    TestDesyncRecoveryIsBoundedThenDraws();             // #161
+    TestLostInputRecoversBeforeDiverging();             // #161 + #163
+    TestDesyncIsNeverTerminal();
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();

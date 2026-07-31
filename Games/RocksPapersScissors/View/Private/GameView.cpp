@@ -1640,6 +1640,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                   EVAlign::Middle, false);
     }
 
+    // #161: a desync repair is in flight. The match holds for a moment and can rewind a second or two
+    // of play when it resumes — silently, that reads as a glitch or as the opponent cheating, which is
+    // a worse experience than the freeze it replaced. Amber, and in the same slot as the link banner
+    // (the two cannot coexist: one is a fresh link, the other a live match being repaired). Driven by
+    // the actual state per frame, so it disappears the instant the repair lands rather than on a timer.
+    if (Recovering_) {
+        const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 7.0f);  // reuse the #143 animation clock
+        const Color WarnC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
+        Text.Draw(Renderer, "resyncing with opponent...", Pad, PanelY + PanelH + 6.0f * HS,
+                  WidthPx - 2.0f * Pad, 16.0f * HS, 12.0f * HS, WarnC, EHAlign::Center,
+                  EVAlign::Middle, false);
+    }
+
 #if !LUR_SHIPPING
     // ---- The CONSOLE (#114) — one tool, ONE UI on both platforms ----
     // Composited by the BeginDevGui THIRD pass (over the game + its GUI). The shipping build
