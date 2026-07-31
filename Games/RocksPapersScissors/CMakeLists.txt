@@ -17,7 +17,8 @@ target_include_directories(rps_core PUBLIC Core/Public PRIVATE Core/Private)
 # lur::sim for Fixed/Random (the deterministic substrate); lur::core for LUR_ASSERT;
 # lur::trace for LUR_TRACE_SCOPE (observational CPU scopes, #101 — no-op in Shipping);
 # lur::save for the key->blob store + device-id helpers ScoreBook persists through.
-target_link_libraries(rps_core PUBLIC lur::sim lur::core lur::trace lur::save)
+# lur::buildfp for the `fp` header line MatchRecord writes — the per-build fingerprint (#164).
+target_link_libraries(rps_core PUBLIC lur::sim lur::core lur::trace lur::save lur::buildfp)
 target_compile_features(rps_core PUBLIC cxx_std_20)
 add_library(rps::core ALIAS rps_core)
 
@@ -51,6 +52,7 @@ add_library(rps::view ALIAS rps_view)
 add_library(rps_net
     Net/Private/LockstepPeer.cpp)
 target_include_directories(rps_net PUBLIC Net/Public)
-target_link_libraries(rps_net PUBLIC rps::core lur::serialization lur::net lur::sim lur::core)
+target_link_libraries(rps_net PUBLIC rps::core lur::serialization lur::net lur::sim lur::core
+                                     lur::buildfp)  # #112's build-mismatch gate (#164: per build)
 target_compile_features(rps_net PUBLIC cxx_std_20)
 add_library(rps::net ALIAS rps_net)

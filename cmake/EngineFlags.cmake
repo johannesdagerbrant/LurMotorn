@@ -132,31 +132,14 @@ if(_lur_agent)
             "This build must not be handed to a player.")
 endif()
 
-# ── Build fingerprint (issue #112, Addendum C.3) ─────────────────────────────
-# git commit + dirty flag, baked in so two peers can refuse to connect on a build
-# mismatch (the proactive form of the reactive anchor-hash desync alarm). Snapshotted at
-# configure time; a source edit without reconfigure is still caught by the anchor hash.
-find_package(Git QUIET)
-set(_lur_fp "no-git")
-if(GIT_FOUND)
-    execute_process(COMMAND ${GIT_EXECUTABLE} rev-parse --short=12 HEAD
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE _lur_sha OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    execute_process(COMMAND ${GIT_EXECUTABLE} status --porcelain --untracked-files=no
-        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
-        OUTPUT_VARIABLE _lur_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    if(_lur_sha STREQUAL "")
-        set(_lur_fp "no-git")
-    elseif(_lur_dirty STREQUAL "")
-        set(_lur_fp "${_lur_sha}")
-    else()
-        set(_lur_fp "${_lur_sha}-dirty")
-    endif()
-endif()
-# Include the config in the fingerprint: same commit, different LUR_CONFIG => different sim.
-set(LUR_BUILD_FP "${_lur_fp}+${LUR_CONFIG}" CACHE INTERNAL "build fingerprint (#112)")
-add_compile_definitions(LUR_BUILD_FP=\"${LUR_BUILD_FP}\")
-message(STATUS "LurMotorn build fingerprint: ${LUR_BUILD_FP}")
+# ── Build fingerprint (issue #112, Addendum C.3) — MOVED, see Modules/Core ────
+# It used to be computed here, at CONFIGURE time, and published as a compile definition
+# (LUR_BUILD_FP). That could not do the job it exists for: generators reconfigure only when a
+# CMakeLists.txt changes, so the ordinary loop (commit, install) shipped a binary stamped with the
+# PREVIOUS commit and two phones built from identical source reported badbuild=1 (#164). It is now
+# Lur::BuildFingerprint() from Modules/Core, regenerated per BUILD by cmake/BuildFingerprint.cmake.
+# Nothing here needs to publish it: consumers link lur::buildfp, so the value cannot go stale and
+# app targets outside this tree's scope have no cache var to re-apply.
 
 # ── Optimization axis — the ladder's "Opt" column, coupled to LUR_CONFIG ──────
 # The macros above are only HALF the ladder. The other half — real optimization

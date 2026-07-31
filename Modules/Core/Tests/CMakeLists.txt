@@ -12,4 +12,11 @@ if(WIN32)
     add_test(NAME cvar_zero_overhead
              COMMAND powershell -NoProfile -ExecutionPolicy Bypass
                      -File ${CMAKE_SOURCE_DIR}/scripts/check-cvar-zero-overhead.ps1)
+
+    # Build fingerprint (#164): it must track the tree at BUILD time, which a cached configure-time
+    # value could not. Drives cmake/BuildFingerprint.cmake against a throwaway git repo — the only
+    # way to assert the commit / dirty / config transitions without three full builds.
+    add_test(NAME build_fingerprint
+             COMMAND powershell -NoProfile -ExecutionPolicy Bypass
+                     -File ${CMAKE_SOURCE_DIR}/scripts/check-build-fingerprint.ps1)
 endif()

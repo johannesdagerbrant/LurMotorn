@@ -3,14 +3,11 @@
 #include <cstring>
 
 #include "Lur/Core/Assert.h"
+#include "Lur/Core/BuildFingerprint.h"
 #include "Lur/Core/Log.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Rps/EventCodec.h"
-
-#ifndef LUR_BUILD_FP
-#define LUR_BUILD_FP "no-fp"  // fallback when the build system didn't inject one (#112)
-#endif
 
 namespace Rps {
 
@@ -367,7 +364,7 @@ void LockstepPeer::DrainCvarQueue() {
 }
 
 void LockstepPeer::SendFingerprint() {
-    const char* Fp = LUR_BUILD_FP;
+    const char* Fp = Lur::BuildFingerprint();
     if (Send) Send(Ctx, MsgFingerprint, reinterpret_cast<const uint8_t*>(Fp), std::strlen(Fp));
 }
 #endif  // LUR_INTERNAL
@@ -527,7 +524,7 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // Compare the peer's compile-time fingerprint to ours; a mismatch means different
         // builds -> refuse the match (the app checks BuildMismatch() and aborts before
         // tick 0). Loud, located, and BEFORE any divergence instead of a mid-match draw.
-        const char* Mine = LUR_BUILD_FP;
+        const char* Mine = Lur::BuildFingerprint();
         const std::size_t Ml = std::strlen(Mine);
         if (N != Ml || std::memcmp(Data, Mine, Ml) != 0) {
             BuildMismatch_ = true;

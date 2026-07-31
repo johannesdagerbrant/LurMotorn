@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <cstring>
 
+#include "Lur/Core/BuildFingerprint.h"
 #include "Lur/Core/Log.h"
 
 namespace Rps {
@@ -31,11 +32,10 @@ bool MatchRecorder::Begin(const char* Path, const Sim& S, int Tier, uint8_t Huma
         return false;
     }
     std::fprintf(File_, "rec 2\n");   // 2 = post-3-tier-collapse CVar ids (see LoadMatchRecording)
-#ifdef LUR_BUILD_FP
-    std::fprintf(File_, "fp %s\n", LUR_BUILD_FP);
-#else
-    std::fprintf(File_, "fp unknown\n");
-#endif
+    // #164: the build this recording came from, exact for THIS binary (never the previous commit's
+    // sha, which is what the old configure-time macro wrote). Two recordings of one linked match are
+    // only comparable if this line agrees, so a stale value here quietly invalidated the diff.
+    std::fprintf(File_, "fp %s\n", Lur::BuildFingerprint());
     std::fprintf(File_, "seed %llx\n", static_cast<unsigned long long>(S.Seed));
     std::fprintf(File_, "tier %d human %u\n", Tier, static_cast<unsigned>(HumanTeam));
     // The whole latched gameplay set by wire id. Replay applies these to a default Cv, so a device
