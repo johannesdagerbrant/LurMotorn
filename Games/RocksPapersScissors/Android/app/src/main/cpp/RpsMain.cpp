@@ -508,7 +508,12 @@ void android_main(android_app* App) {
         // (the entry-site Begin, then the latch's initial 0xFFFFFFFF != MatchIndex 0 firing again on
         // the first tick), leaving an orphan .rec that ended before it recorded anything. Whoever
         // pulls the files then has to guess which of the two is the match.
-        uint32_t LinkedRecIdx = 0xFFFFFFFFu;
+        // #159: "no recording open" must be a value MatchIndex can never take. Explicit here, and it
+        // has to be: iOS declared the same field as a zero-initialised ivar, where "unset" and "match
+        // 0" were the same value, so the iPhone recorded NOTHING until a restart bumped the index —
+        // one-sided capture of the first linked match, which is the one a diff most needs (found on
+        // hardware 2026-07-31). Named on both sides now so the default can't mean "match 0" again.
+        uint32_t LinkedRecIdx = Rps::NoRecMatchIdx;
         struct LinkedRecCtx { Rps::MatchRecorder* Rec; };
         LinkedRecCtx LinkedCtx{&LinkedRec};
         State.Lp.SetTickSink(

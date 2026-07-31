@@ -565,6 +565,18 @@ static void TestBuildFingerprintGate() {
 #endif
 
 #if LUR_INTERNAL
+// ---- #159: the "no recording open" sentinel must never be a real match index ----
+// A main opens its linked recording on the match-started EDGE, keyed on MatchIndex(). iOS held that
+// key as a zero-initialised Obj-C ivar, so "unset" and "match 0" were the same value: the edge never
+// fired for the first match and the iPhone recorded NOTHING until a post-match restart bumped the
+// index. The pair captured one side of the first linked match — and comparing two peers is the whole
+// point of #159, so the first match is the one you least want half of. Found on hardware 2026-07-31
+// by pulling the Galaxy's .rec and finding no iPhone counterpart.
+//
+// The sentinel is shared now, and this pins the property that makes it safe: no match a session can
+// actually reach may equal it. Cheap, and it fails on the host rather than on two phones.
+static void TestNoRecMatchIdxIsNotAReachableMatchIndex();  // defined below, next to the restart helpers
+
 // ---- #159: two peers recording ONE linked match must produce comparable files ----
 // The point of recording both sides is to diff them, so the property that matters is not "a file
 // exists" but "the two files agree tick for tick". If they can drift for benign reasons the diff is
@@ -1488,6 +1500,39 @@ static void RunToResult(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb
     CHECK(A.GetSim().Result == B.GetSim().Result);
 }
 
+// ---- #159: the "no recording open" sentinel must never be a real match index ----
+// A main opens its linked recording on the match-started EDGE, keyed on MatchIndex(). iOS held that
+// key as a zero-initialised Obj-C ivar, so "unset" and "match 0" were the same value: the edge never
+// fired for the first match and the iPhone recorded NOTHING until a post-match restart bumped the
+// index. The pair captured one side of the first linked match — and comparing two peers is the whole
+// point of #159, so the first match is the one you least want half of. Found on hardware 2026-07-31,
+// by pulling the Galaxy's .rec and finding the iPhone had no counterpart file at all.
+//
+// The sentinel is shared (Rps::NoRecMatchIdx) now, and this pins the property that makes it safe: no
+// match index a session can actually reach may equal it. Fails on the host, not on two phones.
+static void TestNoRecMatchIdxIsNotAReachableMatchIndex() {
+    CHECK(NoRecMatchIdx != 0);   // the exact collision that hid: match 0 is the FIRST match
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x159C, 0, Enqueue, &Qa);
+    B.Init(0x159C, 1, Enqueue, &Qb);
+    CHECK(A.MatchIndex() == 0);                 // a fresh session starts AT the value that collided
+    CHECK(A.MatchIndex() != NoRecMatchIdx);
+    // ...and stays clear of it across restarts, which is the only way the index ever moves.
+    for (int I = 0; I < 4; ++I) {
+        ForcedDrawPair(A, B, Qa, Qb, 0x159C + static_cast<uint64_t>(I));
+        RunToResult(A, B, Qa, Qb);
+        const uint32_t Before = A.MatchIndex();
+        uint64_t Held = 0;
+        while (Held < PostMatchHoldNs + OneTickNs) {
+            A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+            Held += OneTickNs;
+        }
+        CHECK(A.MatchIndex() == Before + 1);
+        CHECK(A.MatchIndex() != NoRecMatchIdx);
+    }
+}
+
 // The core behaviour: the result stands for PostMatchHoldNs (no restart early), then a fresh match
 // begins — pre-match again, tick 0, both camps required, seed bumped and AGREED by both peers.
 static void TestPostMatchHoldThenFreshMatch() {
@@ -1627,6 +1672,7 @@ int main() {
     TestBuildFingerprintGate();
 #endif
 #if LUR_INTERNAL
+    TestNoRecMatchIdxIsNotAReachableMatchIndex();  // #159
     TestLinkedRecordingsMatchAcrossPeers();
 #endif
     TestProducedCampLookAlikeIsNotDropped();     // #160

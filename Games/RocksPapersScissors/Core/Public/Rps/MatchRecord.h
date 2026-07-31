@@ -60,6 +60,18 @@
 
 namespace Rps {
 
+// #159: "no linked recording is open yet", for a main that keys its open-a-recording edge on
+// LockstepPeer::MatchIndex(). Deliberately NOT 0, because 0 is a real match index — the FIRST one.
+//
+// It lives here, shared, because getting it wrong is invisible and costly: iOS held this as a
+// zero-initialised Obj-C ivar, so "unset" and "match 0" were the same value, the match-started edge
+// never fired for the first match, and the iPhone recorded nothing until a post-match restart bumped
+// the index. The pair then captured ONE side of the first linked match — and comparing two peers is
+// the entire purpose of #159, which makes the first match the one you least want half of. Android had
+// the right sentinel inline; a shared name means the two mains cannot drift on it again.
+// (Found on hardware 2026-07-31, by looking for the iPhone's .rec and finding no file.)
+constexpr uint32_t NoRecMatchIdx = 0xFFFFFFFFu;
+
 // ---- Writing (on the device / in a main) ----
 class MatchRecorder {
 public:

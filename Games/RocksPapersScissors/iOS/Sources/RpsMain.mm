@@ -166,7 +166,7 @@ Rps::Fixed WorldToFixed(float Wv) {
     Rps::MatchRecorder _LinkedRec;
     int _LinkedMatchNo;
     std::string _LinkedRecFile;
-    uint32_t _LinkedRecIdx;    // which Lp match index the open recording belongs to
+    uint32_t _LinkedRecIdx;    // which Lp match index the open recording belongs to (NoRecMatchIdx = none)
 #endif
 }
 
@@ -180,6 +180,16 @@ Rps::Fixed WorldToFixed(float Wv) {
     // FIRST: give the engine logger a home, before anything can try to report a problem.
     Lur::Log::Init(&EngineLogSink, "OnlyRps");
     _LastTick = 0xFFFFFFFFu;
+#if LUR_INTERNAL
+    // #159: "no recording open yet" must be a value MatchIndex can never take, and an Obj-C ivar is
+    // ZERO-initialised — which is exactly the index of the FIRST match. The open-on-match-started edge
+    // (`_LinkedRecIdx != _Lp.MatchIndex()`) was therefore false for match 0, so this phone recorded
+    // nothing until a post-match restart bumped the index to 1. Android got this right with an
+    // explicit 0xFFFFFFFF sentinel and iOS inherited the default, so the pair silently recorded
+    // ONE side of the first linked match — and diffing two peers is the entire point of #159, which
+    // makes the first match the one you least want missing. Found on hardware 2026-07-31.
+    _LinkedRecIdx = Rps::NoRecMatchIdx;
+#endif
 
     CAMetalLayer* Layer = [self metalLayer];
     Layer.device = MTLCreateSystemDefaultDevice();
