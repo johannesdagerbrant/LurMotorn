@@ -32,6 +32,7 @@
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
+#include "Rps/SessionWiring.h" // the ONE Session->LockstepPeer routing table (#160)
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 
@@ -207,24 +208,13 @@ Rps::Fixed WorldToFixed(float Wv) {
     _Session.SetLogger([](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyRps: Net: %{public}s", M); });
 
     Rps::LockstepPeer* Lp = &_Lp;
-    _Session.SetHandler(Rps::MsgInput,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgInput, D, N); });
-    _Session.SetHandler(Rps::MsgAnchor,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgAnchor, D, N); });
-    _Session.SetHandler(Rps::MsgResyncChunk,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgResyncChunk, D, N); });
-#if LUR_INTERNAL
-    // #147: the dev-only gameplay-CVar sync + build fingerprint (#112). These were wired on the
-    // ANDROID peer only, so an iPhone silently DROPPED the Android's MsgCvarSync — the two peers
-    // then simulated on different Cv (and different Cv-derived initial state) and desynced at the
-    // first anchor. A sync is worthless one-sided; every peer must both send and accept it.
-    _Session.SetHandler(Rps::MsgCvar,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgCvar, D, N); });
-    _Session.SetHandler(Rps::MsgCvarSync,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgCvarSync, D, N); });
-    _Session.SetHandler(Rps::MsgFingerprint,
-                        [Lp](const uint8_t* D, std::size_t N) { Lp->OnMessage(Rps::MsgFingerprint, D, N); });
-#endif
+    // #160: the message SET is defined once, in Rps/SessionWiring.h, and shared with the Android and
+    // desktop mains plus the test harness. It was four hand-maintained copies, and the copies drifted
+    // in exactly the way that hurts most: the dev-only cvar-sync slots were registered on ANDROID
+    // ONLY, so an iPhone silently dropped the Android's MsgCvarSync, the peers simulated on different
+    // Cv and desynced at the first anchor (#147). An unregistered slot fails with no error at either
+    // end, so this is not a place to keep a copy.
+    Rps::RouteSessionToPeer(_Session, _Lp);
     _Session.SetResyncHandler([Lp] { Lp->BeginResync(); });
     _Session.Start(_Transport, _DeviceId);
     os_log(OS_LOG_DEFAULT, "OnlyRps: session started (device id %zuB)", _DeviceId.size());

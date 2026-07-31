@@ -194,13 +194,17 @@ void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
     TryStartMatch();
 }
 
-// The local camp as a framed MsgInput batch — the identical shape a live input tick has, so the
-// receiver's normal decode path handles it.
+// The local camp on its OWN message type (#160). It used to go out as a MsgInput batch — "the
+// identical shape a live input tick has, so the receiver's normal decode path handles it" — and that
+// shared shape was the bug: the receiver then had to decide from the bytes whether a frame was a
+// produced tick or a camp re-send, and a produced tick can be byte-identical to a re-send. Same
+// payload encoding, different channel, so the decision is made by the sender (which knows) instead
+// of guessed by the receiver (which cannot).
 void LockstepPeer::SendLocalCamp() {
     Lur::Serialization::BitWriter W;
     EncodeEventBatch(W, &LocalCamp_, 1);
     const std::vector<uint8_t>& B = W.Finish();
-    if (Send) Send(Ctx, MsgInput, B.data(), B.size());
+    if (Send) Send(Ctx, MsgCamp, B.data(), B.size());
     LocalCampSent_ = true;
     CampResendNs_ = 0;
 }
@@ -419,46 +423,51 @@ namespace {
 constexpr uint8_t ResyncTagMarker = 0xFF;
 }  // namespace
 
-// #149: is this pre-match batch just the peer's camp again (its 500ms re-send), rather than new
-// input? Without this check the re-sends of PreMatchCampResendNs would each be buffered as a real
-// input tick and corrupt the new match's timeline — the re-send has to be idempotent on the
-// receiver to be safe on the sender. Matched on the full event, so a genuine second miner-place at
-// a DIFFERENT spot still counts as input.
-bool LockstepPeer::IsPeerCampRepeat(const InputEvent* Batch, int Count) const {
-    if (Count != 1) return false;
-    const InputEvent& E = Batch[0];
-    return E.Kind == EventPlaceBuilding && E.Type == UnitMiner && E.Team == PeerCamp_.Team &&
-           E.X == PeerCamp_.X && E.Y == PeerCamp_.Y;
-}
-
 void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
     if (Type == MsgInput) {
+        // #160: EVERY MsgInput frame is a produced tick, with no exceptions — so it is always
+        // buffered and the index==tick alignment of PeerEvents cannot be disturbed by anything on
+        // this channel. That invariant is the fix. Previously the camp exchange shared this slot and
+        // a frame was classified by its CONTENTS, so a produced batch that happened to equal the
+        // peer's opening camp (re-placing where their camp already stands — a legal tap) was dropped
+        // as a re-send, and every later peer batch landed one exec tick early for the rest of the
+        // match. It only escaped notice because re-placing onto an occupied square is a sim no-op,
+        // so the hashes stayed equal while the streams were skewed (found by diffing two peers'
+        // recordings, #159/#160).
         Lur::Serialization::BitReader R(Data, N);
         InputEvent Buf[MaxEventsPerTick];
         const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+        if (Cnt < 0) return;
         if (!MatchStarted_) {
-            // #139 pre-match: the peer's FIRST frame is its start camp (its "ready"); any later
-            // frame is its post-match input arriving before we've started — buffer it (it lands
-            // at PeerEvents[Delay]+ once we start) so nothing is dropped across the skew.
-            if (Cnt < 0) return;
-            if (!PeerReady_) { if (Cnt >= 1) { PeerCamp_ = Buf[0]; PeerReady_ = true; TryStartMatch(); } }
-            else if (!IsPeerCampRepeat(Buf, Cnt)) PeerEvents.emplace_back(Buf, Buf + Cnt);
+            // Pre-match, a produced frame can only be from a peer that has ALREADY started (it
+            // restarted before us). Buffer it — it lands at PeerEvents[Delay]+ once we start — so
+            // nothing is dropped across the restart skew. Its camp arrived earlier on MsgCamp; the
+            // transport is reliable and ordered, so a produced tick can never overtake it.
+            PeerEvents.emplace_back(Buf, Buf + Cnt);
             return;
         }
-        // #149: we have STARTED but the peer is still re-sending the camp we already hold — so it
-        // never got OURS (we started on its camp; our own send raced its restart and was dropped).
-        // Re-sending our camp is the only thing that can unstrand it: the peer that starts first
-        // leaves PreMatchTick and would otherwise never send again. And the repeat must NOT be
-        // buffered — it is not a produced tick, so appending it would shift PeerEvents' index==tick
-        // alignment and desync us (a repeat placement is a deterministic no-op anyway).
-        if (IsPeerCampRepeat(Buf, Cnt)) {
-            SendLocalCamp();
-            return;
-        }
-        if (!Awaiting && Cnt >= 0) {
+        if (!Awaiting) {
             PeerEvents.emplace_back(Buf, Buf + Cnt);  // live wire: each Input frame = next peer exec tick
             Execute();                                // peer input may unblock the ceiling
         }
+    } else if (Type == MsgCamp) {
+        // #139/#149/#160: the peer's opening camp, and its 500 ms re-sends. NEVER buffered as a tick
+        // — it is not a produced tick — which is what makes an arbitrary number of re-sends safe.
+        Lur::Serialization::BitReader R(Data, N);
+        InputEvent Buf[MaxEventsPerTick];
+        const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
+        if (Cnt < 1) return;
+        if (!PeerReady_) {
+            PeerCamp_ = Buf[0];
+            PeerReady_ = true;
+            TryStartMatch();  // both camps in hand -> tick 0 carries them on both peers
+            return;
+        }
+        // #149: a re-send arriving at a peer that already holds this camp. If we have STARTED, the
+        // peer is still waiting on OURS — it never got it (we started on its camp; our own send
+        // raced its restart and was dropped). Re-sending is the only thing that can unstrand it:
+        // whoever starts first leaves PreMatchTick and would otherwise never send again.
+        if (MatchStarted_) SendLocalCamp();
     } else if (Type == MsgAnchor) {
         Lur::Serialization::BitReader R(Data, N);
         const uint32_t T = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));

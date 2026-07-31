@@ -41,6 +41,7 @@
 #include "Rps/SimRunner.h"
 #include "Rps/SoloInput.h"
 #include "Rps/ScoreBook.h"
+#include "Rps/SessionWiring.h" // the ONE Session->LockstepPeer routing table (#160)
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 #include "WindowsBleTransport.h"  // #101-E: PC becomes a real BLE opponent to the phone
@@ -105,22 +106,10 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
     P.View.CreateResources(P.Renderer);
     P.Guid = Guid;
     P.Transport.SetDeferred(true);  // deferred delivery: lockstep replies from a receiver never recurse
-    P.Session.SetHandler(Rps::MsgInput,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgInput, D, N); });
-    P.Session.SetHandler(Rps::MsgAnchor,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgAnchor, D, N); });
-    P.Session.SetHandler(Rps::MsgResyncChunk,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
-#if LUR_INTERNAL
-    // #147/#112: the workbench must carry the SAME message set as a phone, or a bug in the
-    // cvar-sync / fingerprint path is invisible in the two-window loopback (its whole point).
-    P.Session.SetHandler(Rps::MsgCvar,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgCvar, D, N); });
-    P.Session.SetHandler(Rps::MsgCvarSync,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgCvarSync, D, N); });
-    P.Session.SetHandler(Rps::MsgFingerprint,
-                         [&P](const uint8_t* D, std::size_t N) { P.Lp.OnMessage(Rps::MsgFingerprint, D, N); });
-#endif
+    // #147/#112: the workbench must carry the SAME message set as a phone, or a bug in the cvar-sync
+    // / fingerprint path is invisible in the two-window loopback (its whole point). #160 makes that
+    // literal — one shared routing table instead of a per-main copy.
+    Rps::RouteSessionToPeer(P.Session, P.Lp);
     // On a reconnect (blip or cold rejoin), offer our history so the peer that's behind
     // rebuilds and both resume in lockstep (proven by rps_net_tests; fires on the phones
     // over real BLE — the loopback never actually disconnects).
@@ -1292,24 +1281,12 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
     Lur::Net::Session Session;
     Rps::LockstepPeer Lp;
     const std::string Guid = "rps-pc-ble-peer";  // stable; the phone's GUID orders the teams
-    Session.SetHandler(Rps::MsgInput,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgInput, D, N); });
-    Session.SetHandler(Rps::MsgAnchor,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgAnchor, D, N); });
-    Session.SetHandler(Rps::MsgResyncChunk,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
-#if LUR_INTERNAL
-    // #147: the gameplay-CVar sync + build fingerprint (#112) were wired on the Android peer only,
-    // so this rig peer DROPPED the phone's MsgCvarSync and never sent its own — and the desktop
-    // DOES load rps-cvars.cfg (above), so a tuned PC vs an untuned phone simulated different Cv
-    // and desynced at the first anchor. Both halves of the exchange must exist on every peer.
-    Session.SetHandler(Rps::MsgCvar,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgCvar, D, N); });
-    Session.SetHandler(Rps::MsgCvarSync,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgCvarSync, D, N); });
-    Session.SetHandler(Rps::MsgFingerprint,
-                       [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(Rps::MsgFingerprint, D, N); });
-#endif
+    // #147: the gameplay-CVar sync + build fingerprint (#112) were once wired on the Android peer
+    // only, so this rig peer DROPPED the phone's MsgCvarSync and never sent its own — and the desktop
+    // DOES load rps-cvars.cfg (above), so a tuned PC vs an untuned phone simulated different Cv and
+    // desynced at the first anchor. Both halves must exist on every peer, which is why the set is now
+    // one shared table (Rps/SessionWiring.h) rather than a copy per main.
+    Rps::RouteSessionToPeer(Session, Lp);
     Session.SetResyncHandler([&Lp] { Lp.BeginResync(); });
     Session.Start(&Ble, Guid);
     Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", Guid.c_str());

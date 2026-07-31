@@ -17,6 +17,7 @@
 #include "Rps/EventCodec.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #159: two peers recording one linked match, then compared
+#include "Rps/SessionWiring.h" // the mains' Session->LockstepPeer routing table, shared verbatim
 
 using namespace Rps;
 using Lur::Serialization::BitReader;
@@ -586,16 +587,19 @@ static void TestLinkedRecordingsMatchAcrossPeers() {
     A.SetTickSink(Sink, &Ca);
     B.SetTickSink(Sink, &Cb);
     PlaceCampsAndStart(A, B, Qa, Qb);
-    // NOT DriveInput: its tick-3 event re-places the opening camp at the same coordinates, and the
-    // receiver's IsPeerCampRepeat then mistakes that PRODUCED batch for the pre-match camp re-send
-    // and drops it — which both loses an event from the peer's stream and skews every later peer
-    // batch by one tick. That is a real bug (filed as #160, found by this very comparison) and not
-    // what this test is about, so the driver here places at DISTINCT spots.
+    // This driver DELIBERATELY re-places the opening camp at its exact coordinates (I % 19 == 5) as
+    // well as at distinct spots. That collision is what #160 was: the receiver classified a produced
+    // batch as the pre-match camp re-send by reading its payload, dropped it, and skewed the peer's
+    // stream for the rest of the match. The camp exchange has its own message type now, so a produced
+    // tick can no longer be mistaken for one — and this comparison is what proves it, since it was
+    // this comparison that found the bug.
     auto Drive = [](LockstepPeer& P, uint8_t Team, int I) {
         if (I % 17 == 3) P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
         if (I % 23 == 7)
             P.QueueLocalEvent(
                 InputEvent::Place(Team, UnitMiner, F(19 + (I % 5) * 3), CampTestY(Team)));
+        if (I % 19 == 5)
+            P.QueueLocalEvent(InputEvent::Place(Team, UnitMiner, CampTestX, CampTestY(Team)));
     };
     CHECK(Ra.Begin(Pa.c_str(), A.GetSim(), /*tier*/ -1, /*human*/ 0));
     CHECK(Rb.Begin(Pb.c_str(), B.GetSim(), /*tier*/ -1, /*human*/ 1));
@@ -649,6 +653,73 @@ static void TestLinkedRecordingsMatchAcrossPeers() {
     CHECK(La.Seed == Lb.Seed);
 }
 #endif  // LUR_INTERNAL (MatchRecorder is dev tooling)
+
+// ---- #160: a PRODUCED tick that LOOKS like the pre-match camp re-send must not be dropped ----
+// The #149 re-send used to be recognised by its PAYLOAD — "a one-event batch equal to the peer's
+// opening camp" — and dropped without buffering. A player re-placing a camp at the coordinates their
+// opening camp already occupies produces exactly those bytes, so a real input tick was silently
+// discarded, and that shifts PeerEvents' index==tick alignment for the REST OF THE MATCH.
+//
+// What this asserts is alignment, not hashes: re-placing onto an occupied square is rejected by the
+// sim, so the two states stay identical by luck while the peer's stream sits a tick early — which is
+// why the bug survived every existing test and had to be found by diffing two recordings. Any event
+// whose effect depends on WHEN it lands would have diverged the sims from that point.
+static void TestProducedCampLookAlikeIsNotDropped() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x160, 0, Enqueue, &Qa);
+    B.Init(0x160, 1, Enqueue, &Qb);
+    A.SetRecording(true);
+    B.SetRecording(true);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    // The collision, then a DISTINGUISHABLE event a few ticks later: the second one is what makes
+    // the one-tick skew visible rather than just the lost event.
+    const int CollideAt = 6, MarkerAt = 11;
+    for (int I = 0; I < 60; ++I) {
+        if (I == CollideAt) {
+            A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+            B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
+        }
+        if (I == MarkerAt) {
+            A.QueueLocalEvent(InputEvent::Queue(0, 0, 3));
+            B.QueueLocalEvent(InputEvent::Queue(1, 1, 3));
+        }
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    for (int I = 0; I < 6; ++I) {  // settle to a common frontier
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+
+    // TICK-EXACT equality of the two executed streams. Both peers apply the same combined batch on
+    // the same tick, so anything else is a lost or misaligned frame.
+    const std::vector<std::vector<InputEvent>>& Ra = A.RecordedEvents();
+    const std::vector<std::vector<InputEvent>>& Rb = B.RecordedEvents();
+    CHECK(Ra.size() == Rb.size());
+    bool Same = Ra.size() == Rb.size();
+    for (std::size_t T = 0; Same && T < Ra.size(); ++T) {
+        Same = Ra[T].size() == Rb[T].size();
+        for (std::size_t K = 0; Same && K < Ra[T].size(); ++K)
+            Same = Ra[T][K].Kind == Rb[T][K].Kind && Ra[T][K].Team == Rb[T][K].Team &&
+                   Ra[T][K].Type == Rb[T][K].Type && Ra[T][K].X == Rb[T][K].X &&
+                   Ra[T][K].Y == Rb[T][K].Y;
+    }
+    CHECK(Same);
+    // And both re-places reached both peers: under the bug each peer executed only its OWN, so this
+    // counts 3 (two opening camps + one own re-place) instead of 4.
+    int Places = 0;
+    for (const std::vector<InputEvent>& Batch : Ra)
+        for (const InputEvent& E : Batch)
+            if (E.Kind == EventPlaceBuilding && E.X == CampTestX.Raw) ++Places;
+    CHECK(Places == 4);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
 
 // ---- A DESYNC MUST NOT FREEZE THE GAME: it declares a draw and the session recovers ----
 // Every other test here asserts a desync does NOT happen, which is the right thing to assert and is
@@ -833,18 +904,10 @@ struct SessPeer {
 static void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
 }
-static void RouteToPeer(Lur::Net::Session& S, LockstepPeer& Lp) {
-    S.SetHandler(MsgInput,  [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgInput, D, N); });
-    S.SetHandler(MsgAnchor, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgAnchor, D, N); });
-    S.SetHandler(MsgResyncChunk, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgResyncChunk, D, N); });
-#if LUR_INTERNAL
-    // The dev-only slots too — every main registers these, so the test composition must match or
-    // it silently proves less than it looks like it does.
-    S.SetHandler(MsgCvar,        [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgCvar, D, N); });
-    S.SetHandler(MsgCvarSync,    [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgCvarSync, D, N); });
-    S.SetHandler(MsgFingerprint, [&Lp](const uint8_t* D, std::size_t N) { Lp.OnMessage(MsgFingerprint, D, N); });
-#endif
-}
+// The mains' routing table verbatim (Rps/SessionWiring.h), not a hand-rolled copy — this test file
+// used to carry a fifth copy, and a test composition that differs from the shipping one silently
+// proves less than it looks like it does (#147).
+static void RouteToPeer(Lur::Net::Session& S, LockstepPeer& Lp) { RouteSessionToPeer(S, Lp); }
 
 #if LUR_INTERNAL
 // ---- #147: the cvar sync ACROSS A REAL SESSION, which is what the phones run. Every other cvar
@@ -1173,6 +1236,7 @@ int main() {
 #if LUR_INTERNAL
     TestLinkedRecordingsMatchAcrossPeers();
 #endif
+    TestProducedCampLookAlikeIsNotDropped();     // #160
     TestDesyncDeclaresADrawAndRecovers();
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();

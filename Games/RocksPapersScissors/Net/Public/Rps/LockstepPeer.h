@@ -18,6 +18,13 @@ namespace Rps {
 constexpr Lur::Net::EMsgType MsgInput       = Lur::Net::EMsgType::Game0;
 constexpr Lur::Net::EMsgType MsgAnchor      = Lur::Net::EMsgType::Game1;
 constexpr Lur::Net::EMsgType MsgResyncChunk = Lur::Net::EMsgType::Game2;
+// #160: the pre-match opening camp (and its #149 re-sends) — a channel of its own, NOT a MsgInput
+// batch. Splitting it is the whole fix: the two used to share MsgInput and be told apart by reading
+// the payload, and a produced tick can be byte-identical to a re-send (a player re-placing a camp
+// where theirs already stands). Now MsgInput means "a produced tick" with no exceptions, so the
+// receiver never has to guess, and MsgCamp is idempotent by construction — it is never buffered as
+// a tick, so any number of re-sends cannot shift the timeline.
+constexpr Lur::Net::EMsgType MsgCamp        = Lur::Net::EMsgType::Game6;
 #if LUR_INTERNAL
 // Dev-only gameplay-CVar sync (#112, Addendum C): a balance knob tweaked in the console/
 // panel is stamped a few exec ticks ahead, sent, and applied on BOTH peers at that tick,
@@ -184,10 +191,7 @@ private:
     // the merged cvar set — so the post-match restart reuses one code path with Init and cannot
     // forget a field. Init calls it too; only Init resets MatchIndex_.
     void BeginMatch(uint64_t Seed);
-    // #149: true when a pre-match batch is only a repeat of the camp we already hold (the peer's
-    // periodic re-send) — dropped instead of buffered as input.
-    bool IsPeerCampRepeat(const InputEvent* Batch, int Count) const;
-    void SendLocalCamp();   // #149: our camp as a framed MsgInput batch (first send + re-sends)
+    void SendLocalCamp();   // #149: our camp on MsgCamp (first send + re-sends)
 #if LUR_INTERNAL
     // Gameplay-CVar overrides waiting to be applied, keyed by the exec tick they land on
     // (both peers hold the SAME tick->overrides once the MsgCvar is delivered). Applied to

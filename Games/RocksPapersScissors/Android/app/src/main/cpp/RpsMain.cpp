@@ -37,6 +37,7 @@
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
 #include "Rps/LockstepPeer.h"
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
+#include "Rps/SessionWiring.h" // the ONE Session->LockstepPeer routing table (#160)
 #include "Rps/Snapshot.h"
 #include "Rps/SoloInput.h"
 #include "Rps/Tunables.h"
@@ -407,23 +408,12 @@ void android_main(android_app* App) {
     auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
     State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
 
-    // Route the framed game messages to the lockstep peer; a reconnect triggers resync.
-    State.Session.SetHandler(Rps::MsgInput,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgInput, D, N); });
-    State.Session.SetHandler(Rps::MsgAnchor,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgAnchor, D, N); });
-    State.Session.SetHandler(Rps::MsgResyncChunk,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgResyncChunk, D, N); });
+    // Route the framed game messages to the lockstep peer; a reconnect triggers resync. The message
+    // SET lives in Rps/SessionWiring.h — one definition shared with the iOS/desktop mains and the
+    // test harness, because an unregistered slot is dropped silently at both ends (#147) and four
+    // hand-maintained copies is how three of them end up stale.
+    Rps::RouteSessionToPeer(State.Session, State.Lp);
     State.Session.SetResyncHandler([&State] { State.Lp.BeginResync(); });
-#if LUR_INTERNAL
-    // Dev-only gameplay-CVar sync + build-fingerprint (#112) over the framed slots.
-    State.Session.SetHandler(Rps::MsgCvar,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgCvar, D, N); });
-    State.Session.SetHandler(Rps::MsgCvarSync,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgCvarSync, D, N); });
-    State.Session.SetHandler(Rps::MsgFingerprint,
-                             [&State](const uint8_t* D, std::size_t N) { State.Lp.OnMessage(Rps::MsgFingerprint, D, N); });
-#endif
     State.Session.Start(Transport, State.DeviceId);
     LOGI("RPS session started (device id %zuB)", State.DeviceId.size());
 

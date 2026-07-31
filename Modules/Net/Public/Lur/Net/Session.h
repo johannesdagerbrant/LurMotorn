@@ -27,11 +27,13 @@ enum class EMsgType : uint8_t {
     Game2       = 5,
     Keepalive   = 6,  // detect a silently dropped BLE link
     Sync        = 7,  // full game-state resync after a reconnect (game-defined payload)
-    Game3       = 8,  // extra generic game slots. DEV-ONLY in practice: the RTS aliases them
-    Game4       = 9,  // to MsgCvar / MsgCvarSync / MsgFingerprint (#112, gameplay-CVar sync
+    Game3       = 8,  // extra generic game slots. 8..10 are DEV-ONLY in practice: the RTS aliases
+    Game4       = 9,  // them to MsgCvar / MsgCvarSync / MsgFingerprint (#112, gameplay-CVar sync
     Game5       = 10, // + the build-fingerprint gate), sent/accepted only under LUR_INTERNAL.
                       // Shipping never emits them and rejects them as unknown, so the
                       // shipping wire is untouched — ProtocolVersion stays 5.
+    Game6       = 11, // SHIPPING slot: the RTS aliases it to MsgCamp, the pre-match opening-camp
+                      // exchange (#160). Costs a wire id on purpose — see ProtocolVersion v7.
 };
 
 // Protocol version negotiated in Hello. Bump on any wire-format change so two
@@ -51,7 +53,15 @@ enum class EMsgType : uint8_t {
 //     mask to a framed input-EVENT batch (place/queue), and the resync history now carries
 //     event batches. A genuine game-wire-format change, so a mixed-build session must be
 //     refused at the Hello handshake rather than desync mid-match.
-inline constexpr uint8_t ProtocolVersion = 6;
+// v7: RPS pre-match camp exchange moved to its own slot, Game6/MsgCamp (#160). It used to
+//     travel as a MsgInput batch and be told apart from produced input by INSPECTING THE
+//     PAYLOAD ("a one-event batch equal to the peer's opening camp"), which a real produced
+//     tick can match exactly — a player re-placing a camp where theirs already stands. That
+//     batch was dropped as a re-send, permanently skewing the peer's input stream by one tick.
+//     A separate slot cannot be fooled by a payload coincidence; the ambiguity is gone rather
+//     than narrowed. A v6 peer would read MsgCamp as an unknown type and never ready, so the
+//     Hello handshake must refuse the pair.
+inline constexpr uint8_t ProtocolVersion = 7;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {
@@ -188,7 +198,7 @@ private:
     // converged their cvars (#147) and why a mismatched build was never actually refused (#112):
     // the receiver logged the datagram, then threw it away one line later. DERIVED from the enum
     // so adding a slot can't reintroduce it.
-    static constexpr int         MaxMsgTypes     = static_cast<int>(EMsgType::Game5) + 1;
+    static constexpr int         MaxMsgTypes     = static_cast<int>(EMsgType::Game6) + 1;
     static constexpr std::size_t GuidLen          = 32;  // 128-bit id as hex (Lur::Save::DeviceIdHexLen)
 
     // Real-time link timing (nanoseconds). Frame-rate-independent: derived from the
