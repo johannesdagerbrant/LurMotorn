@@ -515,6 +515,12 @@ void android_main(android_app* App) {
         Rps::MatchRecorder LinkedRec;
         int LinkedMatchNo = 0;
         std::string LinkedRecFile;
+        // Which Lp match index the OPEN recording belongs to. Its own variable, not the tally latch:
+        // keying the recorder off LinkedScoredIdx opened two files a millisecond apart for every match
+        // (the entry-site Begin, then the latch's initial 0xFFFFFFFF != MatchIndex 0 firing again on
+        // the first tick), leaving an orphan .rec that ended before it recorded anything. Whoever
+        // pulls the files then has to guess which of the two is the match.
+        uint32_t LinkedRecIdx = 0xFFFFFFFFu;
         struct LinkedRecCtx { Rps::MatchRecorder* Rec; };
         LinkedRecCtx LinkedCtx{&LinkedRec};
         State.Lp.SetTickSink(
@@ -527,9 +533,10 @@ void android_main(android_app* App) {
                 if (Tick % 10 == 0) R->Hash(Tick, Hash);
             },
             &LinkedCtx);
-        auto LinkedRecBegin = [&State, &LinkedRec, &LinkedMatchNo, &LinkedRecFile] {
+        auto LinkedRecBegin = [&State, &LinkedRec, &LinkedMatchNo, &LinkedRecFile, &LinkedRecIdx] {
             LinkedRec.End(State.Lp.GetSim());   // safe if never opened; finalises a previous match
             LinkedRecFile.clear();
+            LinkedRecIdx = State.Lp.MatchIndex();
             if (!Rps::CvFlightRecorder.Get()) return;
             const std::time_t Now = std::time(nullptr);
             std::tm Tm{};
@@ -857,10 +864,12 @@ void android_main(android_app* App) {
                 if (LinkedScoredIdx != State.Lp.MatchIndex()) {
                     LinkedScoredIdx = State.Lp.MatchIndex();
                     LinkedScored = false;
-#if LUR_INTERNAL
-                    LinkedRecBegin();   // #159: a restart is a new match -> a new recording
-#endif
                 }
+#if LUR_INTERNAL
+                // #159: a restart is a new match -> a new recording. Keyed on the RECORDER's own
+                // index (see LinkedRecIdx) so the entry-site Begin and this one can never both fire.
+                if (LinkedRecIdx != State.Lp.MatchIndex()) LinkedRecBegin();
+#endif
                 // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
                 if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {
                     LinkedScored = true;
