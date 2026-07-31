@@ -252,6 +252,14 @@ void LockstepPeer::Execute() {
 #endif
         TheSim.StepEvents(Combined, NC);
         if (Recording) RecEvents.emplace_back(Combined, Combined + NC);
+#if LUR_INTERNAL
+        // #159: hand the executed tick to whoever is recording it. T is the tick these events were
+        // applied ON (TheSim.Tick has already advanced past it), matching MatchRecord's convention.
+        // The hash is computed here rather than by the sink so the sink never has to reach back into
+        // this object mid-Execute — and only when someone is actually listening, so a match with no
+        // recorder attached pays a null check.
+        if (Sink_ != nullptr) Sink_(SinkCtx_, T, Combined, NC, TheSim.StateHash());
+#endif
         // Normal cadence: anchor every 10th tick. During a burst, suppress these and
         // emit a single anchor at the frontier below (avoids flooding the GATT queue).
         if (!Burst && TheSim.Tick % 10 == 0) EmitAnchor();

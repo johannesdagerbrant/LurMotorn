@@ -742,6 +742,119 @@ int RunAiBeginner(Rps::EAiTier Tier, uint64_t BaseSeed, int Matches, int MaxTick
 // it. Prints the recorded live census (which carries the AI's state + countered type, unavailable
 // after the fact) alongside a replayed one at the same cadence, then the event profile: what each
 // side spent its decisions on, which is where a human's edge over the AI shows up.
+// ---- --recdiff A.rec B.rec: compare TWO peers' recordings of the SAME linked match (#159) ----
+// The two phones execute the identical combined event stream, so the pair of files answers the one
+// question a single recording cannot: when they disagreed, WHO was wrong about what?
+//
+//   * the event streams differ           -> the wire lost or duplicated a frame; the first differing
+//                                           tick is where, and the two lines say what was missing;
+//   * the streams agree, the hashes not  -> the sims computed different results from identical input,
+//                                           i.e. nondeterminism, and the first differing anchor
+//                                           brackets it to within 10 ticks.
+// Those are different bugs with different fixes, and telling them apart used to require guessing.
+//
+// Text-diffing the files with `diff` also works and is the reason the format is line-oriented — but
+// the two files legitimately differ in the header (each peer records its OWN team) and in census
+// lines (wall-clock timed, so they land on different ticks). This compares only what MUST match.
+int RunRecDiff(const char* PathA, const char* PathB) {
+    const Rps::MatchRecording A = Rps::LoadMatchRecording(PathA);
+    const Rps::MatchRecording B = Rps::LoadMatchRecording(PathB);
+    if (!A.Ok || !B.Ok) {
+        Lur::Log::Error("recdiff: %s is not a valid recording", !A.Ok ? PathA : PathB);
+        return 1;
+    }
+    Lur::Log::Info("recdiff A=%s B=%s", PathA, PathB);
+    Lur::Log::Info("  A: seed=%llx human=team%u build=%s events=%zu hashes=%zu end=tick %u result=%d",
+                   static_cast<unsigned long long>(A.Seed), static_cast<unsigned>(A.HumanTeam),
+                   A.BuildFp.c_str(), A.Events.size(), A.Hashes.size(), A.EndTick, A.Result);
+    Lur::Log::Info("  B: seed=%llx human=team%u build=%s events=%zu hashes=%zu end=tick %u result=%d",
+                   static_cast<unsigned long long>(B.Seed), static_cast<unsigned>(B.HumanTeam),
+                   B.BuildFp.c_str(), B.Events.size(), B.Hashes.size(), B.EndTick, B.Result);
+    int Problems = 0;
+    // Preconditions first: these are not "divergence", they are "you are comparing the wrong things",
+    // and reporting a tick number for them would send someone hunting a sim bug that isn't there.
+    if (A.Seed != B.Seed) { Lur::Log::Error("  SEED differs — not the same match"); ++Problems; }
+    if (A.BuildFp != B.BuildFp)
+        Lur::Log::Error("  BUILD differs (%s vs %s) — a divergence below may be nothing but that",
+                        A.BuildFp.c_str(), B.BuildFp.c_str());
+    if (A.HumanTeam == B.HumanTeam)
+        Lur::Log::Info("  note: both files record human=team%u — same-side captures, so these are "
+                       "probably not the two peers of one match",
+                       static_cast<unsigned>(A.HumanTeam));
+    // The latched CVar set: if the two peers simulated on different tunables, EVERYTHING after tick 0
+    // diverges and the first differing tick is meaningless. Check it before anything else.
+    for (uint8_t Id = 0; Id < Rps::CvIdCount; ++Id) {
+        const int32_t Ra = Rps::CvOverrideRaw(A.Cv, Id), Rb = Rps::CvOverrideRaw(B.Cv, Id);
+        if (Ra != Rb) {
+            Lur::Log::Error("  CV id %u differs: A=%d B=%d — the peers did not agree on tunables",
+                            static_cast<unsigned>(Id), Ra, Rb);
+            ++Problems;
+        }
+    }
+    // EVENTS: compare per tick, since a tick with no events writes no line at all.
+    auto EventsAt = [](const Rps::MatchRecording& R, std::size_t& I, uint32_t Tick) {
+        std::vector<Rps::InputEvent> Out;
+        while (I < R.Events.size() && R.Events[I].Tick == Tick) Out.push_back(R.Events[I++].Event);
+        return Out;
+    };
+    const uint32_t Last = A.EndTick > B.EndTick ? A.EndTick : B.EndTick;
+    std::size_t Ia = 0, Ib = 0;
+    int32_t FirstEventDiff = -1;
+    for (uint32_t T = 0; T <= Last; ++T) {
+        while (Ia < A.Events.size() && A.Events[Ia].Tick < T) ++Ia;
+        while (Ib < B.Events.size() && B.Events[Ib].Tick < T) ++Ib;
+        const std::vector<Rps::InputEvent> Ea = EventsAt(A, Ia, T), Eb = EventsAt(B, Ib, T);
+        bool Same = Ea.size() == Eb.size();
+        for (std::size_t K = 0; Same && K < Ea.size(); ++K)
+            Same = Ea[K].Team == Eb[K].Team && Ea[K].Kind == Eb[K].Kind && Ea[K].Type == Eb[K].Type &&
+                   Ea[K].X == Eb[K].X && Ea[K].Y == Eb[K].Y;
+        if (!Same) {
+            FirstEventDiff = static_cast<int32_t>(T);
+            Lur::Log::Error("  EVENTS differ at tick %u: A has %zu, B has %zu — the WIRE dropped or "
+                            "duplicated a frame (not a sim bug)", T, Ea.size(), Eb.size());
+            for (const Rps::InputEvent& E : Ea)
+                Lur::Log::Info("    A: team=%u kind=%u type=%u x=%d y=%d", static_cast<unsigned>(E.Team),
+                               static_cast<unsigned>(E.Kind), static_cast<unsigned>(E.Type), E.X, E.Y);
+            for (const Rps::InputEvent& E : Eb)
+                Lur::Log::Info("    B: team=%u kind=%u type=%u x=%d y=%d", static_cast<unsigned>(E.Team),
+                               static_cast<unsigned>(E.Kind), static_cast<unsigned>(E.Type), E.X, E.Y);
+            ++Problems;
+            break;
+        }
+    }
+    // HASHES: only meaningful once the inputs are known identical up to that tick, so this is
+    // reported second and explicitly framed against the event result.
+    int32_t FirstHashDiff = -1;
+    for (const Rps::RecordedHash& Ha : A.Hashes) {
+        for (const Rps::RecordedHash& Hb : B.Hashes) {
+            if (Hb.Tick != Ha.Tick) continue;
+            if (Ha.Hash != Hb.Hash) {
+                FirstHashDiff = static_cast<int32_t>(Ha.Tick);
+                Lur::Log::Error("  HASH differs at tick %u: A=%016llx B=%016llx", Ha.Tick,
+                                static_cast<unsigned long long>(Ha.Hash),
+                                static_cast<unsigned long long>(Hb.Hash));
+                ++Problems;
+            }
+            break;
+        }
+        if (FirstHashDiff >= 0) break;
+    }
+    if (A.Hashes.empty() || B.Hashes.empty())
+        Lur::Log::Info("  note: no hash lines in %s — a solo or pre-#159 recording, so only the event "
+                       "streams could be compared", A.Hashes.empty() ? PathA : PathB);
+    // The verdict, stated so it points at ONE of the two bugs rather than at "something is wrong".
+    if (FirstEventDiff >= 0)
+        Lur::Log::Info("VERDICT: input streams diverged first, at tick %d. Look at the transport, not "
+                       "the sim.", FirstEventDiff);
+    else if (FirstHashDiff >= 0)
+        Lur::Log::Info("VERDICT: identical inputs, state diverged by tick %d (so between tick %d and "
+                       "%d). The sim is not deterministic across these two builds/platforms.",
+                       FirstHashDiff, FirstHashDiff - 10, FirstHashDiff);
+    else if (Problems == 0)
+        Lur::Log::Info("VERDICT: the two recordings agree on every compared tick.");
+    return Problems == 0 ? 0 : 2;
+}
+
 int RunReplay(const char* Path, int EveryTicks) {
     const Rps::MatchRecording R = Rps::LoadMatchRecording(Path);
     if (!R.Ok) {
@@ -1273,6 +1386,8 @@ int main(int argc, char** argv) {
     Rps::EAiTier AiDiagTier1 = Rps::EAiTier::Medium;  // --aidiag a:b -> team 1's tier
     int DiagEvery = 300;                         //   census cadence in ticks (300 = every 30 s)
     const char* ReplayPath = nullptr;            // #144 --replay <file>: read a device recording
+    const char* RecDiffA = nullptr;               // #159 --recdiff a.rec b.rec: two peers, one match
+    const char* RecDiffB = nullptr;
     Rps::EAiTier AiVsA = Rps::EAiTier::Hard, AiVsB = Rps::EAiTier::Easy;
     int Matches = 9;
     int MaxTicks = 6000;
@@ -1322,6 +1437,10 @@ int main(int argc, char** argv) {
         }
         else if (A == "--every" && I + 1 < argc) DiagEvery = std::atoi(argv[++I]);
         else if (A == "--replay" && I + 1 < argc) ReplayPath = argv[++I];  // #144 read a device recording
+        else if (A == "--recdiff" && I + 2 < argc) {   // #159 compare two peers' recordings
+            RecDiffA = argv[++I];
+            RecDiffB = argv[++I];
+        }
         else if (A == "--matches" && I + 1 < argc) Matches = std::atoi(argv[++I]);
         else if (A == "--maxticks" && I + 1 < argc) MaxTicks = std::atoi(argv[++I]);
         else if (A == "--flockdemo") { Solo = true; FlockDemo = true; }  // #97 visual tuning (combat ON)
@@ -1338,6 +1457,7 @@ int main(int argc, char** argv) {
     }
 
 #if LUR_INTERNAL
+    if (RecDiffA != nullptr && RecDiffB != nullptr) return RunRecDiff(RecDiffA, RecDiffB);
     if (ReplayPath != nullptr) return RunReplay(ReplayPath, DiagEvery);
 #endif
     if (AiDiag) return RunAiDiag(AiTier, AiDiagTier1, Seed, MaxTicks, DiagEvery);

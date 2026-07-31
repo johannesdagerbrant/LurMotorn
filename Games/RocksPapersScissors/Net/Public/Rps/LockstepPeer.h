@@ -151,6 +151,24 @@ public:
     // desync. Both peers execute the SAME stream, so either peer's recording replays both.
     void SetRecording(bool On) { Recording = On; }
     uint64_t Seed() const { return TheSim.Seed; }
+
+#if LUR_INTERNAL
+    // ---- Per-tick sink: what puts a LINKED match on disk (#159) ----
+    // Called immediately after each tick's COMBINED batch is applied, with the tick it was applied
+    // ON and the resulting state hash. A main hands this to a MatchRecorder; the netcode itself
+    // never touches the filesystem, exactly as the solo path keeps that policy in the main.
+    //
+    // Why a sink instead of letting the caller walk RecordedEvents(): the index-to-tick mapping is
+    // an assumption, and a resync re-bases the timeline underneath it. The sink carries the tick
+    // from the sim that just stepped it, so it cannot drift — and it delivers the hash at the same
+    // moment, which is the whole point of recording two peers. Identical event streams with
+    // diverging hashes is nondeterminism; differing streams is a lost or duplicated frame. Those
+    // are different bugs and the pair of files tells them apart at a glance.
+    using TickSink = void (*)(void* Ctx, uint32_t Tick, const InputEvent* Batch, int Count,
+                              uint64_t StateHash);
+    // Survives a match restart (like Send/Ctx): it is app wiring, not per-match state.
+    void SetTickSink(TickSink S, void* SinkCtx) { Sink_ = S; SinkCtx_ = SinkCtx; }
+#endif  // LUR_INTERNAL — the recorder it feeds is dev tooling, so the seam goes with it
     // #137: the executed COMBINED per-tick event batch (team0's events then team1's) — one
     // stream now (StepEvents takes one batch), replacing the two mask vectors. Replay feeds
     // each tick's batch back through StepEvents on a fresh Sim to a hash-identical state.
@@ -224,6 +242,10 @@ private:
 
     bool Recording = false;
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)
+#if LUR_INTERNAL
+    TickSink Sink_ = nullptr;                        // #159: per-tick recording sink (a main's recorder)
+    void*    SinkCtx_ = nullptr;
+#endif
 
     bool Awaiting = false;                            // in a resync exchange: don't produce/execute yet
     uint64_t AwaitingNs = 0;                          // #148: how long we've been holding (stall bound)

@@ -502,6 +502,48 @@ void android_main(android_app* App) {
             RecCensusNs = 0;
             LOGI("REC started -> %s", SoloRecFile.c_str());
         };
+        // ---- LINKED matches are recorded too (#159) ----
+        // A linked match wrote nothing, which made the 2026-07-30 desync unreproducible BY
+        // CONSTRUCTION: the one match type where two machines can disagree was the one type with no
+        // record of what either machine did. Both phones now write their own file for the same match;
+        // because both execute the identical combined stream, diffing the two files says whether the
+        // wire lost a frame (the `e` lines differ) or the sims computed different results from the
+        // same input (the `e` lines agree and the `h` hashes diverge).
+        //
+        // Fed by LockstepPeer's per-tick sink rather than by polling RecordedEvents(), so the tick
+        // numbers come from the sim that stepped them and a resync re-base cannot slide them.
+        Rps::MatchRecorder LinkedRec;
+        int LinkedMatchNo = 0;
+        std::string LinkedRecFile;
+        struct LinkedRecCtx { Rps::MatchRecorder* Rec; };
+        LinkedRecCtx LinkedCtx{&LinkedRec};
+        State.Lp.SetTickSink(
+            [](void* C, uint32_t Tick, const Rps::InputEvent* Batch, int Count, uint64_t Hash) {
+                Rps::MatchRecorder* R = static_cast<LinkedRecCtx*>(C)->Rec;
+                R->Events(Tick, Batch, Count);
+                // One hash per ANCHOR cadence, not per tick: it is the cadence the netcode already
+                // cross-checks on, so the two peers' files land hashes on identical tick numbers and
+                // the diff lines up without interpolation.
+                if (Tick % 10 == 0) R->Hash(Tick, Hash);
+            },
+            &LinkedCtx);
+        auto LinkedRecBegin = [&State, &LinkedRec, &LinkedMatchNo, &LinkedRecFile] {
+            LinkedRec.End(State.Lp.GetSim());   // safe if never opened; finalises a previous match
+            LinkedRecFile.clear();
+            if (!Rps::CvFlightRecorder.Get()) return;
+            const std::time_t Now = std::time(nullptr);
+            std::tm Tm{};
+            localtime_r(&Now, &Tm);
+            char Stamp[24];
+            std::strftime(Stamp, sizeof(Stamp), "%Y%m%d-%H%M%S", &Tm);
+            // "-vs-" in the name so a linked capture is never confused with a solo one when both are
+            // pulled off the device together.
+            LinkedRecFile = State.DataDir + "/rps-vs-" + Stamp + "-" +
+                            std::to_string(++LinkedMatchNo) + ".rec";
+            LinkedRec.Begin(LinkedRecFile.c_str(), State.Lp.GetSim(), /*tier*/ -1,
+                            State.LinkedTeam.load(std::memory_order_relaxed));
+            LOGI("REC linked -> %s", LinkedRecFile.c_str());
+        };
 #endif
 #if LUR_INTERNAL
         // Developer-facing (stays LUR_INTERNAL, so a dev build a human drives still has it):
@@ -778,6 +820,11 @@ void android_main(android_app* App) {
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);
                 State.Linked.store(true, std::memory_order_release);  // glue applies the view flip
                 LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
+#if LUR_INTERNAL
+                // #159: open this match's recording. After LinkedTeam is stored, since the header
+                // records which team is "us" — that is what lets a reader orient the two files.
+                LinkedRecBegin();
+#endif
             }
 #if LUR_INTERNAL
             // #137b: the linked auto-soak spammed a random press mask, retired with the mask.
@@ -810,12 +857,28 @@ void android_main(android_app* App) {
                 if (LinkedScoredIdx != State.Lp.MatchIndex()) {
                     LinkedScoredIdx = State.Lp.MatchIndex();
                     LinkedScored = false;
+#if LUR_INTERNAL
+                    LinkedRecBegin();   // #159: a restart is a new match -> a new recording
+#endif
                 }
                 // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
                 if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {
                     LinkedScored = true;
                     const uint8_t Me = State.LinkedTeam.load(std::memory_order_relaxed);
                     const uint8_t R = State.Lp.GetSim().Result;
+#if LUR_INTERNAL
+                    // #159: close the recording HERE, on the result, not at the next Begin — the end
+                    // line stamps the result and tick, and by the next Begin the sim has already been
+                    // rebuilt for the following match. A desync-declared draw (e6d6abf) lands here
+                    // too, so the file that captured a divergence is always complete.
+                    if (LinkedRec.IsOpen()) {
+                        LinkedRec.Census(State.Lp.GetSim(), Me, /*no AI*/ -1, -1);
+                        LinkedRec.End(State.Lp.GetSim());
+                        LOGI("REC linked match finished: result=%u tick=%u desync=%d -> %s",
+                             static_cast<unsigned>(R), State.Lp.GetSim().Tick,
+                             State.Lp.Desynced() ? 1 : 0, LinkedRecFile.c_str());
+                    }
+#endif
                     // Per-RIVAL and persistent, keyed on the peer's device GUID — so the row reads
                     // "your record against THIS person", not "against whoever is in the room". A
                     // malformed/absent GUID is refused by RecordPeer rather than tallied against a
@@ -861,6 +924,12 @@ void android_main(android_app* App) {
                          static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                          DS.Teams[State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
                          DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0);
+                    // #159: the linked recording's periodic census. It carries the economy snapshot
+                    // AND it is what FLUSHES the file — without it the whole capture sits in the
+                    // stdio buffer until End, so a killed app or a match that never resolves leaves
+                    // nothing on disk. That is the failure mode this recorder exists to survive.
+                    LinkedRec.Census(State.Lp.GetSim(),
+                                     State.LinkedTeam.load(std::memory_order_relaxed), -1, -1);
                     char TraceLine[512];
                     if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0) LOGI("TRACE %s", TraceLine);
                 }

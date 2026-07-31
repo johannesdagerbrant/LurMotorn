@@ -62,6 +62,11 @@ void MatchRecorder::Events(uint32_t Tick, const InputEvent* Batch, int Count) {
     }
 }
 
+void MatchRecorder::Hash(uint32_t Tick, uint64_t StateHash) {
+    if (File_ == nullptr) return;
+    std::fprintf(File_, "h %u %llx\n", Tick, static_cast<unsigned long long>(StateHash));
+}
+
 void MatchRecorder::Census(const Sim& S, uint8_t HumanTeam, int AiState, int AiCounter) {
     if (File_ == nullptr) return;
     const uint8_t Foe = static_cast<uint8_t>(1 - HumanTeam);
@@ -123,6 +128,11 @@ MatchRecording LoadMatchRecording(const char* Path) {
                 E.Y = Y;
                 R.Events.push_back({T, E});
             }
+        } else if (Line[0] == 'h' && Line[1] == ' ') {
+            uint32_t T = 0;
+            unsigned long long H = 0;
+            if (std::sscanf(Line, "h %u %llx", &T, &H) == 2)
+                R.Hashes.push_back({T, static_cast<uint64_t>(H)});
         } else if (Line[0] == 'c' && Line[1] == ' ') {
             RecordedCensus C{};
             if (std::sscanf(Line, "c %u %d %d %d %d %d %d %d %d %d %d", &C.Tick, &C.Gold[0],
@@ -142,6 +152,11 @@ MatchRecording LoadMatchRecording(const char* Path) {
         uint32_t Last = 0;
         if (!R.Events.empty()) Last = R.Events.back().Tick + 1;
         if (!R.Census.empty() && R.Census.back().Tick > Last) Last = R.Census.back().Tick;
+        // Hashes too: a LINKED recording writes one every 10 ticks, so on a quiet stretch they are
+        // the only evidence of how far the match actually got. Without this an abandoned linked
+        // capture replayed to its last INPUT, throwing away every tick after the players stopped
+        // touching the screen — which on a desync is exactly the interesting part.
+        if (!R.Hashes.empty() && R.Hashes.back().Tick > Last) Last = R.Hashes.back().Tick;
         R.EndTick = Last;
     }
     // VERSION 1 IS REFUSED, not tolerated. The 2026-07-30 ladder collapse deleted a 16-entry

@@ -1,8 +1,10 @@
 // Host tests for the RPS lockstep netcode. Starts with the event codec: round-trip,
 // the byte budget (a press/watermark is 1 byte before framing), and fuzz-safety
 // (hostile bytes never crash the decoder). Chess's fuzz_tests as the pattern.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,6 +16,7 @@
 #include "Lur/Transport/Loopback.h"
 #include "Rps/EventCodec.h"
 #include "Rps/LockstepPeer.h"
+#include "Rps/MatchRecord.h"   // #159: two peers recording one linked match, then compared
 
 using namespace Rps;
 using Lur::Serialization::BitReader;
@@ -554,6 +557,99 @@ static void TestBuildFingerprintGate() {
 }
 #endif
 
+#if LUR_INTERNAL
+// ---- #159: two peers recording ONE linked match must produce comparable files ----
+// The point of recording both sides is to diff them, so the property that matters is not "a file
+// exists" but "the two files agree tick for tick". If they can drift for benign reasons the diff is
+// useless as evidence, which is why this asserts equality of both the event stream and the hashes
+// rather than just checking the recorder wrote something.
+static void TestLinkedRecordingsMatchAcrossPeers() {
+    const std::filesystem::path Dir = std::filesystem::temp_directory_path() / "lur-rps-recdiff";
+    std::error_code Ec;
+    std::filesystem::create_directories(Dir, Ec);
+    const std::string Pa = (Dir / "peer-a.rec").string(), Pb = (Dir / "peer-b.rec").string();
+
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x9159, 0, Enqueue, &Qa);
+    B.Init(0x9159, 1, Enqueue, &Qb);
+    MatchRecorder Ra, Rb;
+    // The sink is the shipping wiring the phone mains use — same lambda shape, same 10-tick hash
+    // cadence — so this covers the path a real capture takes and not a test-only shortcut.
+    struct Ctx { MatchRecorder* R; };
+    Ctx Ca{&Ra}, Cb{&Rb};
+    auto Sink = [](void* C, uint32_t Tick, const InputEvent* Batch, int Count, uint64_t Hash) {
+        MatchRecorder* R = static_cast<Ctx*>(C)->R;
+        R->Events(Tick, Batch, Count);
+        if (Tick % 10 == 0) R->Hash(Tick, Hash);
+    };
+    A.SetTickSink(Sink, &Ca);
+    B.SetTickSink(Sink, &Cb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    // NOT DriveInput: its tick-3 event re-places the opening camp at the same coordinates, and the
+    // receiver's IsPeerCampRepeat then mistakes that PRODUCED batch for the pre-match camp re-send
+    // and drops it — which both loses an event from the peer's stream and skews every later peer
+    // batch by one tick. That is a real bug (filed as #160, found by this very comparison) and not
+    // what this test is about, so the driver here places at DISTINCT spots.
+    auto Drive = [](LockstepPeer& P, uint8_t Team, int I) {
+        if (I % 17 == 3) P.QueueLocalEvent(InputEvent::Queue(Team, Team == 0 ? 0 : 1, 5));
+        if (I % 23 == 7)
+            P.QueueLocalEvent(
+                InputEvent::Place(Team, UnitMiner, F(19 + (I % 5) * 3), CampTestY(Team)));
+    };
+    CHECK(Ra.Begin(Pa.c_str(), A.GetSim(), /*tier*/ -1, /*human*/ 0));
+    CHECK(Rb.Begin(Pb.c_str(), B.GetSim(), /*tier*/ -1, /*human*/ 1));
+    for (int I = 0; I < 120; ++I) {
+        Drive(A, 0, I);
+        Drive(B, 1, I);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    for (int I = 0; I < 4; ++I) {   // settle so both drain to the same frontier
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+    CHECK(!A.Desynced() && !B.Desynced());
+    Ra.End(A.GetSim());
+    Rb.End(B.GetSim());
+
+    const MatchRecording La = LoadMatchRecording(Pa.c_str()), Lb = LoadMatchRecording(Pb.c_str());
+    CHECK(La.Ok && Lb.Ok);
+    CHECK(!La.Events.empty());     // a recording of nothing would pass every check below
+    CHECK(!La.Hashes.empty());
+    // TICK-EXACT equality, which is the property a diff needs to be usable as evidence: both peers
+    // execute the same combined batch on the same tick, so the files must agree element for element.
+    // Anything weaker (same events, ±1 tick) would let a real one-tick skew hide — and a skew is a
+    // latent desync generator, since any event whose effect depends on WHEN it lands then applies a
+    // tick apart on the two sims.
+    CHECK(La.Events.size() == Lb.Events.size());
+    bool EventsMatch = La.Events.size() == Lb.Events.size();
+    for (std::size_t I = 0; EventsMatch && I < La.Events.size(); ++I)
+        EventsMatch = La.Events[I].Tick == Lb.Events[I].Tick &&
+                      La.Events[I].Event.Team == Lb.Events[I].Event.Team &&
+                      La.Events[I].Event.Kind == Lb.Events[I].Event.Kind &&
+                      La.Events[I].Event.Type == Lb.Events[I].Event.Type &&
+                      La.Events[I].Event.X == Lb.Events[I].Event.X &&
+                      La.Events[I].Event.Y == Lb.Events[I].Event.Y;
+    CHECK(EventsMatch);
+    CHECK(La.Hashes.size() == Lb.Hashes.size());
+    bool HashesMatch = La.Hashes.size() == Lb.Hashes.size();
+    for (std::size_t I = 0; HashesMatch && I < La.Hashes.size(); ++I)
+        HashesMatch = La.Hashes[I].Tick == Lb.Hashes[I].Tick && La.Hashes[I].Hash == Lb.Hashes[I].Hash;
+    CHECK(HashesMatch);
+    // Hashes land on the ANCHOR cadence, which is what makes them align across peers without any
+    // interpolation — if this drifts, two files can be internally fine yet impossible to compare.
+    for (const RecordedHash& H : La.Hashes) CHECK(H.Tick % 10 == 0);
+    // And the header records each peer's OWN side, which is what orients the pair for a reader.
+    CHECK(La.HumanTeam == 0 && Lb.HumanTeam == 1);
+    CHECK(La.Seed == Lb.Seed);
+}
+#endif  // LUR_INTERNAL (MatchRecorder is dev tooling)
+
 // ---- A DESYNC MUST NOT FREEZE THE GAME: it declares a draw and the session recovers ----
 // Every other test here asserts a desync does NOT happen, which is the right thing to assert and is
 // also exactly why this shipped broken: nothing covered what happens WHEN one does. Observed on two
@@ -1073,6 +1169,9 @@ int main() {
     TestCvarSyncArrivingBeforeInit();
     TestCvarSyncSurvivesResync();
     TestBuildFingerprintGate();
+#endif
+#if LUR_INTERNAL
+    TestLinkedRecordingsMatchAcrossPeers();
 #endif
     TestDesyncDeclaresADrawAndRecovers();
     TestLockstepExecuteCapBounded();

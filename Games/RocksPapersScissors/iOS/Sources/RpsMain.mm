@@ -151,6 +151,15 @@ Rps::Fixed WorldToFixed(float Wv) {
     int _SoloMatchNo;
     uint64_t _RecCensusNs;
     std::string _SoloRecFile;
+    // #159: the LINKED match's recorder. Both phones write their own file for the same match, and
+    // because both execute the identical combined stream the two files can be diffed: `e` lines
+    // differing means the wire lost or duplicated a frame, `e` identical with `h` hashes diverging
+    // means the sims computed different results from the same input. Before this a linked match
+    // wrote nothing, which is why the 2026-07-30 desync could not be chased.
+    Rps::MatchRecorder _LinkedRec;
+    int _LinkedMatchNo;
+    std::string _LinkedRecFile;
+    uint32_t _LinkedRecIdx;    // which Lp match index the open recording belongs to
 #endif
 }
 
@@ -273,6 +282,33 @@ Rps::Fixed WorldToFixed(float Wv) {
     _SoloRec.Begin(_SoloRecFile.c_str(), _SoloSim, Tier, /*human*/ 0);
     _RecCensusNs = 0;
     os_log(OS_LOG_DEFAULT, "OnlyRps: REC started -> %{public}s", _SoloRecFile.c_str());
+}
+
+// One executed tick, straight from LockstepPeer's sink. Hashes go in on the ANCHOR cadence (every
+// 10th tick) — the same cadence the netcode cross-checks on, so both peers' files land hashes on
+// identical tick numbers and a diff lines up without interpolation.
+- (void)recordLinkedTick:(uint32_t)Tick batch:(const Rps::InputEvent*)Batch count:(int)Count
+                    hash:(uint64_t)Hash {
+    _LinkedRec.Events(Tick, Batch, Count);
+    if (Tick % 10 == 0) _LinkedRec.Hash(Tick, Hash);
+}
+
+// Open a recording for the LINKED match that is starting (#159). Same shape as the solo one; the
+// name carries "-vs-" so a linked capture is never mistaken for a solo one when both are pulled off
+// the device together.
+- (void)linkedRecBegin {
+    _LinkedRecFile.clear();
+    _LinkedRecIdx = _Lp.MatchIndex();
+    if (!Rps::CvFlightRecorder.Get()) return;
+    const std::time_t Now = std::time(nullptr);
+    std::tm Tm{};
+    localtime_r(&Now, &Tm);
+    char Stamp[24];
+    std::strftime(Stamp, sizeof(Stamp), "%Y%m%d-%H%M%S", &Tm);
+    _LinkedRecFile = _SaveDir + "/rps-vs-" + Stamp + "-" + std::to_string(++_LinkedMatchNo) + ".rec";
+    // tier -1 = "not an AI match"; the human team is OUR side, which is what orients the file.
+    _LinkedRec.Begin(_LinkedRecFile.c_str(), _Lp.GetSim(), /*tier*/ -1, _Team);
+    os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked -> %{public}s", _LinkedRecFile.c_str());
 }
 #endif
 
@@ -540,6 +576,18 @@ Rps::Fixed WorldToFixed(float Wv) {
             // histories, marker F=0 both ways). After Init so Init can't wipe it.
             _Lp.BeginResync();
             _Started = true; _Scored = false; _ScoredIdx = _Lp.MatchIndex();
+#if LUR_INTERNAL
+            // #159: route every executed tick into the linked recording. The sink is app wiring and
+            // survives match restarts, so it is armed once here; the C function pointer takes `self`
+            // as its context (the ivars are C++ members of this object).
+            _Lp.SetTickSink(
+                [](void* C, uint32_t Tick, const Rps::InputEvent* Batch, int Count, uint64_t Hash) {
+                    RpsViewController* Vc = (__bridge RpsViewController*)C;
+                    [Vc recordLinkedTick:Tick batch:Batch count:Count hash:Hash];
+                },
+                (__bridge void*)self);
+            [self linkedRecBegin];
+#endif
             // The peer's GUID is known now, so show the ALL-TIME record against THIS rival rather
             // than 0-0-0 until the first match of the session ends.
             {
@@ -555,10 +603,28 @@ Rps::Fixed WorldToFixed(float Wv) {
         // #149: one Lp spans many matches now (it holds the win screen, then rebuilds), so the
         // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
         if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }
+#if LUR_INTERNAL
+        // #159: a restart is a new match, so it gets a new recording. Keyed on the match index like
+        // the tally latch above, rather than on a second bool that could fall out of step with it.
+        if (_Started && _LinkedRecIdx != _Lp.MatchIndex()) [self linkedRecBegin];
+#endif
         // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
         if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
             _Scored = true;
             const uint8_t R = _Lp.GetSim().Result;
+#if LUR_INTERNAL
+            // Close the recording on the RESULT, not at the next Begin: the end line stamps the
+            // result and tick, and by the next Begin the sim has been rebuilt for the match after
+            // this one. A desync-declared draw (e6d6abf) lands here too, so the file that captured a
+            // divergence is always complete.
+            if (_LinkedRec.IsOpen()) {
+                _LinkedRec.Census(_Lp.GetSim(), _Team, /*no AI*/ -1, -1);
+                _LinkedRec.End(_Lp.GetSim());
+                os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked match finished: result=%u tick=%u "
+                       "desync=%d -> %{public}s", static_cast<unsigned>(R), _Lp.GetSim().Tick,
+                       _Lp.Desynced() ? 1 : 0, _LinkedRecFile.c_str());
+            }
+#endif
             // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed
             // or absent id rather than inventing a rivalry row, so keep the session count in that case.
             const std::string& PeerGuid = _Session.GetPeerGuid();
@@ -627,6 +693,11 @@ Rps::Fixed WorldToFixed(float Wv) {
                    static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                    DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),
                    _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0));
+            // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
+            // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
+            // stdio buffer until End, so a killed app or a match that never resolves leaves nothing
+            // on disk, which is the exact failure this recorder exists to survive.
+            if (!_SoloActive) _LinkedRec.Census(_Lp.GetSim(), _Team, -1, -1);
         }
     }
 #endif

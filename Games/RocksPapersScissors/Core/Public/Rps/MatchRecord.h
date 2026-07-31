@@ -21,8 +21,19 @@
 //   tier <0|1|2>  human <team>
 //   cv <id> <raw>               # every AffectsGameplay CVar, so replay latches the SAME Cv
 //   e <tick> <team> <kind> <type> <xraw> <yraw>     # one line per event, ticks with none are absent
+//   h <tick> <hex>              # state hash at that tick (linked matches; see below)
 //   c <tick> <g0> <w0> <s0> <b0> <g1> <w1> <s1> <b1> <aistate> <aicounter>   # periodic census
 //   end <result> <tick>
+//
+// The `h` lines are what make TWO recordings of the same match comparable, which is the whole point
+// of recording a linked match on both phones (#159). Both peers execute the identical event stream,
+// so:
+//   * the `e` lines differing  => a frame was lost or duplicated on the wire;
+//   * the `e` lines identical but the `h` lines diverging at tick T => the sims computed different
+//     results from the same input, i.e. nondeterminism, and T is where to look.
+// Those are different bugs with different fixes, and before this the pair of files could not tell
+// them apart. No format-version bump: a new line type is ignored by an older reader (the parser's
+// if-chain simply falls through) and an older file just yields no hashes.
 //
 // VERSION 2 (2026-07-30): the AI ladder went from four rungs to three, which deleted a 16-entry
 // block from the middle of the gameplay CVar X-list — so the wire ids in a `cv <id> <raw>` line no
@@ -59,6 +70,9 @@ public:
     // One tick's COMBINED event batch, exactly as handed to StepEvents. Call after the step so the
     // recorded tick number is the tick those events were applied ON.
     void Events(uint32_t Tick, const InputEvent* Batch, int Count);
+    // The sim's state hash AFTER that tick. Cheap enough to write often; the linked path writes one
+    // per anchor cadence (every 10th tick) so two peers' files align on the same tick numbers.
+    void Hash(uint32_t Tick, uint64_t StateHash);
     // A census line. AiState/AiCounter are the opponent's internals (or -1 when unknown).
     void Census(const Sim& S, uint8_t HumanTeam, int AiState, int AiCounter);
     // Footer + close. Safe to call twice; safe if Begin failed.
@@ -79,6 +93,10 @@ struct RecordedCensus {
     int32_t Gold[2], Workers[2], Soldiers[2], Buildings[2];
     int AiState, AiCounter;
 };
+struct RecordedHash {
+    uint32_t Tick;
+    uint64_t Hash;
+};
 struct MatchRecording {
     int Version = 0;
     std::string BuildFp;
@@ -88,6 +106,7 @@ struct MatchRecording {
     CvSnapshot Cv{};                       // the exact latched set the match ran with
     std::vector<RecordedEvent> Events;     // ascending tick
     std::vector<RecordedCensus> Census;
+    std::vector<RecordedHash> Hashes;      // ascending tick; empty for a solo/older recording
     int Result = -1;
     uint32_t EndTick = 0;
     bool Ok = false;
