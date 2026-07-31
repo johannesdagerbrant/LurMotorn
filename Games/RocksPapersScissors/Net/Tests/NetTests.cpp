@@ -924,6 +924,68 @@ static void TestDesyncRecoversToACommonStateAndKeepsPlaying() {
     CHECK(A.RecoveryAttempts() == 1);      // one divergence, one recovery — it did not re-trip
 }
 
+// ---- #162: a peer starved at the ceiling must not wait forever ----
+// The load collapse ended with the two phones in DIFFERENT MATCHES and nothing to reconcile them:
+// "iPhone: tick=5195 ... frozen at the ceiling, waiting for peer input that will never come.
+// Galaxy: tick=0 ... gave up, restarted, sitting pre-match." From the player's side both phones were
+// dead. The ceiling stall itself was unbounded — the one hold in the netcode with no timeout, which is
+// how "the peer is slow" became indistinguishable from "the peer is in another match".
+//
+// A bound turns that into an outcome: the match ends, #149's restart runs, and both sides return to
+// the camp handshake, which is the one state that always re-converges. Deliberately generous — a peer
+// this far behind is already unplayable, and the transport's own 5 s timeout fires long before.
+static void TestStarvedCeilingEndsTheMatch() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1620, 0, Enqueue, &Qa);
+    B.Init(0x1620, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 10; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Reached = A.ExecTick();
+    CHECK(Reached > 0);
+
+    // B goes silent (it collapsed under load, or restarted into another match). A keeps ticking and
+    // stalls at the ceiling — the sim cannot advance without B's frames.
+    uint64_t Held = 0;
+    while (A.GetSim().Result == ResultOngoing && Held < 3 * LockstepPeer::CeilingStallTimeoutNs) {
+        A.Tick(OneTickNs);
+        Qa.Q.clear();       // nothing is delivered to B, and B sends nothing back
+        Held += OneTickNs;
+    }
+    CHECK(A.Stalled() || A.GetSim().Result != ResultOngoing);
+    CHECK(A.GetSim().Result == ResultDraw);          // it REACHED an outcome instead of hanging
+    CHECK(Held >= LockstepPeer::CeilingStallTimeoutNs);   // and not before the bound
+    CHECK(A.ExecTick() >= Reached);                  // nothing was rewound to get there
+
+    // And the session recovers into a fresh match, which is what makes it survivable: both peers end
+    // up back at the camp handshake, the one state that always re-converges.
+    const uint32_t Before = A.MatchIndex();
+    A.Tick(PostMatchHoldNs + OneTickNs);
+    CHECK(A.MatchIndex() == Before + 1);
+    CHECK(!A.MatchStarted());
+
+    // A stall that RESOLVES must not be punished: the bound resets when the peer's frames resume, or a
+    // busy phone that briefly falls behind would lose matches to a timer.
+    Outbox Qc, Qd;
+    LockstepPeer C, D;
+    C.Init(0x1621, 0, Enqueue, &Qc);
+    D.Init(0x1621, 1, Enqueue, &Qd);
+    PlaceCampsAndStart(C, D, Qc, Qd);
+    for (int Round = 0; Round < 6; ++Round) {
+        uint64_t Gap = 0;                                  // stall for most of the bound...
+        while (Gap < LockstepPeer::CeilingStallTimeoutNs - 10 * OneTickNs) {
+            C.Tick(OneTickNs);
+            Gap += OneTickNs;
+        }
+        D.Tick(OneTickNs);                                  // ...then D speaks again
+        Deliver(Qd, C);
+        Deliver(Qc, D);
+        CHECK(C.GetSim().Result == ResultOngoing);           // never ends: the bound re-armed
+    }
+}
+
 // ---- #161: recovery must be BOUNDED, and the draw survives as the last resort ----
 // "A recovery loop that never converges is the freeze again by another name." Input-history replay
 // cannot converge if the cause is genuine nondeterminism rather than lost input — it faithfully
@@ -1570,6 +1632,7 @@ int main() {
     TestProducedCampLookAlikeIsNotDropped();     // #160
     TestLostInputFrameIsDetectedAndLocated();    // #163
     TestPreMatchStallIsReported();               // #163
+    TestStarvedCeilingEndsTheMatch();                   // #162
     TestDesyncRecoversToACommonStateAndKeepsPlaying();  // #161
     TestDesyncRecoveryIsBoundedThenDraws();             // #161
     TestLostInputRecoversBeforeDiverging();             // #161 + #163

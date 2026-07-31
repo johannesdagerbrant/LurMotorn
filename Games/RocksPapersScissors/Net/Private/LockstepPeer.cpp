@@ -87,6 +87,8 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     RecoveryAttempts_ = 0;
     RecoveryNs_ = 0;
     RecoveryCarryNs_ = 0;
+    StallNs_ = 0;       // #162: a fresh match is not starved
+    LastExecTick_ = 0;
 #if LUR_INTERNAL
     // #147: ResetSim above already honours a merged set that arrived BEFORE this Init — on iOS that
     // is the normal order, not a race: one renderFrame pumps the session inbox (delivering the
@@ -231,6 +233,26 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
         ++WallTicks;
     }
     Execute();
+
+    // #162: bound the ceiling stall — the one hold here that had no timeout, which is how a load
+    // collapse became terminal (both phones dead, in different matches, nothing reconciling them).
+    // Measured as CONTINUOUS starvation: any executed tick re-arms it, so ordinary lockstep waiting
+    // and a phone that briefly falls behind cost nothing. Only counted while we are live; the resync
+    // and recovery holds have their own, much tighter, bounds.
+    if (TheSim.Tick != LastExecTick_) {
+        LastExecTick_ = TheSim.Tick;
+        StallNs_ = 0;
+        return;
+    }
+    if (TheSim.Tick >= WallTicks) return;   // nothing to wait FOR — we are simply up to date
+    StallNs_ += ElapsedNs;
+    if (StallNs_ < CeilingStallTimeoutNs) return;
+    Lur::Log::Error("RPS: starved at the ceiling for %llums at tick %u — the peer's input is not coming "
+                    "(it collapsed under load or restarted into another match, #162). Ending the match "
+                    "so both sides return to the camp handshake, which always re-converges.",
+                    static_cast<unsigned long long>(StallNs_ / 1'000'000ull), TheSim.Tick);
+    StallNs_ = 0;
+    TheSim.Result = ResultDraw;   // #149's post-match hold + restart takes it from here
 }
 
 // #139 match-start: pre-match, the clock is held. Capture the local camp (the first miner-place

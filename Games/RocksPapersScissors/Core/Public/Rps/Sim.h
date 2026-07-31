@@ -124,6 +124,15 @@ struct Sim {
     // ---- Transient within a tick (cleared each Step; NOT hashed) ----
     int32_t DepositBuf[2] = {};           // worker deposits buffered in Movement, applied in Economy
 
+#if LUR_INTERNAL
+    // #162: how many flock-neighbourhood queries Movement has issued. Dev-only, NOT hashed, never
+    // read by the sim — a counter, so the fix that matters ("a cart issues none") can be asserted
+    // exactly instead of via a wall-clock budget, which on a -O0 host test is either flaky or
+    // meaningless. Cumulative; a test zeroes it before the tick it measures. One increment per unit
+    // per tick, so it cannot distort the phase it counts.
+    long long FlockGathers = 0;
+#endif
+
     // ---- Config (NOT hashed) — force the brute-force neighbour path instead of the
     //      spatial grid. Grid is the default; this exists so a test can run the same
     //      seed+inputs both ways and assert the StateHash sequences are identical. ----
@@ -179,10 +188,13 @@ struct Sim {
     bool IsBuildingUnlocked(uint8_t Team, uint8_t Type) const;
 
 #if LUR_INTERNAL
-    // Dev-only stress scene (issue #75): bulk-spawn PerTeam soldiers spread across each
-    // half of the field, to prove the tick budget (grid) + one-draw render hold at the
-    // raised cap. Deterministic (seed-derived). Compiled out of Shipping — never ships.
-    void StressFill(int32_t PerTeam);
+    // Dev-only stress scene (issue #75): bulk-spawn PerTeam units spread across each half of the
+    // field, to prove the tick budget (grid) + one-draw render hold at the raised cap.
+    // Deterministic (seed-derived). Compiled out of Shipping — never ships.
+    // #162: Type selects what to fill with. UnitNone (the default) keeps the original behaviour, a
+    // random mix of the three soldier types; naming a type is how the CART-heavy field that actually
+    // collapsed on hardware gets reproduced — soldiers and carts have very different tick costs.
+    void StressFill(int32_t PerTeam, uint8_t Type = UnitNone);
 #endif
 
     // ---- Read helpers (tests / view) ----

@@ -592,6 +592,16 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     if (J == I) return;
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
+    // #162: one Chebyshev test up front against the WIDEST radius, before any per-force work. Every
+    // Add below re-tests its own radius, and GatherR is by construction the max of all of them
+    // (DeriveUnits), so a neighbour at or beyond it contributes exactly nothing — this is a pure
+    // early-out, not a behaviour change (grid==brute and the determinism tests both hold it).
+    //
+    // It pays because the grid walks whole CELLS: the queried box is ceil(GatherR/CellSize) cells in
+    // each direction, so it reaches up to about GatherR + CellSize and most of the pairs it yields are
+    // out of range of every force. Those used to run the full body — several branches and up to four
+    // separate Chebyshev computations of the same distance — to conclude nothing.
+    if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) >= S.GatherR) return;
     // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it (no
     // pathfinding). Reuse the corrected separation falloff, its own radius/strength, on ALL
     // buildings (friend or foe). Buildings carry no cohesion/alignment/flee/cart semantics,
@@ -720,21 +730,34 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
     for (int32_t I = 0; I < S.Count; ++I) {
         if (!S.IsAlive(I)) continue;
         if (S.IsBuilding(I)) continue;  // #133: buildings never move (StepX/Y unread for them)
-        FlockAcc A;
-        if (S.UseBruteForce) GatherBrute(S, I, Threat, A);  // reads Pos + Δ — nothing has moved yet
-        else GatherGrid(S, G, I, Threat, A);
 
         if (S.Type[I] == UnitMiner) {
             // Miners are DIRECT (no momentum) and get NO separation (playtest 2026-07-20:
             // separation shoved carts off the tight camp deposit point, so they could never
             // bank). Only the mine-repel ring (deposits are soft obstacles) applies here;
             // WorkerSeek runs in pass 2 (it needs the unmoved start-of-tick Pos).
+            //
+            // #162: and therefore NO FLOCK GATHER — this used to sit AFTER the gather, which computed
+            // a whole FlockAcc for every cart and then read nothing out of it. That dead work was the
+            // measured collapse: at ~1600 units on a Galaxy A14, sim.move was ~50 ms of a 100 ms tick
+            // and ~90% of the sim, and the field was carts ("I was able to make the match freeze by
+            // making over 1600 carts"). Bit-identical — the gather is pure (const Sim, writes only its
+            // accumulator), so not calling it cannot change a result. TestMinerPathIgnoresNeighbours
+            // pins the invariant this rests on, so a future force that DOES want neighbours fails
+            // there rather than silently reintroducing the cost.
             int64_t Nx = 0, Ny = 0;
             AddMineRepel(S, I, Nx, Ny);
             StepX[I] = Fixed{static_cast<int32_t>(Nx)};
             StepY[I] = Fixed{static_cast<int32_t>(Ny)};
             continue;
         }
+
+        FlockAcc A;
+        if (S.UseBruteForce) GatherBrute(S, I, Threat, A);  // reads Pos + Δ — nothing has moved yet
+        else GatherGrid(S, G, I, Threat, A);
+#if LUR_INTERNAL
+        ++S.FlockGathers;  // #162: dev-only counter, so "a cart issues none" is testable exactly
+#endif
 
         // --- Soldier: blend the neighbour sums into a desired velocity ---
         // Seek goal + in-range test (targeting unchanged). No target -> march on the ENEMY
@@ -1134,7 +1157,7 @@ void Sim::StepEvents(const InputEvent* Events, int32_t Count) {
 }
 
 #if LUR_INTERNAL
-void Sim::StressFill(int32_t PerTeam) {
+void Sim::StressFill(int32_t PerTeam, uint8_t FillType) {
     Lur::Sim::SplitMix64 R(Seed ^ 0x57A9E55ull);
     const int32_t Wi = WorldWidth.ToInt(), Hi = WorldHeight.ToInt();
     for (uint8_t T = 0; T < 2; ++T) {
@@ -1143,7 +1166,9 @@ void Sim::StressFill(int32_t PerTeam) {
         for (int32_t K = 0; K < PerTeam; ++K) {
             const int32_t I = AllocSlot(*this);
             if (I < 0) return;  // hit the cap
-            const uint8_t Ty = static_cast<uint8_t>(1 + R.NextBounded(3));
+            // #162: a named type fills with that one; UnitNone keeps the original soldier mix.
+            const uint8_t Ty = FillType != UnitNone ? FillType
+                                                    : static_cast<uint8_t>(1 + R.NextBounded(3));
             PosX[I] = F(2 + static_cast<int32_t>(R.NextBounded(static_cast<uint32_t>(Wi - 4))));
             PosY[I] = F(Y0 + static_cast<int32_t>(R.NextBounded(static_cast<uint32_t>(Hi / 2 - 4))));
             PrevX[I] = PosX[I];

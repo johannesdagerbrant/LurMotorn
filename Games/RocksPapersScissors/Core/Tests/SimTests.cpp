@@ -880,6 +880,62 @@ static void TestEconomyGathersGold() {
 // measurement IS the proof; no hard time assert (machine-dependent, would flake). This
 // is where the spatial grid earns its keep: at 2048 units the O(n^2) scans would be a
 // wall, the grid keeps the tick cheap.
+// ---- #162: a MINER must not pay for a flock gather it never reads ----
+// Measured on a Galaxy A14 at ~1600 units: sim.step 57 ms of a 100 ms tick, of which sim.move was
+// ~50 ms — and the field was carts ("I was able to make the match freeze by making over 1600
+// carts"). Movement gathered every miner's whole neighbourhood and then took only the mine-repel
+// ring from it, discarding the gather: the single hottest phase in the game was dead work for the
+// exact unit type the repro spams.
+//
+// Asserted as a COUNT rather than a duration, because a wall-clock budget on a -O0 host test is
+// either flaky or meaningless. Zero gathers is the property; the timing follows from it.
+static void TestMinersDoNotPayForAFlockGather() {
+    static Sim S;
+    S.Init(0x162);
+    S.StressFill(600, UnitMiner);   // carts only — the reported repro
+    CHECK(S.Count > 1000);
+    S.FlockGathers = 0;
+    S.StepEvents(nullptr, 0);
+    CHECK(S.FlockGathers == 0);     // not one neighbourhood query for a field of carts
+
+    // And the counter is not simply dead: soldiers DO gather, one query each.
+    static Sim T;
+    T.Init(0x162);
+    T.StressFill(600, UnitRock);
+    T.FlockGathers = 0;
+    T.StepEvents(nullptr, 0);
+    CHECK(T.FlockGathers > 1000);
+}
+
+// ---- #162: the INVARIANT that makes the above safe ----
+// Skipping the gather is only correct while nothing a miner does depends on its neighbours. Asserted
+// directly, so a future change that starts feeding the flock accumulator into cart movement fails
+// HERE — loudly, next to the reason — instead of silently un-optimising or silently diverging.
+// Combat off, so the crowd cannot affect the cart by killing it rather than by steering it.
+static void TestMinerPathIgnoresNeighbours() {
+    static Sim Alone, Crowded;
+    for (Sim* P : {&Alone, &Crowded}) {
+        P->Init(0x1620);
+        P->DisableCombat = true;
+        ClearField(*P);
+        P->Count = 1;
+        PlaceUnit(*P, 0, F(17), F(20), 0, UnitMiner);
+    }
+    // Same cart, but ringed by soldiers of both teams — every force the gather can produce.
+    Crowded.Count = 25;
+    for (int K = 1; K < 25; ++K)
+        PlaceUnit(Crowded, K, F(14 + (K % 7)), F(17 + (K % 5)), static_cast<uint8_t>(K & 1),
+                  static_cast<uint8_t>(1 + (K % 3)));
+
+    bool Same = true;
+    for (int I = 0; I < 120 && Same; ++I) {
+        Alone.StepEvents(nullptr, 0);
+        Crowded.StepEvents(nullptr, 0);
+        Same = Alone.PosX[0] == Crowded.PosX[0] && Alone.PosY[0] == Crowded.PosY[0];
+    }
+    CHECK(Same);
+}
+
 static void TestStressTickBudget() {
     static Sim S;
     S.Init(0x57A9E55);
@@ -898,6 +954,20 @@ static void TestStressTickBudget() {
                 "flock gather = %dx%d cells/unit (GatherR=%d, GridCellSize=%d)\n",
                 S.Count, Ms / Ticks, Ticks, Box, Box, S.GatherR.ToInt(), GridCellSize);
     CHECK(S.Count > 0);
+
+    // #162: the same measurement for the shape that actually collapsed on hardware — ~1600 CARTS, not
+    // soldiers. Printed next to the soldier figure because the interesting number is the RATIO: carts
+    // used to cost the same as soldiers despite reading nothing from the gather.
+    static Sim C;
+    C.Init(0x57A9E56);
+    C.StressFill(800, UnitMiner);
+    const auto C0 = std::chrono::steady_clock::now();
+    for (int I = 0; I < Ticks; ++I) C.StepEvents(nullptr, 0);
+    const auto C1 = std::chrono::steady_clock::now();
+    const double CMs = std::chrono::duration<double, std::milli>(C1 - C0).count();
+    std::printf("  stress: %d CARTS, %.3f ms/tick (gathers/tick=%lld — #162 expects 0)\n", C.Count,
+                CMs / Ticks, static_cast<long long>(C.FlockGathers / Ticks));
+    CHECK(C.Count > 1000);
 }
 #endif
 
@@ -909,6 +979,10 @@ int main() {
     TestGameplayCvarListComplete();
 #endif
     TestGridEqualsBruteForce();
+#if LUR_INTERNAL
+    TestMinersDoNotPayForAFlockGather();   // #162
+#endif
+    TestMinerPathIgnoresNeighbours();      // #162 (the invariant the optimisation rests on)
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
     TestCartPriorityOverMirror();

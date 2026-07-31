@@ -130,6 +130,18 @@ public:
     // end up replaying one identical history; the discarded timeline may have been the more complete
     // one. That is deliberate — consistency, not fairness (CLAUDE.md), and the players share a room.
     static constexpr int MaxDesyncRecoveries = 3;
+    // #162: how long execution may sit at the ceiling waiting for peer frames before the match is
+    // given up. This was the ONE hold in the netcode with no bound, and that is how a load collapse
+    // became terminal: under ~1600 units the sim breached the tick budget, the radio timed out, the
+    // reconnect/resync loop never converged, and the two peers ended up in DIFFERENT MATCHES — one
+    // frozen at the ceiling at tick 5195 "waiting for peer input that will never come", the other
+    // restarted and sitting pre-match. Nothing reconciled that; both phones were dead to the players.
+    //
+    // Ending the match instead sends both sides back to the camp handshake, the one state that always
+    // re-converges. Generous on purpose: a peer this far behind is already unplayable, and the
+    // transport's own 5 s link timeout fires long before this does — so reaching it means the peer is
+    // not merely slow. Re-armed by any progress, so a phone that briefly falls behind is not punished.
+    static constexpr uint64_t CeilingStallTimeoutNs = 20'000'000'000ull;
     // A recovery that never completes is the freeze again by another name, so the wait is bounded too
     // (the winner's history may never arrive — a dead peer, a lost chunk).
     static constexpr uint64_t DesyncRecoveryTimeoutNs = 4'000'000'000ull;
@@ -331,6 +343,11 @@ private:
     int      RecoveryAttempts_ = 0;
     uint64_t RecoveryNs_ = 0;
     uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
+
+    // #162: how long we have been unable to advance while live (not resyncing, not recovering). Reset
+    // by any executed tick, so it measures a CONTINUOUS starvation rather than accumulated slowness.
+    uint64_t StallNs_ = 0;
+    uint32_t LastExecTick_ = 0;
 
     bool Recording = false;
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)
