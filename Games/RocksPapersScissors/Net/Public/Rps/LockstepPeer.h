@@ -125,6 +125,7 @@ public:
     // A hash mismatch was seen at an anchor. NOT a terminal state any more: CrossCheck declares the
     // match a DRAW when it trips, so the normal post-match hold + restart runs and clears this. Read
     // it for diagnostics ("that draw was a desync, not a real draw"), not as "the session is over".
+    // The draw is a STOPGAP — **#161** replaces it with actually recovering the match.
     bool Desynced() const { return Desync; }
     bool Stalled() const { return TheSim.Tick < WallTicks; }  // behind wallclock = waiting on peer
 

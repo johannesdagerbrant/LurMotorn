@@ -395,10 +395,15 @@ void LockstepPeer::CrossCheck(uint32_t Tick) {
     // forever with no message — observed 2026-07-30, both peers pinned at tick 8180 with different
     // hashes, datagrams still flowing, no way out but killing the app.
     //
-    // DECLARE A DRAW, which is what this class's own header always said it would do. Everything
-    // needed was already here and the desync path just never joined it: a decided match runs the
-    // #149 post-match hold and then BeginMatch, and BeginMatch is what clears Desync. So one
-    // assignment turns a permanent freeze into "this match ends level, the next one starts".
+    // DECLARE A DRAW — and this is a STOPGAP, not the destination. See **#161**: the owner's call is
+    // that a desync must RECOVER the match, not end it. The draw exists because the alternative it
+    // replaced was worse (a permanent freeze), and because everything it needs was already here: a
+    // decided match runs the #149 post-match hold and then BeginMatch, and BeginMatch is what clears
+    // Desync. One assignment turned a frozen session into "this match ends level, the next starts".
+    //
+    // When recovery lands, a draw should survive only as the bounded last resort after recovery has
+    // failed — #161 has the design questions (who is right, replay input vs transfer state, what the
+    // player sees, how many attempts).
     //
     // A draw is also the only outcome that can be declared SYMMETRICALLY. Both peers cross-check the
     // same anchor tick and both see the same mismatch, so both reach this line and both record the
