@@ -920,14 +920,22 @@ void android_main(android_app* App) {
                     // fingerprint mismatch and sets BuildMismatch(); nothing read it (the gate's own
                     // comment claims the app aborts on it — no app ever did), and its log line went
                     // to an unsinked stderr. One field on the line everyone already reads.
+                    // #163: `gaps`/`gapat` and `stall` are here for the same reason `badbuild` is — they
+                    // were the questions the log could not answer. A frame lost inside a link that
+                    // reports no error is why locating one missing input needed two flight recordings
+                    // and a diff; gaps>0 says it on the line everyone already reads, and gapat names
+                    // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
+                    // to the player (and in the log) exactly like a frozen app.
                     LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
-                         "frontier=%d started=%d",
+                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d",
                          State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
                          State.Lp.Desynced() ? 1 : 0, State.Lp.BuildMismatch() ? 1 : 0,
                          State.PresentedFrames.load(std::memory_order_relaxed),
                          static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                          DS.Teams[State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
-                         DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0);
+                         DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0,
+                         State.Lp.InputGaps(), State.Lp.LastInputGapTick(),
+                         State.Lp.PreMatchStalled() ? 1 : 0);
                     // #159: the linked recording's periodic census. It carries the economy snapshot
                     // AND it is what FLUSHES the file — without it the whole capture sits in the
                     // stdio buffer until End, so a killed app or a match that never resolves leaves

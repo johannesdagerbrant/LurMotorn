@@ -60,6 +60,14 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     LocalCampSent_ = false;
     CampResendNs_ = 0;
     PostMatchNs_ = 0;
+    // #163: per-MATCH diagnostics. Reset here (not in Init) so each match's gap count answers "did
+    // THIS match lose input", which is the question a desync investigation asks; a session-lifetime
+    // total would blur a clean match after a bad one.
+    InputGaps_ = 0;
+    LastGapTick_ = 0;
+    PreMatchStalled_ = false;
+    PreMatchWaitNs_ = 0;
+    PeerTickNext_ = Delay;  // both peers pre-seed ticks 0..Delay-1, so the first produced frame is Delay
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
     AwaitingNs = 0;
@@ -102,8 +110,19 @@ void LockstepPeer::QueueLocalEvent(InputEvent E) {
 }
 
 void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
+    // #163: stamp the frame with the LOW BYTE of the exec tick it is for, BEFORE the batch. The
+    // receiver knows the index it expects (PeerEvents.size()), so a lost frame is named on arrival of
+    // the next one instead of surfacing minutes later as an unexplained divergence — on hardware an
+    // input executed at tick 4528 was simply absent from the other peer's stream, with no transport
+    // complaint, and locating it needed two flight recordings and a diff.
+    //
+    // Deliberately NOT inside EncodeEventBatch: that encoder is also the resync-history and
+    // flight-recorder format (one codec, three uses), and a sequence number is meaningful only on the
+    // live wire. Putting it here keeps the other two formats untouched.
+    const uint32_t ForTick = static_cast<uint32_t>(LocalEvents.size());
     LocalEvents.push_back(Batch);  // lands at exec tick Delay + WallTicks
     Lur::Serialization::BitWriter W;
+    W.WriteBits(ForTick & 0xFFu, 8);
     EncodeEventBatch(W, Batch.data(), static_cast<int>(Batch.size()));  // one framed batch per tick
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgInput, B.data(), B.size());
@@ -190,6 +209,21 @@ void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
     if (LocalReady_) {
         CampResendNs_ += ElapsedNs;
         if (!LocalCampSent_ || CampResendNs_ >= PreMatchCampResendNs) SendLocalCamp();
+        // #163: we have readied and kept re-sending, and the peer has not readied back. Past
+        // PreMatchStallWarnNs, silence is the likelier explanation than the other player still
+        // deciding where to build — and to the player this state looks exactly like a frozen app
+        // ("placed a camp on both phones and nothing happened"). Say it once, with the diagnosis;
+        // repeating it every tick would bury the rest of the log.
+        if (!PreMatchStalled_ && !PeerReady_) {
+            PreMatchWaitNs_ += ElapsedNs;
+            if (PreMatchWaitNs_ >= PreMatchStallWarnNs) {
+                PreMatchStalled_ = true;
+                Lur::Log::Error("RPS: pre-match stalled %llums — our camp has been re-sent since then "
+                                "and the peer has not readied. If the peer reports started=1 the link "
+                                "is HALF-OPEN: our direction is dead while theirs works (#163).",
+                                static_cast<unsigned long long>(PreMatchWaitNs_ / 1'000'000ull));
+            }
+        }
     }
     TryStartMatch();
 }
@@ -435,9 +469,38 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // so the hashes stayed equal while the streams were skewed (found by diffing two peers'
         // recordings, #159/#160).
         Lur::Serialization::BitReader R(Data, N);
+        const uint32_t Seq = R.ReadBits(8);  // #163: low byte of the exec tick this frame is for
         InputEvent Buf[MaxEventsPerTick];
         const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
         if (Cnt < 0) return;
+        // #163: does this frame land where we expect it to? PeerTickNext_ is the exec tick of the next
+        // frame the peer owes us, so a sequence ahead of its low byte proves one went missing. Report
+        // and LOCATE it — the reason a gap took two recordings and a diff to find is that nothing here
+        // could say "the peer's tick 4528 never arrived".
+        //
+        // The expectation is tracked separately from PeerEvents rather than read off its size, for two
+        // reasons. It is re-based past the hole after reporting, so ONE lost frame costs one report
+        // instead of one per frame for the rest of the match — otherwise "how many did we lose", the
+        // number that matters, is unanswerable. And keeping it a full tick (not just the wire byte)
+        // means the reported tick stays exact after an earlier gap has already shifted the buffer.
+        //
+        // Detection lands BEFORE the hole's tick executes — the ceiling is gated on PeerEvents.size(),
+        // which the missing frame never grew — so it is early enough to recover from rather than
+        // diagnose after the fact. Acting on it is #161; this commit only makes it visible.
+        if (!Awaiting) {
+            const uint32_t Missing = (Seq - (PeerTickNext_ & 0xFFu)) & 0xFFu;
+            if (Missing != 0) {
+                ++InputGaps_;
+                LastGapTick_ = PeerTickNext_;
+                Lur::Log::Error("RPS: INPUT GAP — peer frame for tick %u never arrived (it sent seq %u, "
+                                "we expected %u; %u frame(s) missing). The link reported no error, so "
+                                "this is the lost-input shape of #163 and the leading candidate for "
+                                "#159's divergence.",
+                                PeerTickNext_, Seq, PeerTickNext_ & 0xFFu, Missing);
+                PeerTickNext_ += Missing;  // re-base past the hole: count the gap once, not forever
+            }
+            ++PeerTickNext_;
+        }
         if (!MatchStarted_) {
             // Pre-match, a produced frame can only be from a peer that has ALREADY started (it
             // restarted before us). Buffer it — it lands at PeerEvents[Delay]+ once we start — so
@@ -630,6 +693,11 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();
+    // #163: both peers re-base their timelines to the same frontier here, so the sequence expectation
+    // must move with it. Without this every frame after a resync would read as a gap — the detector
+    // would then cry wolf on the ONE path where frames are legitimately dropped, which is precisely
+    // how a diagnostic earns its way into being ignored.
+    PeerTickNext_ = Frontier + Delay;
 }
 
 }  // namespace Rps

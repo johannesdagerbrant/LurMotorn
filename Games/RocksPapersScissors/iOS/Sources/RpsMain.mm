@@ -678,15 +678,22 @@ Rps::Fixed WorldToFixed(float Wv) {
             // badbuild= mirrors Android's: #112 detects a build-fingerprint mismatch and sets
             // BuildMismatch(), but nothing read it and its own log line had no sink — so when this
             // pair desynced on 2026-07-30, "were the two builds even the same?" was unanswerable.
+            // #163: gaps/gapat/stall, matching Android's line field for field — the pair is only
+            // readable side by side, and this direction (peripheral -> central) is the one that went
+            // half-open, so the iPhone's copy is the more important of the two. gaps>0 names a frame
+            // the link dropped without reporting an error; stall=1 names the pre-match hang that
+            // otherwise looks exactly like a frozen app.
             os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u "
-                   "hash=%08x gold=%d frontier=%d started=%d",
+                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d",
                    _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                    _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
                    _Lp.BuildMismatch() ? 1 : 0,
                    _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
                    static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
                    DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),
-                   _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0));
+                   _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0),
+                   _SoloActive ? 0 : _Lp.InputGaps(), _SoloActive ? 0u : _Lp.LastInputGapTick(),
+                   (!_SoloActive && _Lp.PreMatchStalled()) ? 1 : 0);
             // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
             // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
             // stdio buffer until End, so a killed app or a match that never resolves leaves nothing

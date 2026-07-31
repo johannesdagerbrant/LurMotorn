@@ -61,7 +61,12 @@ enum class EMsgType : uint8_t {
 //     A separate slot cannot be fooled by a payload coincidence; the ambiguity is gone rather
 //     than narrowed. A v6 peer would read MsgCamp as an unknown type and never ready, so the
 //     Hello handshake must refuse the pair.
-inline constexpr uint8_t ProtocolVersion = 7;
+// v8: RPS MsgInput frames carry a leading 1-byte sequence (the low byte of the exec tick the frame
+//     is for) so the receiver can tell a lost frame from silence and name the tick it lost (#163).
+//     A frame dropped inside a link that reports no error was invisible: frames were logged as
+//     `recv msg type=N size=M`, nothing tied one to a tick, and finding a single missing input
+//     needed two flight recordings and a diff.
+inline constexpr uint8_t ProtocolVersion = 8;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {

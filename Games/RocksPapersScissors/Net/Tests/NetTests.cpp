@@ -654,6 +654,104 @@ static void TestLinkedRecordingsMatchAcrossPeers() {
 }
 #endif  // LUR_INTERNAL (MatchRecorder is dev tooling)
 
+// Deliver everything EXCEPT the Nth MsgInput frame — a lost produced tick inside a link that is
+// otherwise working perfectly, which is what #163 observed on hardware (iPhone->Galaxy notifications
+// stopped while writes kept landing, and separately an input the iPhone executed at tick 4528 was
+// simply absent from the Galaxy's stream with no transport complaint at all).
+static void DeliverDroppingNthInput(Outbox& From, LockstepPeer& To, int NthInput) {
+    int Seen = 0;
+    for (auto& M : From.Q) {
+        if (M.first == MsgInput && Seen++ == NthInput) continue;  // the frame that never arrives
+        To.OnMessage(M.first, M.second.data(), M.second.size());
+    }
+    From.Q.clear();
+}
+
+// ---- #163: a lost input frame must be DETECTED AND LOCATED, not silently absorbed ----
+// The link carried `recv msg type=N size=M` per frame and nothing tied a frame to a TICK, so a
+// missing input could not be found in the log — it took two flight recordings and a diff to locate
+// one. A produced frame now carries its own low-order tick byte, so the receiver knows the next index
+// it expects and says so on the spot.
+//
+// Note WHEN detection happens: the gap is invisible while the frame is merely late (a lost tail frame
+// is indistinguishable from silence), and becomes visible when the NEXT frame arrives carrying a
+// sequence one past what was expected. That is early enough to matter — the ceiling is gated on
+// PeerEvents.size(), so the hole's tick has not been executed yet.
+static void TestLostInputFrameIsDetectedAndLocated() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x163, 0, Enqueue, &Qa);
+    B.Init(0x163, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(B.InputGaps() == 0);
+
+    // Five clean produced ticks. The match starts with WallTicks==0 (the starting Tick returns before
+    // producing), so these are peer frames for exec ticks Delay+0 .. Delay+4.
+    for (int I = 0; I < 5; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(B.InputGaps() == 0);   // a clean run must never cry wolf
+
+    // Lose A's next frame — the one for exec tick Delay+5.
+    const uint32_t LostTick = InputDelayTicks + 5;
+    A.Tick(OneTickNs);
+    B.Tick(OneTickNs);
+    DeliverDroppingNthInput(Qa, B, 0);   // A produces exactly one frame per Tick at this rate
+    Deliver(Qb, A);
+    CHECK(B.InputGaps() == 0);           // still just silence — nothing has proven a loss yet
+
+    // The following frame exposes it, and names the tick.
+    A.Tick(OneTickNs);
+    B.Tick(OneTickNs);
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+    CHECK(B.InputGaps() == 1);
+    CHECK(B.LastInputGapTick() == LostTick);
+    // One report per gap, not one per later frame: a counter that inflates on every subsequent frame
+    // would make "how many did we lose" unanswerable, which is the number that matters.
+    for (int I = 0; I < 5; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(B.InputGaps() == 1);
+    // A's side saw a complete stream, so it must report nothing — the loss was one-directional, which
+    // is the whole character of a half-open link.
+    CHECK(A.InputGaps() == 0);
+}
+
+// ---- #163: the half-open signature must be REPORTED, not look like a hang ----
+// "The owner placed a camp on both phones and nothing happened." One peer had started and was
+// advancing; the other sat at started=0 with untouched starting gold because the peer's camp never
+// arrived. From the player's side that is indistinguishable from a frozen app, and nothing in the log
+// named it. Pre-match, being ready while the peer is not is a bounded condition, so say so.
+static void TestPreMatchStallIsReported() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1631, 0, Enqueue, &Qa);
+    B.Init(0x1631, 1, Enqueue, &Qb);
+
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+    A.Tick(OneTickNs);
+    CHECK(A.HasLocalCamp());
+    CHECK(!A.PreMatchStalled());   // not a verdict you may reach immediately
+
+    // A keeps re-sending into the failing direction; nothing is delivered either way.
+    uint64_t Held = OneTickNs;
+    while (Held < LockstepPeer::PreMatchStallWarnNs + OneTickNs) { A.Tick(OneTickNs); Held += OneTickNs; }
+    CHECK(!A.MatchStarted());
+    CHECK(A.PreMatchStalled());
+
+    // And it must CLEAR when the handshake completes — a diagnostic that stays lit after the fault is
+    // one people learn to ignore (the same mistake #112's build-mismatch latch made).
+    Qa.Q.clear();
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
+    for (int I = 0; I < 8 && !A.MatchStarted(); ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.MatchStarted());
+    CHECK(!A.PreMatchStalled());
+}
+
 // ---- #160: a PRODUCED tick that LOOKS like the pre-match camp re-send must not be dropped ----
 // The #149 re-send used to be recognised by its PAYLOAD — "a one-event batch equal to the peer's
 // opening camp" — and dropped without buffering. A player re-placing a camp at the coordinates their
@@ -1237,6 +1335,8 @@ int main() {
     TestLinkedRecordingsMatchAcrossPeers();
 #endif
     TestProducedCampLookAlikeIsNotDropped();     // #160
+    TestLostInputFrameIsDetectedAndLocated();    // #163
+    TestPreMatchStallIsReported();               // #163
     TestDesyncDeclaresADrawAndRecovers();
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();

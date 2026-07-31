@@ -118,6 +118,13 @@ public:
     // without this bound the survivor was wedged permanently.
     static constexpr uint64_t ResyncStallTimeoutNs = 3'000'000'000ull;
 
+    // #163: how long pre-match "we are ready, the peer is not" may last before it is called out. The
+    // half-open link produced exactly that state and it read as a frozen app: one peer at started=1
+    // and advancing, the other at started=0 with untouched starting gold because the peer's camp never
+    // arrived. Generous on purpose — the other player may simply be thinking about where to build —
+    // so this is the point past which SILENCE is the more likely explanation than deliberation.
+    static constexpr uint64_t PreMatchStallWarnNs = 8'000'000'000ull;
+
     // #149: pre-match, the local camp is RE-SENT on this period until the peer's camp comes back.
     // A single send was enough only while both peers entered the match together. Across a
     // post-match restart they re-init a few ms to seconds apart, so peer A's camp could arrive
@@ -143,6 +150,22 @@ public:
     // so play begins from tick 0 with both camps already in the identical sim state. The view
     // reads this for the pre-match camera / "waiting for opponent" state.
     bool MatchStarted() const { return MatchStarted_; }
+
+    // ---- #163: link diagnostics. A lost frame and a half-open link both used to be INVISIBLE ----
+    // How many produced peer frames went missing this match, detected by the per-frame sequence byte
+    // (see ProduceAndSend). Non-zero means the transport dropped input while the link looked healthy —
+    // the #163 shape, and the leading candidate for #159's unexplained divergence. Counted once per
+    // gap rather than once per later frame, so it answers "how many did we lose".
+    int InputGaps() const { return InputGaps_; }
+    // The exec tick of the most recent missing frame. This is the field the log could not produce:
+    // frames were logged as `recv msg type=N size=M` with nothing tying one to a tick, so locating a
+    // lost input needed two flight recordings and a diff.
+    uint32_t LastInputGapTick() const { return LastGapTick_; }
+    // Pre-match, WE are ready and the peer is not, for longer than PreMatchStallWarnNs. Derived
+    // against MatchStarted_ rather than cleared by whoever starts the match, so it cannot outlive its
+    // fault by a path that forgot to reset it — and a latch that stays lit after the fault is one
+    // people learn to ignore (the mistake #112's build-mismatch flag made).
+    bool PreMatchStalled() const { return PreMatchStalled_ && !MatchStarted_; }
     // #149: which match this is, 0-based, bumped by each post-match restart. The mains latch their
     // "already tallied this match" flags per index — the only way to score exactly once per match
     // now that one Lp lives across many of them.
@@ -244,6 +267,16 @@ private:
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;
+
+    // #163 diagnostics. The sequence is the LOW BYTE of the produced exec tick, not a separate
+    // counter: one byte per frame (10 B/s at the tick rate) catches every gap of 1..255 frames, which
+    // at 10 Hz is any outage up to 25 s — far longer than the link timeout that would fire first. A
+    // full varint tick would cost 2-3 bytes per frame for a distinction the transport can't produce.
+    int      InputGaps_ = 0;
+    uint32_t LastGapTick_ = 0;
+    bool     PreMatchStalled_ = false;
+    uint64_t PreMatchWaitNs_ = 0;   // time spent ready-but-unpaired (only accrues while LocalReady_)
+    uint32_t PeerTickNext_ = 0;     // exec tick of the next produced frame the peer owes us
 
     bool Recording = false;
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)
