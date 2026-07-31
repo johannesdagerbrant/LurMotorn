@@ -140,4 +140,91 @@ inline EBleRole DecideBleRoleBreaking(std::string_view LocalId, std::string_view
     return Role;
 }
 
+// #83 — PAIRWISE PEER BINDING. A match is strictly 1:1, and a third device in the room must be able
+// to link with SOMEONE ELSE, or wait, but never disturb a live pair.
+//
+// The holes this closes (found 2026-07-19, present in all four transports — chess + RPS × Android +
+// iOS) were all the same shape: the peripheral believed whoever spoke last.
+//
+//   * MID-MATCH SUBSCRIBER HIJACK. Any CCCD subscription became "the canonical central"
+//     (`connectedCentral = device` on Android, `_Subscriber = central` on iOS — unconditional
+//     overwrites). Every outgoing notification then silently redirected to the newcomer, and the
+//     engine was never told, because onLinked no-ops on the `linked` guard. The real peer goes deaf
+//     inside a link that reports itself healthy.
+//   * UNFILTERED INBOUND WRITES. Both write handlers delivered datagrams from ANY connected central
+//     into the engine, so a third device's bytes inject straight into the lockstep/move stream.
+//   * A THIRD DEVICE'S DEPARTURE READ AS LINK LOSS — the hijack in reverse: an outsider could end a
+//     match by unsubscribing or disconnecting.
+//
+// Stopping advertising is not protection: a device that scanned the advertisement before the link
+// formed keeps the peer handle and can connect and subscribe later with no fresh advertising. So the
+// gate has to be at the point of USE, which is what this is.
+//
+// Centrals need no equivalent — a central connects to one peripheral it chose, so it is safe by
+// construction. Peripherals serve whoever arrives, which is why only they need binding.
+//
+// It lives HERE, as one tested policy, for the same reason DecideBleRole does: a rule this small was
+// still wrong in four hand-maintained copies, and each transport's callbacks are platform code that no
+// host test can reach. Kotlin reaches it over JNI (as it already does for the role tie-break); the
+// Obj-C++ transports call it directly.
+//
+// Ids are opaque, platform-supplied strings — a BluetoothDevice address on Android, a CBCentral
+// identifier UUID string on iOS. Compared, never parsed. Fixed capacity, no allocation: these calls
+// land on a Binder / CoreBluetooth callback thread.
+class PeerBinding {
+public:
+    // Long enough for a MAC address (17) or a UUID string (36) with room to spare.
+    static constexpr std::size_t MaxIdLen = 64;
+
+    // A central subscribed to the datagram characteristic. Returns whether it may be served: true if
+    // we were unbound (it becomes the peer) or if it IS the bound peer re-subscribing — an MTU
+    // renegotiation or a CCCD rewrite does that, and rejecting it would break the real link to defend
+    // against a device that isn't there. False for anyone else: do not redirect notifications to them.
+    bool AcceptSubscriber(const char* Id) {
+        if (!Valid(Id)) return false;
+        if (!Bound_) { Store(Id); Bound_ = true; return true; }
+        return IsPeer(Id);
+    }
+
+    // May a datagram from this central enter the engine? Unbound (pre-link) traffic is allowed —
+    // that is the handshake itself, and refusing it would mean no link could ever form. Once bound,
+    // only the peer's bytes pass.
+    bool AcceptData(const char* Id) const { return !Bound_ ? Valid(Id) : IsPeer(Id); }
+
+    // Is this the bound peer? The test for "may this disconnect/unsubscribe end the link".
+    bool IsPeer(const char* Id) const {
+        if (!Bound_ || !Valid(Id)) return false;
+        std::size_t K = 0;
+        for (; Peer_[K] != '\0' && Id[K] != '\0'; ++K)
+            if (Peer_[K] != Id[K]) return false;
+        return Peer_[K] == '\0' && Id[K] == '\0';   // equal length too, so no prefix passes
+    }
+
+    bool HasPeer() const { return Bound_; }
+
+    // The link is genuinely gone: open up again. This is what keeps chess's deliberate opponent-switch
+    // (#38) working — that flow operates at SESSION level after link loss, so the gate must apply only
+    // WHILE linked. A binding that outlived the link would forbid ever changing opponents.
+    void Clear() { Bound_ = false; Peer_[0] = '\0'; }
+
+private:
+    // An id must be non-empty AND representable. Empty means a failed read, not a peer. Over-long
+    // means malformed — no platform produces one — and REFUSING it is the safe answer: storing a
+    // truncated copy would make every id sharing that prefix compare equal, i.e. bind the wrong
+    // device, which is the very thing this class exists to prevent.
+    static bool Valid(const char* Id) {
+        if (Id == nullptr || Id[0] == '\0') return false;
+        for (std::size_t K = 0; K < MaxIdLen; ++K)
+            if (Id[K] == '\0') return true;
+        return false;
+    }
+    void Store(const char* Id) {
+        std::size_t K = 0;
+        for (; Id[K] != '\0'; ++K) Peer_[K] = Id[K];   // Valid() proved it fits
+        Peer_[K] = '\0';
+    }
+    char Peer_[MaxIdLen] = {};
+    bool Bound_ = false;
+};
+
 } // namespace Lur::Transport

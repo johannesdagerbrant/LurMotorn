@@ -89,6 +89,17 @@ class BleShim(private val context: Context) {
      *  GATT read yields bytes that are not an id, and a role decided from those is one the peer
      *  cannot mirror — the deadlock's mechanism (#146). */
     private external fun nativeIsValidDeviceId(id: ByteArray): Boolean
+    /** #83: may this central become (or already be) the ONE central we serve? A match is strictly
+     *  1:1, and any CCCD subscription used to be taken as the canonical one — so a third device in
+     *  the room could redirect a live match's notifications to itself. The rule is shared C++ policy
+     *  (Lur::Transport::PeerBinding), host-tested once, because it was wrong in four transports. */
+    private external fun nativeAcceptSubscriber(address: String): Boolean
+    /** #83: may a datagram from this central enter the engine? Pre-link traffic passes (that is the
+     *  handshake); once bound, only the peer's does. */
+    private external fun nativeAcceptData(address: String): Boolean
+    /** #83: is this the bound peer? Only ITS disconnect ends the match — otherwise an outsider could
+     *  kill a live pair simply by leaving. */
+    private external fun nativeIsBoundPeer(address: String): Boolean
     private external fun nativeLoadOrCreateDeviceId(dir: String): ByteArray
     private external fun nativeLoadPeerId(dir: String): ByteArray
     private external fun nativeSavePeerId(dir: String, bytes: ByteArray)
@@ -418,7 +429,11 @@ class BleShim(private val context: Context) {
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
-            if (newState == BluetoothProfile.STATE_DISCONNECTED && device == connectedCentral) {
+            // #83: only the BOUND peer's departure ends the match. `device == connectedCentral` already
+            // said that, and nativeIsBoundPeer is the same answer from the shared policy — kept so both
+            // gates agree even if connectedCentral is assigned on some future path that skips binding.
+            if (newState == BluetoothProfile.STATE_DISCONNECTED && device == connectedCentral &&
+                nativeIsBoundPeer(device.address)) {
                 onLinkLost()
             }
         }
@@ -444,7 +459,11 @@ class BleShim(private val context: Context) {
             device: BluetoothDevice, requestId: Int, characteristic: BluetoothGattCharacteristic,
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
-            if (characteristic.uuid == DATAGRAM_UUID) nativeOnReceived(value)
+            // #83: only the bound peer's bytes reach the engine. Unfiltered, a third device's writes
+            // injected straight into the lockstep stream. Pre-link traffic still passes — that IS the
+            // handshake — so this cannot stop a link from forming.
+            if (characteristic.uuid == DATAGRAM_UUID && nativeAcceptData(device.address))
+                nativeOnReceived(value)
             if (responseNeeded) {
                 try { gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, 0, null) }
                 catch (_: SecurityException) {}
@@ -462,7 +481,14 @@ class BleShim(private val context: Context) {
             preparedWrite: Boolean, responseNeeded: Boolean, offset: Int, value: ByteArray,
         ) {
             // The canonical central enabling notifications IS the "link is live" signal.
-            if (descriptor.uuid == CCCD_UUID) {
+            //
+            // #83: but only from the BOUND central. This used to assign unconditionally, so any third
+            // device in the room could subscribe mid-match and silently take over the notify channel —
+            // every outgoing frame redirected to it, the real peer went deaf, and the engine was never
+            // told (onLinked no-ops on the `linked` guard). nativeAcceptSubscriber binds the first
+            // subscriber and accepts only that one afterwards; the decision is shared C++ policy
+            // (Lur::Transport::PeerBinding), not a per-platform copy of the rule.
+            if (descriptor.uuid == CCCD_UUID && nativeAcceptSubscriber(device.address)) {
                 connectedCentral = device
                 onLinked(asPeripheral = true)
                 Log.i(TAG, "peripheral: central linked")

@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -103,6 +104,78 @@ static void TestDeviceIdValidation() {
     CHECK(!Lur::Save::IsValidDeviceId(Good + "0"));                // too long
     CHECK(!Lur::Save::IsValidDeviceId("7EF0DDB8C41A4F0E9B2D5A3C8E7F1024"));  // uppercase: not ours
     CHECK(!Lur::Save::IsValidDeviceId("7ef0ddb8c41a4f0e9b2d5a3c8e7f10zz"));  // non-hex
+}
+
+// ---- #83: a pairwise link must survive a third device in the room ----
+// Matches are strictly 1:1, but the peripheral treated ANY CCCD subscription as "the canonical
+// central" (`connectedCentral = device` / `_Subscriber = central`, unconditional) and delivered
+// datagrams from ANY connected central into the engine. So a third phone could silently redirect a
+// live match's notifications to itself and inject bytes into the lockstep stream — and the engine was
+// never told, because onLinked no-ops on the `linked` guard. Present in all four transports.
+//
+// The rule is small enough to be obvious and was still wrong four times over, which is why it lives
+// here as ONE tested policy called from each transport (the same reason DecideBleRole does).
+static void TestPeerBindingRejectsAThirdDevice() {
+    PeerBinding B;
+    CHECK(!B.HasPeer());
+    CHECK(B.AcceptData("AA:BB:CC:DD:EE:01"));   // unbound: anything may open a link
+
+    // The first subscriber binds.
+    CHECK(B.AcceptSubscriber("AA:BB:CC:DD:EE:01"));
+    CHECK(B.HasPeer());
+    CHECK(B.IsPeer("AA:BB:CC:DD:EE:01"));
+
+    // A THIRD device subscribing mid-match must not become the notify target — that is the hijack:
+    // every outgoing frame silently redirects and the real peer goes deaf inside a "healthy" link.
+    CHECK(!B.AcceptSubscriber("FF:EE:DD:CC:BB:02"));
+    CHECK(B.IsPeer("AA:BB:CC:DD:EE:01"));       // still bound to the original
+    CHECK(!B.IsPeer("FF:EE:DD:CC:BB:02"));
+
+    // ...nor may its bytes reach the engine, where they would land in the lockstep/move stream.
+    CHECK(!B.AcceptData("FF:EE:DD:CC:BB:02"));
+    CHECK(B.AcceptData("AA:BB:CC:DD:EE:01"));
+
+    // The bound central re-subscribing is NOT an intruder (an MTU renegotiation or a CCCD rewrite
+    // does this); rejecting it would break the real link to defend against a device that isn't there.
+    CHECK(B.AcceptSubscriber("AA:BB:CC:DD:EE:01"));
+    CHECK(B.IsPeer("AA:BB:CC:DD:EE:01"));
+
+    // Only the BOUND peer's disconnect/unsubscribe may end the link. Treating a third device's
+    // departure as link loss is the hijack in reverse: an outsider could drop a match by leaving.
+    CHECK(!B.IsPeer("FF:EE:DD:CC:BB:02"));
+
+    // On real link loss the binding opens up again — this is what keeps chess's deliberate
+    // opponent-switch (#38) working: that flow operates at session level AFTER link loss, so the gate
+    // must apply only WHILE linked. A binding that outlived the link would forbid changing opponents.
+    B.Clear();
+    CHECK(!B.HasPeer());
+    CHECK(B.AcceptSubscriber("FF:EE:DD:CC:BB:02"));
+    CHECK(B.IsPeer("FF:EE:DD:CC:BB:02"));
+
+    // Degenerate ids must not accidentally bind or match: an empty address is a failed read, not a
+    // peer, and it must never compare equal to the bound one.
+    PeerBinding C;
+    CHECK(!C.AcceptSubscriber(nullptr));
+    CHECK(!C.AcceptSubscriber(""));
+    CHECK(!C.HasPeer());
+    CHECK(C.AcceptSubscriber("AA:01"));
+    CHECK(!C.IsPeer(""));
+    CHECK(!C.IsPeer(nullptr));
+    CHECK(!C.AcceptData(""));
+
+    // An over-long id is malformed (no platform produces one) and must be REFUSED, not stored
+    // truncated: a truncated copy would compare equal to every id sharing that prefix, which is
+    // binding the wrong device — the exact failure this class exists to prevent.
+    PeerBinding D;
+    const std::string Long(PeerBinding::MaxIdLen + 8, 'x');
+    CHECK(!D.AcceptSubscriber(Long.c_str()));
+    CHECK(!D.HasPeer());
+    CHECK(!D.IsPeer(Long.c_str()));
+    // The longest id that still FITS is fine, and a longer one does not match it.
+    const std::string Fits(PeerBinding::MaxIdLen - 1, 'x');
+    CHECK(D.AcceptSubscriber(Fits.c_str()));
+    CHECK(D.IsPeer(Fits.c_str()));
+    CHECK(!D.IsPeer(std::string(PeerBinding::MaxIdLen - 2, 'x').c_str()));  // a prefix is not the peer
 }
 
 // One datagram Sent on A is delivered byte-for-byte to B's receiver, both ways.
@@ -291,6 +364,7 @@ int main() {
     TestRoleBreakerRespectsDevPin();
 #endif
     TestDeviceIdValidation();
+    TestPeerBindingRejectsAThirdDevice();   // #83
     TestLoopbackRoundtrip();
     TestMoveRoundtripsOverTransport();
     TestProtocolConstants();

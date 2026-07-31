@@ -196,6 +196,57 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSavePeerId(JNIEnv* Env, jobject /*Sel
     DeviceStore.Save(Lur::Save::PeerIdKey, Bytes.data(), Bytes.size());
 }
 
+// --- #83 JNI: pairwise peer binding. While linked, this peripheral serves exactly ONE central; a
+// third device in the room may link with someone else or wait, but must not disturb a live pair.
+//
+// The POLICY is Lur::Transport::PeerBinding (host-tested), not Kotlin, for the same reason the role
+// tie-break is C++: the rule is tiny and was still wrong in all four transports at once, and none of
+// the platform callbacks it guards can be reached by a host test. The Kotlin shim asks; C++ decides.
+// Cleared by nativeOnDisconnected, so a lost link opens the binding up again — which is what keeps the
+// deliberate opponent-switch (#38) possible.
+//
+// The id is the BluetoothDevice address, opaque here: compared, never parsed.
+namespace {
+Lur::Transport::PeerBinding g_PeerBinding;
+
+std::string JStringToStd(JNIEnv* Env, jstring S) {
+    if (S == nullptr) return {};
+    const char* Chars = Env->GetStringUTFChars(S, nullptr);
+    std::string Out = Chars != nullptr ? Chars : "";
+    if (Chars != nullptr) Env->ReleaseStringUTFChars(S, Chars);
+    return Out;
+}
+}  // namespace
+
+// A central wrote the CCCD (enabled notifications). True = it is the peer we serve; false = a
+// non-bound device whose subscription must be IGNORED rather than allowed to redirect our notifies.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_lurmotorn_onlychess_BleShim_nativeAcceptSubscriber(JNIEnv* Env, jobject /*Self*/,
+                                                           jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    const bool Ok = g_PeerBinding.AcceptSubscriber(A.c_str());
+    if (!Ok) LOGI("BLE: IGNORING subscribe from %s — a live pair serves exactly one central (#83)",
+                  A.c_str());
+    return Ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// May a datagram from this central reach the engine? Pre-link traffic passes (that IS the handshake);
+// once bound, only the peer's bytes do — unfiltered, a third device injected straight into the move
+// stream.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_lurmotorn_onlychess_BleShim_nativeAcceptData(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    return g_PeerBinding.AcceptData(A.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Is this the bound peer? Only ITS disconnect may end the match — treating any device's departure as
+// link loss is the hijack in reverse, letting an outsider kill a live pair by leaving.
+extern "C" JNIEXPORT jboolean JNICALL
+Java_com_lurmotorn_onlychess_BleShim_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    return g_PeerBinding.IsPeer(A.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
                                                        jboolean AsPeripheral) {
@@ -209,6 +260,10 @@ Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject 
 extern "C" JNIEXPORT void JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeOnDisconnected(JNIEnv* /*Env*/, jobject /*Self*/) {
     LOGI("BLE disconnected");
+    // #83: the link is genuinely gone, so release the peer binding — the next central to subscribe may
+    // bind. Doing it HERE means one place covers every path that loses a link, and it is what keeps the
+    // deliberate opponent-switch (#38) possible: that flow runs at session level after loss.
+    g_PeerBinding.Clear();
     g_Transport.Inbox.PushDisconnected();  // Binder thread: engine applies it in Pump()
 }
 

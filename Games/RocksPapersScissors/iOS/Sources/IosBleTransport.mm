@@ -122,6 +122,12 @@ static void SaveIosPeerId(const std::string& Id) {
     // Peripheral-side state (we host the service; peer connected to us).
     CBMutableCharacteristic* _LocalDatagram;
     CBCentral*               _Subscriber;
+    // #83: which central this peripheral is BOUND to while linked. Any CCCD subscription used to
+    // become the canonical central unconditionally, so a third device in the room could silently
+    // redirect a live match's notifications to itself — and the engine was never told, because
+    // onLinked no-ops on the `linked` guard. The rule is SHARED with the Android shim
+    // (Lur::Transport::PeerBinding) rather than written per platform; it was wrong in four copies.
+    Lur::Transport::PeerBinding _Binding;
 
     bool _Connected;
     bool _Linked;            // canonical link established; stop discovery
@@ -324,6 +330,10 @@ static void SaveIosPeerId(const std::string& Id) {
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
     _SendQueue.clear();                                           // drop stale send backlog (#72)
     _Subscriber = nil;
+    // #83: the link is genuinely gone, so open the binding up again. This is what keeps chess's
+    // deliberate opponent-switch (#38) working — it operates at session level AFTER link loss, so a
+    // binding that outlived the link would forbid ever changing opponents.
+    _Binding.Clear();
     _RemoteDatagram = nil;
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
     // Role-aware rediscovery: known central only scans, known peripheral only advertises,
@@ -503,6 +513,14 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
                   central:(CBCentral*)central
 didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
     if ([characteristic.UUID isEqual:_DatagramUuid]) {
+        // #83: bind to the FIRST subscriber and serve only that one. Re-subscription by the bound
+        // central is fine (an MTU renegotiation does that); anyone else is a third device trying to
+        // take over a live pair's notify channel, and is ignored rather than obeyed.
+        if (!_Binding.AcceptSubscriber(central.identifier.UUIDString.UTF8String)) {
+            NSLog(@"OnlyRps BLE: IGNORING subscribe from a non-bound central (#83) — a live pair "
+                   "serves exactly one");
+            return;
+        }
         _Subscriber = central;
         NSLog(@"OnlyRps BLE: central subscribed (peripheral) — link ready");
         [self onLinked];                              // peripheral side: link is live
@@ -512,7 +530,10 @@ didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
                   central:(CBCentral*)central
 didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
-    if ([characteristic.UUID isEqual:_DatagramUuid] && _Linked) {
+    // #83: only the BOUND peer's departure ends the match. Treating any unsubscribe as link loss is
+    // the hijack in reverse — a third device could kill a live pair simply by leaving.
+    if ([characteristic.UUID isEqual:_DatagramUuid] && _Linked &&
+        _Binding.IsPeer(central.identifier.UUIDString.UTF8String)) {
         [self onLinkLost];
     }
 }
@@ -520,6 +541,10 @@ didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
   didReceiveWriteRequests:(NSArray<CBATTRequest*>*)requests {
     for (CBATTRequest* Req in requests) {
+        // #83: drop bytes from any central that is not the bound peer. Unfiltered, a third device's
+        // writes injected straight into the lockstep/move stream. Pre-link traffic still passes —
+        // that IS the handshake — but once bound, only the peer does.
+        if (!_Binding.AcceptData(Req.central.identifier.UUIDString.UTF8String)) continue;
         if ([Req.characteristic.UUID isEqual:_DatagramUuid] && Req.value) {
             [self deliverInbound:Req.value];
         }
