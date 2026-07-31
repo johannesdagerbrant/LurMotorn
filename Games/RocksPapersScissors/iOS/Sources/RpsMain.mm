@@ -20,6 +20,7 @@
 
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
+#include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with Android
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -107,6 +108,11 @@ Rps::Fixed WorldToFixed(float Wv) {
     Rps::CameraScroll _Cam;
     bool _CamInit;
     float _DownX, _DownY;
+    // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It was
+    // simply absent here (the recognizer had never been written for iOS), so the console was
+    // unreachable on the iPhone and on-device tuning was Android-only. Shared with the Android and
+    // desktop shims rather than hand-written a third time; the three copies had already drifted.
+    Lur::Input::ConsoleGesture _DevGesture;
     uint8_t _Team;
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
@@ -762,6 +768,18 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     _DownX = X; _DownY = Y;
+#if !LUR_SHIPPING
+    // #151: the console. It was never wired here at all — the two-finger triple-tap that opens it on
+    // Android did nothing on the iPhone, so on-device tuning was Android-only and the iPhone half of a
+    // two-phone playtest was un-tunable (playtest 2026-07-25). The recognizer is the SHARED one
+    // (Lur::Input::ConsoleGesture), not a third hand-written copy: the existing copies had already
+    // drifted three ways, which is how this one came to be missing.
+    _DevGesture.PointersDown(static_cast<int>(event.allTouches.count), NowNs());
+    // While the console is open it OWNS the pointer — a drag anywhere scrolls the cvar list and a
+    // still release is a DevTap. Swallowing the gesture is the point: the panel sits over a LIVE
+    // match, so a scroll must not leak through and pan the camera or start a building drag.
+    if (_View.DevOverlayOpen()) { _DevGesture.DragBegin(Y); return; }
+#endif
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float Off = [self ghostOffPxForWidth:W];
     const bool Live = _SoloActive || _Started;
@@ -787,11 +805,15 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+#if !LUR_SHIPPING
+    if (_View.DevOverlayOpen()) { _View.DevScroll(_DevGesture.DragMove(Y)); return; }  // #151
+#endif
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
         const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
         _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
+        _DevGesture.Cancel();  // #151: a placement drag is not a console tap
     } else {
         _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
     }
@@ -803,6 +825,14 @@ Rps::Fixed WorldToFixed(float Wv) {
     const CGPoint P = [touches.anyObject locationInView:self.view];
     const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
     const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+#if !LUR_SHIPPING
+    // #151: the console owns the gesture while it is open — a still release is a tap it hit-tests
+    // (rows, numpad, the top-left X that closes it), anything else was a scroll already applied.
+    if (_View.DevOverlayOpen()) {
+        if (_DevGesture.DragEndIsTap()) _View.DevTap(X, Y);
+        return;
+    }
+#endif
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
         bool Placed = false;
@@ -813,9 +843,22 @@ Rps::Fixed WorldToFixed(float Wv) {
             Placed = true;
         }
         _View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
+        _DevGesture.Cancel();        // #151
         return;
     }
     _Cam.End();
+#if !LUR_SHIPPING
+    // #151: two-finger triple-tap OPENS the console, with the same windows Android uses because it is
+    // the same recognizer. `event.allTouches` is empty by the time the last touch ends, so the count
+    // was captured in touchesBegan — the candidate is armed there and merely resolved here.
+    const bool WasTwoFinger = _DevGesture.TwoFingerActive();
+    if (_DevGesture.LiftAndShouldOpen(NowNs())) {
+        _View.SetDevOverlayOpen(true);
+        os_log(OS_LOG_DEFAULT, "OnlyRps: dev console opened (two-finger triple-tap, #151)");
+        return;
+    }
+    if (WasTwoFinger) return;   // a tap in the chain: do not also hit the HUD underneath
+#endif
     const bool Tap = (X - _DownX) * (X - _DownX) + (Y - _DownY) * (Y - _DownY) < (24.0f * 24.0f);
     if (Tap) {
         // The opponent selector consumes its own taps; an AI row (re)starts solo, the linked row

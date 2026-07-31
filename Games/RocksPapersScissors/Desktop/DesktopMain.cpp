@@ -26,6 +26,7 @@
 #include "Lur/Core/CVar.h"         // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/CVarConfig.h"  // #115: persist tuned cvars across runs
 #include "Lur/Core/Log.h"
+#include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with the phones
 #include "Lur/Net/Session.h"
 #include "Lur/Platform/Window.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
@@ -1064,7 +1065,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
     Rps::CameraScroll Cam;
     bool CamInit = false;
 #if !LUR_SHIPPING
-    float DevDragY = 0.0f, DevDragMoved = 0.0f;  // drag-to-scroll the console (# 121)
+    Lur::Input::ConsoleGesture DevGesture;  // #151: drag-to-scroll the console, shared with the phones
 #endif
     uint64_t PrevNs = NowNs();
     static Rps::Snapshot Snap;
@@ -1113,15 +1114,14 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             // release becomes a DevTap the overlay hit-tests on the render thread — same path
             // as the phone's touch, so desktop drives the identical console.
             if (View.DevOverlayOpen()) {
-                // Drag = scroll the cvar list; a click that barely moved = a tap the overlay
-                // hit-tests. Same gesture model as the phone (finger drag / tap).
-                if (T.Phase == Lur::Input::ETouchPhase::Began) { DevDragY = T.YPx; DevDragMoved = 0.0f; }
-                else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
-                    View.DevScroll(DevDragY - T.YPx);
-                    DevDragMoved += std::fabs(DevDragY - T.YPx);
-                    DevDragY = T.YPx;
-                } else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                    if (DevDragMoved < 6.0f) View.DevTap(T.XPx, T.YPx);
+                // Drag = scroll the cvar list; a click that barely moved = a tap the overlay hit-tests.
+                // #151: the SAME recognizer the phones use (Lur::Input::ConsoleGesture) rather than a
+                // third copy. This one had its own slop (6 px vs Android's 12), and per-platform slop is
+                // exactly how "one console, identical on both" stops being true.
+                if (T.Phase == Lur::Input::ETouchPhase::Began) DevGesture.DragBegin(T.YPx);
+                else if (T.Phase == Lur::Input::ETouchPhase::Moved) View.DevScroll(DevGesture.DragMove(T.YPx));
+                else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+                    if (DevGesture.DragEndIsTap()) View.DevTap(T.XPx, T.YPx);
                 }
                 continue;
             }

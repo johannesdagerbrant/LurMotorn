@@ -58,7 +58,8 @@ target_link_libraries(OnlyRps PRIVATE
     lur::net
     lur::save
     lur::sim
-    lur::math)
+    lur::math
+    lur::input)  # #151: the shared dev-console gesture (two-finger triple-tap + drag-scroll)
 
 # The .mm sources are Objective-C++ with ARC (CMake's Xcode generator doesn't default it on).
 set_source_files_properties(

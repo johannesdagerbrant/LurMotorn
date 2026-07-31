@@ -26,6 +26,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Core/CVarConfig.h"  // #115: persist + load tuned cvars
 #include "Lur/Core/Log.h"         // the engine logger — routed into logcat below
+#include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with iOS/desktop
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
@@ -119,11 +120,11 @@ struct AppState {
     Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
     float DownX = 0.0f, DownY = 0.0f;
-    uint64_t TwoDownNs = 0;                        // two-finger triple-tap recognizer (glue)
-    uint64_t LastTwoTapNs = 0;
-    int TwoTapCount = 0;
-    bool TwoFingerActive = false;
-    float DevDragY = 0.0f, DevDragMoved = 0.0f;    // #150 console drag-scroll (glue)
+    // #151: the console gesture — two-finger triple-tap to open, drag-to-scroll while open — is now
+    // ONE shared recognizer (Lur::Input::ConsoleGesture), not a per-platform copy. The three copies
+    // had drifted in three different directions: this one could open the panel but not scroll it, the
+    // desktop could scroll but used a different slop, and iOS could not open it at all.
+    Lur::Input::ConsoleGesture DevGesture;         // glue thread only
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
 
     // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
@@ -249,19 +250,16 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // building drag. Same gesture model as DesktopMain.cpp, so one console behaves identically on
     // both — the drag slop is looser here because a finger jitters where a mouse doesn't.
     if (S->View.DevOverlayOpen()) {
-        constexpr float DevTapSlopPx = 12.0f;
         switch (Action) {
             case AMOTION_EVENT_ACTION_DOWN:
-                S->DevDragY = Y;
-                S->DevDragMoved = 0.0f;
+                S->DevGesture.DragBegin(Y);
                 break;
             case AMOTION_EVENT_ACTION_MOVE:
-                S->View.DevScroll(S->DevDragY - Y);  // thread-safe: an atomic the render thread drains
-                S->DevDragMoved += std::fabs(S->DevDragY - Y);
-                S->DevDragY = Y;
+                // Thread-safe: DevScroll is an atomic the render thread drains.
+                S->View.DevScroll(S->DevGesture.DragMove(Y));
                 break;
             case AMOTION_EVENT_ACTION_UP:
-                if (S->DevDragMoved < DevTapSlopPx) S->View.DevTap(X, Y);
+                if (S->DevGesture.DragEndIsTap()) S->View.DevTap(X, Y);
                 break;
             default:
                 break;  // extra fingers / cancel: consumed, but no gameplay side effect
@@ -291,7 +289,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     switch (Action) {
         case AMOTION_EVENT_ACTION_DOWN: {
             S->DownX = X; S->DownY = Y;
-            S->TwoFingerActive = false;
+            S->DevGesture.PointersDown(1, NowNs());
             const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
             if (Plate >= 0) {
                 S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
@@ -308,7 +306,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             return 1;
         }
         case AMOTION_EVENT_ACTION_POINTER_DOWN:  // a second finger landed
-            if (Count == 2) { S->TwoFingerActive = true; S->TwoDownNs = NowNs(); }
+            S->DevGesture.PointersDown(static_cast<int>(Count), NowNs());
             return 1;
         case AMOTION_EVENT_ACTION_MOVE:
             if (S->View.IsPlacing()) {
@@ -333,27 +331,23 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                     Placed = true;
                 }
                 S->View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
-                S->TwoFingerActive = false;
+                S->DevGesture.Cancel();        // a placement is not a console tap
                 return 1;
             }
             S->Cam.End();
 #if !LUR_SHIPPING
             // Two-finger TRIPLE-tap opens the CVar view (dev-only; won't fire during normal
-            // one-finger play). The in-panel top-left X closes it. Each quick two-finger tap
-            // within the window increments the count; the 3rd opens.
-            if (S->TwoFingerActive && (NowNs() - S->TwoDownNs) < 350'000'000ull) {
-                S->TwoTapCount = (NowNs() - S->LastTwoTapNs < 600'000'000ull) ? S->TwoTapCount + 1 : 1;
-                S->LastTwoTapNs = NowNs();
-                if (S->TwoTapCount >= 3) {
-                    S->View.SetDevOverlayOpen(true);
-                    S->TwoTapCount = 0;
-                }
-                S->TwoFingerActive = false;
+            // one-finger play). The in-panel top-left X closes it. #151: the windows and the chaining
+            // live in Lur::Input::ConsoleGesture, shared with the iOS and desktop shims.
+            const bool WasTwoFinger = S->DevGesture.TwoFingerActive();
+            if (S->DevGesture.LiftAndShouldOpen(NowNs())) {
+                S->View.SetDevOverlayOpen(true);
                 return 1;
             }
+            if (WasTwoFinger) return 1;   // a tap in the chain: do not also hit the HUD underneath
 #endif
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
-            if (Tap && !S->TwoFingerActive) {
+            if (Tap && !S->DevGesture.TwoFingerActive()) {
                 // (No DevTap here: an open console returns at the top of HandleInput — #150.)
                 // The opponent selector works pre-match (the AI rows start a solo match, #127).
                 const int Hit = S->View.OnTap(X, Y);     // -2 selector consumed, 0..3 plate, -1 world
@@ -369,7 +363,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                     if (Cnt > 0) RouteLocalEvent(S, Rps::InputEvent::Queue(MyTeam, Slot, Cnt));
                 }
             }
-            S->TwoFingerActive = false;
+            S->DevGesture.Cancel();   // the gesture is over either way
             return 1;
         }
         default:

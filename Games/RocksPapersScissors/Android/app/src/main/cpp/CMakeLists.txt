@@ -41,6 +41,7 @@ target_link_libraries(onlyrps
     lur::sim
     lur::math
     lur::trace  # named CPU scopes (#101) — RpsMain emits the aggregated TRACE line
+    lur::input  # #151: the shared dev-console gesture (two-finger triple-tap + drag-scroll)
     android   # NativeActivity / ANativeWindow
     log       # __android_log_print
     vulkan)   # the GPU API (Vulkan backend, task #9)
