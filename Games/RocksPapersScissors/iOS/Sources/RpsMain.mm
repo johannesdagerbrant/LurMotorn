@@ -586,7 +586,7 @@ Rps::Fixed WorldToFixed(float Wv) {
                     [Vc recordLinkedTick:Tick batch:Batch count:Count hash:Hash];
                 },
                 (__bridge void*)self);
-            [self linkedRecBegin];
+            // The recording itself is NOT opened here — see the MatchStarted gate below.
 #endif
             // The peer's GUID is known now, so show the ALL-TIME record against THIS rival rather
             // than 0-0-0 until the first match of the session ends.
@@ -604,9 +604,13 @@ Rps::Fixed WorldToFixed(float Wv) {
         // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
         if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }
 #if LUR_INTERNAL
-        // #159: a restart is a new match, so it gets a new recording. Keyed on the match index like
-        // the tally latch above, rather than on a second bool that could fall out of step with it.
-        if (_Started && _LinkedRecIdx != _Lp.MatchIndex()) [self linkedRecBegin];
+        // #159: open the recording on the MATCH-STARTED edge, and NOT at Lp.Init. The header snapshots
+        // the sim's latched CVar set, and at Init that set is still this peer's own — the #147
+        // MsgCvarSync merge (and the ResetSim it triggers) can land afterwards, so a recording opened
+        // at Init misstates the tunables it ran on. Caught by diffing two real phones: one file said
+        // miner-building 400 / gold 750 and the other 600 / 800 for a pair that was demonstrably
+        // converged. Keyed on the match index, so a post-match restart opens the next one.
+        if (_Started && _Lp.MatchStarted() && _LinkedRecIdx != _Lp.MatchIndex()) [self linkedRecBegin];
 #endif
         // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
         if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {

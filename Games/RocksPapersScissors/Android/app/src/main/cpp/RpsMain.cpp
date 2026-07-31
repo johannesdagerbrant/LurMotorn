@@ -827,11 +827,6 @@ void android_main(android_app* App) {
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);
                 State.Linked.store(true, std::memory_order_release);  // glue applies the view flip
                 LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
-#if LUR_INTERNAL
-                // #159: open this match's recording. After LinkedTeam is stored, since the header
-                // records which team is "us" — that is what lets a reader orient the two files.
-                LinkedRecBegin();
-#endif
             }
 #if LUR_INTERNAL
             // #137b: the linked auto-soak spammed a random press mask, retired with the mask.
@@ -866,9 +861,19 @@ void android_main(android_app* App) {
                     LinkedScored = false;
                 }
 #if LUR_INTERNAL
-                // #159: a restart is a new match -> a new recording. Keyed on the RECORDER's own
-                // index (see LinkedRecIdx) so the entry-site Begin and this one can never both fire.
-                if (LinkedRecIdx != State.Lp.MatchIndex()) LinkedRecBegin();
+                // #159: open the recording on the MATCH-STARTED edge, and NOT at Lp.Init.
+                //
+                // The header snapshots the sim's latched CVar set, and at Init that set is still this
+                // peer's own — the #147 MsgCvarSync merge (and the ResetSim it triggers) can land
+                // afterwards. Caught the first time two real phones were diffed: the Galaxy's
+                // persisted overrides (miner building 400, starting gold 750) showed in ITS file while
+                // the iPhone's said 600/800, so recdiff reported "the peers did not agree on tunables"
+                // for a pair that was in fact converged and desync-free. A recording that misstates
+                // its own tunables replays wrong and makes every diff noisy.
+                //
+                // MatchStarted_ is the point where the merged set is in place and tick 0's camps are
+                // seeded, and no tick executes before it — so nothing is missed by waiting.
+                if (State.Lp.MatchStarted() && LinkedRecIdx != State.Lp.MatchIndex()) LinkedRecBegin();
 #endif
                 // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
                 if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {

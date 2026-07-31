@@ -850,7 +850,14 @@ int RunRecDiff(const char* PathA, const char* PathB) {
         Lur::Log::Info("VERDICT: identical inputs, state diverged by tick %d (so between tick %d and "
                        "%d). The sim is not deterministic across these two builds/platforms.",
                        FirstHashDiff, FirstHashDiff - 10, FirstHashDiff);
-    else if (Problems == 0)
+    else if (Problems > 0)
+        // Preconditions failed but nothing diverged. This printed NO verdict at all on its first real
+        // run (two phones whose headers disagreed on tunables), which reads as "the tool gave up" —
+        // and the honest answer is the opposite: the streams agreed, so look at the headers.
+        Lur::Log::Info("VERDICT: no divergence in the events or hashes, but the two files disagree on "
+                       "their PRECONDITIONS (above). Fix that first — a header that misstates the "
+                       "match makes every tick number here meaningless.");
+    else
         Lur::Log::Info("VERDICT: the two recordings agree on every compared tick.");
     return Problems == 0 ? 0 : 2;
 }
