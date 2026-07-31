@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
+#include <type_traits>   // #159: compile-time guard that hashed sim state carries no floating point
 
 #include "Lur/Sim/Random.h"
 #include "Rps/Sim.h"
@@ -880,6 +881,46 @@ static void TestEconomyGathersGold() {
 // measurement IS the proof; no hard time assert (machine-dependent, would flake). This
 // is where the spatial grid earns its keep: at 2048 units the O(n^2) scans would be a
 // wall, the grid keeps the tick cheap.
+// ---- #159: nothing in the HASHED sim state may be floating point ----
+// The remaining unexplained candidate for the 2026-07-30 divergence (13.5 minutes of clean lockstep,
+// then two different hashes at tick 8180) is cross-compiler nondeterminism: NDK clang and Apple clang
+// compiling the same source, with something in sim state that should be Fixed and is not. The classic
+// signature is exactly what was seen — thousands of identical ticks and then a late 1-ULP split.
+//
+// There is no such field today, which is worth ASSERTING rather than re-establishing by reading the
+// header each time the question comes up. These are compile-time checks over the members StateHash
+// mixes, so adding a float to hashed state fails the build with this comment attached, on the host,
+// before either phone is involved. (Modules/Math floats are for RENDERING and never reach here.)
+static void TestNoFloatingPointInHashedSimState() {
+    // Fixed is the substrate: integer-backed by construction, so every position/velocity derived from
+    // it is exact and identical on both compilers.
+    static_assert(std::is_integral_v<decltype(Fixed::Raw)>, "Fixed must stay integer-backed (#159)");
+    static_assert(sizeof(Fixed) == sizeof(int32_t), "Fixed must be a thin wrapper, no padding (#159)");
+
+    // Every array StateHash mixes, in its declaration order. Fixed counts as integral by the check
+    // above; everything else must be a plain integer type.
+    using PosT = std::remove_extent_t<decltype(Sim::PosX)>;
+    using HpT = std::remove_extent_t<decltype(Sim::Hp)>;
+    using TypeT = std::remove_extent_t<decltype(Sim::Type)>;
+    using TargetT = std::remove_extent_t<decltype(Sim::Target)>;
+    using CooldownT = std::remove_extent_t<decltype(Sim::Cooldown)>;
+    using CarryT = std::remove_extent_t<decltype(Sim::Carry)>;
+    using QueueT = std::remove_extent_t<decltype(Sim::Queue)>;
+    using ProgressT = std::remove_extent_t<decltype(Sim::BuildProgress)>;
+    static_assert(std::is_same_v<PosT, Fixed>, "positions must be Fixed, never float (#159)");
+    static_assert(std::is_same_v<std::remove_extent_t<decltype(Sim::PrevX)>, Fixed>, "#159");
+    static_assert(std::is_integral_v<HpT> && std::is_integral_v<TypeT>, "#159");
+    static_assert(std::is_integral_v<TargetT> && std::is_integral_v<CooldownT>, "#159");
+    static_assert(std::is_integral_v<CarryT> && std::is_integral_v<QueueT>, "#159");
+    static_assert(std::is_integral_v<ProgressT>, "#159");
+    static_assert(std::is_integral_v<decltype(Sim::Tick)>, "#159");
+    static_assert(std::is_integral_v<decltype(Sim::Seed)>, "#159");
+    // The whole sim must stay memcpy-able too: the snapshot seam and the future rollback both copy it,
+    // and a member needing a real copy constructor is a member that can carry non-POD state.
+    static_assert(std::is_trivially_copyable_v<Sim>, "Sim must stay POD-copyable (#159, Review #2)");
+    CHECK(true);  // the assertions above are the test; this keeps the runner's shape uniform
+}
+
 // ---- #162: a MINER must not pay for a flock gather it never reads ----
 // Measured on a Galaxy A14 at ~1600 units: sim.step 57 ms of a 100 ms tick, of which sim.move was
 // ~50 ms — and the field was carts ("I was able to make the match freeze by making over 1600
@@ -979,6 +1020,7 @@ int main() {
     TestGameplayCvarListComplete();
 #endif
     TestGridEqualsBruteForce();
+    TestNoFloatingPointInHashedSimState();  // #159
 #if LUR_INTERNAL
     TestMinersDoNotPayForAFlockGather();   // #162
 #endif
