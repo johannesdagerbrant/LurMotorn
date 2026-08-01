@@ -56,5 +56,25 @@ Check 'absent app -> null record' ([bool](Get-IosAppRecord)) 'False'
 $script:Canned = $null
 Check 'dead probe -> null record' ([bool](Get-IosAppRecord)) 'False'
 
+# REGRESSION: `apps list` is ~2.25 MB on a real device and PS 5.1's ConvertFrom-Json refuses anything
+# past ~2 MB. The first implementation parsed the whole document, so it threw on real hardware and the
+# evidence silently became "unavailable" — on an install that had actually succeeded. Pad past the cap
+# with the real record embedded at the far end, exactly where the real one sits.
+$rec = '"com.lurmotorn.onlyrps.L5XBWVZ7N3": {' +
+       '"CFBundleVersion": "1",' +
+       '"Container": "/private/var/mobile/Containers/Data/Application/4A314254",' +
+       '"ParallelPlaceholderPath": true,' +
+       '"Path": "/private/var/containers/Bundle/Application/5DF6A615/OnlyRps.app",' +
+       '"SequenceNumber": 2000}'
+$script:Canned = '{"com.other.padding": {"Blob": "' + ('x' * 2500000) + '"},' + $rec + '}'
+$big = Get-IosAppRecord
+Check 'record survives a 2.5MB listing' ([bool]$big) 'True'
+Check 'picks Path, not ParallelPlaceholderPath' ($big -match 'Path=/private/var/containers/Bundle/Application/5DF6A615/OnlyRps\.app') 'True'
+Check 'captures SequenceNumber too' ($big -match 'SequenceNumber=2000') 'True'
+
+# A reinstall changes Path AND SequenceNumber; that difference is the entire verdict.
+$script:Canned = '{' + ($rec -replace '5DF6A615', 'F0934752' -replace '2000', '2001') + '}'
+Check 'reinstall changes the big-listing record' ($big -ne (Get-IosAppRecord)) 'True'
+
 if ($fails -gt 0) { Write-Host "$fails FAILED" -ForegroundColor Red; exit 1 }
 Write-Host 'ALL PASS' -ForegroundColor Green

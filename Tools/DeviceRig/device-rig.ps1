@@ -272,12 +272,27 @@ function Invoke-BoundedPmd([string[]]$PmdArgs, [int]$TimeoutSec = 60) {
 }
 
 function Get-IosAppRecord {
-    $out = Invoke-BoundedPmd @('apps', 'list') 60
+    # 150s, not 60: `apps list` enumerates every installed app and measured slower than a minute here.
+    $out = Invoke-BoundedPmd @('apps', 'list') 150
     if (-not $out) { return $null }
-    try { $j = $out | ConvertFrom-Json } catch { return $null }
-    $prop = $j.PSObject.Properties[$App.IosBundleId]
-    if (-not $prop) { return $null }
-    return ($prop.Value | ConvertTo-Json -Depth 6 -Compress)
+    # Deliberately NOT ConvertFrom-Json. That output is ~2.25 MB on this device and PS 5.1's
+    # ConvertFrom-Json refuses anything past its ~2 MB MaxJsonLength, so it threw and the evidence
+    # silently became "unavailable" — which is exactly what the first real run of this reported, on an
+    # install that had in fact succeeded. A targeted read of our own record has no size limit.
+    #
+    # Path holds the Bundle/Application UUID and SequenceNumber increments, so both change on a
+    # reinstall: that is the whole signal. ("Path" cannot collide with "ParallelPlaceholderPath" —
+    # the leading quote is part of the pattern.)
+    $i = $out.IndexOf('"' + $App.IosBundleId + '"')
+    if ($i -lt 0) { return $null }
+    $seg = $out.Substring($i, [Math]::Min(4000, $out.Length - $i))
+    $parts = @()
+    foreach ($f in 'Path', 'SequenceNumber', 'Container') {
+        $m = [regex]::Match($seg, '"' + $f + '"\s*:\s*"?([^",\r\n]+)')
+        if ($m.Success) { $parts += ($f + '=' + $m.Groups[1].Value.Trim()) }
+    }
+    if ($parts.Count -eq 0) { return $null }
+    return ($parts -join '|')
 }
 
 # Is the app running? Returns the pid as a STRING, '' when definitively not running, or 'unknown'
@@ -308,14 +323,26 @@ function Wait-IosAppClosed([int]$TimeoutSec) {
 # `apps install` with a HARD bound, and its exit code actually returned. -1 means it was still
 # running at the deadline and we killed it.
 function Invoke-BoundedInstall([string]$Path, [int]$TimeoutSec) {
-    $p = Start-Process -FilePath 'python' `
-            -ArgumentList @('-m', 'pymobiledevice3', 'apps', 'install', $Path) `
-            -NoNewWindow -PassThru
-    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
-        try { $p.Kill() } catch {}
+    # A JOB, not `Start-Process -PassThru`. That was the first attempt and its Process object does not
+    # reliably expose ExitCode: a real install printed "Installation succeed." and the rig then said
+    # "install FAILED (exit code )" from a $null that matched neither 0 nor -1. Reading $LASTEXITCODE
+    # INSIDE the job gets the actual code, and Wait-Job still bounds it. -1 = timed out and killed,
+    # -2 = exited but the code could not be read (caller falls through to the bundle evidence rather
+    # than inventing a verdict).
+    $job = Start-Job -ScriptBlock {
+        param($p)
+        & python -m pymobiledevice3 apps install $p 2>&1 | Out-Null
+        $LASTEXITCODE
+    } -ArgumentList $Path
+    if (-not (Wait-Job $job -Timeout $TimeoutSec)) {
+        Stop-Job   $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
         return -1
     }
-    return $p.ExitCode
+    $code = @(Receive-Job $job) | Where-Object { $_ -is [int] } | Select-Object -Last 1
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    if ($null -eq $code) { return -2 }
+    return [int]$code
 }
 
 # The one install path: clear the blocker if we can, bound the call, and decide success on
