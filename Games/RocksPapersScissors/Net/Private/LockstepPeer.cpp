@@ -274,8 +274,35 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
     if (!LocalReady_) {
         std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-        for (const InputEvent& E : PendingLocalEvents)
-            if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner) { LocalCamp_ = E; LocalReady_ = true; break; }
+        for (const InputEvent& E : PendingLocalEvents) {
+            if (E.Kind != EventPlaceBuilding || E.Type != UnitMiner) continue;
+            // #167: "ready" must mean "ready with a camp that will EXIST". This used to take the camp
+            // on faith, so an unplaceable one still set LocalReady_, the match started, and tick 0's
+            // ApplyPlace then discarded it — leaving a peer in a live match with NO camp and its full
+            // opening gold. That state is reachable by no rule of the game, and it reads downstream as
+            // an economy desync rather than as a bad input.
+            //
+            // CanPlaceBuilding, NOT WouldAcceptPlace, and the difference is deliberate: the latter
+            // also requires the camp to be AFFORDABLE, and gold is the one input that legitimately
+            // changes between here and tick 0 — MsgCvarSync converges the tunables pre-tick-0 (#147),
+            // and the two phones really do arrive holding different starting_gold. Refusing on gold
+            // observed before the merge would leave a peer silently never-ready on a camp tick 0 would
+            // have accepted, which presents as #163's "pre-match stalled / half-open link" and sends
+            // the reader hunting the transport. Spatial validity has no such timing: it is a pure
+            // function of the coordinate and the map. An unaffordable camp is still discarded at tick
+            // 0 as before — that case is a tunables choice, not a malformed input.
+            //
+            // A human cannot trip this (drag-to-place only emits once ResolvePlacement succeeded);
+            // the agent harness can and did, because injecting exact coordinates is its whole purpose.
+            if (!TheSim.CanPlaceBuilding(E.Team, E.Type, Fixed{E.X}, Fixed{E.Y})) {
+                Lur::Log::Error("RPS: pre-match camp at (%d,%d) is NOT placeable — ignoring it and "
+                                "staying unready. Place again on valid ground.",
+                                Fixed{E.X}.ToInt(), Fixed{E.Y}.ToInt());
+                continue;  // a later candidate in the same batch may still be good
+            }
+            LocalCamp_ = E; LocalReady_ = true;
+            break;
+        }
         PendingLocalEvents.clear();  // pre-match: only the mining camp is accepted; drop the rest
     }
     // #149: send our camp, then KEEP re-sending it on a period until the peer's arrives. One send

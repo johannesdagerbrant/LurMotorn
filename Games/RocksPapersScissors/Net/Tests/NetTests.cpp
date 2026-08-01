@@ -837,6 +837,76 @@ static void TestProducedCampLookAlikeIsNotDropped() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 }
 
+// ---- #167: "ready" must mean "ready with a camp that will actually exist" ----
+// PreMatchTick captured the first PlaceBuilding/UnitMiner off the pending queue as LocalCamp_ and
+// set LocalReady_ WITHOUT validating placement. The match then started and tick 0's ApplyPlace threw
+// the camp away, so a peer could enter a live match with no camp and its full opening gold — a state
+// no rule of the game produces, and one that reads as an economy desync rather than a bad input.
+//
+// A human cannot reach it: drag-to-place only emits an event once ResolvePlacement has already
+// succeeded. The agent harness reaches it trivially, because injecting EXACT coordinates (bypassing
+// the snap) is the entire point of it — which is how this was found.
+static void TestPreMatchRejectsUnplaceableCamp() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x167, 0, Enqueue, &Qa);
+    B.Init(0x167, 1, Enqueue, &Qb);
+
+    // Team 0 "places" its opening camp on team 1's ground — outside its own frontier, so tick 0
+    // would reject it.
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(1)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
+    for (int I = 0; I < 8; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+
+    // An unplaceable camp is not a readiness. Neither peer may start: B is legitimately ready, but a
+    // match needs BOTH camps, and starting here is what produced the campless peer.
+    CHECK(!A.HasLocalCamp());
+    CHECK(!A.MatchStarted());
+    CHECK(!B.MatchStarted());
+
+    // The rejection must not wedge the handshake — a legal camp afterwards still readies and starts.
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+    for (int I = 0; I < 8 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.HasLocalCamp());
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    // And the camp is REALLY there once tick 0 has run — the check above only proves we agreed to
+    // start, which is exactly the thing that used to be true while the camp did not exist.
+    for (int I = 0; I < 4; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    const Sim& Sa = A.GetSim();
+    int Camps0 = 0;
+    for (int32_t I = 0; I < Sa.Count; ++I)
+        if (Sa.IsAlive(I) && Sa.IsBuilding(I) && !Sa.IsHomeBase(I) && Sa.Team[I] == 0 &&
+            Sa.Type[I] == UnitMiner)
+            ++Camps0;
+    CHECK(Camps0 == 1);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
+// The gate above is SPATIAL only (CanPlaceBuilding), and this pins that on purpose. Using the
+// stricter WouldAcceptPlace would also demand the camp be AFFORDABLE, and gold is precisely the
+// input that legitimately changes between the placement and tick 0: MsgCvarSync converges the
+// tunables pre-tick-0 (#147) and the two phones genuinely arrive holding different starting_gold.
+// A peer that refused its camp on pre-merge gold would sit silently unready on a camp tick 0 would
+// have accepted — indistinguishable from #163's half-open link, and a much worse bug than the one
+// #167 fixes. So: an unaffordable camp on LEGAL ground still readies and still starts the match.
+static void TestPreMatchAcceptsUnaffordableCampOnLegalGround() {
+    const int32_t GoldWas = CvStartingGold.Get();
+    CvStartingGold.Set(100);  // far below a camp: tick 0 will discard it, the handshake must not stall
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x167b, 0, Enqueue, &Qa);
+    B.Init(0x167b, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.HasLocalCamp() && B.HasLocalCamp());
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    for (int I = 0; I < 6; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    CvStartingGold.Set(GoldWas);
+}
+
 // Re-encode ONE of the sender's produced frames with an extra event injected, keeping the sequence
 // byte and appending rather than replacing — so nothing looks lost, no gap is reported, and the two
 // sims genuinely diverge. That is the shape #159 captured on hardware: a long clean match, then one
@@ -1676,6 +1746,8 @@ int main() {
     TestLinkedRecordingsMatchAcrossPeers();
 #endif
     TestProducedCampLookAlikeIsNotDropped();     // #160
+    TestPreMatchRejectsUnplaceableCamp();        // #167
+    TestPreMatchAcceptsUnaffordableCampOnLegalGround();  // #167: spatial only, by design
     TestLostInputFrameIsDetectedAndLocated();    // #163
     TestPreMatchStallIsReported();               // #163
     TestStarvedCeilingEndsTheMatch();                   // #162
