@@ -37,6 +37,12 @@ param(
     [int]$SettleSec = 12,           # run: grace for the two peers to discover + link
     [int]$LinkTimeoutSec = 35,      # run: abort LOUDLY if no peer reports READY by then
     [int]$Iterations = 1,           # cycle: repeat the loop this many times back-to-back
+    [int]$InstallTimeoutSec = 240,  # install: hard bound on `apps install` (never hang silently)
+    [int]$AppCloseWaitSec = 180,    # install: how long to wait for a blocking app to be closed
+    [switch]$ForceUninstall,        # install: DESTRUCTIVE zero-touch path - uninstall first, which
+                                    #   is the only headless way to guarantee the app is not running.
+                                    #   Wipes the container: device GUID, opponent history, and any
+                                    #   .rec flight recordings not yet pulled. Off by default.
     [switch]$NoReset,               # run: DON'T pm-clear Android or clear logcat - arm the
                                     #   already-running/linked apps + keep the buffered
                                     #   handshake. Use when peers are already paired live.
@@ -225,6 +231,133 @@ function ClearHistory-Ios {
     [void](Launch-Ios -FreshProcess)   # process restart consumes the marker and wipes
 }
 
+# --- Install blocking: detect it, never hang on it ---------------------------------
+# THE FAILURE THIS SOLVES. `apps install` blocks for as long as the app is RUNNING on the
+# phone, and it blocks SILENTLY - no progress, no error, no timeout. The human-visible shape is
+# "the install just sits there until I swipe the app away, then it finishes instantly", and the
+# agent-visible shape is worse: nothing at all, for as long as you are willing to wait. Android
+# has no equivalent (`adb install -r` kills and replaces a running app), so an install of BOTH
+# peers stalls on the iOS half only, which is exactly where nobody is looking.
+#
+# It was compounded by the rig itself: the old code was `Pmd apps install $x | Out-Host` followed
+# unconditionally by `Say 'ios: installed'; return $true`. The exit code was never read, so a
+# failed - or externally killed - install still reported success and returned the headless flag.
+# A hang and a lie, in the one step that decides which binary is on the phone.
+#
+# WHAT DOES NOT WORK, measured on iOS 26.5 / pymobiledevice3 on 2026-08-01: `dvt kill <pid>`
+# exits 0 and `dvt pkill OnlyRps` even logs "Killing OnlyRps(5099)", and the process survives
+# BOTH with an unchanged pid and start time. Only a kill-existing `dvt launch` restarts it, and
+# that relaunches rather than terminates, so it is no use before an install. There is no headless
+# terminate. Hence: detect, say so in one actionable line, and WAIT - resuming the moment the app
+# closes - instead of blocking forever on a condition nobody can see.
+#
+# This is the iOS twin of Test-AndroidAlive above: the same silent-stall class, the same rule -
+# a bounded probe beats a call that can never return.
+
+# The app's installation record, used as INSTALL EVIDENCE. The CLI's exit is NOT the source of
+# truth: measured 2026-08-01, an install LANDED on the phone (verified by the new build running)
+# while the CLI sat unreturned for over ten minutes. iOS mints a fresh Bundle/Application UUID on
+# every reinstall, so a changed record proves the new binary arrived regardless of what the CLI
+# did. Returns $null when the app is absent or the query fails.
+function Invoke-BoundedPmd([string[]]$PmdArgs, [int]$TimeoutSec = 60) {
+    $job = Start-Job -ScriptBlock { param($a) & python -m pymobiledevice3 @a 2>$null } -ArgumentList (, $PmdArgs)
+    if (-not (Wait-Job $job -Timeout $TimeoutSec)) {
+        Stop-Job   $job -ErrorAction SilentlyContinue
+        Remove-Job $job -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    $out = (Receive-Job $job) -join "`n"
+    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    return $out
+}
+
+function Get-IosAppRecord {
+    $out = Invoke-BoundedPmd @('apps', 'list') 60
+    if (-not $out) { return $null }
+    try { $j = $out | ConvertFrom-Json } catch { return $null }
+    $prop = $j.PSObject.Properties[$App.IosBundleId]
+    if (-not $prop) { return $null }
+    return ($prop.Value | ConvertTo-Json -Depth 6 -Compress)
+}
+
+# Is the app running? Returns the pid as a STRING, '' when definitively not running, or 'unknown'
+# when the probe itself failed (a dead tunnel must not be read as "not running"). String-typed on
+# purpose: an int-vs-'unknown' comparison throws under ErrorActionPreference=Stop.
+function Get-IosAppPid {
+    $out = Invoke-BoundedPmd @('developer', 'dvt', 'proclist', '--userspace') 60
+    if (-not $out) { return 'unknown' }
+    try { $j = $out | ConvertFrom-Json } catch { return 'unknown' }
+    foreach ($p in $j) {
+        if ("$($p.bundleIdentifier)" -eq $App.IosBundleId) { return "$($p.pid)" }
+    }
+    return ''
+}
+
+# Poll until the app is gone. Gives up on 'unknown' rather than spinning on a broken probe.
+function Wait-IosAppClosed([int]$TimeoutSec) {
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        Start-Sleep -Seconds 3
+        $p = Get-IosAppPid
+        if ($p -eq '')        { return $true }
+        if ($p -eq 'unknown') { return $false }
+    }
+    return $false
+}
+
+# `apps install` with a HARD bound, and its exit code actually returned. -1 means it was still
+# running at the deadline and we killed it.
+function Invoke-BoundedInstall([string]$Path, [int]$TimeoutSec) {
+    $p = Start-Process -FilePath 'python' `
+            -ArgumentList @('-m', 'pymobiledevice3', 'apps', 'install', $Path) `
+            -NoNewWindow -PassThru
+    if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+        try { $p.Kill() } catch {}
+        return -1
+    }
+    return $p.ExitCode
+}
+
+# The one install path: clear the blocker if we can, bound the call, and decide success on
+# EVIDENCE rather than on the CLI's say-so.
+function Install-IpaHeadless([string]$Path, [string]$What) {
+    if ($ForceUninstall) {
+        Warn 'ios: -ForceUninstall - uninstalling first (WIPES the container: device GUID, opponent history, unpulled .rec files).'
+        $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
+        try { & python -m pymobiledevice3 apps uninstall $App.IosBundleId 2>$null | Out-Null } catch {}
+        $ErrorActionPreference = $prev
+    }
+    $before = Get-IosAppRecord
+    $appPid = Get-IosAppPid
+    if ($appPid -eq 'unknown') {
+        Warn 'ios: could not probe whether the app is running (dvt tunnel refused) - installing anyway, bounded.'
+    } elseif ($appPid -ne '') {
+        Warn "ios: $($App.LogTag) is RUNNING (pid $appPid). An install BLOCKS until it exits, silently."
+        Warn 'ios: dvt kill/pkill do not work on this OS. CLOSE THE APP ON THE PHONE (swipe it away in the app switcher).'
+        Say  "ios: waiting up to ${AppCloseWaitSec}s - the install resumes by itself the moment it closes."
+        if (Wait-IosAppClosed $AppCloseWaitSec) { Say 'ios: app closed - installing.' }
+        else { Warn 'ios: app still running - trying the install anyway so the bound, not the block, decides.' }
+    }
+    Say "ios: headless install ($What), bounded at ${InstallTimeoutSec}s"
+    $code  = Invoke-BoundedInstall $Path $InstallTimeoutSec
+    $after = Get-IosAppRecord
+    if ($code -eq 0) { Say 'ios: installed'; return $true }
+    # Not a clean exit. Before calling it a failure, look at the phone: the install may well have
+    # landed anyway (see Get-IosAppRecord).
+    if ($before -and $after -and ($before -ne $after)) {
+        Warn "ios: install did not exit cleanly (code $code) but the bundle record CHANGED - the new build IS on the phone."
+        return $true
+    }
+    $evidence = 'bundle record unchanged'
+    if (-not $before -or -not $after) { $evidence = 'bundle record unavailable, so this is inconclusive' }
+    if ($code -eq -1) {
+        throw ("ios: install TIMED OUT after ${InstallTimeoutSec}s ($evidence). " +
+               'The usual cause is the app still running on the phone: close it and re-run. ' +
+               'Raise -InstallTimeoutSec for a genuinely slow link.')
+    }
+    throw "ios: install FAILED (exit code $code; $evidence)."
+}
+
 # Install a NEW build of the app. Code signing is the one Apple gate; since 2026-07-18
 # it is fully automated with LOCAL material (nothing Apple-ID-credential-shaped):
 #   1. -SignedIpa <path>   : already signed -> `apps install` (fully headless).
@@ -241,9 +374,7 @@ function Install-Ios {
     # (1) Pre-signed ipa -> headless apps install.
     if ($SignedIpa) {
         if (-not (Test-Path $SignedIpa)) { throw "signed ipa not found: $SignedIpa" }
-        Say ('ios: headless install (signed) ' + (Split-Path $SignedIpa -Leaf))
-        Pmd apps install $SignedIpa | Out-Host   # Out-Host, not the pipeline, so $true is the only return value
-        Say 'ios: installed'; return $true
+        return (Install-IpaHeadless $SignedIpa ('signed ' + (Split-Path $SignedIpa -Leaf)))
     }
     # (2)/(3) zsign + apps install. Explicit -ZsignP12/-ZsignProfile wins; else auto-locate.
     $zsign = (Get-Command zsign -ErrorAction SilentlyContinue).Source
@@ -282,9 +413,7 @@ print(best[1] if best else '')
         if ($cert) { & $zsign -k $key -c $cert -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
         else       { & $zsign -k $key -p $ZsignPassword -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
         if ($LASTEXITCODE -ne 0) { throw 'zsign failed (profile expired? renew via Sideloadly once, then retry).' }
-        Say 'ios: headless install (zsigned)'
-        Pmd apps install $signed | Out-Host
-        Say 'ios: installed'; return $true
+        return (Install-IpaHeadless $signed 'zsigned')
     }
     Warn 'ios: headless signing material incomplete (zsign / key+cert PEMs / profile) - falling back to Sideloadly.'
     # (3) Assisted Sideloadly - the honest single human touch (first run also does the

@@ -58,6 +58,42 @@ rig falls back to opening Sideloadly (drag the `.ipa` in — its `-i` flag is un
 `cycle` additionally hashes the `.ipa` and **skips install when unchanged**, so re-running
 experiments back-to-back never reinstalls at all.
 
+#### A running app blocks the install — and used to do it invisibly
+
+**`apps install` blocks for as long as the app is RUNNING on the iPhone, with no progress, no
+error and no timeout.** The shape a human sees is "the install just sits there until I swipe the
+app away, then it finishes instantly"; the shape an agent sees is nothing at all, for as long as
+it is willing to wait. Android has no equivalent (`adb install -r` kills and replaces a running
+app), so a two-peer install stalls on the iOS half *only* — which is exactly where nobody is
+watching. The rig made it worse: it never read the install's exit code, so a failed or killed
+install still printed `ios: installed` and reported the headless path had succeeded.
+
+The rig now **detects it, bounds it, and decides on evidence**:
+
+- Before installing it asks whether the app is running (`dvt proclist`). If it is, it says so and
+  waits up to `-AppCloseWaitSec` (default 180), **resuming by itself the moment you close it** —
+  so the one manual step is announced instead of inferred from a hang.
+- The install itself is bounded by `-InstallTimeoutSec` (default 240) and its exit code is read.
+- **The CLI's exit is not the source of truth.** Measured 2026-08-01: an install *landed* (the new
+  build verifiably ran afterwards) while the CLI sat unreturned for over ten minutes. So on a
+  non-clean exit the rig compares the app's installation record before and after — iOS mints a new
+  `Bundle/Application` UUID per install — and reports "did not exit cleanly but the bundle
+  CHANGED: the new build IS on the phone" rather than a false failure. When the record is
+  unavailable it says the result is *inconclusive* instead of guessing.
+
+**There is no headless terminate on iOS.** Measured on iOS 26.5: `dvt kill <pid>` exits 0 and
+`dvt pkill OnlyRps` even logs `Killing OnlyRps(5099)`, and the process survives both with an
+unchanged pid *and* start time. Only a kill-existing `dvt launch` restarts it, which relaunches
+rather than terminates and so is useless before an install. If you want genuinely zero-touch,
+`-ForceUninstall` uninstalls first — but it is **destructive**: it wipes the container, taking the
+device GUID (stable BLE role + colour), opponent history, and any `.rec` flight recordings you
+have not pulled. Off by default for that reason.
+
+`test-install-probes.ps1` covers the parsing and the two safety-critical distinctions — a failed
+probe must never read as "app closed", and a bundle id that merely *contains* ours is not a match.
+It lifts the real functions out of `device-rig.ps1` via the AST, so it tests the shipped code and
+needs no device: `powershell -ExecutionPolicy Bypass -File Tools\DeviceRig\test-install-probes.ps1`.
+
 ### One-time / periodic setup (each an unavoidable Apple gate)
 
 1. **Weekly profile renewal**: free Apple accounts get **7-day provisioning profiles**; one
