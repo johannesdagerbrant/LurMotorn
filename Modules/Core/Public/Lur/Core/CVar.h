@@ -73,6 +73,12 @@ public:
     // Current value as a raw int32 for the wire (Fixed.Raw / int / enum ordinal / bool),
     // so a type-erased edit can be handed to LockstepPeer::SetGameplayCvar without knowing T.
     virtual int32_t     RawValue() const = 0;
+    // Move the value by Steps (+1/-1 per arrow-key press, #119). The STEP SIZE is per-type
+    // and chosen by the concrete CVar, because that is the only thing that knows T: a bool
+    // flips, an int moves by 1, a Fixed by 1/64 of a unit, a float by 0.01. Returns false
+    // (leaving the value untouched) for a type with no sensible nudge — an enum, whose valid
+    // range this layer cannot know, would otherwise scrub to a value that isn't a member.
+    virtual bool        Nudge(int Steps) = 0;
 
     ICVar* NextRegistered_ = nullptr;  // intrusive singly-linked registry list
 
@@ -172,6 +178,27 @@ public:
         else if constexpr (std::is_integral_v<T>) return static_cast<int32_t>(Value_);
         else if constexpr (requires(const T& V) { V.Raw; }) return Value_.Raw;  // Fixed-like
         else return 0;  // float (never AffectsGameplay) — not sent on the wire
+    }
+    bool Nudge(int Steps) override {
+        if (Steps == 0) return true;
+        // bool FIRST: it is integral, so the integral branch would otherwise claim it and
+        // "increment" a bool, which lands on true and then stays there.
+        if constexpr (std::is_same_v<T, bool>) { Value_ = !Value_; return true; }
+        else if constexpr (std::is_enum_v<T>) { return false; }  // no known valid range
+        else if constexpr (std::is_integral_v<T>) {
+            Value_ = static_cast<T>(Value_ + static_cast<T>(Steps));
+            return true;
+        } else if constexpr (requires { T::One; } && requires(const T& V) { V.Raw; }) {
+            // Fixed: 1/64 of a unit. Fine enough to feel out a flock weight, coarse enough
+            // that holding the key visibly moves the sim.
+            Value_.Raw += Steps * (T::One / 64);
+            return true;
+        } else if constexpr (std::is_floating_point_v<T>) {
+            Value_ = static_cast<T>(Value_ + static_cast<T>(Steps) * static_cast<T>(0.01));
+            return true;
+        } else {
+            return false;
+        }
     }
 
     // Typed accessors for code that holds the concrete CVar (not through ICVar).

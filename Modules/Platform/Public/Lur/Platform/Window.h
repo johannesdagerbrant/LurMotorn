@@ -44,6 +44,10 @@ public:
     // Auto-repeat is filtered at the source, so a held key is a single press — what a
     // discrete game action (e.g. RPS's 1-4 production buttons) wants. Casing-agnostic
     // raw VKs; the game maps the codes it cares about.
+    // Drain queued key-down VKs. Includes OS auto-repeat while a key is held (see the
+    // WM_KEYDOWN comment): the dev console is the only consumer and wants the repeats. A
+    // future consumer needing one-event-per-physical-press must reintroduce the distinction
+    // here rather than assume it.
     std::vector<uint32_t> TakeKeys() { std::vector<uint32_t> K; K.swap(Keys); return K; }
 
     // --- Internal: driven by the Win32 WndProc. Not for game code. ---

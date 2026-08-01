@@ -1,6 +1,9 @@
 # Host unit tests for Modules/Core (the Lur::Log seam; LUR_ASSERT is header-only).
 add_executable(core_tests CoreTests.cpp)
-target_link_libraries(core_tests PRIVATE lur::core)
+# lur::sim is for the TEST only (Fixed): CVar<T>::Nudge picks its step from T, and Fixed is
+# the type the balance knobs actually use, so leaving it untested would leave the branch that
+# matters uncovered. Modules/Core itself does not depend on Sim.
+target_link_libraries(core_tests PRIVATE lur::core lur::sim)
 target_compile_features(core_tests PRIVATE cxx_std_20)
 add_test(NAME core_tests COMMAND core_tests)
 

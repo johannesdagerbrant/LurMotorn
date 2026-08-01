@@ -67,6 +67,22 @@ public:
         Buffer_ += Lbl;
     }
 
+    // Type a character straight into the buffer (physical keyboard, #119) — the same effect
+    // as tapping the matching on-screen key, so the two input paths can't produce different
+    // buffers. Accepts '0'-'9' and '.'; returns false for anything else (including a second
+    // dot) so the caller can let the key fall through. Deliberately NOT '-': the pad has no
+    // sign key, and a keyboard that could enter values the pad cannot would break the
+    // one-UI-both-platforms rule. Negative entry is a gap in BOTH, to fix in both.
+    bool Press(char Ch) {
+        if (Ch >= '0' && Ch <= '9') { Buffer_ += Ch; return true; }
+        if (Ch == '.') {
+            if (Buffer_.find('.') != std::string::npos) return false;  // one dot only
+            Buffer_ += Ch;
+            return true;
+        }
+        return false;
+    }
+
     void Backspace() { if (!Buffer_.empty()) Buffer_.pop_back(); }
     const std::string& Buffer() const { return Buffer_; }
     void SetBuffer(const std::string& S) { Buffer_ = S; }

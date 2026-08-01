@@ -172,6 +172,17 @@ public:
     // thread, applied + clamped on the render thread. No-op while the console is hidden.
     void DevScroll(float DeltaY) { DevScrollAccum_.fetch_add(DeltaY, std::memory_order_relaxed); }
 
+    // Feed a physical key (Win32 VK code) to the open console — #119, desktop in practice.
+    // Strictly ADDITIVE to the on-screen numpad, which keeps working identically: the UI is
+    // untouched, so the console stays one tool with one UI on both platforms. A keyboard is
+    // just a second device aimed at the same widgets, the way a mouse and a finger already are.
+    //   Up/Down  scrub the selected cvar (ICVar::Nudge picks the per-type step) and commit.
+    //   0-9 . Enter Backspace  drive the same Numpad_ buffer the on-screen keys drive.
+    // Queued here and drained on the render thread, same discipline as DevTap/DevScroll.
+    // Returns true if the console is open and therefore claims the key — the caller must NOT
+    // also give it to the game.
+    bool DevKey(uint32_t Vk);
+
     // Show/hide the console. Default hidden (the game is unobstructed). Opened by the phone's
     // two-finger TRIPLE-tap or the desktop § key; closed by the in-panel top-right X button.
     // Closing also dismisses the numpad.
@@ -257,6 +268,14 @@ private:
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
     CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
     void*              CvCommitCtx_ = nullptr;
+    // #119 keyboard queue: written by the input thread, drained by the render thread inside
+    // the console block (where SelectedCvar_/Numpad_ are already being touched, so the edit
+    // stays on one thread). Capacity is a frame's worth of human typing many times over;
+    // an overflow drops the excess rather than blocking, since a lost keystroke while
+    // holding a key down is invisible and a stalled input thread is not.
+    static constexpr int DevKeyCap = 32;
+    std::atomic<uint32_t> DevKeys_[DevKeyCap] = {};
+    std::atomic<int>      DevKeyCount_{0};
 #endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours

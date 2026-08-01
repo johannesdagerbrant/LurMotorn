@@ -498,6 +498,21 @@ void GameView::DevTap(float XPx, float YPx) {
     DevTapY_.store(YPx, std::memory_order_relaxed);
     DevTapPending_.store(true, std::memory_order_release);  // consumed on the render thread
 }
+
+bool GameView::DevKey(uint32_t Vk) {
+    // Claim the key ONLY while the console is showing. Closed, every key belongs to the
+    // game and this must not swallow it — that is the whole "input flows to the game
+    // unchanged when it's closed" half of the contract.
+    if (!DevOverlayOpen_) return false;
+    const int N = DevKeyCount_.load(std::memory_order_relaxed);
+    if (N < DevKeyCap) {
+        DevKeys_[N].store(Vk, std::memory_order_relaxed);
+        DevKeyCount_.store(N + 1, std::memory_order_release);
+    }
+    // Claimed even when the queue is full: the console is open, so the game must not see
+    // this key regardless of whether we had room to act on it.
+    return true;
+}
 #endif
 
 int GameView::OnTap(float XPx, float YPx) {
@@ -1733,6 +1748,60 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Text.Draw(Renderer, T, X0 + 10.0f * HS, Y0 + 3.0f * HS, PW - XbtnS - 18.0f * HS,
                   TitleH, 14.0f * HS, Accent);
 
+        // Commit the numpad buffer to the selected cvar, then dismiss the pad. Shared by the
+        // on-screen Enter key and the physical one (#119) so the two entry paths cannot drift
+        // — they are the same widget, reached by two devices.
+        auto CommitNumpad = [&]() {
+            if (SelectedCvar_)
+                if (!Numpad_.Buffer().empty() &&
+                    SelectedCvar_->SetFromString(Numpad_.Buffer().c_str()))
+                    if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);  // persist + sync
+            Numpad_.Clear();
+            NumpadOpen_ = false;
+        };
+
+        // ---- Physical keyboard (#119) — desktop in practice, ADDITIVE to the on-screen pad ----
+        // Nothing here draws: the console renders identically on both platforms, and a phone
+        // simply never queues a key. Drained before the taps so a keystroke and a click in the
+        // same frame resolve in the order a human would expect.
+        {
+            const int NKeys = DevKeyCount_.load(std::memory_order_acquire);
+            for (int K = 0; K < NKeys; ++K) {
+                const uint32_t Vk = DevKeys_[K].load(std::memory_order_relaxed);
+                // Digits come from BOTH the top row (VK_0..VK_9) and the numpad cluster
+                // (VK_NUMPAD0..VK_NUMPAD9) — a tuner using the number pad one-handed is the
+                // whole point, so accepting only one of the two would miss the common case.
+                char Ch = '\0';
+                if (Vk >= 0x30 && Vk <= 0x39)      Ch = static_cast<char>('0' + (Vk - 0x30));
+                else if (Vk >= 0x60 && Vk <= 0x69) Ch = static_cast<char>('0' + (Vk - 0x60));
+                else if (Vk == 0xBE || Vk == 0x6E) Ch = '.';  // VK_OEM_PERIOD / VK_DECIMAL
+
+                if (Ch != '\0') {
+                    // Typing on a selected numeric row opens the pad if a click hasn't already,
+                    // so "click the row, then type" works without a second click on the pad.
+                    if (SelectedCvar_ && !SelectedCvar_->IsBool()) NumpadOpen_ = true;
+                    if (NumpadOpen_) Numpad_.Press(Ch);
+                } else if (Vk == 0x0D) {          // VK_RETURN (the numpad's Enter is the same VK)
+                    if (NumpadOpen_) CommitNumpad();
+                } else if (Vk == 0x08) {          // VK_BACK
+                    if (NumpadOpen_) Numpad_.Backspace();
+                } else if (Vk == 0x26 || Vk == 0x28) {  // VK_UP / VK_DOWN — scrub the value
+                    // An arrow means "move the LIVE value", not "edit a pending string", so any
+                    // half-typed buffer is discarded rather than combined — otherwise "12" +
+                    // Up would have two defensible answers and no obvious one. ICVar::Nudge
+                    // picks the step from T; it declines on an enum, and that leaves the value
+                    // untouched and uncommitted. (Its bool branch is unreachable from here today:
+                    // tapping a bool row toggles it and clears the selection, so no bool is ever
+                    // the highlighted row. Correct if that ever changes.)
+                    if (SelectedCvar_ && SelectedCvar_->Nudge(Vk == 0x26 ? +1 : -1)) {
+                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);
+                        Numpad_.Clear();
+                    }
+                }
+            }
+            if (NKeys > 0) DevKeyCount_.store(0, std::memory_order_release);
+        }
+
         // Tap handling — consumed on THIS thread, where every rect is laid out, so hit-test +
         // edits don't race the ValueString reads.
         const bool TapPending = DevTapPending_.load(std::memory_order_acquire);
@@ -1778,14 +1847,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (TapPending && !TapUsed && NumpadOpen_ &&
             Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
             TapUsed = true;
-            if (Numpad_.TakeEnter()) {  // commit the typed value to the selected CVar
-                if (SelectedCvar_)
-                    if (!Numpad_.Buffer().empty() &&
-                        SelectedCvar_->SetFromString(Numpad_.Buffer().c_str()))
-                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);  // persist + sync
-                Numpad_.Clear();
-                NumpadOpen_ = false;
-            }
+            if (Numpad_.TakeEnter()) CommitNumpad();  // commit the typed value to the selected CVar
         }
 
         // Row columns (constant right edge, so values align down a true column).

@@ -13,6 +13,10 @@
 #include "Lur/Core/FromString.h"
 #include "Lur/Core/Hash.h"
 #include "Lur/Core/Log.h"
+// Nudge's Fixed step is the one branch Core alone can't reach. FixedString.h supplies the
+// ADL FromString/ToString overloads CVar<Fixed> needs — Fixed.h alone leaves it unprintable.
+#include "Lur/Sim/Fixed.h"
+#include "Lur/Sim/FixedString.h"
 
 static int GFailures = 0;
 
@@ -141,6 +145,59 @@ LUR_CVAR(CvTestBool, "test.bool", false, ::Lur::Core::CVarFlagNone, "Test fixtur
 LUR_CVAR(CvTestMode, "test.mode", ETestMode::Auto, ::Lur::Core::CVarFlagAffectsGameplay,
          "Test fixture: enum CVar");
 
+// ---- #119: arrow-key scrubbing. The step size is per-type and chosen inside CVar<T>,
+//      because ICVar is type-erased and the console has no idea what T is. ----
+LUR_CVAR(CvNudgeInt, "nudge.int", 5, ::Lur::Core::CVarFlagNone, "Test fixture: int nudge");
+LUR_CVAR(CvNudgeBool, "nudge.bool", false, ::Lur::Core::CVarFlagNone,
+         "Test fixture: bool nudge");
+LUR_CVAR(CvNudgeFixed, "nudge.fixed", ::Lur::Sim::Fixed::FromInt(2),
+         ::Lur::Core::CVarFlagAffectsGameplay, "Test fixture: Fixed nudge");
+LUR_CVAR(CvNudgeFloat, "nudge.float", 1.0f, ::Lur::Core::CVarFlagNone,
+         "Test fixture: float nudge");
+
+static void TestCVarNudge() {
+    // int: one unit per step, scaling linearly with the step count.
+    CHECK(CvNudgeInt.Nudge(+1) && CvNudgeInt.Get() == 6);
+    CHECK(CvNudgeInt.Nudge(-1) && CvNudgeInt.Get() == 5);
+    CHECK(CvNudgeInt.Nudge(+4) && CvNudgeInt.Get() == 9);
+    CvNudgeInt.Reset();
+
+    // Zero steps succeeds and changes nothing — it must NOT mark the CVar overridden, or a
+    // stray key event would light the console's "R" button on an untouched knob.
+    CHECK(CvNudgeInt.Nudge(0) && CvNudgeInt.Get() == 5 && !CvNudgeInt.Overridden());
+
+    // bool FLIPS. This is the case the ordering inside Nudge exists for: bool is integral, so
+    // an "increment" would reach true and then stay there, and Down would never turn it off.
+    CHECK(CvNudgeBool.Nudge(+1) && CvNudgeBool.Get() == true);
+    CHECK(CvNudgeBool.Nudge(+1) && CvNudgeBool.Get() == false);
+    CHECK(CvNudgeBool.Nudge(-1) && CvNudgeBool.Get() == true);  // a toggle ignores direction
+    CvNudgeBool.Reset();
+
+    // Fixed: 1/64 of a unit, asserted in RAW units so the check can't be satisfied by a
+    // float-rounded near-miss. This is the type the balance knobs actually use.
+    const int32_t Step = ::Lur::Sim::Fixed::One / 64;
+    const int32_t Base = ::Lur::Sim::Fixed::FromInt(2).Raw;
+    CHECK(CvNudgeFixed.Nudge(+1) && CvNudgeFixed.Get().Raw == Base + Step);
+    CHECK(CvNudgeFixed.Nudge(-2) && CvNudgeFixed.Get().Raw == Base - Step);
+    CvNudgeFixed.Reset();
+
+    // float: a 0.01 step, sized for the 0..1 knobs (theme colours, non-gameplay).
+    CHECK(CvNudgeFloat.Nudge(+1));
+    CHECK(CvNudgeFloat.Get() > 1.009f && CvNudgeFloat.Get() < 1.011f);
+    CvNudgeFloat.Reset();
+
+    // enum: DECLINED, value untouched. This layer cannot know the valid range, so scrubbing
+    // off the end would produce a value that is not a member of the enumeration.
+    const ETestMode Before = CvTestMode.Get();
+    CHECK(!CvTestMode.Nudge(+1));
+    CHECK(CvTestMode.Get() == Before);
+
+    // A real nudge marks the CVar overridden — that is what lights the console's reset button.
+    CHECK(CvNudgeInt.Nudge(+1) && CvNudgeInt.Overridden());
+    CvNudgeInt.Reset();
+    CHECK(!CvNudgeInt.Overridden());
+}
+
 static void TestCVarMechanism() {
     CHECK(CvTestInt.Get() == 7);
     CHECK(int(CvTestInt) == 7);                // operator T
@@ -218,6 +275,7 @@ int main() {
     TestFlightRecorderRingBounded();
     TestFromStringGeneric();
     TestCVarMechanism();
+    TestCVarNudge();
     TestCVarRegistry();
     TestCVarConfig();
 

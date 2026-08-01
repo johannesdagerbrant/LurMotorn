@@ -94,7 +94,29 @@ struct Peer {
     Rps::CameraScroll Cam;
     bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     uint8_t Team = 0;
+#if !LUR_SHIPPING
+    Lur::Input::ConsoleGesture DevGesture;  // per-window: each peer's console scrolls on its own
+#endif
 };
+
+#if !LUR_SHIPPING
+// Route one pointer event to an OPEN console; returns true if the console consumed it (the
+// caller must then skip the game's own handling — no camera pan or building placed under the
+// overlay). ONE copy, shared by the solo loop and the two-window HandlePeerInput: #151 already
+// warns that a second recognizer with its own slop is how "one console, identical on both"
+// quietly stops being true, and a third would be worse. Drag = scroll the cvar list; a click
+// that barely moved = a tap the overlay hit-tests on the render thread, the same path a
+// phone's touch takes.
+bool RouteConsolePointer(Rps::GameView& View, Lur::Input::ConsoleGesture& Gesture,
+                         const Lur::Input::TouchEvent& T) {
+    if (!View.DevOverlayOpen()) return false;
+    if (T.Phase == Lur::Input::ETouchPhase::Began) Gesture.DragBegin(T.YPx);
+    else if (T.Phase == Lur::Input::ETouchPhase::Moved) View.DevScroll(Gesture.DragMove(T.YPx));
+    else if (T.Phase == Lur::Input::ETouchPhase::Ended && Gesture.DragEndIsTap())
+        View.DevTap(T.XPx, T.YPx);
+    return true;
+}
+#endif
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
@@ -163,10 +185,23 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
     // #139: a pointer-down on a build plate starts a drag-to-place (the ghost follows to the
     // field; a valid release emits a Place event, an invalid one slides back); any other drag
     // pans the camera. The per-building x1/x5/x20 queue taps land in #140.
+#if !LUR_SHIPPING
+    // The console, per window (#119). The two-window loopback is the build the balance pass
+    // actually runs in (#110), and until now its § key was wired only in the solo path — so
+    // the one mode with a peer to sync a tuned cvar to was the one mode you could not open
+    // the console in. Each Peer owns its Win and View, so § acts on the focused window.
+    if (P.Win.TakeConsoleToggle()) P.View.SetDevOverlayOpen(!P.View.DevOverlayOpen());
+    for (uint32_t Vk : P.Win.TakeKeys()) P.View.DevKey(Vk);
+#else
     for (uint32_t Vk : P.Win.TakeKeys()) (void)Vk;
+#endif
     int W = 0, H = 0;
     P.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
+#if !LUR_SHIPPING
+        // An open console eats pointer input, so nothing pans or places underneath it.
+        if (RouteConsolePointer(P.View, P.DevGesture, T)) continue;
+#endif
         if (T.Phase == Lur::Input::ETouchPhase::Began) {
             const int Plate = P.View.PlateAt(T.XPx, T.YPx);
             if (Plate >= 0) {
@@ -1133,24 +1168,20 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             return View.ResolvePlacement(DesX, DesY, Cam.Y, static_cast<float>(W), static_cast<float>(H),
                                          /*FlipY=*/false, Snap, /*Team*/ 0, Wx, Wy, Gsx, Gsy);
         };
-        for (uint32_t Vk : Win.TakeKeys()) (void)Vk;  // keys no longer drive units (#137b: events)
+        // Keys no longer drive units (#137b: events). They go to the console when it is open
+        // (#119) and are dropped otherwise — DevKey claims a key only while the console shows,
+        // so the game's input path is untouched when it is closed.
+        for (uint32_t Vk : Win.TakeKeys()) {
+#if !LUR_SHIPPING
+            View.DevKey(Vk);
+#else
+            (void)Vk;
+#endif
+        }
         for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
 #if !LUR_SHIPPING
-            // When the console is open it eats pointer input (no camera pan under it); a click
-            // release becomes a DevTap the overlay hit-tests on the render thread — same path
-            // as the phone's touch, so desktop drives the identical console.
-            if (View.DevOverlayOpen()) {
-                // Drag = scroll the cvar list; a click that barely moved = a tap the overlay hit-tests.
-                // #151: the SAME recognizer the phones use (Lur::Input::ConsoleGesture) rather than a
-                // third copy. This one had its own slop (6 px vs Android's 12), and per-platform slop is
-                // exactly how "one console, identical on both" stops being true.
-                if (T.Phase == Lur::Input::ETouchPhase::Began) DevGesture.DragBegin(T.YPx);
-                else if (T.Phase == Lur::Input::ETouchPhase::Moved) View.DevScroll(DevGesture.DragMove(T.YPx));
-                else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                    if (DevGesture.DragEndIsTap()) View.DevTap(T.XPx, T.YPx);
-                }
-                continue;
-            }
+            // An open console eats pointer input, so nothing pans or places underneath it.
+            if (RouteConsolePointer(View, DevGesture, T)) continue;
 #endif
             // #139/#140 mirror of the loopback's HandlePeerInput: a pointer-down on a build plate
             // starts a drag-to-place (ghost follows, valid release emits a Place event); any other

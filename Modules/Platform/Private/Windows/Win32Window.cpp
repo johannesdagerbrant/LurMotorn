@@ -67,9 +67,12 @@ LRESULT CALLBACK WndProc(HWND Hwnd, UINT Msg, WPARAM WParam, LPARAM LParam) {
             // the dev console. Keyed on the SCANCODE so it's layout-independent, the classic
             // Quake/Unreal console key. Consumed here (not queued as a game key).
             if (((LParam >> 16) & 0xFF) == 0x29) { Self->RequestConsoleToggle(); return 0; }
-            // Queue non-repeat key-down edges (LParam bit 30 = previous key state:
-            // set means auto-repeat). One press per physical keystroke.
-            if ((LParam & (1 << 30)) == 0) Self->PushKey(static_cast<uint32_t>(WParam));
+            // Queue key-downs INCLUDING auto-repeat (LParam bit 30 = previous key state).
+            // Repeats used to be filtered for "one press per physical keystroke", which was
+            // right when keys drove units. The console is now the only consumer (#119), and
+            // there holding a key IS the gesture: ↑ held sweeps a cvar through its range, and
+            // Backspace held clears a typed value. Filtering repeat made both a finger drill.
+            Self->PushKey(static_cast<uint32_t>(WParam));
             return 0;
         case WM_CLOSE:
             Self->RequestClose();

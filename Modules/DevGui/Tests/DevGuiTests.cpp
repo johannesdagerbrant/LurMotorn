@@ -50,6 +50,34 @@ static void TestPressBuildsBuffer() {
 }
 
 // The tap hit-test must resolve to the same key the renderer would draw at that rect.
+// #119: typing on a physical keyboard must land in the SAME buffer the on-screen keys fill,
+// so the two input devices can never produce different values for one widget.
+static void TestPressCharMatchesTappedKeys() {
+    Numpad Typed, Tapped;
+    for (char C : std::string("10.5")) CHECK(Typed.Press(C));
+    Tapped.Press(0, 0);  // 1
+    Tapped.Press(3, 1);  // 0
+    Tapped.Press(3, 0);  // .
+    Tapped.Press(1, 1);  // 5
+    CHECK(Typed.Buffer() == Tapped.Buffer());
+    CHECK(Typed.Buffer() == "10.5");
+
+    // The one-dot guard is the buffer's, not the pad geometry's — it must hold for typing too.
+    CHECK(!Typed.Press('.'));
+    CHECK(Typed.Buffer() == "10.5");
+
+    // Non-numeric keys are declined so the caller can let them fall through. '-' is declined
+    // ON PURPOSE: the pad has no sign key, and a keyboard able to enter values the pad cannot
+    // would break the one-UI-both-platforms rule.
+    CHECK(!Typed.Press('-'));
+    CHECK(!Typed.Press('a'));
+    CHECK(!Typed.Press(' '));
+    CHECK(Typed.Buffer() == "10.5");
+
+    // Enter is NOT a character: it arrives as a VK and the caller commits. Typing never arms it.
+    CHECK(!Typed.TakeEnter());
+}
+
 static void TestTapHitTest() {
     Numpad N;
     const float X = 100, Y = 200, W = 300, H = 400, Gap = 10;
@@ -136,6 +164,7 @@ static void TestPopoverPlacement() {
 int main() {
     TestLayout();
     TestPressBuildsBuffer();
+    TestPressCharMatchesTappedKeys();
     TestTapHitTest();
     TestCategoryTree();
     TestPopoverPlacement();
