@@ -243,12 +243,20 @@ Gradle's `installDebug` isn't ambiguous. When hunting the BLE handshake specific
 per-frame chatter: `... -s OnlyChess:* | grep -vE 'hello: link not up|Chess core alive|Renderer'`.
 
 **iOS** — no logcat; use `pymobiledevice3` and **bound the capture with `timeout`** (the stream
-never ends on its own). NOTE: `syslog live -m <text>` does NOT filter on iOS 26 — stream broad and
-grep the tag yourself:
+never ends on its own). Filter with **`-pn <process>`** and write with **`-o <file>`**, then grep the
+file:
 
 ```
-timeout 15 python -m pymobiledevice3 syslog live 2>/dev/null | grep -a "OnlyChess"
+timeout 30 python -m pymobiledevice3 syslog live -pn OnlyChess -o ios.txt >/dev/null 2>&1
+grep -aE "BLE|linked" ios.txt | sed 's/\x1b\[[0-9;]*m//g'
 ```
+
+**Do NOT pipe the stream into `grep > file`.** It silently drops most lines — grep block-buffers and
+`timeout` kills the pipeline before it flushes. That cost hours on 2026-08-01: 6–10 lines captured
+where ~25 were due, so a working agent-control channel (and its startup banner) read as dead. Piping
+to the *terminal* is fine; it's the redirect that loses data. Sanity-check any empty result against
+the expected cadence — the RPS diagnostic line prints every 2 s, so a 30 s capture owes you ~15.
+(`-m/--match` filters too; the older note that it doesn't work on iOS 26 applied to a different form.)
 
 **BLE log vocabulary to grep for** (both platforms): `BLE up` / `powered on` (radio started),
 `role decided` (tie-break ran), `central: linked` / `peripheral: central linked` (handshake done),
