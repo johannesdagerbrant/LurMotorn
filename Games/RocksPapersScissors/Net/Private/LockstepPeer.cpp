@@ -870,12 +870,18 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // tick 0). Loud, located, and BEFORE any divergence instead of a mid-match draw.
         const char* Mine = Lur::BuildFingerprint();
         const std::size_t Ml = std::strlen(Mine);
-        if (N != Ml || std::memcmp(Data, Mine, Ml) != 0) {
-            BuildMismatch_ = true;
+        const bool Differs = (N != Ml || std::memcmp(Data, Mine, Ml) != 0);
+        // ASSIGN, don't just latch on. The verdict should describe the last fingerprint we actually
+        // heard, and now that BeginResync re-offers one on every reconnect, a matching fingerprint is
+        // positive evidence that the peer's build is fine. That is a better answer to the 2026-07-30
+        // complaint (a peer reinstalled from a matching commit left the OTHER phone reporting
+        // badbuild=1 against a build that no longer existed) than clearing at our own Init, because it
+        // clears on evidence rather than on an unrelated local event.
+        BuildMismatch_ = Differs;
+        if (Differs)
             Lur::Log::Error("RPS: build-fingerprint mismatch — peer '%.*s' vs local '%s' "
                             "(refuse match; rebuild both from the same commit)",
                             static_cast<int>(N), reinterpret_cast<const char*>(Data), Mine);
-        }
     }
 #endif
 }
@@ -945,6 +951,14 @@ void LockstepPeer::BeginResync() {
     // reply to an offer, so there is no ping-pong to budget (ReoffersLeft exists for the history
     // because that path DOES answer).
     SendCvarSync();
+    // ...and the BUILD FINGERPRINT, for exactly the same reason. Caught on hardware right after the
+    // cvar fix, by watching `badbuild` flip 1 -> 0 on a pair that was genuinely on two different
+    // commits: SendFingerprint is likewise called only at the main's Lp.Init, so the peer that Inits
+    // LAST never receives the incumbent's fingerprint and reports a clean build against a mismatched
+    // one. A gate that reads 0 when it cannot know is worse than no gate — badbuild=0 is exactly what
+    // you check before trusting a two-phone result. Re-offering can only ever SET the flag (the
+    // handler compares and never clears), so this cannot blank a real mismatch.
+    SendFingerprint();
 #endif
     ReseedFrom(TheSim.Tick);  // re-base our own timeline (drops in-flight beyond F); sim already at F
     IncomingHistory.clear();

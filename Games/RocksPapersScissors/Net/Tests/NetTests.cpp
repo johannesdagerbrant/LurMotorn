@@ -662,6 +662,35 @@ static void TestBuildFingerprintGate() {
     A.OnMessage(MsgFingerprint, reinterpret_cast<const uint8_t*>(Fake), sizeof(Fake) - 1);
     CHECK(A.BuildMismatch());
 }
+
+// ---- #170/#169: a resync must RE-OFFER both pre-match agreements, not just the input history ----
+// Both the build fingerprint and the cvar set were sent exactly once, by the main, next to Lp.Init.
+// So the peer that Inits LAST receives neither: the incumbent's Init is long past and nothing makes
+// it send again. For the tunables that meant simulating a different game (#169); for the fingerprint
+// it means `badbuild=0` — a CLEAN reading — on a pair genuinely built from two different commits.
+// Caught on hardware 2026-08-01 immediately after the cvar fix, by watching badbuild flip 1 -> 0 when
+// only the Galaxy restarted. A gate that reports 0 when it cannot know is worse than no gate, because
+// badbuild=0 is exactly what you check before trusting a two-phone result.
+//
+// Asserted as EMISSION rather than end-to-end, deliberately: two peers in one test process share a
+// LUR_BUILD_FP, so a delivered fingerprint and a missing one are indistinguishable by BuildMismatch().
+// What the fix changes is that the datagrams go out at all.
+static void TestResyncReoffersFingerprintAndTunables() {
+    Outbox Qa;
+    LockstepPeer A;
+    A.Init(0x170F, 0, Enqueue, &Qa);
+    Qa.Q.clear();                       // drop Init-time traffic; we want what BeginResync alone sends
+    A.BeginResync();
+    int Fp = 0, Cv = 0, Resync = 0;
+    for (const auto& M : Qa.Q) {
+        if (M.first == MsgFingerprint) ++Fp;
+        else if (M.first == MsgCvarSync) ++Cv;
+        else if (M.first == MsgResyncChunk) ++Resync;
+    }
+    CHECK(Fp == 1);        // the build gate is re-offered...
+    CHECK(Cv == 1);        // ...and so is the tunable set (#169)
+    CHECK(Resync > 0);     // ...without displacing what BeginResync already did (#148)
+}
 #endif
 
 #if LUR_INTERNAL
@@ -1842,6 +1871,7 @@ int main() {
     TestLateJoinerReceivesIncumbentCvars();   // #169
     TestMidMatchCvarSyncIsIgnored();          // #169
     TestBuildFingerprintGate();
+    TestResyncReoffersFingerprintAndTunables();   // #169/#170
 #endif
 #if LUR_INTERNAL
     TestNoRecMatchIdxIsNotAReachableMatchIndex();  // #159
