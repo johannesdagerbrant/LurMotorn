@@ -176,6 +176,30 @@ public:
     // self-healing regardless of who restarts first.
     static constexpr uint64_t PreMatchCampResendNs = 500'000'000ull;
 
+#if LUR_AGENT
+    // ---- Assistant-only fault injection (CLAUDE.md's LUR_AGENT axis) ----
+    // Absent from every config including Development, force-zeroed in Shipping. These exist because
+    // the two failure modes this netcode was rebuilt around cannot be produced on demand from the
+    // outside: a BLE link does not drop a single frame when asked, and a deterministic sim does not
+    // diverge when asked. Without them the recovery paths could only be tested on the host, and the
+    // hardware bug they were written for (#159, once, after 13.5 minutes) is not reproducible by
+    // waiting. Injecting the fault is the only way to prove the repair works on a real pair.
+
+    // Silently drop the next N PRODUCED input frames — the datagram is never handed to Send. This is
+    // the #163 half-open link in miniature: the sender believes it sent, the receiver never sees it,
+    // and nothing in the transport reports an error. The receiver's sequence check should then name
+    // the missing tick and #161 should repair the timeline before the hole is executed.
+    void AgentDropOutgoing(int Frames) { AgentDropTx_ = Frames > 0 ? Frames : 0; }
+    int  AgentDroppedRemaining() const { return AgentDropTx_; }
+
+    // Diverge this peer's state on purpose, so the anchor cross-check has something real to catch.
+    // Gold because it is hashed, trivially observable on the LOCKSTEP line, and cannot crash anything.
+    // NOTE this is NOT in the input history, so replaying the survivor's history cannot undo it — that
+    // makes it the NONDETERMINISM shape rather than the lost-input shape, and therefore the case that
+    // must exhaust the recovery budget and end in the bounded draw.
+    void AgentCorruptState(int32_t GoldDelta) { TheSim.Teams[MyTeam].Gold += GoldDelta; }
+#endif
+
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
     // A hash mismatch was seen at an anchor. NOT a terminal state any more: CrossCheck declares the
@@ -334,6 +358,9 @@ private:
     bool     PreMatchStalled_ = false;
     uint64_t PreMatchWaitNs_ = 0;   // time spent ready-but-unpaired (only accrues while LocalReady_)
     uint32_t PeerTickNext_ = 0;     // exec tick of the next produced frame the peer owes us
+#if LUR_AGENT
+    int AgentDropTx_ = 0;           // produced frames still to be swallowed (agent fault injection)
+#endif
 
     // #161 recovery state. Separate from Awaiting (the reconnect exchange) because the two differ in
     // what they mean and in how they end: a reconnect resumes on OUR state when it times out, while a

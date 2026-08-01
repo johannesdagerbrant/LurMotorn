@@ -21,6 +21,7 @@
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with Android
+#include "Rps/AgentControl.h"          // LUR_AGENT: assistant remote-control command grammar
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
@@ -113,6 +114,21 @@ Rps::Fixed WorldToFixed(float Wv) {
     // unreachable on the iPhone and on-device tuning was Android-only. Shared with the Android and
     // desktop shims rather than hand-written a third time; the three copies had already drifted.
     Lur::Input::ConsoleGesture _DevGesture;
+#if LUR_AGENT
+    // ---- Assistant remote control (CLAUDE.md's LUR_AGENT axis) ----
+    // Channel: Documents/agent.cmd inside the app container, holding "<seq> <verb> [args]". A FILE
+    // rather than a system property because iOS has no equivalent, and because the dev rig can already
+    // push into the container (`pymobiledevice3 apps push <bundle> <local> Documents/<name>`) — the
+    // same mechanism the role/clearsave markers use. Polled on the render thread, which on iOS is also
+    // the sim thread, so a command may touch _Lp/_SoloSim directly.
+    //
+    // This is the half that most needs it: there is no touch injection for iOS at all, so without this
+    // every two-phone scenario needs a person tapping the iPhone. Absent from every ordinary build;
+    // clear the file when handing the phone back.
+    Rps::AgentControl _AgentCtl;
+    std::string _AgentCmdPath;
+    uint64_t _AgentPollNs;
+#endif
     uint8_t _Team;
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
@@ -208,6 +224,18 @@ Rps::Fixed WorldToFixed(float Wv) {
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
     _SaveDir = std::string(Dir.UTF8String);
     _Store = new Lur::Save::Store(_SaveDir);
+#if LUR_AGENT
+    {
+        // Documents/, not Application Support: Documents is what the dev rig can push into.
+        NSArray<NSString*>* Docs =
+            NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
+        NSString* D = Docs.firstObject ?: NSTemporaryDirectory();
+        _AgentCmdPath = std::string(D.UTF8String) + "/agent.cmd";
+        _AgentPollNs = 0;
+        os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT CONTROL COMPILED IN (LUR_AGENT=1) — this build must not "
+               "be handed to a player. Channel: %{public}s", _AgentCmdPath.c_str());
+    }
+#endif
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
     // All-time W-L-D per AI tier / per rival. Seeded into the view's rows here so the dropdown shows
     // the real record on its first open, not 0-0-0 until this session's first match resolves.
@@ -298,6 +326,101 @@ Rps::Fixed WorldToFixed(float Wv) {
     _LinkedRec.Events(Tick, Batch, Count);
     if (Tick % 10 == 0) _LinkedRec.Hash(Tick, Hash);
 }
+
+#if LUR_AGENT
+// Apply one assistant remote-control command. Render thread, which on iOS is also the sim thread, so
+// these may reach straight into _Lp/_SoloSim. Mirrors ApplyAgentCommand in the Android main verb for
+// verb — the grammar is shared (Rps/AgentControl.h) precisely so the two cannot drift, which is the
+// mistake this batch has already had to fix three times (#147's cvar slots, #151's gesture, #159's
+// recording sentinel — iOS the odd one out every time).
+- (void)applyAgentCommand:(const Rps::AgentCommand&)Cmd {
+    switch (Cmd.Kind) {
+        case Rps::EAgentCmd::Place: {
+            // EXACT coordinates, which the touch UI cannot produce: drag-to-place snaps to the nearest
+            // VALID square and emits nothing on an invalid drop, so a human cannot place onto the
+            // square an existing camp occupies — and that is exactly the #160 collision.
+            const Rps::InputEvent E = Rps::InputEvent::Place(
+                _Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A,
+                   Cmd.B, static_cast<unsigned>(_Team));
+            [self placeLocal:E];
+            break;
+        }
+        case Rps::EAgentCmd::Queue:
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
+            [self placeLocal:Rps::InputEvent::Queue(_Team, Cmd.A, Cmd.B)];
+            break;
+        case Rps::EAgentCmd::Stress: {
+            Rps::Sim& Sm = _SoloActive ? _SoloSim : const_cast<Rps::Sim&>(_Lp.GetSim());
+            Sm.StressFill(Cmd.A, static_cast<uint8_t>(Cmd.B));
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT stress %d/team type %d -> count=%d", Cmd.A, Cmd.B,
+                   Sm.Count);
+            break;
+        }
+        case Rps::EAgentCmd::Corrupt:
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT corrupt gold %+d — forcing a divergence (#161)", Cmd.A);
+            _Lp.AgentCorruptState(Cmd.A);
+            break;
+        case Rps::EAgentCmd::DropTx:
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT drop next %d produced frame(s) (#163)", Cmd.A);
+            _Lp.AgentDropOutgoing(Cmd.A);
+            break;
+        case Rps::EAgentCmd::Console:
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT console %d", Cmd.A);
+            _View.SetDevOverlayOpen(Cmd.A != 0);
+            break;
+        case Rps::EAgentCmd::Gesture: {
+            // #151's real subject: drive the SHARED recognizer with a synthetic two-finger triple-tap.
+            // It proves the recognizer plus its wiring to SetDevOverlayOpen — the piece that was simply
+            // absent on iOS — without needing touch injection, which iOS does not offer at all.
+            const uint64_t T0 = NowNs();
+            bool Opened = false;
+            for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
+                const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
+                _DevGesture.PointersDown(1, Down);
+                _DevGesture.PointersDown(2, Down);
+                Opened = _DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
+            }
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture -> recognizer says open=%d", Opened ? 1 : 0);
+            if (Opened) _View.SetDevOverlayOpen(true);
+            break;
+        }
+        case Rps::EAgentCmd::KillOwn: {
+            // #160 setup: free the ground under our own camp so it can be rebuilt on the same square —
+            // the only route to a produced placement whose coordinates equal the opening camp's.
+            Rps::Sim& Sm = const_cast<Rps::Sim&>(_Lp.GetSim());
+            for (int32_t I = 0; I < Sm.Count; ++I) {
+                if (!Sm.IsAlive(I) || Sm.Team[I] != _Team) continue;
+                if (!Sm.IsBuilding(I) || Sm.IsHomeBase(I)) continue;
+                if (Sm.Type[I] != static_cast<uint8_t>(Cmd.A & 3)) continue;
+                os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT killown slot=%d at (%d,%d)", I,
+                       Sm.PosX[I].ToInt(), Sm.PosY[I].ToInt());
+                Sm.Hp[I] = 0;
+                break;
+            }
+            break;
+        }
+        case Rps::EAgentCmd::None:
+            break;
+    }
+}
+
+// Poll the agent channel ~10x/s. Reads the whole (tiny) file each time; the sequence number in the
+// command is what makes re-reading a level-triggered channel idempotent.
+- (void)pollAgentChannel:(uint64_t)ElapsedNs {
+    _AgentPollNs += ElapsedNs;
+    if (_AgentPollNs < 100'000'000ull) return;
+    _AgentPollNs = 0;
+    std::FILE* F = std::fopen(_AgentCmdPath.c_str(), "rb");
+    if (F == nullptr) return;
+    char Buf[128] = {};
+    const std::size_t N = std::fread(Buf, 1, sizeof(Buf) - 1, F);
+    std::fclose(F);
+    Buf[N] = '\0';
+    Rps::AgentCommand Cmd;
+    if (_AgentCtl.Poll(Buf, Cmd)) [self applyAgentCommand:Cmd];
+}
+#endif  // LUR_AGENT
 
 // Open a recording for the LINKED match that is starting (#159). Same shape as the solo one; the
 // name carries "-vs-" so a linked capture is never mistaken for a solo one when both are pulled off
@@ -605,6 +728,9 @@ Rps::Fixed WorldToFixed(float Wv) {
             }
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
+#if LUR_AGENT
+        [self pollAgentChannel:ElapsedNs];   // assistant remote control (absent from ordinary builds)
+#endif
         if (_Started) _Lp.Tick(ElapsedNs);
         // #161: tell the player a desync repair is in flight — the match holds and may rewind a second
         // of play, which is worse than the freeze it replaced if it happens without explanation.

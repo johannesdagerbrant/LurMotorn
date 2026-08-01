@@ -20,3 +20,13 @@ add_executable(rps_score_tests ScoreBookTests.cpp)
 target_link_libraries(rps_score_tests PRIVATE rps::core lur::save)
 target_compile_features(rps_score_tests PRIVATE cxx_std_20)
 add_test(NAME rps_score_tests COMMAND rps_score_tests)
+
+# The agent remote-control command grammar (LUR_AGENT). The PARSER is compiled in every build so its
+# grammar is covered here rather than only in a build nobody runs; the channel that reads it and the
+# effects it applies are #if LUR_AGENT. Worth testing on the host because the failure modes are
+# destructive on a live phone: a command with no identity re-fires on every poll of a level-triggered
+# channel, and the text arrives from outside the process.
+add_executable(rps_agent_tests AgentControlTests.cpp)
+target_link_libraries(rps_agent_tests PRIVATE rps::core)
+target_compile_features(rps_agent_tests PRIVATE cxx_std_20)
+add_test(NAME rps_agent_tests COMMAND rps_agent_tests)

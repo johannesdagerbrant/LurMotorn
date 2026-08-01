@@ -34,6 +34,7 @@
 #include "Lur/Transport/Ble.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
+#include "Rps/AgentControl.h"  // LUR_AGENT: assistant remote-control command grammar
 #include "Rps/AiController.h"
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
 #include "Rps/LockstepPeer.h"
@@ -116,6 +117,11 @@ struct AppState {
     // touch Lp (it owns input + render only), and the player needs to be told on screen — an
     // unexplained hold that then rewinds a second of play reads as a glitch or as cheating.
     std::atomic<bool>       Recovering{false};   // sim -> glue (drives View.SetRecovering)
+#if LUR_AGENT
+    // Agent `gesture`: the console recognizer lives on the GLUE thread (it owns the touch stream), so
+    // a sim-thread command hands the request across rather than touching it directly.
+    std::atomic<bool>       AgentGestureRequest{false};
+#endif
 
     Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
@@ -177,6 +183,90 @@ void RouteLocalEvent(AppState* S, const Rps::InputEvent& E) {
     if (S->SoloActive.load(std::memory_order_acquire)) S->SoloIn.Push(E);
     else if (S->Linked.load(std::memory_order_acquire)) S->Lp.QueueLocalEvent(E);
 }
+
+#if LUR_AGENT
+// Apply one assistant remote-control command. SIM THREAD ONLY — several of these reach straight into
+// Lp/Sim, which no other thread may touch. See Rps/AgentControl.h for why this exists and what the
+// handover rules are; it is absent from every config including Development.
+//
+// `place` is the one that matters most: it injects an event at EXACT world coordinates, which the touch
+// UI cannot do. Drag-to-place magnetically snaps to the nearest VALID square and emits nothing at all
+// on an invalid drop, so a human physically cannot produce a placement whose coordinates equal an
+// existing camp's — which is precisely the #160 collision. Reproducing that bug on hardware requires
+// bypassing the snap, and this is the bypass.
+void ApplyAgentCommand(AppState& S, const Rps::AgentCommand& Cmd) {
+    const uint8_t Team = S.LinkedTeam.load(std::memory_order_relaxed);
+    switch (Cmd.Kind) {
+        case Rps::EAgentCmd::Place: {
+            const Rps::InputEvent E = Rps::InputEvent::Place(
+                Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
+            LOGI("AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A, Cmd.B,
+                 static_cast<unsigned>(Team));
+            RouteLocalEvent(&S, E);
+            break;
+        }
+        case Rps::EAgentCmd::Queue:
+            LOGI("AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
+            RouteLocalEvent(&S, Rps::InputEvent::Queue(Team, Cmd.A, Cmd.B));
+            break;
+        case Rps::EAgentCmd::Stress: {
+            // #162's load scenario. Writes the sim directly rather than going through input, because
+            // the point is to reach a unit count the economy would take an hour to fund.
+            //
+            // Whichever sim is live — SOLO is the one to use for a clean PERF measurement, because
+            // filling only this peer diverges a linked pair by construction and the #161 recovery then
+            // fires in the middle of the numbers. Linked is the right one for the COLLAPSE scenario,
+            // where the divergence is part of what is being tested.
+            Rps::Sim& Sm = S.SoloActive.load(std::memory_order_acquire)
+                               ? S.SoloSim
+                               : const_cast<Rps::Sim&>(S.Lp.GetSim());
+            LOGI("AGENT stress %d per team, type %d (solo=%d, count %d -> ...)", Cmd.A, Cmd.B,
+                 S.SoloActive.load(std::memory_order_relaxed) ? 1 : 0, Sm.Count);
+            Sm.StressFill(Cmd.A, static_cast<uint8_t>(Cmd.B));
+            LOGI("AGENT stress done, count=%d", Sm.Count);
+            break;
+        }
+        case Rps::EAgentCmd::Corrupt:
+            LOGI("AGENT corrupt gold %+d — forcing a divergence (#161)", Cmd.A);
+            S.Lp.AgentCorruptState(Cmd.A);
+            break;
+        case Rps::EAgentCmd::DropTx:
+            LOGI("AGENT drop next %d produced frame(s) — simulating #163's half-open link", Cmd.A);
+            S.Lp.AgentDropOutgoing(Cmd.A);
+            break;
+        case Rps::EAgentCmd::Console:
+            LOGI("AGENT console %d", Cmd.A);
+            S.View.SetDevOverlayOpen(Cmd.A != 0);
+            break;
+        case Rps::EAgentCmd::Gesture:
+            // Drives the SHARED recognizer the way a real touch stream would, so it exercises the
+            // #151 wiring (recognizer -> SetDevOverlayOpen) without needing multitouch — which is
+            // unavailable here anyway (SELinux blocks evdev injection on this device).
+            LOGI("AGENT gesture: synthetic two-finger triple-tap");
+            S.AgentGestureRequest.store(true, std::memory_order_release);
+            break;
+        case Rps::EAgentCmd::KillOwn: {
+            // #160 setup: free the ground under our own camp so it can be REBUILT on the same square.
+            // That is the only route by which a produced placement can carry coordinates equal to the
+            // opening camp's, which is what the old payload-sniffing re-send check mistook for a
+            // re-send. Kills via Hp so the sim's own death handling runs.
+            Rps::Sim& Sm = const_cast<Rps::Sim&>(S.Lp.GetSim());
+            for (int32_t I = 0; I < Sm.Count; ++I) {
+                if (!Sm.IsAlive(I) || Sm.Team[I] != Team) continue;
+                if (!Sm.IsBuilding(I) || Sm.IsHomeBase(I)) continue;
+                if (Sm.Type[I] != static_cast<uint8_t>(Cmd.A & 3)) continue;
+                LOGI("AGENT killown slot=%d type=%d at (%d,%d)", I, Sm.Type[I], Sm.PosX[I].ToInt(),
+                     Sm.PosY[I].ToInt());
+                Sm.Hp[I] = 0;
+                break;
+            }
+            break;
+        }
+        case Rps::EAgentCmd::None:
+            break;
+    }
+}
+#endif
 
 #if LUR_INTERNAL
 // A dev CVar edit committed via the numpad/keyboard (GLUE thread). GameView already set the
@@ -555,6 +645,22 @@ void android_main(android_app* App) {
         if (AutoPlay) LOGI("autoplay ENABLED (debug.lur.autoplay=1): auto-spamming miners+soldiers");
         Lur::Sim::SplitMix64 AutoRng(0x5059ull ^ State.DeviceId.size());
 #endif
+#if LUR_AGENT
+        // ---- Assistant remote control (CLAUDE.md's LUR_AGENT axis) ----
+        // Channel: the system property `debug.lur.agent.cmd`, holding "<seq> <verb> [args]". Polled on
+        // the SIM thread, which is the only thread allowed to touch Lp/Sim — the same reason the cvar
+        // console commits route through a queue. A system property is the Android idiom here (the
+        // pre-existing autoplay hook uses one) and costs a cheap read per poll.
+        //
+        // This is remote control, so it is absent from every config including Development. Two rules
+        // when handing a build over: rebuild WITHOUT -DLUR_AGENT so it is not merely idle, and
+        // `adb shell setprop debug.lur.agent.cmd ""` — a stale property fighting a player's own input
+        // is what cost the 2026-07-25 playtest an evening.
+        Rps::AgentControl AgentCtl;
+        uint64_t AgentPollNs = 0;
+        LOGI("AGENT CONTROL COMPILED IN (LUR_AGENT=1) — this build must not be handed to a player. "
+             "Drive it with: adb shell setprop debug.lur.agent.cmd '<seq> <verb> [args]'");
+#endif
         while (State.SimRunning.load(std::memory_order_acquire)) {
             const auto Now = std::chrono::steady_clock::now();
             const uint64_t ElapsedNs =
@@ -826,6 +932,17 @@ void android_main(android_app* App) {
             // Event-based soak (random place/queue) returns with the input UI in #139/#140.
             (void)AutoPlay; (void)AutoRng; (void)AutoAccumNs;
 #endif
+#if LUR_AGENT
+            // Poll the agent channel ~10x/s. On the sim thread, so a command may touch Lp/Sim directly.
+            AgentPollNs += ElapsedNs;
+            if (AgentPollNs >= 100'000'000ull) {
+                AgentPollNs = 0;
+                char CmdV[PROP_VALUE_MAX] = {};
+                Rps::AgentCommand Cmd;
+                if (__system_property_get("debug.lur.agent.cmd", CmdV) > 0 && AgentCtl.Poll(CmdV, Cmd))
+                    ApplyAgentCommand(State, Cmd);
+            }
+#endif
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
                 State.Recovering.store(State.Lp.Recovering(), std::memory_order_relaxed);  // #161 -> HUD
@@ -1043,6 +1160,25 @@ void android_main(android_app* App) {
                                     State.PeerDraws_.load(std::memory_order_relaxed));
             // #161: "resyncing with opponent" while a desync repair is in flight.
             State.View.SetRecovering(State.Recovering.load(std::memory_order_relaxed));
+#if LUR_AGENT
+            // Agent `gesture`: feed the SHARED recognizer a synthetic two-finger triple-tap on the glue
+            // thread, which is where it lives. Three taps, each inside the hold window and inside the
+            // chain window, exactly as a finger pair would produce — so this proves the recognizer and
+            // its wiring to SetDevOverlayOpen, which is the part #151 got wrong on iOS.
+            if (State.AgentGestureRequest.exchange(false, std::memory_order_acquire)) {
+                const uint64_t T0 = NowNs();
+                bool Opened = false;
+                for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
+                    const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
+                    State.DevGesture.PointersDown(1, Down);
+                    State.DevGesture.PointersDown(2, Down);
+                    Opened = State.DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
+                }
+                LOGI("AGENT gesture -> recognizer says open=%d (console now %d)", Opened ? 1 : 0,
+                     State.View.DevOverlayOpen() ? 1 : 0);
+                if (Opened) State.View.SetDevOverlayOpen(true);
+            }
+#endif
             // Copy the latest published tick out only when it CHANGED — between ticks we
             // re-render the held snapshot with a fresh alpha (deletes the per-frame copy).
             const uint32_t Pub = State.PublishedTick.load(std::memory_order_acquire);

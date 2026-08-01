@@ -14,6 +14,17 @@ name: macOS CI
 on:
   push:
   pull_request:
+  # MANUAL ONLY, and deliberately so: `agent` builds the RPS .ipa with -DLUR_AGENT=ON, which compiles
+  # in assistant-only REMOTE CONTROL (injected input, forced state). CLAUDE.md's rule is that such a
+  # build must never reach a player, so it can only be produced by asking for it by hand — never as a
+  # by-product of a push, where the artifact sits next to the ordinary one and could be sideloaded by
+  # mistake. The artifact is named -AGENT- for the same reason.
+  workflow_dispatch:
+    inputs:
+      agent:
+        description: "Also build an RPS .ipa with LUR_AGENT=ON (remote control; never give to a player)"
+        type: boolean
+        default: false
 
 jobs:
   core:
@@ -192,4 +203,70 @@ jobs:
         with:
           name: OnlyRps-unsigned-ipa
           path: OnlyRps-unsigned.ipa
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # RPS .ipa WITH ASSISTANT REMOTE CONTROL (-DLUR_AGENT=ON).
+  #
+  # Gated on a manual dispatch input, so an ordinary push can never produce it. The reason is
+  # CLAUDE.md's LUR_AGENT rule: this binary carries injected input and forced state, and handing it to
+  # someone who then plays it is the 2026-07-25 failure (an agent hook fighting the player's own
+  # gesture). It exists because several hardware scenarios cannot be reproduced otherwise — iOS offers
+  # no touch injection at all, so without this the iPhone half of every two-phone scenario needs a
+  # person tapping.
+  #
+  # Whoever uses it: install it, run the scenarios, then reinstall the ORDINARY .ipa and delete
+  # Documents/agent.cmd. "Inert by default" is not the same as "not there".
+  ios-ipa-rps-agent:
+    name: RPS iOS .ipa — AGENT build (manual, never for a player)
+    if: github.event_name == 'workflow_dispatch' && inputs.agent
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
+      - name: Configure (device, unsigned, LUR_AGENT=ON)
+        run: |
+          cmake -S Games/RocksPapersScissors/iOS -B Games/RocksPapersScissors/iOS/build-agent -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DLUR_AGENT=ON \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+
+      - name: Build (device, unsigned)
+        run: |
+          xcodebuild -project Games/RocksPapersScissors/iOS/build-agent/OnlyRps.xcodeproj \
+            -scheme OnlyRps -configuration Debug \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned .ipa
+        run: |
+          APP=$(find Games/RocksPapersScissors/iOS/build-agent -name 'OnlyRps.app' -type d | head -1)
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry OnlyRps-AGENT-unsigned.ipa Payload
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnlyRps-AGENT-unsigned-ipa
+          path: OnlyRps-AGENT-unsigned.ipa
           if-no-files-found: error

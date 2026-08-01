@@ -1,7 +1,9 @@
 # Build output
 /build/
 /build-desktop/
+/build-agent/      # host build configured with -DLUR_AGENT=ON (compile-checks the gated paths)
 **/build/
+**/build-agent/
 **/.cxx/
 
 # Desktop Workbench local save dir (Phase 0.5)

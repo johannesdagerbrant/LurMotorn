@@ -44,6 +44,11 @@ target_compile_definitions(OnlyRps PRIVATE
     LUR_INTERNAL=${LUR_INTERNAL}
     LUR_ASSERTS=${LUR_ASSERTS}
     LUR_SLOW=${LUR_SLOW}
+    # LUR_AGENT was MISSING here, which meant the app target silently compiled agent code out even
+    # when the engine tree was configured with -DLUR_AGENT=ON — the iPhone is the half that most needs
+    # remote control, since it has no touch injection at all. LUR_AGENT_ON is the derived value
+    # EngineFlags publishes (force-zeroed in Shipping); Android's cpp/CMakeLists.txt does the same.
+    LUR_AGENT=${LUR_AGENT_ON}
     # Distinct per-game BLE service UUID so RPS never cross-links a chess phone
     # (chess keeps the default ...7370; RPS advertises/scans ...7371).
     "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")

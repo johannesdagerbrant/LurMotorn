@@ -142,6 +142,19 @@ void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
     W.WriteBits(ForTick & 0xFFu, 8);
     EncodeEventBatch(W, Batch.data(), static_cast<int>(Batch.size()));  // one framed batch per tick
     const std::vector<uint8_t>& B = W.Finish();
+#if LUR_AGENT
+    // Assistant-only fault injection: swallow this frame. The local timeline is UNTOUCHED (the batch is
+    // already in LocalEvents above), so this reproduces exactly the #163 shape — the sender's state is
+    // correct and complete, the receiver is missing one produced tick, and no transport error is
+    // raised anywhere. Placed after the encode so the frame is fully built and only the handoff is
+    // skipped; a drop that also skipped the encode would not exercise the same code.
+    if (AgentDropTx_ > 0) {
+        --AgentDropTx_;
+        Lur::Log::Error("RPS/agent: DROPPING produced frame for tick %u (%d more to drop) — simulating "
+                        "the #163 half-open link", ForTick, AgentDropTx_);
+        return;
+    }
+#endif
     if (Send) Send(Ctx, MsgInput, B.data(), B.size());
 }
 
