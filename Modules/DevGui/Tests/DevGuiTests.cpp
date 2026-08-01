@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Lur/DevGui/CategoryTree.h"
+#include "Lur/DevGui/ColorPicker.h"
 #include "Lur/DevGui/Numpad.h"
 #include "Lur/DevGui/Popover.h"
 #include "Lur/DevGui/Widgets.h"
@@ -248,6 +249,63 @@ static void TestSliderRoundTrips() {
                           50.0f, 100.0f) > 74.9f);
 }
 
+// #117: the picker's rows must hit-test to the channel they draw, and a press must select the
+// value the knob is drawn at — the same round-trip property the slider has, but through the
+// row/track layout, which is where an off-by-one in the row index would hide.
+static void TestColorPickerRows() {
+    using Lur::DevGui::ColorPicker;
+    using Lur::DevGui::Slider;
+    const float X = 20, Y = 40, W = 240, RowH = 22, SwatchH = 30, Gap = 6;
+    const float LabelW = 18, ValueW = 44, KnobW = 12;
+
+    // Rows do not overlap, sit below the swatch, and stay inside the declared panel height.
+    const float PanelH = ColorPicker::PanelH(RowH, SwatchH, Gap);
+    float PrevBottom = Y + SwatchH;
+    for (int I = 0; I < ColorPicker::Channels; ++I) {
+        float Rx, Ry, Rw, Rh;
+        ColorPicker::RowRect(X, Y, W, RowH, SwatchH, Gap, I, Rx, Ry, Rw, Rh);
+        CHECK(Ry >= PrevBottom);
+        CHECK(Ry + Rh <= Y + PanelH + 0.01f);
+        PrevBottom = Ry + Rh;
+    }
+
+    // A press in the middle of each row resolves to THAT channel, and to the value the knob
+    // would be drawn at for it. Off-by-one in the row index is the bug this catches.
+    for (int I = 0; I < ColorPicker::Channels; ++I) {
+        float Tx, Ty, Tw, Th;
+        ColorPicker::TrackRect(X, Y, W, RowH, SwatchH, Gap, I, LabelW, ValueW, Tx, Ty, Tw, Th);
+        const float Want = 0.6f;
+        const float Kx = Slider::KnobX(Tx, Tw, KnobW, Want, 0.0f, 1.0f);
+        float Got = -1.0f;
+        const int Chan = ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
+                                          Kx, Ty + Th * 0.5f, Got);
+        CHECK(Chan == I);
+        CHECK(Got > Want - 0.01f && Got < Want + 0.01f);
+    }
+
+    // Pressing the LABEL still selects the row (point-anywhere): a 12 px knob is unhittable on
+    // a phone, so the whole row is the target.
+    {
+        float Rx, Ry, Rw, Rh;
+        ColorPicker::RowRect(X, Y, W, RowH, SwatchH, Gap, 2, Rx, Ry, Rw, Rh);
+        float V = -1.0f;
+        CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
+                               Rx + 2.0f, Ry + Rh * 0.5f, V) == 2);
+        CHECK(V == 0.0f);   // far left of the track clamps to 0, not to a negative
+    }
+
+    // A press on the swatch, or outside the panel, hits no channel.
+    float V = -1.0f;
+    CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
+                           X + W * 0.5f, Y + SwatchH * 0.5f, V) == -1);
+    CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
+                           X - 50, Y - 50, V) == -1);
+
+    CHECK(std::string(ColorPicker::ChannelLabel(0)) == "R");
+    CHECK(std::string(ColorPicker::ChannelLabel(3)) == "A");
+    CHECK(std::string(ColorPicker::ChannelLabel(9)).empty());
+}
+
 int main() {
     TestLayout();
     TestPressBuildsBuffer();
@@ -258,6 +316,7 @@ int main() {
     TestCategoryTree();
     TestPopoverPlacement();
     TestSliderRoundTrips();
+    TestColorPickerRows();
     if (GFailures == 0) { std::printf("devgui_tests: ALL PASS\n"); return 0; }
     std::printf("devgui_tests: %d FAILURE(S)\n", GFailures);
     return 1;

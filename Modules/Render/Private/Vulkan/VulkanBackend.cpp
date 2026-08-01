@@ -280,6 +280,11 @@ public:
         return static_cast<MaterialHandle>(Materials.size());
     }
 
+    void SetMaterialTint(MaterialHandle Material, const Color& Tint) override {
+        if (Material == 0 || Material > Materials.size()) return;
+        Materials[Material - 1].Tint = Tint;  // no descriptor touched: same texture binding
+    }
+
     // Wait for the previous frame's GPU work and acquire the next image. SPLIT OUT of
     // BeginFrame so the app loop can call it BEFORE it samples input: the ~vsync fence-wait
     // idle then happens ahead of input, so the presented frame carries the FRESHEST input

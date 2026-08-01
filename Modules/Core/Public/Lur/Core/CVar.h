@@ -88,6 +88,14 @@ public:
     virtual float       RangeMinF() const = 0;
     virtual float       RangeMaxF() const = 0;
     virtual float       ValueF() const = 0;
+    // ---- 4-channel colour knob (#117) ----
+    // The console opens the PICKER popover for these instead of the numpad — a colour is four
+    // numbers and typing them one at a time through a numpad is not editing a colour.
+    // Duck-typed on the member names inside CVar<T> (R/G/B/A), which is what lets Core answer
+    // "is this a colour" without ever knowing Render::Color exists.
+    virtual bool        IsColor() const = 0;
+    virtual bool        GetColorChannels(float Out[4]) const = 0;
+    virtual bool        SetColorChannels(const float In[4]) = 0;
 
     ICVar* NextRegistered_ = nullptr;  // intrusive singly-linked registry list
 
@@ -198,6 +206,23 @@ public:
         else if constexpr (requires(const T& V) { V.Raw; }) return Value_.Raw;  // Fixed-like
         else return 0;  // float (never AffectsGameplay) — not sent on the wire
     }
+    // ---- Colour (#117) ----
+    // Detected structurally, not by naming a type: Core must not depend on Render.
+    static constexpr bool IsColorType = requires(const T& V) { V.R; V.G; V.B; V.A; };
+    bool IsColor() const override { return IsColorType; }
+    bool GetColorChannels(float Out[4]) const override {
+        if constexpr (IsColorType) {
+            Out[0] = Value_.R; Out[1] = Value_.G; Out[2] = Value_.B; Out[3] = Value_.A;
+            return true;
+        } else { (void)Out; return false; }
+    }
+    bool SetColorChannels(const float In[4]) override {
+        if constexpr (IsColorType) {
+            Value_.R = In[0]; Value_.G = In[1]; Value_.B = In[2]; Value_.A = In[3];
+            return true;
+        } else { (void)In; return false; }
+    }
+
     // ---- Range (#116) ----
     bool  HasRange() const override { return HasRange_; }
     float RangeMinF() const override { return AsFloat(Min_); }

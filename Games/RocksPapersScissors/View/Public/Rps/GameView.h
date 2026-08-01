@@ -265,7 +265,12 @@ private:
     float              ToastAge_ = 0.0f;            //   seconds shown (auto-dismiss)
     Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
     bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
+    // #117: a CVar<Color> row opens the PICKER popover instead of the numpad — same anchor, same
+    // dismissal, different editor. Mutually exclusive with NumpadOpen_: one editor at a time, or
+    // two popovers would fight for the same screen space below the selected row.
+    bool               PickerOpen_ = false;
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
+    Lur::Render::MaterialHandle DevSwatchMat = 0;   //   #117 picker swatch: retinted, not recreated
     CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
     void*              CvCommitCtx_ = nullptr;
     // #119 keyboard queue: written by the input thread, drained by the render thread inside

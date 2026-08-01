@@ -102,6 +102,15 @@ public:
                                        ETextureFormat Format = ETextureFormat::Rgba8) = 0;
     virtual MaterialHandle CreateMaterial(const MaterialDesc& Desc) = 0;
 
+    // Retint an EXISTING material in place. CreateMaterial allocates a descriptor set and grows
+    // a vector that is never reclaimed, so anything whose colour changes per frame — the colour
+    // picker's live swatch (#117) — must not create one each time or it exhausts the descriptor
+    // pool within a minute. The texture binding is untouched, so this is a plain field write
+    // with no descriptor churn. No-op on an invalid handle.
+    virtual void SetMaterialTint(MaterialHandle Material, const Color& Tint) {
+        (void)Material; (void)Tint;
+    }
+
     // --- Per-frame. ---
     // Optional: wait for the previous frame's GPU work + acquire the next image, up front.
     // Call this at the TOP of the loop, BEFORE sampling input, so the ~vsync fence-wait

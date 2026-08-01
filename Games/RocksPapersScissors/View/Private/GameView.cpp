@@ -16,6 +16,8 @@
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
 #include "Lur/Core/DevCommand.h"  // #116: commands rendered as buttons
+#include "Lur/DevGui/ColorPicker.h"  // #117: RGBA picker popover
+#include "Lur/Render/ColorString.h"  // CVar<Color> ADL codec  // #117: RGBA picker popover
 #include "Lur/DevGui/DevTheme.h"
 #include "Lur/DevGui/Widgets.h"   // HitRect / Slider   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
@@ -82,6 +84,15 @@ const char* ResultStr(uint8_t R, int MyTeam) {
 
 // ---- Locked palette (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html) ----
 constexpr float Srgb(int V) { return static_cast<float>(V) / 255.0f; }
+
+// #117's first real CVar<Color>: the invalid-placement red. #142 reserves red for exactly this
+// meaning, which makes it a palette DECISION rather than an arbitrary constant — the kind of
+// thing worth being able to try three shades of without a rebuild. Retinted per frame through
+// SetMaterialTint (never re-created), so the picker's slider moves it live on screen.
+LUR_CVAR(CvGhostInvalidColor, "rps.view.ghost_invalid_color",
+         (Lur::Render::Color{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f}),
+         ::Lur::Core::CVarFlagNone,
+         "Colour of the blinking ghost shown when a building cannot be placed there");
 struct GradStop { float P; Color C; };
 // Field gradient — SCREENSPACE vertical: night-blue enemy horizon (top) through
 // dark earth to the warm umber home ground (bottom). Both players see the same
@@ -349,6 +360,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
     DevPanelMat  = FlatMat(Renderer, Lur::DevGui::DevTheme::Panel);
     DevAccentMat = FlatMat(Renderer, Lur::DevGui::DevTheme::AccentFill);
     DevKeyMat    = FlatMat(Renderer, Lur::DevGui::DevTheme::KeyFace);
+    // #117: the picker's swatch, retinted each frame via SetMaterialTint (never re-created).
+    DevSwatchMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
 #endif
 
     Font.Init(Lur::Text::InterFont());
@@ -1419,6 +1432,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             if (SlideT_ >= Dur) { GhostType_ = -1; SlideT_ = -1.0f; }
         }
         if (GhostType_ >= 0) {
+            // The two alpha steps the blink alternates between are baked in; only the HUE is
+            // tunable, so a colour that reads badly can be fixed without touching the blink.
+            const Lur::Render::Color Bad = CvGhostInvalidColor.Get();
+            Renderer->SetMaterialTint(GhostBadMat[0], {Bad.R, Bad.G, Bad.B, 0.85f});
+            Renderer->SetMaterialTint(GhostBadMat[1], {Bad.R, Bad.G, Bad.B, 0.30f});
             const Lur::Render::MaterialHandle GM =
                 (GhostDragging_ && !GhostValid_) ? GhostBadMat[std::sin(GhostBlink_ * 12.0f) > 0.0f ? 0 : 1]
                                                  : GhostMat[My];
@@ -1874,7 +1892,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // Top-right X closes the view.
         if (TapPending && !TapUsed && TapX >= XbtnX && TapX <= XbtnX + XbtnS && TapY >= Y0 &&
             TapY <= Y0 + TitleH) {
-            DevOverlayOpen_ = false; NumpadOpen_ = false; TapUsed = true;
+            DevOverlayOpen_ = false; NumpadOpen_ = false; PickerOpen_ = false; TapUsed = true;
         }
 
         // Numpad geometry — anchored BELOW the selected row, flipped above when it wouldn't fit.
@@ -1903,6 +1921,49 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Numpad_.Tap(NumX, NumY, NumW, NumH, NumGap, TapX, TapY)) {
             TapUsed = true;
             if (Numpad_.TakeEnter()) CommitNumpad();  // commit the typed value to the selected CVar
+        }
+
+        // ---- Colour picker popover (#117) — same anchor + dismissal as the numpad ----
+        // A colour is four numbers; typing them one at a time through a numpad means never
+        // seeing what you are making. Sliders with a live swatch make CVar<Color> usable now,
+        // without answering the open v2 question (whether DrawGlyphs can draw the untextured
+        // gradient triangles an HSV square needs, spec §7).
+        using Picker = Lur::DevGui::ColorPicker;
+        const float PickRowH = 22.0f * HS, PickSwatchH = 30.0f * HS, PickGap = 6.0f * HS;
+        const float PickLabelW = 18.0f * HS, PickValueW = 44.0f * HS, PickKnobW = 12.0f * HS;
+        const float PickW = OW * 0.62f;
+        const float PickX = (OW - PickW) * 0.5f;
+        const float PickH = Picker::PanelH(PickRowH, PickSwatchH, PickGap);
+        const float PickY = Lur::DevGui::PlaceBelowOrAbove(
+            RowScreenY(SelectedCvar_, HeightPx * 0.45f), LineH, PickH + 10.0f * HS, PickGap,
+            HeightPx) + 5.0f * HS;
+        // Cancel sits where the numpad's does, so dismissing either editor is the same gesture.
+        const float PickCancelS = PickSwatchH * 0.62f;
+        const float PickCancelX = PickX + PickW + 6.0f * HS;
+        const float PickCancelY = PickY + (PickSwatchH - PickCancelS) * 0.5f;
+
+        if (PickerOpen_ && SelectedCvar_ && SelectedCvar_->IsColor()) {
+            float Ch[4] = {0, 0, 0, 1};
+            SelectedCvar_->GetColorChannels(Ch);
+
+            if (TapPending && !TapUsed &&
+                Lur::DevGui::HitRect(PickCancelX, PickCancelY, PickCancelS, PickCancelS,
+                                     TapX, TapY)) {
+                PickerOpen_ = false; TapUsed = true;   // dismiss; edits already committed live
+            }
+            if (TapPending && !TapUsed) {
+                float V = 0.0f;
+                const int Chan = Picker::Tap(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap,
+                                             PickLabelW, PickValueW, PickKnobW, TapX, TapY, V);
+                if (Chan >= 0) {
+                    // Commit LIVE, on every press, down the same hook the numpad's Enter uses —
+                    // a colour you have to press Enter to see is a colour you cannot tune.
+                    Ch[Chan] = V;
+                    SelectedCvar_->SetColorChannels(Ch);
+                    if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);
+                    TapUsed = true;
+                }
+            }
         }
 
         // Row columns (constant right edge, so values align down a true column).
@@ -1974,7 +2035,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     // Never leave the numpad bound to a row that no longer uses it.
                     if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; SelectedCvar_ = nullptr; }
                 } else {
-                    SelectedCvar_ = C; Numpad_.Clear(); NumpadOpen_ = true;
+                    // A colour gets the picker; everything else gets the numpad (#117).
+                    SelectedCvar_ = C;
+                    Numpad_.Clear();
+                    NumpadOpen_ = !C->IsColor();
+                    PickerOpen_ = C->IsColor();
                 }
                 TapUsed = true;
             }
@@ -2055,6 +2120,57 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Blit(DevKeyMat, CancelX + CancelS * 0.5f, CancelY + CancelS * 0.5f, CancelS, CancelS);
             Text.Draw(Renderer, "x", CancelX, CancelY, CancelS, CancelS, 12.0f * HS, Warn,
                       Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
+        }
+
+        // ---- The colour picker (#117): live swatch + four RGBA sliders ----
+        if (PickerOpen_ && SelectedCvar_ && SelectedCvar_->IsColor()) {
+            float Ch[4] = {0, 0, 0, 1};
+            SelectedCvar_->GetColorChannels(Ch);
+            Blit(DevPanelMat, PickX + PickW * 0.5f, PickY + PickH * 0.5f, PickW + 10.0f * HS,
+                 PickH + 10.0f * HS);
+
+            // Swatch — the whole reason this is not a numpad. Drawn with the CVar's OWN colour
+            // through a transient material, so what you see is literally the value.
+            float Sx, Sy2, Sw, Sh;
+            Picker::SwatchRect(PickX, PickY, PickW, PickSwatchH, Sx, Sy2, Sw, Sh);
+            // Retint ONE material rather than creating one per frame: CreateMaterial allocates
+            // a descriptor set and grows a vector that is never reclaimed, so a live swatch built
+            // that way exhausts the pool within a minute of having the picker open.
+            Renderer->SetMaterialTint(DevSwatchMat,
+                                      Lur::Render::Color{Ch[0], Ch[1], Ch[2], Ch[3]});
+            Blit(DevSwatchMat, Sx + Sw * 0.5f, Sy2 + Sh * 0.5f, Sw, Sh);
+
+            for (int I = 0; I < Picker::Channels; ++I) {
+                float Rx, Ry, Rw, Rh;
+                Picker::RowRect(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap, I,
+                                Rx, Ry, Rw, Rh);
+                Text.Draw(Renderer, Picker::ChannelLabel(I), Rx, Ry, PickLabelW, Rh, 12.0f * HS,
+                          Ink, Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
+
+                float Tx, Ty, Tw, Th;
+                Picker::TrackRect(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap, I,
+                                  PickLabelW, PickValueW, Tx, Ty, Tw, Th);
+                // Track, then the filled portion, then the knob — painter's order, no depth.
+                Blit(DevKeyMat, Tx + Tw * 0.5f, Ty + Th * 0.5f, Tw, Th - 8.0f * HS);
+                const float KnobCx =
+                    Lur::DevGui::Slider::KnobX(Tx, Tw, PickKnobW, Ch[I], 0.0f, 1.0f);
+                const float FillW = KnobCx - Tx;
+                if (FillW > 0.0f)
+                    Blit(DevAccentMat, Tx + FillW * 0.5f, Ty + Th * 0.5f, FillW, Th - 10.0f * HS);
+                Blit(DevAccentMat, KnobCx, Ty + Th * 0.5f, PickKnobW, Th - 2.0f * HS);
+
+                char Vs[16];
+                std::snprintf(Vs, sizeof(Vs), "%.2f", static_cast<double>(Ch[I]));
+                Text.Draw(Renderer, Vs, Rx + Rw - PickValueW, Ry, PickValueW - 4.0f * HS, Rh,
+                          11.0f * HS, Ink, Lur::Text::EHAlign::Right,
+                          Lur::Text::EVAlign::Middle);
+            }
+
+            Blit(DevKeyMat, PickCancelX + PickCancelS * 0.5f, PickCancelY + PickCancelS * 0.5f,
+                 PickCancelS, PickCancelS);
+            Text.Draw(Renderer, "x", PickCancelX, PickCancelY, PickCancelS, PickCancelS,
+                      12.0f * HS, Theme::Warn, Lur::Text::EHAlign::Center,
+                      Lur::Text::EVAlign::Middle);
         }
 
         // The tooltip toaster — a panel + the cvar's help text, anchored below/above its row.
