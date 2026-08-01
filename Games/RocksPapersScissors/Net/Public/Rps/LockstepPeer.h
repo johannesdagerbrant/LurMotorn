@@ -77,8 +77,8 @@ public:
 #if LUR_INTERNAL
     // Override an AffectsGameplay CVar (by its 1-byte wire id, raw value): stamps it a few
     // exec ticks ahead, sends MsgCvar, and applies it on BOTH peers at that tick to the
-    // per-Sim Cv — a deterministic mid-match balance tweak. Dev-only (the console/panel/
-    // desktop --tune caller). EditWallClockMs is the last-writer-wins resolver key.
+    // per-Sim Cv — a deterministic mid-match balance tweak. Dev-only; the console is the
+    // only caller. EditWallClockMs is the last-writer-wins resolver key.
     void SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
 
     // Match-start sync (Addendum C.3): seed this peer's pre-match overrides (typically the

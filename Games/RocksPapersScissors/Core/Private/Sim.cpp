@@ -1026,8 +1026,8 @@ void SpawnHomeBase(Sim& S, uint8_t Team) {
 // The tick body shared by Step(mask) and StepEvents — everything after phase-0 input. Kept as
 // one function so the two entry points can never drift in phase order or content (spec §6).
 void PreTick(Sim& S) {
-    // Cv is per-Sim state (latched at Init + synced overrides, #112); only solo/desktop live
-    // tuning (#115) opts into re-latching from the globals so a --tune edit moves the sim.
+    // Cv is per-Sim state (latched at Init + synced overrides, #112); only solo live tuning
+    // opts into re-latching from the globals so a console edit moves the running sim.
     if (S.LiveCvLatch) S.Cv = LatchCvs();
     S.DeriveUnits();  // reflect this tick's Cv (Init latch, live-tune, or a synced override)
 }

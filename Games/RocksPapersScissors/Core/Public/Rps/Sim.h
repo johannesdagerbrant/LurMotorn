@@ -104,7 +104,7 @@ struct Sim {
     // Latched from the global CVars ONCE at Init, then owned by the Sim: constant within a
     // tick and mutated only at tick boundaries by synced overrides (LockstepPeer applies a
     // resolved MsgCvar at its stamped tick on both peers). Because it lives in the Sim, two
-    // peers in one process (loopback / two-window --tune) hold INDEPENDENT overrides that
+    // peers in one process (loopback / the two-window desktop) hold INDEPENDENT overrides that
     // the sync converges — the workbench-faithful model. Folded into StateHash so a
     // mis-apply/mis-sync is an immediate desync alarm. POD -> Sim stays trivially copyable.
     CvSnapshot Cv{};
@@ -143,9 +143,10 @@ struct Sim {
     //      of the flow (momentum smoothing, dense-pack jitter). Never set in real play. ----
     bool DisableCombat = false;
 
-    // ---- Config (NOT hashed) — solo/desktop live CVar tuning (#115). When set, Step
-    //      re-latches Cv from the global CVars every tick, so a desktop `--tune` edit
-    //      changes the RUNNING sim live. OFF by default: a networked (lockstep) match
+    // ---- Config (NOT hashed) — solo live CVar tuning. When set, Step re-latches Cv from
+    //      the global CVars every tick, so a console edit changes the RUNNING sim live
+    //      (solo has no peer to sync with, so the sync path can't carry it).
+    //      OFF by default: a networked (lockstep) match
     //      keeps Cv per-Sim (latched at Init + synced overrides), so this never affects a
     //      real match or the determinism tests — only the solo SimRunner turns it on. ----
     bool LiveCvLatch = false;

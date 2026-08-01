@@ -24,7 +24,7 @@
 #include <thread>
 
 #include "Lur/Core/CVar.h"         // #147: registry walk for the gameplay-CVar sync seed
-#include "Lur/Core/CVarConfig.h"  // #115: persist tuned cvars across runs
+#include "Lur/Core/CVarConfig.h"  // persist tuned cvars across runs
 #include "Lur/Core/Log.h"
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with the phones
 #include "Lur/Net/Session.h"

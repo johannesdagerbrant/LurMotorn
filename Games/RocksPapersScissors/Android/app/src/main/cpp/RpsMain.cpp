@@ -24,7 +24,7 @@
 
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
-#include "Lur/Core/CVarConfig.h"  // #115: persist + load tuned cvars
+#include "Lur/Core/CVarConfig.h"  // persist + load tuned cvars
 #include "Lur/Core/Log.h"         // the engine logger — routed into logcat below
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with iOS/desktop
 #include "Lur/Save/DeviceId.h"
@@ -532,7 +532,7 @@ void android_main(android_app* App) {
     State.Session.Start(Transport, State.DeviceId);
     LOGI("RPS session started (device id %zuB)", State.DeviceId.size());
 
-    // #115: persisted dev-cvar overrides (per-game cvars.cfg). Load into the globals now
+    // Persisted dev-cvar overrides (per-game cvars.cfg). Load into the globals now
     // (before the sim thread's match-start Init latches them); route commits back to disk +
     // the peer sync via the GameView hook. Dev-only.
     State.CvarsPath = std::string(DataDir != nullptr ? DataDir : ".") + "/rps-cvars.cfg";

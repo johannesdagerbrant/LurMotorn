@@ -1,6 +1,6 @@
 #pragma once
-// Lur::DevGui::Numpad — a self-contained numeric entry pad for the dev-GUI layer (#113/
-// #115). It exists because raw NativeActivity can't raise the OS soft keyboard (#118
+// Lur::DevGui::Numpad — a self-contained numeric entry pad for the dev-GUI layer (#113),
+// the console's only editor. It exists because raw NativeActivity can't raise the OS soft keyboard (#118
 // no-go), and numeric CVars only need digits/./sign anyway: a tap-driven pad is the
 // portable text-entry answer on phones AND desktop (mouse) with zero platform input glue.
 //
