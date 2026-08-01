@@ -111,11 +111,25 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     //
     // It used to persist for the life of the object, and that outlived the condition: after the peer
     // was reinstalled from a matching commit, the phone that had not itself restarted still reported
-    // badbuild=1 against a build that no longer existed (seen 2026-07-30, one peer reading 1 and the
-    // other 0 for the same pair). A diagnostic that stays lit after the fault is one people learn to
-    // ignore. NOT cleared in BeginMatch: a post-match restart does not re-exchange, so clearing
-    // there would blank a REAL mismatch after the first match and never set it again.
-    BuildMismatch_ = false;
+    // badbuild=1 against a build that no longer existed (seen 2026-07-30). A diagnostic that stays
+    // lit after the fault is one people learn to ignore. NOT cleared in BeginMatch: a post-match
+    // restart does not re-exchange, so clearing there would blank a REAL mismatch after the first
+    // match and never set it again.
+    //
+    // #166: but do NOT clear BLIND, which is what this used to do. A peer's MsgFingerprint routinely
+    // arrives BEFORE this side reaches Lp.Init — that is the normal iOS order (one renderFrame pumps
+    // the session inbox, and only afterwards reaches the session-ready -> Init branch, per the #147
+    // note in ApplyActiveCvars). Clearing threw that evidence away, so which peer noticed a mismatch
+    // depended on init order, and the SAME mismatched pair read badbuild=1 on one phone and 0 on the
+    // other — recorded as unexplained on 2026-07-30 and reproduced on hardware 2026-08-01.
+    //
+    // Re-DERIVE from the last fingerprint we actually heard instead. That still retires a stale
+    // verdict when the peer is reinstalled (its next MsgFingerprint overwrites the string and the
+    // handler re-assigns), which is all the clearing was for — without discarding one that already
+    // landed. Between Init and the new peer's first fingerprint the verdict describes the PREVIOUS
+    // peer, which is strictly better than describing nothing.
+    BuildMismatch_ = !PeerFingerprint_.empty() && PeerFingerprint_ != Lur::BuildFingerprint();
+    BadBuildLogged_ = false;
 #endif
     BeginMatch(Seed);
 }
@@ -370,6 +384,26 @@ void LockstepPeer::TryStartMatch() {
         Lur::Log::Error("RPS: starting a linked match having received NO cvar sync from the peer — if "
                         "either phone has persisted tunables the two sims will differ from tick 0 "
                         "(#169). Check both peers' pre-match gold/hash agree.");
+
+    // #112: the build-fingerprint gate ACTS. Until now it only set a flag and printed a line that
+    // two diag readouts echoed; nothing ever read it, so the "refuse the match" the handler's own
+    // comment promised did not exist. Two different builds cannot agree on the gameplay-CVar id
+    // list, the tick order, or StateHash — so a match between them is not a match, it is two sims
+    // that will diverge, and the anchor alarm reports that as a desync whose cause is invisible.
+    // Refusing before tick 0 turns an unexplained mid-match draw into a located, one-line fix.
+    //
+    // Unlike the cvar-sync warning above, this IS a refusal: a fingerprint mismatch is proof, not
+    // suspicion. TryStartMatch runs every pre-match tick, so log once per Init or the error scrolls
+    // the log away.
+    if (BuildMismatch_) {
+        if (!BadBuildLogged_) {
+            Lur::Log::Error("RPS: REFUSING to start the match — peer build '%s' != local '%s'. "
+                            "Rebuild BOTH devices from the same commit.",
+                            PeerFingerprint_.c_str(), Lur::BuildFingerprint());
+            BadBuildLogged_ = true;
+        }
+        return;
+    }
 #endif
     LocalEvents[0] = {LocalCamp_};
     PeerEvents[0]  = {PeerCamp_};
@@ -878,6 +912,9 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // badbuild=1 against a build that no longer existed) than clearing at our own Init, because it
         // clears on evidence rather than on an unrelated local event.
         BuildMismatch_ = Differs;
+        // Remember the STRING, not just the verdict (#166): Init re-derives from this, so a
+        // fingerprint that arrives before our own Init is no longer thrown away.
+        PeerFingerprint_.assign(reinterpret_cast<const char*>(Data), N);
         if (Differs)
             Lur::Log::Error("RPS: build-fingerprint mismatch — peer '%.*s' vs local '%s' "
                             "(refuse match; rebuild both from the same commit)",

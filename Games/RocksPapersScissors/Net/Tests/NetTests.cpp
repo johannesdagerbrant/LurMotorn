@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "Lur/Core/BuildFingerprint.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
@@ -663,6 +664,114 @@ static void TestBuildFingerprintGate() {
     CHECK(A.BuildMismatch());
 }
 
+// #112: the gate must ACT, not just report. It used to set a flag whose only readers were two diag
+// log lines, so the "refuse the match" its own handler comment promised did not exist — a mismatched
+// pair played on and surfaced as an unexplained mid-match desync instead.
+static void TestBuildFingerprintRefusesMatchStart() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x7, 0, Enqueue, &Qa);
+    B.Init(0x7, 1, Enqueue, &Qb);
+
+    const char Fake[] = "0000000000ff-clean+Development";
+    A.OnMessage(MsgFingerprint, reinterpret_cast<const uint8_t*>(Fake), sizeof(Fake) - 1);
+    CHECK(A.BuildMismatch());
+
+    // Both camps placed: everything EXCEPT the build agrees, so this would have started before.
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
+    for (int I = 0; I < 8; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(!A.MatchStarted());   // refused, before tick 0
+    CHECK(A.ExecTick() == 0);   // and it really never ticked
+
+    // B heard no bad fingerprint, so B is free to start — the refusal is per-peer evidence, not a
+    // global halt. (On hardware the other phone refuses too, once its own fingerprint arrives.)
+    CHECK(!B.BuildMismatch());
+}
+
+// #166: a fingerprint that lands BEFORE this side's Lp.Init must survive it. Init used to clear the
+// verdict blind, and MsgFingerprint routinely arrives first (the normal iOS order: one renderFrame
+// pumps the session inbox, and only afterwards reaches the session-ready -> Init branch). So which
+// peer noticed a mismatch depended on init order, and the same mismatched pair read badbuild=1 on
+// one phone and 0 on the other — logged as unexplained on 2026-07-30, reproduced 2026-08-01.
+static void TestFingerprintSurvivesLaterInit() {
+    Outbox Qa;
+    LockstepPeer A;
+    const char Fake[] = "feedface1234-clean+Development";
+
+    // Arrives BEFORE Init — the exact ordering that used to lose it.
+    A.OnMessage(MsgFingerprint, reinterpret_cast<const uint8_t*>(Fake), sizeof(Fake) - 1);
+    CHECK(A.BuildMismatch());
+    A.Init(0x9, 0, Enqueue, &Qa);
+    CHECK(A.BuildMismatch());   // re-derived from the remembered string, not cleared
+
+    // And the clearing behaviour it replaced still works: a peer rebuilt to match retires the
+    // verdict on EVIDENCE (its next fingerprint), which is what d591539 was protecting.
+    const char* Real = Lur::BuildFingerprint();
+    A.OnMessage(MsgFingerprint, reinterpret_cast<const uint8_t*>(Real),
+                static_cast<uint32_t>(std::strlen(Real)));
+    CHECK(!A.BuildMismatch());
+    A.Init(0xA, 0, Enqueue, &Qa);
+    CHECK(!A.BuildMismatch());  // a matching peer stays clean across Init too
+}
+
+// #112 acceptance: the determinism soak. Editing a gameplay CVar mid-match must land on the SAME
+// tick on both peers and leave the sims bit-identical — that is the whole point of the per-tick
+// latch plus MsgCvar, and the StateHash fold is what makes a mis-latch visible instead of silent.
+// A scripted schedule rather than one edit: the failure mode that matters is an edit applied a tick
+// apart, which a single well-timed set can hide.
+static void TestCvarEditSoakStaysHashIdentical() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0xD0FA, 0, Enqueue, &Qa);
+    B.Init(0xD0FA, 1, Enqueue, &Qb);
+    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
+    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
+    for (int I = 0; I < 8 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    // Edits from BOTH sides, interleaved, on knobs that actually move the sim.
+    struct Edit { int AtTick; bool FromA; uint8_t Id; int32_t Raw; };
+    const Edit Schedule[] = {
+        { 12, true,  CvIdMinerSpeed,   F(3).Raw   },
+        { 20, false, CvIdRockCost,     55         },
+        { 28, true,  CvIdRockHp,       140        },
+        { 36, false, CvIdMinerSpeed,   F(2).Raw   },  // same knob, other peer, later stamp
+        { 44, true,  CvIdCounterMultiplier, 3     },
+        { 52, false, CvIdPaperHp,      90         },
+    };
+    std::size_t Next = 0;
+    uint64_t WallMs = 1000;
+
+    for (int I = 0; I < 200; ++I) {
+        while (Next < sizeof(Schedule) / sizeof(Schedule[0]) &&
+               Schedule[Next].AtTick == I) {
+            const Edit& E = Schedule[Next];
+            (E.FromA ? A : B).SetGameplayCvar(E.Id, E.Raw, WallMs);
+            WallMs += 100;   // strictly increasing, so last-writer-wins has a defined answer
+            ++Next;
+        }
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs);  B.Tick(OneTickNs);
+        Deliver(Qa, B);     Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(Next == sizeof(Schedule) / sizeof(Schedule[0]));  // the whole schedule really ran
+    CHECK(A.ExecTick() > 100);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    // The edits actually took (otherwise the hashes would match trivially, proving nothing).
+    CHECK(A.GetSim().Cv.MinerSpeed == F(2));
+    CHECK(A.GetSim().Cv.RockCost == 55);
+    CHECK(B.GetSim().Cv.MinerSpeed == F(2));
+    CHECK(B.GetSim().Cv.RockCost == 55);
+}
+
 // ---- #170/#169: a resync must RE-OFFER both pre-match agreements, not just the input history ----
 // Both the build fingerprint and the cvar set were sent exactly once, by the main, next to Lp.Init.
 // So the peer that Inits LAST receives neither: the incumbent's Init is long past and nothing makes
@@ -798,6 +907,73 @@ static void TestLinkedRecordingsMatchAcrossPeers() {
     // And the header records each peer's OWN side, which is what orients the pair for a reader.
     CHECK(La.HumanTeam == 0 && Lb.HumanTeam == 1);
     CHECK(La.Seed == Lb.Seed);
+}
+
+// #112: recordings key their CVar lines by NAME (format v3), not by the X-list ordinal. The ordinal
+// is declaration order, so inserting one knob slid every later id and replayed the previous day's
+// captures with values shifted along the list — mine rows of "5/35" nobody set. A name cannot slide.
+static void TestRecordingCvarsAreNameKeyedAndSurviveReorder() {
+    const std::filesystem::path Dir = std::filesystem::temp_directory_path() / "lur-rps-recname";
+    std::error_code Ec;
+    std::filesystem::create_directories(Dir, Ec);
+    const std::string P = (Dir / "named.rec").string();
+
+    // A sim carrying NON-DEFAULT tunables — defaults would round-trip even if the key were ignored.
+    Sim S;
+    S.Init(0xC0FFEE);
+    S.Cv.MinerSpeed = F(3);
+    S.Cv.RockCost = 77;
+    S.Cv.PaperHp = 133;
+
+    MatchRecorder R;
+    CHECK(R.Begin(P.c_str(), S, /*Tier*/ -1, /*HumanTeam*/ 0));
+    R.End(S);
+
+    const MatchRecording L = LoadMatchRecording(P.c_str());
+    CHECK(L.Ok);
+    CHECK(L.Version == 3);
+    CHECK(L.Cv.MinerSpeed == F(3));
+    CHECK(L.Cv.RockCost == 77);
+    CHECK(L.Cv.PaperHp == 133);
+    CHECK(L.UnknownCvs == 0);
+
+    // The file really is name-keyed: every cv line names a registered gameplay CVar, and the ids
+    // appear nowhere. Reading the text is the only way to prove the KEY changed rather than just
+    // the values surviving.
+    {
+        std::FILE* F2 = std::fopen(P.c_str(), "r");
+        CHECK(F2 != nullptr);
+        char Line[256];
+        int CvLines = 0, Named = 0;
+        while (F2 && std::fgets(Line, sizeof(Line), F2) != nullptr) {
+            if (std::strncmp(Line, "cv ", 3) != 0) continue;
+            ++CvLines;
+            if (std::strncmp(Line, "cv rps.", 7) == 0) ++Named;
+        }
+        if (F2) std::fclose(F2);
+        CHECK(CvLines == static_cast<int>(CvIdCount));
+        CHECK(Named == CvLines);   // not one ordinal left
+    }
+
+    // A name this build does not register is SKIPPED, leaving the default — never applied to
+    // whatever now occupies that slot, which is the corruption the name key exists to prevent.
+    {
+        const std::string P2 = (Dir / "stale.rec").string();
+        std::FILE* W = std::fopen(P2.c_str(), "w");
+        CHECK(W != nullptr);
+        if (W) {
+            std::fprintf(W, "rec 3\nfp whatever\nseed c0ffee\ntier -1 human 0\n");
+            std::fprintf(W, "cv rps.knob.that.was.deleted 999\n");
+            std::fprintf(W, "cv %s 42\n", GameplayNameForId(CvIdRockCost));
+            std::fprintf(W, "end -1 0\n");
+            std::fclose(W);
+        }
+        const MatchRecording St = LoadMatchRecording(P2.c_str());
+        CHECK(St.Ok);
+        CHECK(St.UnknownCvs == 1);                 // reported, not silently swallowed
+        CHECK(St.Cv.RockCost == 42);               // the knob that still exists still applies
+        CHECK(St.Cv.MinerSpeed == DefaultCvs().MinerSpeed);  // the stale one touched nothing
+    }
 }
 #endif  // LUR_INTERNAL (MatchRecorder is dev tooling)
 
@@ -1871,11 +2047,15 @@ int main() {
     TestLateJoinerReceivesIncumbentCvars();   // #169
     TestMidMatchCvarSyncIsIgnored();          // #169
     TestBuildFingerprintGate();
+    TestBuildFingerprintRefusesMatchStart();
+    TestFingerprintSurvivesLaterInit();
+    TestCvarEditSoakStaysHashIdentical();
     TestResyncReoffersFingerprintAndTunables();   // #169/#170
 #endif
 #if LUR_INTERNAL
     TestNoRecMatchIdxIsNotAReachableMatchIndex();  // #159
     TestLinkedRecordingsMatchAcrossPeers();
+    TestRecordingCvarsAreNameKeyedAndSurviveReorder();
 #endif
     TestProducedCampLookAlikeIsNotDropped();     // #160
     TestPreMatchRejectsUnplaceableCamp();        // #167

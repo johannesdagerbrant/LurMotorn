@@ -825,21 +825,24 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
 // id is declaration order, which agrees across peers because the build-fingerprint gate
 // guarantees identical builds.)
 //
-// APPEND new ids at the END; never insert one mid-list. The id is declaration order, and a flight
-// recording stores its whole latched set as `cv <id> <raw>` lines (MatchRecord) — so inserting an
-// entry shifts every id after it and every OLDER recording silently replays with the wrong values
-// slid one slot along. It cost an afternoon: rps.mine.spread_slack was inserted next to the other
-// mine knobs, and yesterday's recordings then replayed with mine rows of "5/35" that no one had
-// ever set (row_home had been handed row_safe's value, row_safe the frontier's, and so on down the
-// list). Replay does not refuse on a fingerprint mismatch, so nothing warns you. Grouping a knob
-// with its family is worth less than being able to read last week's match.
+// You may now INSERT an id mid-list — that used to be forbidden, and the reason it was is gone.
 //
-// THE ONE DELIBERATE VIOLATION (2026-07-30): collapsing the ladder to three rungs deleted a whole
-// 16-id LUR_AI_TIER_IDS block, so the four ids that followed it (chest floor + the three mix knobs)
-// moved down by 16 — exactly the silent slide described above. It is safe only because the recording
-// format version went to 2 in the same change and LoadMatchRecording now REFUSES version 1, so a
-// pre-collapse recording fails loudly instead of replaying with values slid along the list. If you
-// ever have to renumber again, bump that version in the same commit or don't do it.
+// History, because the constraint was expensive and its removal should be checkable: the id is
+// DECLARATION ORDER, and recordings used to store the latched set as `cv <id> <raw>`, so inserting
+// an entry shifted every later id and older recordings replayed with values slid one slot along.
+// It cost an afternoon — rps.mine.spread_slack was inserted next to the other mine knobs, and the
+// previous day's recordings came back with mine rows of "5/35" nobody had set (row_home had been
+// handed row_safe's value, row_safe the frontier's, on down the list). Collapsing the AI ladder to
+// three rungs later deleted a 16-id block and forced the same slide deliberately, papered over with
+// a format-version bump.
+//
+// Recordings are now keyed by NAME (MatchRecord v3), which is durable identity: reordering this
+// list cannot touch them, and a knob that no longer exists is skipped rather than misapplied.
+//
+// The id still matters for the LIVE wire (MsgCvar/MsgCvarSync carry one byte), where both peers
+// must agree on the list — and that is exactly what the build-fingerprint gate guarantees, now
+// that it REFUSES a mismatched pair instead of merely logging one (#112/#166). So: keep the list
+// under 256 (the static_assert below is the enforcement), and group a knob with its family.
 #define LUR_RPS_GAMEPLAY_CVARS(FX, IX)                    \
     FX(SeparationStrength,      CvSeparationStrength)      \
     FX(EnemySeparationStrength, CvEnemySeparationStrength) \

@@ -31,17 +31,25 @@ bool MatchRecorder::Begin(const char* Path, const Sim& S, int Tier, uint8_t Huma
         Lur::Log::Info("RPS rec: cannot open %s — match will not be recorded", Path);
         return false;
     }
-    std::fprintf(File_, "rec 2\n");   // 2 = post-3-tier-collapse CVar ids (see LoadMatchRecording)
+    std::fprintf(File_, "rec 3\n");   // 3 = CVar lines keyed by NAME (see LoadMatchRecording)
     // #164: the build this recording came from, exact for THIS binary (never the previous commit's
     // sha, which is what the old configure-time macro wrote). Two recordings of one linked match are
     // only comparable if this line agrees, so a stale value here quietly invalidated the diff.
     std::fprintf(File_, "fp %s\n", Lur::BuildFingerprint());
     std::fprintf(File_, "seed %llx\n", static_cast<unsigned long long>(S.Seed));
     std::fprintf(File_, "tier %d human %u\n", Tier, static_cast<unsigned>(HumanTeam));
-    // The whole latched gameplay set by wire id. Replay applies these to a default Cv, so a device
-    // running persisted overrides replays exactly — without this the replay silently diverges.
+    // The whole latched gameplay set, keyed by the CVar's NAME. Replay applies these to a default
+    // Cv, so a device running persisted overrides replays exactly — without this the replay
+    // silently diverges.
+    //
+    // v3 writes the name, not the wire id, and that is the whole point of the version bump. The id
+    // is DECLARATION ORDER in the X-list, so inserting one knob slides every later id by one and
+    // yesterday's recordings replay with values shifted along the list — mine rows of "5/35" nobody
+    // ever set. It cost an afternoon once and forced a second deliberate renumber later. A name is
+    // durable identity (spec C.0.1): reordering the list cannot touch it, adding a knob cannot touch
+    // it, and a knob that no longer exists is skipped by name instead of silently misapplied.
     for (uint8_t Id = 0; Id < CvIdCount; ++Id)
-        std::fprintf(File_, "cv %u %d\n", static_cast<unsigned>(Id), CvOverrideRaw(S.Cv, Id));
+        std::fprintf(File_, "cv %s %d\n", GameplayNameForId(Id), CvOverrideRaw(S.Cv, Id));
     // Flush the header NOW, not at the first census (#156). A match sits pre-match until the player
     // places their opening camp, and nothing else flushes until then — so a session that was opened
     // and backgrounded left a ZERO-BYTE file, losing even the seed and the latched CVar set. The
@@ -112,10 +120,23 @@ MatchRecording LoadMatchRecording(const char* Path) {
             std::sscanf(Line, "tier %d human %u", &R.Tier, &H);
             R.HumanTeam = static_cast<uint8_t>(H & 1u);
         } else if (std::strncmp(Line, "cv ", 3) == 0) {
-            unsigned Id = 0;
-            int Raw = 0;
-            if (std::sscanf(Line, "cv %u %d", &Id, &Raw) == 2 && Id < CvIdCount)
-                ApplyCvOverride(R.Cv, static_cast<uint8_t>(Id), Raw);
+            // v3 keys by NAME, v2 by ordinal. One parse handles both: a leading digit means the
+            // legacy ordinal form (names are all "rps.…", so the two can never be confused).
+            char Key[128] = {};
+            int  Raw = 0;
+            if (std::sscanf(Line, "cv %127s %d", Key, &Raw) == 2) {
+                if (Key[0] >= '0' && Key[0] <= '9') {
+                    const unsigned Id = static_cast<unsigned>(std::atoi(Key));
+                    if (Id < CvIdCount) ApplyCvOverride(R.Cv, static_cast<uint8_t>(Id), Raw);
+                } else {
+                    const int Id = GameplayIdForName(Key);
+                    // A knob this build no longer has: SKIP it. The default stays, which is the
+                    // only honest answer — the alternative (applying it to whatever now occupies
+                    // that slot) is exactly the silent corruption the name key exists to stop.
+                    if (Id >= 0) ApplyCvOverride(R.Cv, static_cast<uint8_t>(Id), Raw);
+                    else ++R.UnknownCvs;
+                }
+            }
         } else if (Line[0] == 'e' && Line[1] == ' ') {
             unsigned T = 0, Team = 0, Kind = 0, Type = 0;
             int X = 0, Y = 0;
@@ -168,7 +189,23 @@ MatchRecording LoadMatchRecording(const char* Path) {
     if (R.Version == 1)
         Lur::Log::Error("RPS replay: %s is format v1 (pre-3-tier-collapse); its CVar ids no longer "
                         "match this build and it will NOT be replayed", Path);
-    R.Ok = R.Version == 2 && R.Seed != 0;
+
+    // v2 is ordinal-keyed, so the same hazard applies to it the moment the X-list changes — but it
+    // is safe to replay when the recording came from THIS EXACT BUILD, which the `fp` line pins.
+    // That keeps today's captures (the #159/#172 material) readable while closing the hole: a v2
+    // file from any other build is refused rather than replayed with values slid along the list.
+    // v3 is name-keyed and needs no such check, which is the point of it.
+    const bool V2SameBuild = (R.Version == 2 && !R.BuildFp.empty() &&
+                              R.BuildFp == Lur::BuildFingerprint());
+    if (R.Version == 2 && !V2SameBuild)
+        Lur::Log::Error("RPS replay: %s is format v2 (CVar ids by declaration order) from build "
+                        "'%s', but this is '%s'. Its ids may name different knobs, so it will NOT "
+                        "be replayed.", Path, R.BuildFp.c_str(), Lur::BuildFingerprint());
+    if (R.UnknownCvs > 0)
+        Lur::Log::Info("RPS replay: %s names %d CVar(s) this build does not have — left at their "
+                       "defaults", Path, R.UnknownCvs);
+
+    R.Ok = (R.Version == 3 || V2SameBuild) && R.Seed != 0;
     return R;
 }
 

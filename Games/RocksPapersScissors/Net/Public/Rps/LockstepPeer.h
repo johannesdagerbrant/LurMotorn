@@ -317,6 +317,10 @@ private:
     int CvarSyncsSeen_ = 0;
 
     bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
+    // #166: the last fingerprint the peer ACTUALLY sent ("" = none heard yet). Kept as evidence
+    // so Init can re-derive the verdict instead of discarding a fingerprint that arrived early.
+    std::string PeerFingerprint_;
+    bool        BadBuildLogged_ = false;  // refuse once per Init, not once per TryStartMatch
 
     std::mutex               CvQueueMutex_;  // UI thread -> sim thread edit inbox
     std::vector<PendingCvar> CvQueue_;

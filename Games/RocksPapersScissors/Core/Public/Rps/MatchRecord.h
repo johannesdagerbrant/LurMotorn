@@ -121,6 +121,9 @@ struct MatchRecording {
     std::vector<RecordedHash> Hashes;      // ascending tick; empty for a solo/older recording
     int Result = -1;
     uint32_t EndTick = 0;
+    // v3+ only: `cv` lines naming a knob this build no longer registers. They are skipped (the
+    // default stands) rather than misapplied — reported so a surprising replay has an explanation.
+    int UnknownCvs = 0;
     bool Ok = false;
 };
 
