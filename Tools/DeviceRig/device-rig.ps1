@@ -39,9 +39,8 @@ param(
     [int]$LinkTimeoutSec = 35,      # run: abort LOUDLY if no peer reports READY by then
     [int]$Iterations = 1,           # cycle: repeat the loop this many times back-to-back
     [int]$InstallTimeoutSec = 240,  # install: hard bound on `apps install` (never hang silently)
-    [int]$AppCloseWaitSec = 180,    # install: how long to wait for a blocking app to be closed
-    [switch]$ForceUninstall,        # install: DESTRUCTIVE zero-touch path - uninstall first, which
-                                    #   is the only headless way to guarantee the app is not running.
+    [switch]$ForceUninstall,        # install: DESTRUCTIVE fallback - uninstall first, for the day
+                                    #   SIGKILL stops working. Stop-IosApp is the normal path.
                                     #   Wipes the container: device GUID, opponent history, and any
                                     #   .rec flight recordings not yet pulled. Off by default.
     [switch]$NoReset,               # run: DON'T pm-clear Android or clear logcat - arm the
@@ -436,15 +435,32 @@ function Get-IosAppPid {
     return ''
 }
 
-# Poll until the app is gone. Gives up on 'unknown' rather than spinning on a broken probe.
-function Wait-IosAppClosed([int]$TimeoutSec) {
-    $deadline = (Get-Date).AddSeconds($TimeoutSec)
-    while ((Get-Date) -lt $deadline) {
-        Start-Sleep -Seconds 3
-        $p = Get-IosAppPid
-        if ($p -eq '')        { return $true }
-        if ($p -eq 'unknown') { return $false }
+# TERMINATE the app, headlessly. Returns $true once it is genuinely gone.
+#
+# THE ONE THAT ACTUALLY WORKS: `dvt signal <pid> 9`. #168 concluded no headless terminate existed on
+# iOS 26 — but it had only tried `dvt kill` and `dvt pkill`, which ride a DTX request the OS accepts
+# and ignores (pkill even logs "Killing OnlyRps(5099)" while the pid and start time are unchanged).
+# `signal` sends a REAL POSIX signal through a different request, and SIGKILL takes the process down:
+# verified 2026-08-01, pid 5255 -> absent from proclist.
+#
+# This matters more than a convenience. `apps install` blocks HARD on a running app — measured twice
+# that day, both installs sitting until a person swiped the app away — so without a headless kill the
+# rig cannot reinstall without hands on the phone, which makes the whole instrument useless for the
+# unattended two-phone runs it exists for. Never replace this with an instruction to a human.
+function Stop-IosApp {
+    $p = Get-IosAppPid
+    if ($p -eq '')        { return $true }        # already gone
+    if ($p -eq 'unknown') { Warn 'ios: cannot probe the app pid (dvt tunnel refused) - cannot terminate.'; return $false }
+    Say "ios: terminating $($App.LogTag) (pid $p) with SIGKILL via dvt signal"
+    [void](Invoke-BoundedPmd @('developer', 'dvt', 'signal', $p, '9', '--userspace') 60)
+    # Trust the PROBE, not the exit code — `kill`/`pkill` taught us the CLI reports success either way.
+    for ($i = 0; $i -lt 8; $i++) {
+        Start-Sleep -Seconds 2
+        $q = Get-IosAppPid
+        if ($q -eq '') { Say 'ios: app terminated'; return $true }
+        if ($q -eq 'unknown') { return $false }
     }
+    Warn "ios: $($App.LogTag) survived SIGKILL - still running."
     return $false
 }
 
@@ -487,11 +503,19 @@ function Install-IpaHeadless([string]$Path, [string]$What) {
     if ($appPid -eq 'unknown') {
         Warn 'ios: could not probe whether the app is running (dvt tunnel refused) - installing anyway, bounded.'
     } elseif ($appPid -ne '') {
-        Warn "ios: $($App.LogTag) is RUNNING (pid $appPid). An install BLOCKS until it exits, silently."
-        Warn 'ios: dvt kill/pkill do not work on this OS. CLOSE THE APP ON THE PHONE (swipe it away in the app switcher).'
-        Say  "ios: waiting up to ${AppCloseWaitSec}s - the install resumes by itself the moment it closes."
-        if (Wait-IosAppClosed $AppCloseWaitSec) { Say 'ios: app closed - installing.' }
-        else { Warn 'ios: app still running - trying the install anyway so the bound, not the block, decides.' }
+        # The app is running, and `apps install` will BLOCK until it exits — measured, repeatedly, on
+        # 2026-08-01: the two installs that day only completed at the moment a person swiped the app
+        # away. It is a wall, not a delay. Waiting it out is not an option.
+        #
+        # And asking a human is not an option either: this rig exists to be driven headlessly, so a
+        # step that needs hands on the phone is a broken step, not a documented one. Terminate it
+        # ourselves — Stop-IosApp is the headless kill, and it is required to succeed.
+        Warn "ios: $($App.LogTag) is RUNNING (pid $appPid) - it would block the install; terminating it."
+        if (-not (Stop-IosApp)) {
+            throw ("ios: could not terminate $($App.LogTag) headlessly, and a running app blocks " +
+                   '`apps install` indefinitely. Re-run with -ForceUninstall for the guaranteed ' +
+                   'zero-touch path (it wipes the container - pull .rec files first with -Action pullrec).')
+        }
     }
     Say "ios: headless install ($What), bounded at ${InstallTimeoutSec}s"
     $code  = Invoke-BoundedInstall $Path $InstallTimeoutSec

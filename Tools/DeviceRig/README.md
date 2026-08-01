@@ -97,9 +97,18 @@ install still printed `ios: installed` and reported the headless path had succee
 
 The rig now **detects it, bounds it, and decides on evidence**:
 
-- Before installing it asks whether the app is running (`dvt proclist`). If it is, it says so and
-  waits up to `-AppCloseWaitSec` (default 180), **resuming by itself the moment you close it** —
-  so the one manual step is announced instead of inferred from a hang.
+- Before installing it asks whether the app is running (`dvt proclist`). If it is, it **terminates
+  it itself** — `dvt signal <pid> 9`. No human, ever: an install step that waits for someone to
+  swipe the app away makes the rig undrivable for the unattended two-phone runs it exists for.
+  If the terminate fails, the install is refused with `-ForceUninstall` named as the fallback,
+  rather than blocking forever.
+
+  **`dvt signal` is the only thing that works.** `dvt kill` and `dvt pkill` ride a DTX request iOS
+   26 accepts and ignores — `pkill` even logs `Killing OnlyRps(5099)` while the pid *and start
+  time* are unchanged. That is why #168 originally concluded no headless terminate existed.
+  `signal` sends a real POSIX signal through a different request; SIGKILL takes the process down
+  (verified 2026-08-01, pid 5255 → absent from `proclist`). Install over a running app then takes
+  **~32 s, hands-off**, where before it blocked indefinitely until someone swiped.
 - The install itself is bounded by `-InstallTimeoutSec` (default 240) and its exit code is read.
 - **The CLI's exit is not the source of truth.** Measured 2026-08-01: an install *landed* (the new
   build verifiably ran afterwards) while the CLI sat unreturned for over ten minutes. So on a

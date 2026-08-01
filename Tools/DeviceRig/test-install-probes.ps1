@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $errs = $null; $toks = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     'C:\games\lurmotorn\Tools\DeviceRig\device-rig.ps1', [ref]$toks, [ref]$errs)
-$want = 'Get-IosAppPid', 'Get-IosAppRecord', 'Wait-IosAppClosed'
+$want = 'Get-IosAppPid', 'Get-IosAppRecord'
 $ast.FindAll({ $args[0] -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true) |
     Where-Object { $want -contains $_.Name } |
     ForEach-Object { Invoke-Expression $_.Extent.Text }
