@@ -666,7 +666,82 @@ void android_main(android_app* App) {
             const uint64_t ElapsedNs =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
             PrevTime = Now;
+#if LUR_AGENT
+            // Poll the agent channel FIRST, and unconditionally. It must be serviced whatever mode the
+            // app is in, and the branches below `continue` out of the loop for solo (which owns it),
+            // for a decided match, and for the post-match hold — so anywhere further down is
+            // unreachable in exactly the states a scenario most often needs to be driven from. (Learned
+            // by putting it further down and watching the property land while nothing happened: the app
+            // opens into a solo AI match, which takes the first of those continues.)
+            AgentPollNs += ElapsedNs;
+            if (AgentPollNs >= 100'000'000ull) {
+                AgentPollNs = 0;
+                char CmdV[PROP_VALUE_MAX] = {};
+                Rps::AgentCommand Cmd;
+                if (__system_property_get("debug.lur.agent.cmd", CmdV) > 0 && AgentCtl.Poll(CmdV, Cmd))
+                    ApplyAgentCommand(State, Cmd);
+            }
+#endif
 
+#if LUR_INTERNAL
+            // The periodic diagnostic + TRACE line. It lives at the TOP of the loop, above the mode
+            // branches, because those `continue` out for solo (which owns the loop), for a decided
+            // match and for the post-match hold — so at the bottom it was unreachable in exactly the
+            // states worth diagnosing.
+            //
+            // SOLO counts too. This was linked-only, and the TRACE line rides on it — so the one mode
+            // with no peer to perturb the numbers, i.e. the mode you actually want for a PERFORMANCE
+            // measurement, was the mode that printed nothing. iOS already covered both
+            // (`_Started || _SoloActive`); this is the Android side catching up. Found while measuring
+            // #162 on the phone: 1602 carts spawned and not a single TRACE line came out.
+            const bool SoloDiag = State.SoloActive.load(std::memory_order_acquire);
+            if (State.Started || SoloDiag) {
+                DiagAccumNs += ElapsedNs;
+                if (DiagAccumNs > 2'000'000'000ull) {
+                    DiagAccumNs = 0;
+                    // #147: hash + gold + frontier are the CONVERGENCE readout. The anchor cross-check
+                    // only starts once the match does, so before either camp is placed a divergence
+                    // was completely invisible — the two phones simply showed different numbers and
+                    // nobody could tell which state was wrong. Pre-match these MUST be identical on
+                    // both peers; comparing one line per phone is the whole test, no taps required.
+                    const Rps::Sim& DS = SoloDiag ? State.SoloSim : State.Lp.GetSim();
+                    // `badbuild` is here because it was the FIRST question asked when the pair
+                    // desynced on 2026-07-30 and the log could not answer it. #112 detects a
+                    // fingerprint mismatch and sets BuildMismatch(); nothing read it (the gate's own
+                    // comment claims the app aborts on it — no app ever did), and its log line went
+                    // to an unsinked stderr. One field on the line everyone already reads.
+                    // #163: `gaps`/`gapat` and `stall` are here for the same reason `badbuild` is — they
+                    // were the questions the log could not answer. A frame lost inside a link that
+                    // reports no error is why locating one missing input needed two flight recordings
+                    // and a diff; gaps>0 says it on the line everyone already reads, and gapat names
+                    // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
+                    // to the player (and in the log) exactly like a frozen app.
+                    LOGI("%s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
+                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d",
+                         SoloDiag ? "SOLO" : "LOCKSTEP",
+                         SoloDiag ? DS.Tick : State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
+                         (!SoloDiag && State.Lp.Desynced()) ? 1 : 0,
+                         State.Lp.BuildMismatch() ? 1 : 0,
+                         State.PresentedFrames.load(std::memory_order_relaxed),
+                         static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
+                         DS.Teams[SoloDiag ? 0 : State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
+                         DS.FrontierT0.ToInt(),
+                         SoloDiag ? 1 : (State.Lp.MatchStarted() ? 1 : 0),
+                         SoloDiag ? 0 : State.Lp.InputGaps(),
+                         SoloDiag ? 0u : State.Lp.LastInputGapTick(),
+                         (!SoloDiag && State.Lp.PreMatchStalled()) ? 1 : 0);
+                    // #159: the linked recording's periodic census. It carries the economy snapshot
+                    // AND it is what FLUSHES the file — without it the whole capture sits in the
+                    // stdio buffer until End, so a killed app or a match that never resolves leaves
+                    // nothing on disk. That is the failure mode this recorder exists to survive.
+                    if (!SoloDiag)
+                        LinkedRec.Census(State.Lp.GetSim(),
+                                         State.LinkedTeam.load(std::memory_order_relaxed), -1, -1);
+                    char TraceLine[512];
+                    if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0) LOGI("TRACE %s", TraceLine);
+                }
+            }
+#endif
             // ---- Solo AI match (#127/#2): a local Sim + AiController, no peer. Picking ANY AI tier
             // (re)starts a fresh match AT ONCE — even mid-match — via the one-shot SoloAiTier the
             // glue sets on each selector pick. App-open stores Easy, so a match is live immediately. ----
@@ -932,17 +1007,6 @@ void android_main(android_app* App) {
             // Event-based soak (random place/queue) returns with the input UI in #139/#140.
             (void)AutoPlay; (void)AutoRng; (void)AutoAccumNs;
 #endif
-#if LUR_AGENT
-            // Poll the agent channel ~10x/s. On the sim thread, so a command may touch Lp/Sim directly.
-            AgentPollNs += ElapsedNs;
-            if (AgentPollNs >= 100'000'000ull) {
-                AgentPollNs = 0;
-                char CmdV[PROP_VALUE_MAX] = {};
-                Rps::AgentCommand Cmd;
-                if (__system_property_get("debug.lur.agent.cmd", CmdV) > 0 && AgentCtl.Poll(CmdV, Cmd))
-                    ApplyAgentCommand(State, Cmd);
-            }
-#endif
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
                 State.Recovering.store(State.Lp.Recovering(), std::memory_order_relaxed);  // #161 -> HUD
@@ -1025,49 +1089,6 @@ void android_main(android_app* App) {
                     }
                 }
             }
-#if LUR_INTERNAL
-            if (State.Started) {
-                DiagAccumNs += ElapsedNs;
-                if (DiagAccumNs > 2'000'000'000ull) {
-                    DiagAccumNs = 0;
-                    // #147: hash + gold + frontier are the CONVERGENCE readout. The anchor cross-check
-                    // only starts once the match does, so before either camp is placed a divergence
-                    // was completely invisible — the two phones simply showed different numbers and
-                    // nobody could tell which state was wrong. Pre-match these MUST be identical on
-                    // both peers; comparing one line per phone is the whole test, no taps required.
-                    const Rps::Sim& DS = State.Lp.GetSim();
-                    // `badbuild` is here because it was the FIRST question asked when the pair
-                    // desynced on 2026-07-30 and the log could not answer it. #112 detects a
-                    // fingerprint mismatch and sets BuildMismatch(); nothing read it (the gate's own
-                    // comment claims the app aborts on it — no app ever did), and its log line went
-                    // to an unsinked stderr. One field on the line everyone already reads.
-                    // #163: `gaps`/`gapat` and `stall` are here for the same reason `badbuild` is — they
-                    // were the questions the log could not answer. A frame lost inside a link that
-                    // reports no error is why locating one missing input needed two flight recordings
-                    // and a diff; gaps>0 says it on the line everyone already reads, and gapat names
-                    // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
-                    // to the player (and in the log) exactly like a frozen app.
-                    LOGI("LOCKSTEP tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
-                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d",
-                         State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
-                         State.Lp.Desynced() ? 1 : 0, State.Lp.BuildMismatch() ? 1 : 0,
-                         State.PresentedFrames.load(std::memory_order_relaxed),
-                         static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
-                         DS.Teams[State.LinkedTeam.load(std::memory_order_relaxed)].Gold,
-                         DS.FrontierT0.ToInt(), State.Lp.MatchStarted() ? 1 : 0,
-                         State.Lp.InputGaps(), State.Lp.LastInputGapTick(),
-                         State.Lp.PreMatchStalled() ? 1 : 0);
-                    // #159: the linked recording's periodic census. It carries the economy snapshot
-                    // AND it is what FLUSHES the file — without it the whole capture sits in the
-                    // stdio buffer until End, so a killed app or a match that never resolves leaves
-                    // nothing on disk. That is the failure mode this recorder exists to survive.
-                    LinkedRec.Census(State.Lp.GetSim(),
-                                     State.LinkedTeam.load(std::memory_order_relaxed), -1, -1);
-                    char TraceLine[512];
-                    if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0) LOGI("TRACE %s", TraceLine);
-                }
-            }
-#endif
             // ~500 Hz service: datagram-to-Step latency stays ~ms without busy-spinning a core.
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }

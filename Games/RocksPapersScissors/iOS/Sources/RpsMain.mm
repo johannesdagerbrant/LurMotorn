@@ -524,6 +524,12 @@ Rps::Fixed WorldToFixed(float Wv) {
     const double Now = CACurrentMediaTime();
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
+#if LUR_AGENT
+    // Poll the agent channel FIRST, and unconditionally — it must be serviced whatever mode the app is
+    // in. Putting it inside the linked branch (as this first was) makes it unreachable in solo, which
+    // is the mode the app OPENS in, so a scenario could not be driven until a peer appeared.
+    [self pollAgentChannel:ElapsedNs];
+#endif
 
     // #2/#127: consume a selector tier pick -> (re)start a solo AI match at once (even mid-match).
     // App-open sets Easy, so a match is live immediately (the empty pre-match sim that showed no
@@ -728,9 +734,6 @@ Rps::Fixed WorldToFixed(float Wv) {
             }
             os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
         }
-#if LUR_AGENT
-        [self pollAgentChannel:ElapsedNs];   // assistant remote control (absent from ordinary builds)
-#endif
         if (_Started) _Lp.Tick(ElapsedNs);
         // #161: tell the player a desync repair is in flight — the match holds and may rewind a second
         // of play, which is worse than the freeze it replaced if it happens without explanation.
