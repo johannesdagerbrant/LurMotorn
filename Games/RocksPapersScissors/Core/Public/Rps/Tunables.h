@@ -1054,6 +1054,20 @@ inline int GameplayIdForName(const char* Name) {
 #undef IX
     return -1;
 }
+
+// The forward map, for a tool REPORTING on a wire id rather than routing an edit. --recdiff used to
+// print "CV id 46 differs: A=400 B=600", which names the one thing a reader cannot look up: the ids
+// come from an X-macro list, so pinning 46 to rps.unit.miner.building_cost means counting entries by
+// hand. It matters because that line is the whole answer when two phones disagree on tunables — it
+// should read as the answer, not as a lookup exercise. Returns "?" for an id outside the list.
+inline const char* GameplayNameForId(int Id) {
+#define FX(F, Cv) if (Id == CvId##F) return Cv.Name();
+#define IX(F, Cv) if (Id == CvId##F) return Cv.Name();
+    LUR_RPS_GAMEPLAY_CVARS(FX, IX)
+#undef FX
+#undef IX
+    return "?";
+}
 #endif
 
 } // namespace Rps

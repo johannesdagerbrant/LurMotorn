@@ -22,7 +22,34 @@ analyze] ×N`, with **zero human interaction per iteration** after the one-time 
 below. `run` is one measured pass on its own — arms both peers, (re)launches, captures
 both engine logs, and reports the same-frame tally after N matches. Other actions:
 `install`, `arm`, `disarm`, `reset`, `launch`, `tail -Peer <android|ios>`, `shot`,
-`status`.
+`status`, `pullrec`.
+
+## `pullrec` — collect BOTH peers' flight recordings, and diff the pairs
+
+```
+Tools\DeviceRig\device-rig.bat -Action pullrec -Game rps
+```
+
+Pulls every `.rec` off both phones into `dist\rec\{android,ios}\`, pairs the linked
+(`rps-vs-*`) captures **by match rather than by filename** — each peer stamps its own
+clock and its own per-session ordinal, so one match is `…-073714-1.rec` here and
+`…-073715-2.rec` there — and runs `--recdiff` on each pair. Requires the desktop binary
+(`scripts\rps-desktop-build.ps1`); without it the pull still happens and the diff is
+skipped with a note.
+
+The pairing key is seed + build fingerprint + the footer's `end` line. Captures with **no
+`end` line** (the app was killed mid-match — which includes the longest ones) are reported
+with their seed rather than paired: every session walks the same seed ladder from
+`kMatchSeed`, so seed alone would pair whatever collides. Anything one-sided is named
+explicitly — a match only one peer recorded is a finding, not noise.
+
+**Why this is a command and not a `pymobiledevice3` one-liner.** iOS recordings live in
+`Library/Application Support`, and the interactive `apps afc` shell word-splits the space
+into two paths, reporting `cannot access` for both (on Windows it also dies on an emoji in
+its own banner). Hand-listing that directory produced a partial result that read as an
+empty one, and hence a wrong bug report (#171) claiming the iPhone recorded nothing — it
+had recorded twelve matches, and #159 stayed blocked on a diff that could have been run
+the whole time. `apps pull` takes the directory whole and handles the space itself.
 
 ## The iOS loop is now autonomous (no admin) — one Apple gate remains
 

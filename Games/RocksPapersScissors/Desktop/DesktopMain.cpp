@@ -780,11 +780,13 @@ int RunRecDiff(const char* PathA, const char* PathB) {
                        static_cast<unsigned>(A.HumanTeam));
     // The latched CVar set: if the two peers simulated on different tunables, EVERYTHING after tick 0
     // diverges and the first differing tick is meaningless. Check it before anything else.
+    bool CvDiffers = false;
     for (uint8_t Id = 0; Id < Rps::CvIdCount; ++Id) {
         const int32_t Ra = Rps::CvOverrideRaw(A.Cv, Id), Rb = Rps::CvOverrideRaw(B.Cv, Id);
         if (Ra != Rb) {
-            Lur::Log::Error("  CV id %u differs: A=%d B=%d — the peers did not agree on tunables",
-                            static_cast<unsigned>(Id), Ra, Rb);
+            Lur::Log::Error("  CV %s (id %u) differs: A=%d B=%d — the peers did not agree on tunables",
+                            Rps::GameplayNameForId(Id), static_cast<unsigned>(Id), Ra, Rb);
+            CvDiffers = true;
             ++Problems;
         }
     }
@@ -840,13 +842,37 @@ int RunRecDiff(const char* PathA, const char* PathB) {
         Lur::Log::Info("  note: no hash lines in %s — a solo or pre-#159 recording, so only the event "
                        "streams could be compared", A.Hashes.empty() ? PathA : PathB);
     // The verdict, stated so it points at ONE of the two bugs rather than at "something is wrong".
-    if (FirstEventDiff >= 0)
+    //
+    // A tunables (or seed) mismatch OUTRANKS a hash divergence, and that ordering is the whole point:
+    // two sims fed different Cv diverge immediately and legitimately, so the hashes differing is the
+    // SYMPTOM, not the finding. The first real two-phone pair ever diffed (2026-08-01 10:39, #171) hit
+    // exactly this — miner-building 400 vs 600, starting-gold 750 vs 800, hashes apart at tick 0 — and
+    // the verdict read "the sim is not deterministic across these two builds/platforms" on a pair whose
+    // build fingerprints were IDENTICAL. That sends the reader hunting cross-compiler nondeterminism
+    // (#159's candidate 2) when the answer, printed four lines above, is that the cvar sync never
+    // converged (#169). A tool that buries its own finding under a confident wrong headline is worse
+    // than one that says nothing.
+    //
+    // An EVENT divergence still outranks the tunables mismatch, though: the recorded batch is what
+    // each peer EXECUTED, and both peers execute the identical combined stream by construction — so
+    // the two streams differing is a wire fact that different Cv does not explain, and it is the
+    // finding with the shorter path to a fix.
+    if (FirstEventDiff >= 0) {
         Lur::Log::Info("VERDICT: input streams diverged first, at tick %d. Look at the transport, not "
                        "the sim.", FirstEventDiff);
+        if (CvDiffers || A.Seed != B.Seed)
+            Lur::Log::Info("         (the peers ALSO disagree on %s — a separate bug, fix both)",
+                           A.Seed != B.Seed ? "seeds" : "tunables");
+    } else if (CvDiffers || A.Seed != B.Seed)
+        Lur::Log::Info("VERDICT: the peers did not simulate the same match — %s (above). Everything "
+                       "downstream, hashes included%s, follows from that; fix the mismatch and re-run "
+                       "before reading any tick number here as a sim bug.",
+                       A.Seed != B.Seed ? "different SEEDS" : "different TUNABLES",
+                       FirstHashDiff >= 0 ? "" : " (which happen to still agree)");
     else if (FirstHashDiff >= 0)
-        Lur::Log::Info("VERDICT: identical inputs, state diverged by tick %d (so between tick %d and "
-                       "%d). The sim is not deterministic across these two builds/platforms.",
-                       FirstHashDiff, FirstHashDiff - 10, FirstHashDiff);
+        Lur::Log::Info("VERDICT: identical inputs and identical tunables, state diverged by tick %d "
+                       "(so between tick %d and %d). The sim is not deterministic across these two "
+                       "builds/platforms.", FirstHashDiff, FirstHashDiff - 10, FirstHashDiff);
     else if (Problems > 0)
         // Preconditions failed but nothing diverged. This printed NO verdict at all on its first real
         // run (two phones whose headers disagreed on tunables), which reads as "the tool gave up" —

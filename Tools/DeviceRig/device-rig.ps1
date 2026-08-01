@@ -14,9 +14,10 @@
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action run -Matches 3
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action tail  -Peer ios
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action arm   -Peer both
+#   powershell -File Tools\DeviceRig\device-rig.ps1 -Action pullrec -Game rps   # both peers' .rec + diff
 [CmdletBinding()]
 param(
-    [ValidateSet('run','cycle','arm','disarm','reset','clearhistory','install','uninstall','launch','tail','shot','status')]
+    [ValidateSet('run','cycle','arm','disarm','reset','clearhistory','install','uninstall','launch','tail','shot','status','pullrec')]
     [string]$Action = 'run',
     [ValidateSet('auto','central','peripheral')]
     [string]$AndroidRole = 'auto',  # dev BLE role override (LUR_INTERNAL): pin this peer's role
@@ -47,6 +48,7 @@ param(
                                     #   already-running/linked apps + keep the buffered
                                     #   handshake. Use when peers are already paired live.
     [switch]$Fresh,                 # run: force-stop + relaunch BOTH (fresh handshake) WITHOUT
+    [string]$RecDir,                # pullrec: where the .rec files land (default: dist\rec\<peer>\)
     [string]$Game = 'chess'         # which game's app under test: 'chess' or 'rps'
 )                                   #   pm-clear (identity kept), and clear the log window.
                                     #   The clean-measurement mode: fresh link, no churn.
@@ -66,6 +68,12 @@ if ($Game -eq 'rps') {
         RoleProp       = 'debug.lur.role'
         RoleMarker     = 'role'
         ClearMarker    = 'clearsave'
+        # Flight recordings (pullrec). The rig body stays game-agnostic: it knows only
+        # "this app writes recordings HERE, matching THIS glob, and THIS tool pairs them".
+        RecGlob        = 'rps-*.rec'                         # everything the recorder writes
+        RecPairGlob    = 'rps-vs-*.rec'                      # ...of which THESE are two-peer captures
+        RecDiffExe     = 'build-desktop\Games\RocksPapersScissors\Desktop\onlyrps_desktop.exe'
+        RecDiffArg     = '--recdiff'
     }
 } else {
     $App = @{
@@ -78,6 +86,7 @@ if ($Game -eq 'rps') {
         RoleProp       = 'debug.lur.role'                     # Android: dev BLE role override (setprop)
         RoleMarker     = 'role'                               # iOS: Documents/<marker> dev BLE role override
         ClearMarker    = 'clearsave'                          # iOS: Documents/<marker> one-shot history wipe
+        RecGlob        = $null                                # chess has no flight recorder (pullrec no-ops)
     }
 }
 
@@ -229,6 +238,125 @@ function ClearHistory-Ios {
     [System.IO.File]::WriteAllText($f, '1')
     Pmd apps push $App.IosBundleId $f "Documents/$($App.ClearMarker)" 2>&1 | Out-Null
     [void](Launch-Ios -FreshProcess)   # process restart consumes the marker and wipes
+}
+
+# --- Flight recordings: collect BOTH peers' .rec files, and pair them (#171) -------
+#
+# WHY THIS EXISTS. Recording a linked match on both phones is only half a capability — the
+# other half is getting the two files onto one machine, and that half had no command at all.
+# So "did the iPhone record?" got answered by hand, through an interactive AFC shell, against
+# a path with a SPACE in it (Library/Application Support). That shell is a xonsh REPL: it
+# word-splits the path into "Library/Application" and "Support" and reports `cannot access`
+# for both, and on a Windows console it also dies on a UTF-8 emoji in its own banner. The
+# resulting listing is partial and reads exactly like an empty one.
+#
+# It produced a wrong bug report (#171: "the iPhone still writes NO linked recording"). The
+# iPhone had in fact written twelve of them, including the very match said to be missing —
+# and because the pair was believed not to exist, #159 sat blocked for two days on a diff
+# that could have been run the whole time. An observation channel that fails by UNDER-
+# reporting is the dangerous kind: absence looks like evidence.
+#
+# Hence: one command, no interactive shell, no hand-typed paths. `apps pull` takes the
+# directory whole and handles the space itself.
+function Pull-Rec-Android($dest) {
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    $names = @(Adb shell run-as $App.AndroidPackage ls files/ 2>$null |
+               ForEach-Object { $_.Trim() } | Where-Object { $_ -like $App.RecGlob })
+    foreach ($n in $names) {
+        # cmd's `>` is byte-exact. PowerShell's would re-encode and rewrite the line endings,
+        # and the .rec parser reads lines — a stray CR corrupts the trailing `end <r> <tick>`.
+        $out = Join-Path $dest $n
+        & cmd /c ('"{0}" exec-out run-as {1} cat "files/{2}" > "{3}"' -f $adb, $App.AndroidPackage, $n, $out)
+    }
+    Say "android: pulled $($names.Count) recording(s) -> $dest"
+    return $names.Count
+}
+function Pull-Rec-Ios($dest) {
+    New-Item -ItemType Directory -Force -Path $dest | Out-Null
+    $stage = Join-Path $logs 'recpull'
+    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null
+    # The whole directory in one call — no per-file quoting, and no listing step to get wrong.
+    PmdQuiet apps pull $App.IosBundleId 'Library/Application Support' $stage
+    $files = @(Get-ChildItem -Path $stage -Recurse -File -Filter $App.RecGlob -ErrorAction SilentlyContinue)
+    foreach ($f in $files) { Copy-Item $f.FullName (Join-Path $dest $f.Name) -Force }
+    Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+    Say "ios: pulled $($files.Count) recording(s) -> $dest"
+    return $files.Count
+}
+# Pair the two sides by what the MATCH is, not by filename: each peer stamps its own local
+# clock and its own per-session ordinal into the name, so the same match is `...-073714-1.rec`
+# on one phone and `...-073715-2.rec` on the other. Seed + build + the footer's end line
+# identify it on both.
+function Rec-Seed($path) {
+    foreach ($line in [System.IO.File]::ReadLines($path)) { if ($line -like 'seed *') { return $line.Substring(5).Trim() } }
+    return '?'
+}
+function Rec-Key($path) {
+    $seed = $null; $end = $null; $fp = $null
+    foreach ($line in [System.IO.File]::ReadLines($path)) {
+        if     ($line -like 'seed *') { $seed = $line.Substring(5).Trim() }
+        elseif ($line -like 'fp *')   { $fp   = $line.Substring(3).Trim() }
+        elseif ($line -like 'end *')  { $end  = $line.Substring(4).Trim() }
+    }
+    # An ABANDONED recording (no `end` line — the app was killed mid-match) is deliberately not
+    # keyed. Seed alone cannot identify a match: every session walks the same ladder from
+    # kMatchSeed, so match N of Tuesday and match N of Friday share a seed. Keying those as
+    # "seed/open" is what this function did on its first run, and it duly paired a 1819-tick
+    # capture with an unrelated 3-tick one from a different build. Refusing to guess is better:
+    # an unpaired file is reported, and a wrong pair is a fabricated diff.
+    if (-not $seed -or -not $end) { return $null }
+    # `end <result> <tick>` at tick 0 is a match that was torn down before it simulated anything.
+    # There is nothing in it to diff, and every such file on a device carries the same end line, so
+    # keying them just manufactures collisions.
+    if ($end -match '\s0$') { return $null }
+    return "$seed/$end/$fp"
+}
+function Diff-Rec-Pairs($andDir, $iosDir) {
+    $exe = Join-Path $root $App.RecDiffExe
+    $unkeyed = New-Object System.Collections.ArrayList
+    $index = {
+        param($dir, $side)
+        $map = @{}
+        foreach ($f in Get-ChildItem $dir -File -Filter $App.RecPairGlob -ErrorAction SilentlyContinue) {
+            $k = Rec-Key $f.FullName
+            if (-not $k) {
+                # Say WHICH match it was anyway. These are mostly captures the app was killed
+                # mid-way (no `end` line), which includes the longest and most interesting ones —
+                # so the seed is what lets a human spot the obvious counterpart on the other side
+                # and diff it by hand. A bare filename list would be unusable.
+                [void]$unkeyed.Add("  $side not auto-pairable (no end line, or ended at tick 0): $($f.Name)  seed=$(Rec-Seed $f.FullName)")
+                continue
+            }
+            # Two files on ONE side with the same key means the key is not unique for this batch;
+            # say so rather than silently keeping whichever enumerated last. $null marks the key
+            # poisoned, so a third collision must not try to Split-Path it.
+            if ($map.ContainsKey($k)) {
+                $other = if ($map[$k]) { Split-Path $map[$k] -Leaf } else { 'an earlier file' }
+                Warn "  $side AMBIGUOUS: $($f.Name) and $other share key [$k] - skipping both"
+                $map[$k] = $null; continue
+            }
+            $map[$k] = $f.FullName
+        }
+        return $map
+    }
+    $a = & $index $andDir 'android'
+    $b = & $index $iosDir 'ios    '
+    $paired = @($a.Keys | Where-Object { $a[$_] -and $b[$_] })
+    Say "pairs: $($paired.Count) match(es) captured by BOTH peers ($($a.Count) android / $($b.Count) ios linked recordings)"
+    # Name what did NOT pair. A one-sided capture is a real finding (the other peer was in solo,
+    # or never entered the match) and silently diffing only the pairs would hide it.
+    foreach ($k in @($a.Keys | Where-Object { $a[$_] -and -not $b[$_] })) { Warn "  android-only: $(Split-Path $a[$k] -Leaf)  [$k]" }
+    foreach ($k in @($b.Keys | Where-Object { $b[$_] -and -not $a[$_] })) { Warn "  ios-only:     $(Split-Path $b[$k] -Leaf)  [$k]" }
+    foreach ($u in $unkeyed) { Warn $u }
+    if (-not (Test-Path $exe)) {
+        Warn "recdiff skipped: $exe not built (scripts\rps-desktop-build.ps1)"
+        return
+    }
+    foreach ($k in $paired) {
+        Write-Host ''
+        & $exe $App.RecDiffArg $a[$k] $b[$k]
+    }
 }
 
 # --- Install blocking: detect it, never hang on it ---------------------------------
@@ -675,6 +803,17 @@ switch ($Action) {
         else { Warn 'tail: choose one -Peer (android or ios)' }
     }
     'status'  { Summarize (Join-Path $logs 'android.log') 'android'; Summarize (Join-Path $logs 'ios.log') 'ios' }
+    'pullrec' {
+        if (-not $App.RecGlob) { Warn "pullrec: -Game $Game has no flight recorder"; break }
+        $recRoot = if ($RecDir) { $RecDir } else { Join-Path $root 'dist\rec' }
+        $andDir = Join-Path $recRoot 'android'
+        $iosDir = Join-Path $recRoot 'ios'
+        if ($doAndroid) { Ensure-Android; [void](Pull-Rec-Android $andDir) }
+        if ($doIos)     { Ensure-Ios;     [void](Pull-Rec-Ios     $iosDir) }
+        # Diffing is the POINT of pulling both — a pair sitting undiffed on disk is the same
+        # dead end as a pair sitting on two phones, so it happens without a second command.
+        if ($doAndroid -and $doIos) { Diff-Rec-Pairs $andDir $iosDir }
+    }
     'run'     { Invoke-Run $true }
     'cycle'   {
         # The full autonomous loop: (fetch ->) install-if-changed -> [run -> analyze] xN,

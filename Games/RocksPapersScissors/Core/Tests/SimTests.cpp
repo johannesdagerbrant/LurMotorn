@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>    // #171: GameplayNameForId round-trip (strcmp)
 #include <initializer_list>
 #include <type_traits>   // #159: compile-time guard that hashed sim state carries no floating point
 
@@ -156,6 +157,23 @@ static void TestGameplayCvarListComplete() {
     Lur::Core::CVarRegistry::ForEach(
         [&](Lur::Core::ICVar* C) { if (C->AffectsGameplay()) ++Registered; });
     CHECK(Registered == CvIdCount);
+}
+
+// ---- #171: the id->name map must be the exact inverse of the name->id one ----
+// GameplayNameForId exists so --recdiff can print "rps.econ.starting_gold" instead of "id 64",
+// and the only way that line is worth anything is if the name it prints is the tunable the id
+// actually addresses. Both maps expand from the same X-list, so they can only disagree if one
+// grows a hand-written entry — cheap to pin, and a wrong name here would misdirect exactly the
+// investigation the tool exists to support (a mislabelled cvar sent the 2026-08-01 two-phone
+// desync hunt at cross-compiler nondeterminism instead of the cvar merge).
+static void TestGameplayCvarIdNameRoundTrips() {
+    for (int Id = 0; Id < CvIdCount; ++Id) {
+        const char* Name = GameplayNameForId(Id);
+        CHECK(std::strcmp(Name, "?") != 0);       // every wire id names a real cvar
+        CHECK(GameplayIdForName(Name) == Id);     // ...and that name maps back to this id
+    }
+    CHECK(std::strcmp(GameplayNameForId(CvIdCount), "?") == 0);   // out of range stays "?"
+    CHECK(GameplayIdForName("rps.dev.flight_recorder") < 0);      // non-gameplay is not on the wire
 }
 #endif
 
@@ -1018,6 +1036,7 @@ int main() {
     TestCVarOverrideDeterminism();
 #if !LUR_SHIPPING
     TestGameplayCvarListComplete();
+    TestGameplayCvarIdNameRoundTrips();   // #171
 #endif
     TestGridEqualsBruteForce();
     TestNoFloatingPointInHashedSimState();  // #159
