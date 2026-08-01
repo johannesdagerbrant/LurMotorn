@@ -92,6 +92,39 @@ struct Grid {
     }
 };
 
+// #165: the same CSR bucketing for MINES. Carts read the deposit ring every tick (deposits are soft
+// obstacles, playtest 2026-07-20), and that was the whole of sim.move once the dead flock gather went
+// (f2a456e): every cart tested every mine, NumMines x carts = ~78k AddRepel calls per tick at ~1600
+// carts, 8-24 ms of a 100 ms tick on a Galaxy A14.
+//
+// Mines are STATIC — MineX/MineY are written once in BuildMap and never move — so a cart's neighbour
+// set is a pure function of its position against fixed data. Only MineGold changes, and a depleted
+// mine is skipped by the scan anyway, so it is simply left out of the index; rebuilding per step (48
+// entries) keeps that automatic and costs nothing next to the work it removes.
+//
+// Bit-identical by construction, like the two changes in f2a456e: AddRepel already early-outs on
+// Cheb >= R, so a mine outside the queried box contributes exactly zero, and the accumulator is int64
+// addition — associative and commutative — so the ORDER the survivors are summed in cannot matter
+// either. The determinism tests and TestGridEqualsBruteForce are the guard.
+struct MineGrid {
+    int32_t Start[GridCells + 1];  // CSR: cell c's live mines are Order[Start[c] .. Start[c+1])
+    int32_t Order[NumMines];
+
+    void Build(const Sim& S) {
+        for (int32_t C = 0; C <= GridCells; ++C) Start[C] = 0;
+        for (int32_t M = 0; M < NumMines; ++M)
+            if (S.MineGold[M] > 0) ++Start[CellY(S.MineY[M]) * GridCols + CellX(S.MineX[M]) + 1];
+        for (int32_t C = 1; C <= GridCells; ++C) Start[C] += Start[C - 1];
+        int32_t Cursor[GridCells];
+        for (int32_t C = 0; C < GridCells; ++C) Cursor[C] = Start[C];
+        for (int32_t M = 0; M < NumMines; ++M)
+            if (S.MineGold[M] > 0) {
+                const int32_t C = CellY(S.MineY[M]) * GridCols + CellX(S.MineX[M]);
+                Order[Cursor[C]++] = M;
+            }
+    }
+};
+
 // --- slot allocation: lowest free slot (deterministic). Reuse != compaction —
 //     live units never move, ids stay stable for a unit's whole life. ---
 int32_t AllocSlot(const Sim& S) {
@@ -661,12 +694,21 @@ void GatherGrid(const Sim& S, const Grid& G, int32_t I, const ThreatSet& Threat,
 // Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get pushed
 // outward with the same corrected falloff as unit separation. Reads Pos against static
 // mine positions — identical on the brute and grid paths.
-void AddMineRepel(const Sim& S, int32_t I, int64_t& Ax, int64_t& Ay) {
-    for (int32_t Mn = 0; Mn < NumMines; ++Mn) {
-        if (S.MineGold[Mn] <= 0) continue;
-        AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
-                 S.Cv.MineRepelRadius, S.Cv.SeparationStrength, Ax, Ay);
-    }
+// #165: query only the cells the repel radius can reach instead of scanning all NumMines. The index
+// holds live mines only, so the depleted-mine skip is already applied.
+void AddMineRepel(const Sim& S, const MineGrid& MG, int32_t I, int64_t& Ax, int64_t& Ay) {
+    const Fixed R = S.Cv.MineRepelRadius;
+    const int32_t Cx0 = CellX(S.PosX[I] - R), Cx1 = CellX(S.PosX[I] + R);
+    const int32_t Cy0 = CellY(S.PosY[I] - R), Cy1 = CellY(S.PosY[I] + R);
+    for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
+        for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
+            const int32_t C = Gy * GridCols + Gx;
+            for (int32_t P = MG.Start[C]; P < MG.Start[C + 1]; ++P) {
+                const int32_t Mn = MG.Order[P];
+                AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
+                         R, S.Cv.SeparationStrength, Ax, Ay);
+            }
+        }
 }
 // Chebyshev-clamp a raw (Q16.16) vector in place to a max magnitude — the sqrt-free
 // "don't exceed" used for both the per-tick accel clamp and the final speed clamp.
@@ -722,7 +764,7 @@ Fixed FbmNoise(uint32_t Unit, Fixed T, uint32_t Axis, int32_t Octaves, Fixed Gai
 //   pass 2 APPLIES the steps (miners run their state machine here — direct movement —
 //          then take the nudge). Splitting the passes is what lets the gather read a
 //          stable Pos snapshot (grid≡brute holds) while Δ still carries momentum.
-void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
+void Movement(Sim& S, const Grid& G, const MineGrid& MG, const ThreatSet& Threat) {
     // Transient per-unit step scratch (32 KB stack; never hashed, never heap). A stack
     // local — NOT static — so two Sims stepping on different threads (future rollback)
     // can't race. Written for every alive unit in pass 1, read for the same set in pass 2.
@@ -746,7 +788,7 @@ void Movement(Sim& S, const Grid& G, const ThreatSet& Threat) {
             // pins the invariant this rests on, so a future force that DOES want neighbours fails
             // there rather than silently reintroducing the cost.
             int64_t Nx = 0, Ny = 0;
-            AddMineRepel(S, I, Nx, Ny);
+            AddMineRepel(S, MG, I, Nx, Ny);
             StepX[I] = Fixed{static_cast<int32_t>(Nx)};
             StepY[I] = Fixed{static_cast<int32_t>(Ny)};
             continue;
@@ -1034,12 +1076,13 @@ void PreTick(Sim& S) {
 void RunTick(Sim& S) {
     ProductionBuildings(S);   // phase 1 (#132): per-building production (the only production now)
     Grid G;
-    { LUR_TRACE_SCOPE("sim.grid"); G.Build(S); }  // after production so spawns are bucketed
+    MineGrid MG;
+    { LUR_TRACE_SCOPE("sim.grid"); G.Build(S); MG.Build(S); }  // after production so spawns are bucketed
     ThreatSet Threat;
     if (S.UseBruteForce) BuildThreatBrute(S, Threat);
     else BuildThreatGrid(S, G, Threat);
     { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(S, G); }          // phase 2
-    { LUR_TRACE_SCOPE("sim.move"); Movement(S, G, Threat); }       // phase 3
+    { LUR_TRACE_SCOPE("sim.move"); Movement(S, G, MG, Threat); }       // phase 3
     UpdateFrontier(S);        // phase 3b (#133): extend the per-team high-water build line
     { LUR_TRACE_SCOPE("sim.atk");  Attacks(S); }               // phase 4
     Deaths(S);                // phase 5
