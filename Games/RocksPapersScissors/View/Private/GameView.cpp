@@ -15,6 +15,7 @@
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
+#include "Lur/DevGui/DevTheme.h"   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Text/BuiltinFonts.h"
@@ -340,9 +341,12 @@ void GameView::CreateResources(IRenderer* Renderer) {
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
     GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
 #if !LUR_SHIPPING
-    DevPanelMat = FlatMat(Renderer, {0.08f, 0.08f, 0.08f, 0.88f});  // DevTheme charcoal
-    DevAccentMat = FlatMat(Renderer, {0.25f, 0.95f, 0.85f, 1.0f});  // DevTheme cyan accent
-    DevKeyMat = FlatMat(Renderer, {0.20f, 0.22f, 0.24f, 0.98f});    // numpad key face
+    // #113: every dev colour comes from DevTheme now. These used to be literals here and four
+    // more Color locals ~300 lines down in the draw block, the same values re-typed — which is
+    // how a theme drifts into looking like two surfaces.
+    DevPanelMat  = FlatMat(Renderer, Lur::DevGui::DevTheme::Panel);
+    DevAccentMat = FlatMat(Renderer, Lur::DevGui::DevTheme::AccentFill);
+    DevKeyMat    = FlatMat(Renderer, Lur::DevGui::DevTheme::KeyFace);
 #endif
 
     Font.Init(Lur::Text::InterFont());
@@ -1683,10 +1687,11 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // sim thread — so this render-thread read is race-free). Selection is a CVar POINTER,
         // stable across collapse/expand/scroll; the numpad + the tooltip toaster anchor BELOW
         // the selected row (flipping above when they'd run off-screen, PlaceBelowOrAbove).
-        const Lur::Render::Color Accent{0.55f, 0.98f, 0.90f, 1.0f};
-        const Lur::Render::Color Ink{0.86f, 0.90f, 0.92f, 1.0f};
-        const Lur::Render::Color CatInk{0.62f, 0.72f, 0.78f, 1.0f};
-        const Lur::Render::Color DimInk{0.40f, 0.45f, 0.48f, 1.0f};
+        namespace Theme = Lur::DevGui::DevTheme;
+        const Lur::Render::Color Accent = Theme::Accent;
+        const Lur::Render::Color Ink    = Theme::Ink;
+        const Lur::Render::Color CatInk = Theme::CatInk;
+        const Lur::Render::Color DimInk = Theme::DimInk;
         const float LineH = 20.0f * HS, CatH = 22.0f * HS, TitleH = 26.0f * HS;
         const float IndentW = 12.0f * HS;  // per depth level
 
@@ -1982,7 +1987,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     Pad::RowRect(NumX, NumY, NumW, NumH, NumGap, R, Kx, Ky, Kw, Kh);
                     Blit(DevAccentMat, Kx + Kw * 0.5f, Ky + Kh * 0.5f, Kw, Kh);
                     Text.Draw(Renderer, Pad::Label(R, 0), Kx, Ky, Kw, Kh, 15.0f * HS,
-                              Lur::Render::Color{0.04f, 0.07f, 0.07f, 1.0f},
+                              Theme::AccentInk,
                               Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
                     continue;
                 }
@@ -1999,7 +2004,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 }
             }
             // Cancel "x" — small, right of the top row; dismisses without writing.
-            const Lur::Render::Color Warn{0.94f, 0.52f, 0.46f, 1.0f};
+            const Lur::Render::Color Warn = Theme::Warn;
             Blit(DevKeyMat, CancelX + CancelS * 0.5f, CancelY + CancelS * 0.5f, CancelS, CancelS);
             Text.Draw(Renderer, "x", CancelX, CancelY, CancelS, CancelS, 12.0f * HS, Warn,
                       Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);

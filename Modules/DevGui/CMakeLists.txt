@@ -5,4 +5,7 @@
 add_library(lur_devgui INTERFACE)
 target_include_directories(lur_devgui INTERFACE Public)
 target_compile_features(lur_devgui INTERFACE cxx_std_20)
+# lur::render for Render::Color only (DevTheme). The widgets stay render-agnostic — they
+# compute geometry and the host draws it — but a theme without a colour type is not a theme.
+target_link_libraries(lur_devgui INTERFACE lur::render)
 add_library(lur::devgui ALIAS lur_devgui)

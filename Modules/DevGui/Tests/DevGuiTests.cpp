@@ -9,6 +9,7 @@
 #include "Lur/DevGui/CategoryTree.h"
 #include "Lur/DevGui/Numpad.h"
 #include "Lur/DevGui/Popover.h"
+#include "Lur/DevGui/Widgets.h"
 
 using Lur::DevGui::Numpad;
 
@@ -214,6 +215,39 @@ static void TestPopoverPlacement() {
     }
 }
 
+// #113/#116: the slider's two mappings must be exact inverses, or grabbing a knob makes it jump
+// — the classic slider bug, and the one that makes a tuning control feel untrustworthy.
+static void TestSliderRoundTrips() {
+    using Lur::DevGui::Slider;
+    const float X = 50, W = 200, KnobW = 20, Min = 0.0f, Max = 1.0f;
+
+    for (int I = 0; I <= 10; ++I) {
+        const float V = static_cast<float>(I) / 10.0f;
+        const float Kx = Slider::KnobX(X, W, KnobW, V, Min, Max);
+        const float Back = Slider::ValueAt(X, W, KnobW, Kx, Min, Max);
+        CHECK(Back > V - 0.001f && Back < V + 0.001f);
+    }
+
+    // The knob's CENTRE spans exactly [Min,Max], so the knob never hangs off either end.
+    CHECK(Slider::KnobX(X, W, KnobW, Min, Min, Max) == X + KnobW * 0.5f);
+    CHECK(Slider::KnobX(X, W, KnobW, Max, Min, Max) == X + W - KnobW * 0.5f);
+
+    // Out of range clamps rather than drawing outside the widget — the console warns-but-allows
+    // an out-of-range value, so the slider has to cope with one.
+    CHECK(Slider::KnobX(X, W, KnobW, -5.0f, Min, Max) == X + KnobW * 0.5f);
+    CHECK(Slider::KnobX(X, W, KnobW, 99.0f, Min, Max) == X + W - KnobW * 0.5f);
+    CHECK(Slider::ValueAt(X, W, KnobW, X - 500, Min, Max) == Min);
+    CHECK(Slider::ValueAt(X, W, KnobW, X + 500, Min, Max) == Max);
+
+    // A degenerate range must not divide by zero or NaN the knob off-screen.
+    const float Kx = Slider::KnobX(X, W, KnobW, 5.0f, 5.0f, 5.0f);
+    CHECK(Kx >= X && Kx <= X + W);
+
+    // Non-unit ranges (an int knob with min/max) map the same way.
+    CHECK(Slider::ValueAt(X, W, KnobW, Slider::KnobX(X, W, KnobW, 75.0f, 50.0f, 100.0f),
+                          50.0f, 100.0f) > 74.9f);
+}
+
 int main() {
     TestLayout();
     TestPressBuildsBuffer();
@@ -223,6 +257,7 @@ int main() {
     TestTapHitTest();
     TestCategoryTree();
     TestPopoverPlacement();
+    TestSliderRoundTrips();
     if (GFailures == 0) { std::printf("devgui_tests: ALL PASS\n"); return 0; }
     std::printf("devgui_tests: %d FAILURE(S)\n", GFailures);
     return 1;
