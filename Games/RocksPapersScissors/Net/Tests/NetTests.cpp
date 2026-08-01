@@ -990,6 +990,83 @@ static void DeliverDroppingNthInput(Outbox& From, LockstepPeer& To, int NthInput
     From.Q.clear();
 }
 
+// Deliver every MsgInput frame TWICE — the opposite fault to the one above, and the one actually
+// caught on hardware 2026-08-01: the Android central had established TWO GATT connections to the same
+// iPhone peripheral and subscribed to notifications on both, so every produced frame the peripheral
+// notified arrived at the app twice. Writes (central->peripheral) go out from one place and were
+// clean, which is why the damage was one-directional in exactly the direction #163 documents.
+static void DeliverDuplicatingInputs(Outbox& From, LockstepPeer& To) {
+    for (auto& M : From.Q) {
+        To.OnMessage(M.first, M.second.data(), M.second.size());
+        if (M.first == MsgInput) To.OnMessage(M.first, M.second.data(), M.second.size());
+    }
+    From.Q.clear();
+}
+
+// ---- #163: a DUPLICATED input frame is not a gap, and must not be re-buffered ----
+// The sequence is one byte, so "one frame arriving twice" and "255 frames missing" are the same
+// unsigned delta. Before the signed reading, a duplicate-delivery link reported an INPUT GAP on every
+// tick of a 20-minute match, spent the whole recovery budget in the first three ticks (after which the
+// repair path was a silent no-op), and then appended each duplicate to PeerEvents — skewing the peer's
+// timeline by one index per frame. That skew is INVISIBLE while batches are empty, which is why it
+// survived a clean-looking soak; it diverges the sims the moment a duplicated frame carries an event.
+static void TestDuplicateInputFrameIsNotAGap() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1633, 0, Enqueue, &Qa);
+    B.Init(0x1633, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    // Every one of A's produced frames reaches B twice; B's reach A once (the half-open shape).
+    for (int I = 0; I < 12; ++I) {
+        DriveInput(A, 0, I);   // real events, so a skewed stream cannot hide in empty batches
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        DeliverDuplicatingInputs(Qa, B);
+        Deliver(Qb, A);
+    }
+    for (int I = 0; I < 4; ++I) {  // settle
+        A.Tick(OneTickNs); B.Tick(OneTickNs); DeliverDuplicatingInputs(Qa, B); Deliver(Qb, A);
+    }
+
+    CHECK(B.DuplicateFrames() > 0);   // it noticed, and named the fault as duplication
+    CHECK(B.InputGaps() == 0);        // and NOT as loss — the two are opposite faults
+    CHECK(A.InputGaps() == 0);        // the clean direction stays clean
+    // The duplicates were discarded rather than buffered, so the timelines never skewed: no repair was
+    // needed, no budget spent, and the sims agree. This is the assertion the old code could not pass.
+    CHECK(B.RecoveryAttempts() == 0);
+    CHECK(B.GapRecoveries() == 0);
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
+// ---- #167: repairing a lost frame must not spend the DESYNC budget ----
+// MaxDesyncRecoveries is what finally declares a draw. The gap path shares the request machinery but
+// not the meaning: it is caused by the radio, it is repaired before the hole executes, and an ordinary
+// app restart takes it too — so a match containing one restart used to start its next real repair
+// already an attempt down, and enough of them ended a healthy match as a draw.
+static void TestInputGapDoesNotSpendTheDesyncBudget() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1671, 0, Enqueue, &Qa);
+    B.Init(0x1671, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+
+    for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    A.Tick(OneTickNs); B.Tick(OneTickNs);
+    DeliverDroppingNthInput(Qa, B, 0);          // lose one produced frame
+    Deliver(Qb, A);
+    A.Tick(OneTickNs); B.Tick(OneTickNs);
+    Deliver(Qa, B);                              // the next frame exposes it
+    Deliver(Qb, A);
+
+    CHECK(B.InputGaps() == 1);
+    CHECK(B.GapRecoveries() == 1);        // charged to the gap budget...
+    CHECK(B.RecoveryAttempts() == 0);     // ...and NOT to the one that ends the match in a draw
+}
+
 // ---- #163: a lost input frame must be DETECTED AND LOCATED, not silently absorbed ----
 // The link carried `recv msg type=N size=M` per frame and nothing tied a frame to a TICK, so a
 // missing input could not be found in the log — it took two flight recordings and a diff to locate
@@ -2061,6 +2138,8 @@ int main() {
     TestPreMatchRejectsUnplaceableCamp();        // #167
     TestPreMatchAcceptsUnaffordableCampOnLegalGround();  // #167: spatial only, by design
     TestLostInputFrameIsDetectedAndLocated();    // #163
+    TestDuplicateInputFrameIsNotAGap();          // #163
+    TestInputGapDoesNotSpendTheDesyncBudget();   // #167
     TestPreMatchStallIsReported();               // #163
     TestStarvedCeilingEndsTheMatch();                   // #162
     TestDesyncRecoversToACommonStateAndKeepsPlaying();  // #161

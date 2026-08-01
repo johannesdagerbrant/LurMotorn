@@ -85,6 +85,8 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     Recovering_ = false;
     RecoveryAdopting_ = false;
     RecoveryAttempts_ = 0;
+    GapRecoveries_ = 0;     // #167: the gap budget is per-match too
+    DuplicateFrames_ = 0;   // #163
     RecoveryNs_ = 0;
     RecoveryCarryNs_ = 0;
     StallNs_ = 0;       // #162: a fresh match is not starved
@@ -623,8 +625,12 @@ void LockstepPeer::BeginRecovery(const char* Why) {
 void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     if (Recovering_ || Awaiting) return;
     if (TheSim.Result != ResultOngoing) return;  // the match is over; the peer's later frames are noise
-    if (RecoveryAttempts_ >= MaxDesyncRecoveries) return;  // a lost frame is not worth ending a match
-    ++RecoveryAttempts_;
+    // #167: charge the GAP budget, not the desync one. A lost frame is not worth ending a match, and
+    // it must not push the match toward the draw that spending MaxDesyncRecoveries declares — an
+    // ordinary app restart takes this path too (it is the cold-rejoin case), so sharing the budget
+    // meant one restart left the next real repair already an attempt down.
+    if (GapRecoveries_ >= MaxGapRecoveries) return;
+    ++GapRecoveries_;
     Recovering_ = true;
     RecoveryAdopting_ = true;
     RecoveryNs_ = 0;
@@ -635,7 +641,7 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     PeerHash.clear();
     Lur::Log::Info("RPS: input gap at tick %u — asking the peer for its history before the hole is "
                    "executed, so nothing diverges (attempt %d/%d)",
-                   MissingTick, RecoveryAttempts_, MaxDesyncRecoveries);
+                   MissingTick, GapRecoveries_, MaxGapRecoveries);
     Lur::Serialization::BitWriter W;
     Lur::Serialization::WriteVarUint(W, MissingTick);
     const std::vector<uint8_t>& MB = W.Finish();
@@ -740,7 +746,30 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // A decided match is exempt: our sim has stopped while the peer may still be producing, so an
         // "expected next tick" no longer means anything and every later frame would read as a gap.
         if (!Awaiting && TheSim.Result == ResultOngoing) {
-            const uint32_t Missing = (Seq - (PeerTickNext_ & 0xFFu)) & 0xFFu;
+            // The sequence is one BYTE, so it wraps every 256 frames and the only meaningful reading of
+            // "how far is this from what we expect" is the SHORTER way round the circle — i.e. signed.
+            // Unsigned subtraction alone cannot tell "one frame missing" from "one frame arriving
+            // twice": the latter yields 255, which then reads as a 25-second hole (#163, hardware
+            // 2026-08-01, where a duplicate GATT subscription delivered every notification twice and
+            // produced a 255-missing report on EVERY tick of a 20-minute match).
+            const uint32_t Fwd = (Seq - (PeerTickNext_ & 0xFFu)) & 0xFFu;
+            const int32_t Ahead = Fwd >= 128 ? static_cast<int32_t>(Fwd) - 256 : static_cast<int32_t>(Fwd);
+            if (Ahead < 0) {
+                // BEHIND our expectation: this frame's tick has already been accounted for, so it is a
+                // duplicate or a reorder — never a loss. Drop it whole. Buffering it would append a
+                // second batch for a tick that already has one and skew every later index by a frame,
+                // which is invisible while batches are empty and diverges the sims the moment one is
+                // not (#160's shape, and the leading suspect for #159). Counting it as a gap would also
+                // spend a repair attempt on a frame we already have.
+                ++DuplicateFrames_;
+                if (DuplicateFrames_ == 1 || DuplicateFrames_ % 256 == 0)
+                    Lur::Log::Error("RPS: DUPLICATE input frame — seq %u is %d behind the expected %u "
+                                    "(%d so far). The peer's frame arrived more than once, so the link "
+                                    "is delivering data twice rather than losing it (#163). Discarding.",
+                                    Seq, -Ahead, PeerTickNext_ & 0xFFu, DuplicateFrames_);
+                return;
+            }
+            const uint32_t Missing = static_cast<uint32_t>(Ahead);
             if (Missing != 0) {
                 ++InputGaps_;
                 LastGapTick_ = PeerTickNext_;

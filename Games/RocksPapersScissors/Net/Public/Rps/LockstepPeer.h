@@ -137,6 +137,18 @@ public:
     // end up replaying one identical history; the discarded timeline may have been the more complete
     // one. That is deliberate — consistency, not fairness (CLAUDE.md), and the players share a room.
     static constexpr int MaxDesyncRecoveries = 3;
+    // #167: the LOST-FRAME path gets its OWN, more generous bound instead of sharing the one above.
+    // The two are not the same kind of event. An anchor mismatch means the sims already disagree and
+    // replay may not converge — three attempts and then a draw is right. A lost frame is repaired
+    // BEFORE the hole executes, demonstrably converges (395 ms on hardware), and is caused by the
+    // radio rather than by the sim; charging it to the desync budget means an ordinary restart or a
+    // flaky link leaves the match one attempt from a draw with nothing actually wrong.
+    //
+    // 2026-08-01 made the case unarguable: a duplicate-delivery fault (#163) reported a false gap on
+    // every tick and spent all three attempts within the first three ticks of the match. After that
+    // RequestRecovery was a silent no-op for twenty minutes — so the ONE mechanism that repairs a real
+    // lost frame was disabled by noise, in exactly the match it existed to protect.
+    static constexpr int MaxGapRecoveries = 16;
     // #162: how long execution may sit at the ceiling waiting for peer frames before the match is
     // given up. This was the ONE hold in the netcode with no bound, and that is how a load collapse
     // became terminal: under ~1600 units the sim breached the tick budget, the radio timed out, the
@@ -160,6 +172,13 @@ public:
     // Recoveries attempted THIS match (reset by BeginMatch). Reaching MaxDesyncRecoveries is what
     // finally declares the draw — that is the only place a draw legitimately lives.
     int RecoveryAttempts() const { return RecoveryAttempts_; }
+    // #167: gap repairs attempted THIS match, bounded separately by MaxGapRecoveries. Split out so a
+    // lost frame can never push the match toward the draw that MaxDesyncRecoveries declares.
+    int GapRecoveries() const { return GapRecoveries_; }
+    // #163: produced frames discarded as duplicates/reorders — a frame whose sequence sits BEHIND the
+    // one we expect. Exposed because it is the difference between "the link lost data" (InputGaps) and
+    // "the link delivered data twice", which are opposite faults that looked identical before.
+    int DuplicateFrames() const { return DuplicateFrames_; }
 
     // #148: how long a peer may hold production/execution waiting for the other side's frontier
     // marker before resuming on its own state. A restarted app cannot send that marker (Session
@@ -385,6 +404,8 @@ private:
     bool     Recovering_ = false;
     bool     RecoveryAdopting_ = false;  // we are the one rebuilding (waiting for the survivor's history)
     int      RecoveryAttempts_ = 0;
+    int      GapRecoveries_ = 0;     // #167: lost-frame repairs, bounded by MaxGapRecoveries
+    int      DuplicateFrames_ = 0;   // #163: frames arriving BEHIND the expected sequence
     uint64_t RecoveryNs_ = 0;
     uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
 
