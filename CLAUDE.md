@@ -144,6 +144,25 @@ rather than idle, and **leave no device state behind** — clear properties and 
 "inert by default" is not the same as "not there". Configuring with the flag on prints a CMake
 warning naming the hazard.
 
+**The harness that lives behind it (RPS).** `Rps/AgentControl.h` defines one command grammar —
+`<seq> <verb> [args]`, verbs `place queue stress corrupt droptx console gesture killown` — so an
+assistant can drive both phones with no hands. It exists because the interesting failures aren't
+reachable by tapping: a BLE link won't drop one frame on request, a deterministic sim won't diverge on
+request, drag-to-place *snaps to the nearest valid square* so a placement can never land on an exact
+occupied coordinate, and **iOS has no touch injection at all**. Channels differ because the idioms do —
+Android polls the system property `debug.lur.agent.cmd`, iOS reads `Documents/agent.cmd` (which the dev
+rig can already push into). Both are *level-triggered*, so **the sequence number must strictly
+increase**; that's what makes re-reading idempotent. The iOS build comes from a **manual-dispatch-only**
+CI job (`gh workflow run "macOS CI" -f agent=true`) — never an ordinary push, or the artifact would sit
+next to the player one. The command PARSER is compiled always (it can't drive anything, and that keeps
+its grammar in the host suite); the channel and every effect are `#if LUR_AGENT`.
+
+Two traps worth knowing before using it. The RPS sim loop `continue`s for solo (**the mode the app opens
+in**), for a decided match and for the post-match hold — so anything that must always run, agent poll and
+diagnostics included, belongs at the **top** of the loop, not the bottom. And `WorldHeight` is **240**:
+team 0's opening camp is `(17, 16)`, team 1's mirror is `(17, 224)`, and a placement outside a team's
+frontier is rejected **silently** — gold simply doesn't drop.
+
 **`LUR_CONFIG` is the single dial — it drives optimization too, not just the macros (issue #89).**
 `EngineFlags.cmake` derives `CMAKE_BUILD_TYPE` from it (the *Opt* column above), so
 `Development`/`Shipping` are **optimized** and only `Debugging` is `-O0`. Never hardcode
