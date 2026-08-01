@@ -485,6 +485,10 @@ static void UnblockStdio() {
 // name carries "-vs-" so a linked capture is never mistaken for a solo one when both are pulled off
 // the device together.
 - (void)linkedRecBegin {
+    // #180: idempotent. The guard moved in here from the call site when the caller became the
+    // match-start EDGE rather than a per-frame poll, so opening twice for one match is now a
+    // programming error rather than the normal flow it used to be.
+    if (_LinkedRecIdx == _Lp.MatchIndex()) return;
     _LinkedRecFile.clear();
     _LinkedRecIdx = _Lp.MatchIndex();
     if (!Rps::CvFlightRecorder.Get()) return;
@@ -790,7 +794,15 @@ static void UnblockStdio() {
                     [Vc recordLinkedTick:Tick batch:Batch count:Count hash:Hash];
                 },
                 (__bridge void*)self);
-            // The recording itself is NOT opened here — see the MatchStarted gate below.
+            // #180: and the OPEN is driven by the netcode's match-start edge, not by this class
+            // watching MatchStarted() from renderFrame. The poll lost tick 0 whenever the match
+            // started while DELIVERING the peer's camp rather than during our own Tick, and tick 0 is
+            // the tick carrying both camps — so the file diffed as "EVENTS differ at tick 0 ... look
+            // at the transport" on a clean match. Still not at Lp.Init: the header would then snapshot
+            // this peer's pre-merge CVar set (see linkedRecBegin).
+            _Lp.SetMatchStartSink(
+                [](void* C) { [(__bridge RpsViewController*)C linkedRecBegin]; },
+                (__bridge void*)self);
 #endif
             // The peer's GUID is known now, so show the ALL-TIME record against THIS rival rather
             // than 0-0-0 until the first match of the session ends.
@@ -810,15 +822,6 @@ static void UnblockStdio() {
         // #149: one Lp spans many matches now (it holds the win screen, then rebuilds), so the
         // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
         if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }
-#if LUR_INTERNAL
-        // #159: open the recording on the MATCH-STARTED edge, and NOT at Lp.Init. The header snapshots
-        // the sim's latched CVar set, and at Init that set is still this peer's own — the #147
-        // MsgCvarSync merge (and the ResetSim it triggers) can land afterwards, so a recording opened
-        // at Init misstates the tunables it ran on. Caught by diffing two real phones: one file said
-        // miner-building 400 / gold 750 and the other 600 / 800 for a pair that was demonstrably
-        // converged. Keyed on the match index, so a post-match restart opens the next one.
-        if (_Started && _Lp.MatchStarted() && _LinkedRecIdx != _Lp.MatchIndex()) [self linkedRecBegin];
-#endif
         // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
         if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
             _Scored = true;

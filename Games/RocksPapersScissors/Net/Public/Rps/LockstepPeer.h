@@ -291,6 +291,30 @@ public:
                               uint64_t StateHash);
     // Survives a match restart (like Send/Ctx): it is app wiring, not per-match state.
     void SetTickSink(TickSink S, void* SinkCtx) { Sink_ = S; SinkCtx_ = SinkCtx; }
+
+    // #180: fired the instant a match becomes live — from inside TryStartMatch, after the merged CVar
+    // set is in place and tick 0's camps are seeded, and BEFORE any tick has executed. A main opens
+    // its recording here.
+    //
+    // Why this is an EVENT and not something a main polls. The mains used to watch MatchStarted()
+    // from their own loop, and that is a race: TryStartMatch runs whenever the gate closes, which
+    // includes while DELIVERING the peer's camp — so a peer could start and execute tick 0 before its
+    // loop next looked. Tick 0 is the one tick guaranteed to carry input (it is where BOTH camps are
+    // applied), so the loser wrote a file with an empty tick 0 and `--recdiff` then reported
+    // "EVENTS differ at tick 0 ... look at the transport" for a match whose transport was fine.
+    // Observed on hardware 2026-08-01: the Galaxy armed 77 ms AFTER its match started and lost tick 0
+    // while the iPhone armed 3 s before and kept it, so a 23-minute desync-free run diffed as a
+    // transport fault — a false lead pointing at the subsystem #163 had just made everyone suspicious
+    // of. Arming at Lp.Init instead is NOT the fix: the header would then snapshot this peer's own
+    // pre-merge CVar set (the reason the arm was moved to match-start in the first place).
+    using MatchStartSink = void (*)(void* Ctx);
+    // Survives a match restart, like the tick sink: it is app wiring, not per-match state. Fires once
+    // per match — TryStartMatch returns early once MatchStarted_ is set — including on the #149
+    // post-match restart, so each match gets its own file.
+    void SetMatchStartSink(MatchStartSink S, void* SinkCtx) {
+        StartSink_ = S;
+        StartSinkCtx_ = SinkCtx;
+    }
 #endif  // LUR_INTERNAL — the recorder it feeds is dev tooling, so the seam goes with it
     // #137: the executed COMBINED per-tick event batch (team0's events then team1's) — one
     // stream now (StepEvents takes one batch), replacing the two mask vectors. Replay feeds
@@ -419,6 +443,8 @@ private:
 #if LUR_INTERNAL
     TickSink Sink_ = nullptr;                        // #159: per-tick recording sink (a main's recorder)
     void*    SinkCtx_ = nullptr;
+    MatchStartSink StartSink_ = nullptr;             // #180: match-became-live edge (opens the file)
+    void*          StartSinkCtx_ = nullptr;
 #endif
 
     bool Awaiting = false;                            // in a resync exchange: don't produce/execute yet

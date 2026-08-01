@@ -1985,6 +1985,88 @@ static void TestNoRecMatchIdxIsNotAReachableMatchIndex() {
     }
 }
 
+// ---- #180: the match-start edge must reach a main BEFORE tick 0 is executed ----
+// A recording opened even one tick late loses tick 0, and tick 0 is the one tick guaranteed to carry
+// input: TryStartMatch installs BOTH camps there. On hardware 2026-08-01 the Galaxy armed 77 ms after
+// its match started and the iPhone 3 s before, so a 23-minute desync-free run diffed as
+// "EVENTS differ at tick 0 ... look at the transport" — a false lead, and pointed at the one
+// subsystem #163 had just made everyone suspicious of.
+//
+// The old arm was a POLL of MatchStarted() from each main's own loop, and no amount of call-site
+// ordering makes that safe: TryStartMatch also runs while DELIVERING the peer's camp, so the peer
+// that starts on a delivered message can reach tick 0 before its loop looks again. This pins the
+// invariant at the seam instead — for BOTH peers, since the two start by different routes (one
+// during its own Tick, the other during delivery), which is exactly why it was asymmetric on
+// hardware.
+namespace {
+struct StartOrderProbe {
+    int  Starts = 0;
+    int  TicksSeen = 0;
+    int  TicksBeforeFirstStart = 0;   // must stay 0: nothing may execute before the edge
+    uint32_t FirstTick = 0xFFFFFFFFu;
+};
+void OnStartProbe(void* C) { ++static_cast<StartOrderProbe*>(C)->Starts; }
+void OnTickProbe(void* C, uint32_t Tick, const InputEvent*, int, uint64_t) {
+    StartOrderProbe* P = static_cast<StartOrderProbe*>(C);
+    if (P->Starts == 0) ++P->TicksBeforeFirstStart;
+    if (P->TicksSeen == 0) P->FirstTick = Tick;
+    ++P->TicksSeen;
+}
+}  // namespace
+
+static void TestMatchStartEdgePrecedesTickZero() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    StartOrderProbe Pa, Pb;
+    A.Init(0x180A, 0, Enqueue, &Qa);
+    B.Init(0x180A, 1, Enqueue, &Qb);
+    A.SetMatchStartSink(OnStartProbe, &Pa);  A.SetTickSink(OnTickProbe, &Pa);
+    B.SetMatchStartSink(OnStartProbe, &Pb);  B.SetTickSink(OnTickProbe, &Pb);
+
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(Pa.Starts == 1 && Pb.Starts == 1);   // fired, exactly once, on both
+
+    for (int I = 0; I < 6; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    // The whole point: no tick reached the recorder before it was told to open, on either peer...
+    CHECK(Pa.TicksBeforeFirstStart == 0);
+    CHECK(Pb.TicksBeforeFirstStart == 0);
+    // ...and the first tick each of them sees is tick 0 — the one carrying both camps. A file whose
+    // first recorded tick is 1 is precisely the artifact that made recdiff blame the wire.
+    CHECK(Pa.TicksSeen > 0 && Pb.TicksSeen > 0);
+    CHECK(Pa.FirstTick == 0);
+    CHECK(Pb.FirstTick == 0);
+}
+
+// ...and again across the #149 post-match restart, since each match gets its own file: an edge that
+// fired only for the first match would leave every later one unrecorded (the shape of the iOS
+// zero-init bug above, arrived at from the other direction).
+static void TestMatchStartEdgeFiresOnEveryRestart() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    StartOrderProbe Pa, Pb;
+    A.SetMatchStartSink(OnStartProbe, &Pa);
+    B.SetMatchStartSink(OnStartProbe, &Pb);
+    ForcedDrawPair(A, B, Qa, Qb, 0x180B);     // Init + cvar sync only — no match yet
+    A.SetMatchStartSink(OnStartProbe, &Pa);
+    B.SetMatchStartSink(OnStartProbe, &Pb);
+    RunToResult(A, B, Qa, Qb);                // the first match starts (and ends) here
+    const int AfterFirst = Pa.Starts;
+    CHECK(AfterFirst >= 1);
+    CHECK(Pb.Starts >= 1);
+    uint64_t Held = 0;
+    while (Held < PostMatchHoldNs + OneTickNs) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+        Held += OneTickNs;
+    }
+    // The restart re-runs the camp handshake, so the edge must come round again on both peers.
+    RunToResult(A, B, Qa, Qb);
+    CHECK(Pa.Starts > AfterFirst);
+    CHECK(Pb.Starts > AfterFirst);
+}
+
 // The core behaviour: the result stands for PostMatchHoldNs (no restart early), then a fresh match
 // begins — pre-match again, tick 0, both camps required, seed bumped and AGREED by both peers.
 static void TestPostMatchHoldThenFreshMatch() {
@@ -2131,6 +2213,8 @@ int main() {
 #endif
 #if LUR_INTERNAL
     TestNoRecMatchIdxIsNotAReachableMatchIndex();  // #159
+    TestMatchStartEdgePrecedesTickZero();          // #180
+    TestMatchStartEdgeFiresOnEveryRestart();       // #180
     TestLinkedRecordingsMatchAcrossPeers();
     TestRecordingCvarsAreNameKeyedAndSurviveReorder();
 #endif

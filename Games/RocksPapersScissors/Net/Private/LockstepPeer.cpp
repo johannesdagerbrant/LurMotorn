@@ -410,6 +410,15 @@ void LockstepPeer::TryStartMatch() {
     LocalEvents[0] = {LocalCamp_};
     PeerEvents[0]  = {PeerCamp_};
     MatchStarted_ = true;
+#if LUR_INTERNAL
+    // #180: announce the edge HERE, which is the only place that is both late enough (the merged CVar
+    // set is in place, so a recording header states the tunables the sim will actually use) and early
+    // enough (the camps are seeded above, and no tick has executed yet — the Tick that starts a match
+    // always returns before producing one). A main that instead watched MatchStarted() from its loop
+    // could be beaten to tick 0 by this very call when it runs during camp delivery, and tick 0 is
+    // exactly the tick that carries both camps.
+    if (StartSink_ != nullptr) StartSink_(StartSinkCtx_);
+#endif
 }
 
 void LockstepPeer::Execute() {

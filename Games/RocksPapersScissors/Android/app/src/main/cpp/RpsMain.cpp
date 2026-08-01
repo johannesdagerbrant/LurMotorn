@@ -644,6 +644,10 @@ void android_main(android_app* App) {
             },
             &LinkedCtx);
         auto LinkedRecBegin = [&State, &LinkedRec, &LinkedMatchNo, &LinkedRecFile, &LinkedRecIdx] {
+            // #180: idempotent. The guard moved in here from the call site when the caller became the
+            // match-start EDGE rather than a per-frame poll, so opening twice for one match is a
+            // programming error rather than the normal flow it used to be.
+            if (LinkedRecIdx == State.Lp.MatchIndex()) return;
             LinkedRec.End(State.Lp.GetSim());   // safe if never opened; finalises a previous match
             LinkedRecFile.clear();
             LinkedRecIdx = State.Lp.MatchIndex();
@@ -661,6 +665,15 @@ void android_main(android_app* App) {
                             State.LinkedTeam.load(std::memory_order_relaxed));
             LOGI("REC linked -> %s", LinkedRecFile.c_str());
         };
+        // #180: open on the match-start EDGE delivered by the netcode, not by watching MatchStarted()
+        // from this loop. The poll lost tick 0 whenever the match started during camp DELIVERY rather
+        // than during our own Tick — and tick 0 is the tick that carries both camps, so the file then
+        // diffed as "EVENTS differ at tick 0 ... look at the transport" on a clean match. The sink
+        // fires inside TryStartMatch: merged cvars in place (which is why this is not done at
+        // Lp.Init), camps seeded, nothing executed yet.
+        using LinkedRecBeginFn = decltype(LinkedRecBegin);
+        State.Lp.SetMatchStartSink(
+            [](void* C) { (*static_cast<LinkedRecBeginFn*>(C))(); }, &LinkedRecBegin);
 #endif
 #if LUR_INTERNAL
         // Developer-facing (stays LUR_INTERNAL, so a dev build a human drives still has it):
@@ -1071,21 +1084,6 @@ void android_main(android_app* App) {
                     LinkedScoredIdx = State.Lp.MatchIndex();
                     LinkedScored = false;
                 }
-#if LUR_INTERNAL
-                // #159: open the recording on the MATCH-STARTED edge, and NOT at Lp.Init.
-                //
-                // The header snapshots the sim's latched CVar set, and at Init that set is still this
-                // peer's own — the #147 MsgCvarSync merge (and the ResetSim it triggers) can land
-                // afterwards. Caught the first time two real phones were diffed: the Galaxy's
-                // persisted overrides (miner building 400, starting gold 750) showed in ITS file while
-                // the iPhone's said 600/800, so recdiff reported "the peers did not agree on tunables"
-                // for a pair that was in fact converged and desync-free. A recording that misstates
-                // its own tunables replays wrong and makes every diff noisy.
-                //
-                // MatchStarted_ is the point where the merged set is in place and tick 0's camps are
-                // seeded, and no tick executes before it — so nothing is missed by waiting.
-                if (State.Lp.MatchStarted() && LinkedRecIdx != State.Lp.MatchIndex()) LinkedRecBegin();
-#endif
                 // #2: tally the linked result ONCE (you are LinkedTeam: your-team win = W, else L; draw = D).
                 if (!LinkedScored && State.Lp.GetSim().Result != Rps::ResultOngoing) {
                     LinkedScored = true;
