@@ -296,6 +296,24 @@ class BleShim(private val context: Context) {
     @Synchronized
     private fun onDiscoveryWatchdog() {
         if (linked) return
+        // #163: do NOT disturb a connect that is still in flight. This used to clear `connecting`
+        // unconditionally, and that is how the central ended up with TWO live GATT connections to the
+        // same peer: the first connectGatt was still outstanding (it took ~2 s to reach
+        // onServicesDiscovered), the watchdog fired at 8 s, re-armed the scan, and the next scan
+        // result walked straight through the `connecting` gate into a second connectGatt. Both
+        // completed, both subscribed to notifications, and every frame the peripheral notified was
+        // then delivered to the app twice for the life of the link.
+        //
+        // The in-flight case already has an owner — the 6 s connect watchdog in connectAsCentral,
+        // which tears the attempt down and rescans if it never links. This watchdog exists for a
+        // different failure (#79: a cached role leaves us one-sided and nothing is being attempted at
+        // all), so it has no business pre-empting an attempt that is still running.
+        if (gattClient != null) {
+            Log.i(TAG, "discovery watchdog: a connect is still in flight — leaving it to its own " +
+                       "watchdog (#163)")
+            armDiscoveryWatchdog()
+            return
+        }
         Log.i(TAG, "discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)")
         decidedPeripheral = false
         connecting = false
@@ -508,6 +526,19 @@ class BleShim(private val context: Context) {
         // or hang with no callback — the reconnect stall we hit (issue #17). We resume
         // scanning if the connect fails (see onConnectionStateChange).
         stopScanning()
+        // #163: never let a second client exist alongside the first. `gattClient = g` below used to
+        // simply overwrite the field, which does not disconnect the old object — it ORPHANS it, still
+        // connected and still subscribed, delivering into this same callback. Two subscriptions means
+        // every peripheral notification is handed to the app twice, which the receiver then reads as a
+        // 255-frame gap on every tick (the counterpart fix lives in LockstepPeer::OnMessage). Closing
+        // first is also what the rest of this file already insists on: a leaked gatt makes the NEXT
+        // connectGatt fail with status 133.
+        gattClient?.let { old ->
+            Log.i(TAG, "central: a client already exists — closing it before connecting again (#163)")
+            try { old.disconnect(); old.close() } catch (_: SecurityException) {}
+            gattClient = null
+            clientDatagram = null
+        }
         try {
             Log.i(TAG, "central: connectGatt -> ${device.address}")
             val g = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
