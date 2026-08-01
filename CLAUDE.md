@@ -314,10 +314,8 @@ drift).
 
 ## Documentation (CodeViewer sessions)
 
-Recipe: the create tool writes `<slug>.codeviewer` into its `directory` with `base_dir: "."`. Author
-it with `directory` = the repo root (so code paths validate during authoring), then move the file
-into `CodeViewerSessions/` and patch `base_dir` from `"."` to `".."` so code paths still resolve to
-the repo root. Use `symbol`/anchor ranges; avoid parentheses in anchors (regex).
+Walkthroughs live in `CodeViewerSessions/`. The authoring recipe (the `base_dir` relocation and the
+anchor rules) is the `codeviewer-session` skill — invoke it when writing one.
 
 ## Version control
 
@@ -337,9 +335,7 @@ completed phase reviewed, they ask for a focused CodeViewer walkthrough (see Doc
 ## Scripts
 
 Common actions are wrapped as `.bat` entry points in `scripts/` so the workflow is consistent for
-humans and future agents — prefer them over ad-hoc commands: `build.bat` (host core build + test),
-`clean.bat`, `setup-android.bat` (one-time CLI-only SDK/NDK/JDK/Gradle install), `android-build.bat`,
-`android-install.bat`, `logcat.bat`. See `scripts/README.md`.
+humans and future agents — prefer them over ad-hoc commands. See `scripts/README.md` for the list.
 
 ## Content pipeline: Tools sanitize → Cook builds
 
