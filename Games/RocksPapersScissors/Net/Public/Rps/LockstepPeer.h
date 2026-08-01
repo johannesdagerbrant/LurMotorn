@@ -86,6 +86,13 @@ public:
     // their full sets, merge with the last-writer-wall-clock resolver (timestamp collision
     // -> compile-time default), and apply the identical merged set before simulating — so
     // one designer's tuning propagates to the peer, deterministically.
+    //
+    // #169: a main calls SendCvarSync ONCE, next to Lp.Init — and that is not enough on its own,
+    // so BeginResync re-offers the set too. One offer per peer only converges when both peers
+    // Init while the link is up; when one app restarts, the incumbent's Init has long passed and
+    // it never re-sends, leaving the rejoiner on compile-time defaults for the rest of the
+    // session. Offers are only honoured BEFORE tick 0 (a mid-match set has no agreed apply tick —
+    // use SetGameplayCvar, which stamps one).
     void SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs);
     void SendCvarSync();
 
@@ -302,6 +309,12 @@ private:
     // not the local globals — is what a fresh sim must be built from, so #147 can't come back via
     // a path that calls Sim::Init directly.
     bool HaveMergedCvs_ = false;
+
+    // #169: how many MsgCvarSync datagrams this peer has RECEIVED. Not a statistic — zero at match
+    // start is the signature of the bug that made every match on the last-launched phone desync at
+    // the first anchor (the incumbent never re-offered its set to a rejoiner). Deliberately never
+    // reset: it answers "has this peer ever heard the other one's tunables", which spans matches.
+    int CvarSyncsSeen_ = 0;
 
     bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
 

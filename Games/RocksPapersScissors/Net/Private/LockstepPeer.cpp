@@ -356,6 +356,21 @@ void LockstepPeer::SendLocalCamp() {
 // pre-seeded empties after index 0 stay the delay buffer; real input still lands at Delay+.
 void LockstepPeer::TryStartMatch() {
     if (MatchStarted_ || !LocalReady_ || !PeerReady_) return;
+#if LUR_INTERNAL
+    // #169 asked for the disagreement to be LOUD and BEFORE tick 0 rather than a mid-match draw, and
+    // this is the whole detector — no extra wire slot needed, because after the BeginResync re-offer
+    // every peer sends its set at least twice and an EMPTY set is still a message. So "I am starting
+    // a match having never received one" is not a benign case: it means the peer's offers never
+    // reached us, which is precisely the state that ran four consecutive matches on mismatched
+    // tunables. Cheap, exact, and it fires before the first tick instead of after the match is lost.
+    //
+    // Deliberately not a refusal (unlike badbuild): the sets may well be identical, and killing a
+    // match on a suspicion is worse than playing one that says so in the log.
+    if (CvarSyncsSeen_ == 0)
+        Lur::Log::Error("RPS: starting a linked match having received NO cvar sync from the peer — if "
+                        "either phone has persisted tunables the two sims will differ from tick 0 "
+                        "(#169). Check both peers' pre-match gold/hash agree.");
+#endif
     LocalEvents[0] = {LocalCamp_};
     PeerEvents[0]  = {PeerCamp_};
     MatchStarted_ = true;
@@ -824,6 +839,20 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // it in hand before either peer reaches that tick.
     }
     else if (Type == MsgCvarSync) {
+        ++CvarSyncsSeen_;   // #169: "never heard from the peer" is the failure — see TryStartMatch
+        // A sync that arrives AFTER tick 0 is dropped, and that is a correctness rule, not caution.
+        // The whole-set exchange has no agreed apply tick (unlike MsgCvar, which is stamped): merging
+        // it mid-match moves TheSim.Cv the instant the datagram lands, i.e. on whatever tick each peer
+        // happened to be on. Two peers applying the same set on different ticks diverge — so honouring
+        // a late sync would CAUSE the desync it exists to prevent. Pre-tick-0 is the only safe window,
+        // and it is the only one the protocol needs: every offer precedes its sender's camp, and the
+        // match cannot start until both camps are in. #169 made this reachable by re-offering on every
+        // resync, so the rule has to be stated rather than merely relied upon.
+        if (MatchStarted_) {
+            Lur::Log::Info("RPS: ignoring a cvar sync that arrived mid-match (tick %u) — the set can "
+                           "only move on a stamped tick once the match is running", TheSim.Tick);
+            return;
+        }
         Lur::Serialization::BitReader R(Data, N);
         const uint32_t Count = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
         for (uint32_t I = 0; I < Count && R.IsOk(); ++I) {
@@ -892,6 +921,31 @@ void LockstepPeer::SendResyncOffer() {
 
 void LockstepPeer::BeginResync() {
     SendResyncOffer();
+#if LUR_INTERNAL
+    // #169: re-offer the TUNABLES too, not just the input history. This is #148's hole, in the one
+    // place #148 didn't look.
+    //
+    // SendCvarSync used to be called exactly once, by the main, next to Lp.Init — so the exchange
+    // only converged when BOTH peers Init'd while the link was up. It usually is, which is why this
+    // passed for weeks. But when one phone's app restarts and the other keeps running, the restarted
+    // peer Inits and sends its set, and the INCUMBENT never re-sends: its Init already happened and
+    // the `!Started && PeerReady` gate that calls SendCvarSync can never fire again. The rejoiner
+    // therefore simulates on compile-time defaults while the incumbent simulates on its persisted
+    // overrides, forever — desync at the first anchor, every match, until someone restarts the other
+    // phone too. Measured on hardware 2026-08-01: whichever phone launched LAST ran the whole session
+    // un-merged (miner 600/gold 800 against the Galaxy's 400/750), across four consecutive matches.
+    //
+    // The asymmetry is what hid it: the incumbent is never wrong (it merged its own set when it seeded
+    // it), and the rejoiner's own empty set merges into the incumbent as a no-op. Both peers report a
+    // clean exchange; only the pre-tick-0 state differs.
+    //
+    // BeginResync is the right home because it is already the "a peer is (re)joining, reconcile with
+    // it" event, called by both mains on entering a match AND by Session's reconnect edge — which is
+    // exactly when the other side restarted. Bounded by construction: it re-offers state, it does not
+    // reply to an offer, so there is no ping-pong to budget (ReoffersLeft exists for the history
+    // because that path DOES answer).
+    SendCvarSync();
+#endif
     ReseedFrom(TheSim.Tick);  // re-base our own timeline (drops in-flight beyond F); sim already at F
     IncomingHistory.clear();
     Awaiting = true;    // cleared when we process the peer's marker (or by the stall timeout)

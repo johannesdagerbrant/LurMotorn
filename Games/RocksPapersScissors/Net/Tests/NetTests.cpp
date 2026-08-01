@@ -470,6 +470,106 @@ static void TestCvarSyncSurvivesResync() {
     CvInitialFrontier.Set(FrontDefault);
 }
 
+// ---- #169: the peer that joins LATE must still receive the incumbent's tunables ----
+// The hardware failure, exactly: SendCvarSync was called once per peer, by the main, next to
+// Lp.Init. When one phone's app restarts and the other keeps running, the rejoiner Inits and offers
+// its (empty) set, and the incumbent NEVER re-offers — its Init already happened and the
+// `!Started && PeerReady` gate that calls SendCvarSync cannot fire again. So the rejoiner simulates
+// on compile-time defaults while the incumbent simulates on its persisted overrides, and every match
+// desyncs at the first anchor until someone restarts the other phone too.
+//
+// Measured 2026-08-01 by diffing both phones' .rec files: whichever phone launched LAST ran the whole
+// session un-merged (miner 600 / gold 800 against the Galaxy's 400 / 750) across four consecutive
+// matches. It hid because it is ASYMMETRIC and silent — the incumbent is never wrong (it merged its
+// own set when it seeded it) and the rejoiner's empty set merges into the incumbent as a no-op, so
+// both peers report a clean exchange and only the pre-tick-0 state differs.
+//
+// Note what this test does NOT do: it never seeds the rejoiner with the overrides. The pre-existing
+// #147 rejoin test does (`the sync it re-does on reconnect`), and that assumption is what let the bug
+// through — the rejoiner has nothing, and the incumbent's re-offer is the only thing that can save it.
+static void TestLateJoinerReceivesIncumbentCvars() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+
+    // A is the incumbent, launched first, carrying a persisted override. Its Init-time offer goes
+    // out while nobody is listening — the other phone's app is not up yet.
+    A.Init(0x169A, 0, Enqueue, &Qa);
+    A.SeedGameplayCvar(CvIdStartingGold, 400, 700);
+    A.SendCvarSync();
+    Qa.Q.clear();                       // ...into the void: the peer was not there to hear it
+    CHECK(A.GetSim().Teams[0].Gold == 400);
+
+    // B launches now, with NO persisted tunables, and both mains call BeginResync on entering the
+    // match (#148). That is the only event either side has to reconcile on.
+    B.Init(0x169A, 1, Enqueue, &Qb);
+    CHECK(B.GetSim().Teams[0].Gold == GoldDefault);   // B starts wrong, by construction
+    B.SendCvarSync();                                 // B's own Init-time offer (empty)
+    A.BeginResync();
+    B.BeginResync();
+    Deliver(Qb, A);
+    Deliver(Qa, B);
+
+    // The fix: A re-offered, so B is on A's tunables BEFORE tick 0 — not merely equal, but equal to
+    // the value the incumbent was already simulating on.
+    CHECK(B.GetSim().Teams[0].Gold == 400);
+    CHECK(A.GetSim().Cv.StartingGold == B.GetSim().Cv.StartingGold);
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+
+    // ...and the match then runs desync-free, which is the property the hardware pair could not hold
+    // for ten ticks.
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    for (int I = 0; I < 120; ++I) {
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    CvStartingGold.Set(GoldDefault);
+}
+
+// ---- #169: a cvar sync that arrives MID-MATCH must be ignored, not applied ----
+// The whole-set exchange carries no apply tick (unlike MsgCvar, which is stamped a few ticks ahead
+// precisely so both peers move together). Merging one mid-match moves TheSim.Cv the instant the
+// datagram lands — on whatever tick each peer happens to be on — so honouring a late sync would
+// CAUSE a desync rather than prevent one. Pre-tick-0 was always the only safe window; re-offering on
+// every resync (above) made a late arrival reachable, so the rule has to be enforced rather than
+// assumed. The cost of dropping it is nil: every offer precedes its sender's camp, and no match can
+// start until both camps are in.
+static void TestMidMatchCvarSyncIsIgnored() {
+    const int32_t GoldDefault = CvStartingGold.Default();
+    Outbox Qa, Qb, Qlate;
+    LockstepPeer A, B, Late;
+    A.Init(0x169B, 0, Enqueue, &Qa);
+    B.Init(0x169B, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    for (int I = 0; I < 30; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint64_t Before = A.GetSim().StateHash();
+    const int32_t  GoldBefore = A.GetSim().Cv.StartingGold;
+
+    // A third peer's full-set offer lands on A alone, twenty ticks into the match.
+    Late.Init(0x169B, 1, Enqueue, &Qlate);
+    Late.SeedGameplayCvar(CvIdStartingGold, 12345, 900);
+    Late.SendCvarSync();
+    Deliver(Qlate, A);
+
+    CHECK(A.GetSim().Cv.StartingGold == GoldBefore);   // Cv did not move under the running match...
+    CHECK(A.GetSim().StateHash() == Before);
+    for (int I = 0; I < 60; ++I) {                     // ...so the pair stays in lockstep
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+        CHECK(!A.Desynced() && !B.Desynced());
+    }
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+    CvStartingGold.Set(GoldDefault);
+}
+
 // ---- #148: restarting one app must not wedge the peer. The survivor takes Session's reconnect
 // edge and offers its history; the RESTARTED app never takes that edge (it connects before the
 // Hello handshake finishes), so it sent no frontier marker — and LockstepPeer::Tick early-returns
@@ -1739,6 +1839,8 @@ int main() {
     TestCvarSyncRederivesInitState();
     TestCvarSyncArrivingBeforeInit();
     TestCvarSyncSurvivesResync();
+    TestLateJoinerReceivesIncumbentCvars();   // #169
+    TestMidMatchCvarSyncIsIgnored();          // #169
     TestBuildFingerprintGate();
 #endif
 #if LUR_INTERNAL
