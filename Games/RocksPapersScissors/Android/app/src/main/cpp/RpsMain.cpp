@@ -1197,10 +1197,16 @@ void android_main(android_app* App) {
             // #2: the Linked-opponent ROW + "opponent link established" blink appear only when a real
             // PEER connects (not for a solo match). Fire once on the rising edge.
             if (!ViewLinkedApplied && State.PeerLinked.load(std::memory_order_acquire)) {
-                State.View.SetLinked(true);       // adds the Linked-opponent row (green dot)
+                // Label the row with the PEER's device id, not a generic word (#178): with two
+                // phones on a table, a label that reads the same on both tells you nothing.
+                State.View.SetLinked(true, State.Session.GetPeerGuid());
                 State.View.NotifyPeerLinked();    // blink the bar
                 ViewLinkedApplied = true;
             }
+            // Every frame, not just the link edge: a mismatch is discovered when the peer's
+            // fingerprint ARRIVES, which can be well after the link comes up, and it clears on a
+            // reinstall. The setter early-outs when unchanged, so this costs a bool compare.
+            State.View.SetBuildMismatch(State.Lp.BuildMismatch());
             // feedback: the sim switched us to the peer -> point the selector at that row, so the HUD
             // names who we are actually playing instead of still reading the AI tier.
             // (gated on ViewLinkedApplied so the flag is never consumed before the row exists)

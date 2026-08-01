@@ -44,7 +44,16 @@ public:
     static float VisibleWorldHeight(float WidthPx, float HeightPx);
 
     // Link status for the opponent selector's dot (view-only; call when it changes).
-    void SetLinked(bool InLinked);
+    // PeerGuid labels the linked row with the peer's device id (like chess's opponent list), so
+    // two phones can be told apart and checked against each other. Empty falls back to a generic
+    // label, which is what the desktop loopback and any pre-identity path get.
+    void SetLinked(bool InLinked, const std::string& PeerGuid = std::string());
+
+    // The peer is running a DIFFERENT BUILD (LockstepPeer::BuildMismatch). The match will be
+    // refused, so the selector says so: the lead dot goes red and the row explains itself. Without
+    // this the refusal is invisible and a correct gate reads as a freeze (#178) — which it did, on
+    // hardware, within an hour of the gate shipping.
+    void SetBuildMismatch(bool Mismatch);
 
     // #139/feedback: the camp you placed while WAITING for the opponent to place theirs. Pre-match
     // it isn't in the sim yet (both camps are applied together as tick 0's input), so the field
@@ -366,6 +375,8 @@ private:
     float TopInsetPx = 0.0f;              // OS safe areas (status bar / nav bar)
     float BottomInsetPx = 0.0f;
     bool Linked = false;
+    std::string PeerGuid_;          // labels the linked row (empty = generic label)
+    bool        BuildMismatch_ = false;  // peer on a different build: the match will be refused
     bool SelectorDirty = true;            // rebuild items when link state changes
     // Opponent-list layout: the linked row FIRST (when a peer is up), then a non-selectable
     // "AI OPPONENTS" header that renders as the separator, then the three AI tiers. So the AI rows

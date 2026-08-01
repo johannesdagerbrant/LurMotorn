@@ -14,6 +14,7 @@
 #include "Lur/Core/Assert.h"          // LUR_ASSERT_MSG — trap a row/tier decode disagreement
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
+#include "Lur/Hud/GuidLabel.h"    // ShortGuid — the linked row is labelled with the peer id
 #include "Lur/Math/Mat4.h"
 #include "Lur/Core/DevCommand.h"  // #116: commands rendered as buttons
 #include "Lur/DevGui/ColorMath.h"
@@ -463,9 +464,16 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Ready = true;
 }
 
-void GameView::SetLinked(bool InLinked) {
-    if (Linked == InLinked) return;
+void GameView::SetLinked(bool InLinked, const std::string& PeerGuid) {
+    if (Linked == InLinked && PeerGuid_ == PeerGuid) return;
     Linked = InLinked;
+    PeerGuid_ = PeerGuid;
+    SelectorDirty = true;
+}
+
+void GameView::SetBuildMismatch(bool Mismatch) {
+    if (BuildMismatch_ == Mismatch) return;
+    BuildMismatch_ = Mismatch;
     SelectorDirty = true;
 }
 
@@ -496,12 +504,28 @@ void GameView::RefreshSelector() {
     char Buf[24];
     int N = 0;
     if (Linked) {
-        Items[N].Label = "Linked opponent";
+        // The peer's DEVICE ID, not a generic word — the same thing chess's opponent list shows,
+        // and for the same reason: with two phones on a table you need to tell which is which, and
+        // a label that reads identically on both tells you nothing. Falls back to the generic text
+        // when no identity is known (desktop loopback, or before the handshake names the peer).
+        Items[N].Label = PeerGuid_.empty() ? std::string("Linked opponent")
+                                           : Lur::Hud::ShortGuid(PeerGuid_);
         Items[N].Lead = Lur::Hud::ELeadStyle::Dot;
-        // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth difficulty.
-        // Green/amber/red stay reserved for the AI tiers, so the dot colour alone says "radio link".
-        // #0082FC is the Bluetooth SIG blue.
-        Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
+        if (BuildMismatch_) {
+            // RED: the link is up but the match will be REFUSED, because the two builds cannot
+            // agree on the CVar id list, the tick order or the hash (#112). Saying so here is the
+            // whole point — the refusal is otherwise invisible and reads as a freeze (#178).
+            // A ring as well as the fill, so it is distinguishable from the red AI tier at a glance.
+            Items[N].LeadFill = Color{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};
+            Items[N].Ring = true;
+            Items[N].RingColor = Color{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), 1.0f};
+            Items[N].Sublabel = "different build - rebuild both";
+        } else {
+            // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth
+            // difficulty, and blue says "radio link, healthy". Green/amber/red stay reserved for
+            // the AI tiers (and now for this row's fault state). #0082FC is the Bluetooth SIG blue.
+            Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
+        }
         std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
         Items[N].Trailing = Buf;
         ++N;

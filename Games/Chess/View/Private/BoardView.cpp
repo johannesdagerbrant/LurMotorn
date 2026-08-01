@@ -10,6 +10,7 @@
 #include "Chess/MatchMeta.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/OpponentRegistry.h"
+#include "Lur/Hud/GuidLabel.h"   // ShortGuid (shared with RPS's selector)
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Serialization/BitReader.h"
@@ -464,20 +465,7 @@ bool BoardView::OnPeerLinked(const std::string& PeerGuid) {
 }
 
 namespace {
-// First 12 hex of a GUID as three upper-case groups (e.g. "7F3A-C9E1-04B2"). The
-// font atlas is ASCII, so use '-' (not a middot) as the separator.
-std::string ShortGuid(const std::string& G) {
-    auto Up = [](char C) { return (C >= 'a' && C <= 'f') ? static_cast<char>(C - 32) : C; };
-    std::string S;
-    for (int Grp = 0; Grp < 3; ++Grp) {
-        if (Grp) S += '-';
-        for (int K = 0; K < 4; ++K) {
-            const std::size_t Idx = static_cast<std::size_t>(Grp) * 4 + K;
-            S += (Idx < G.size()) ? Up(G[Idx]) : '0';
-        }
-    }
-    return S;
-}
+using Lur::Hud::ShortGuid;   // moved to Modules/Hud so RPS's selector renders GUIDs identically
 
 // Coarse "time ago" for the last-move sublabel.
 std::string RelTime(std::uint64_t Ms) {

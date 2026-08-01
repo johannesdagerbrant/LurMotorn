@@ -297,8 +297,12 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
             A->Lp.SendCvarSync();
             B->Lp.SendCvarSync();
 #endif
-            A->View.SetLinked(true);
-            B->View.SetLinked(true);
+            // Each window's linked row names the OTHER peer, so the two-window build shows the
+            // same thing two phones would (#178).
+            A->View.SetLinked(true, B->Guid);
+            B->View.SetLinked(true, A->Guid);
+            A->View.SetBuildMismatch(A->Lp.BuildMismatch());
+            B->View.SetBuildMismatch(B->Lp.BuildMismatch());
             Started = true;
             Lur::Log::Info("linked - lockstep started (A=team%d B=team%d)", ATeam, BTeam);
         }

@@ -612,9 +612,12 @@ static void UnblockStdio() {
     const bool PeerReady = _Session.IsReady();
     if (PeerReady && !_PeerEverReady) {
         _PeerEverReady = true;
-        _View.SetLinked(true);       // adds the Linked-opponent row (green dot)
+        // Peer's device id as the row label (#178) — see the matching note in RpsMain.cpp.
+        _View.SetLinked(true, _Session.GetPeerGuid());
         _View.NotifyPeerLinked();    // blink the bar
     }
+    // Every frame, not just the link edge — see the matching note in RpsMain.cpp.
+    _View.SetBuildMismatch(_Lp.BuildMismatch());
     // AUTO-switch solo -> linked, on the EDGE where the link establishes and ONLY out of an AI match
     // the player has not started (no mine camp dragged in yet). Two freshly opened phones therefore
     // pair and front-load the match with zero taps, and because both peers switch on the same
