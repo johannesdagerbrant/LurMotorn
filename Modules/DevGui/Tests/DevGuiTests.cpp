@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "Lur/DevGui/CategoryTree.h"
+#include "Lur/DevGui/ColorMath.h"
 #include "Lur/DevGui/ColorPicker.h"
 #include "Lur/DevGui/Numpad.h"
 #include "Lur/DevGui/Popover.h"
@@ -249,57 +250,128 @@ static void TestSliderRoundTrips() {
                           50.0f, 100.0f) > 74.9f);
 }
 
-// #117: the picker's rows must hit-test to the channel they draw, and a press must select the
-// value the knob is drawn at — the same round-trip property the slider has, but through the
-// row/track layout, which is where an off-by-one in the row index would hide.
-static void TestColorPickerRows() {
+// #174: HSV <-> RGB must round-trip everywhere hue is DEFINED. Where it is not (grey, black,
+// white) the conversion is lossy by nature — which is exactly why the picker keeps its own H,S,V
+// while open instead of re-deriving each frame.
+static void TestColorMathRoundTrip() {
+    using namespace Lur::DevGui::ColorMath;
+    for (int Hi = 0; Hi < 12; ++Hi)
+        for (int Si = 1; Si <= 4; ++Si)
+            for (int Vi = 1; Vi <= 4; ++Vi) {
+                const float H = static_cast<float>(Hi) / 12.0f;
+                const float S = static_cast<float>(Si) / 4.0f;
+                const float V = static_cast<float>(Vi) / 4.0f;
+                float R = 0, G = 0, B = 0, H2 = 0, S2 = 0, V2 = 0;
+                HsvToRgb(H, S, V, R, G, B);
+                RgbToHsv(R, G, B, H2, S2, V2);
+                CHECK(S2 > S - 0.01f && S2 < S + 0.01f);
+                CHECK(V2 > V - 0.01f && V2 < V + 0.01f);
+                // Hue wraps, so 0 and 1 are the same angle.
+                const float D = (H2 > H) ? (H2 - H) : (H - H2);
+                CHECK(D < 0.01f || D > 0.99f);
+            }
+
+    // The known primaries, so a sign error in a sector cannot hide behind a round-trip.
+    float R = 0, G = 0, B = 0;
+    HsvToRgb(0.0f, 1.0f, 1.0f, R, G, B);        CHECK(R == 1.0f && G == 0.0f && B == 0.0f);
+    HsvToRgb(1.0f / 3.0f, 1.0f, 1.0f, R, G, B); CHECK(G == 1.0f && R < 0.01f && B < 0.01f);
+    HsvToRgb(2.0f / 3.0f, 1.0f, 1.0f, R, G, B); CHECK(B == 1.0f && R < 0.01f && G < 0.01f);
+
+    // Hue WRAPS rather than clamping, so dragging the strip past either end keeps going.
+    float R2 = 0, G2 = 0, B2 = 0;
+    HsvToRgb(1.25f, 1.0f, 1.0f, R, G, B);
+    HsvToRgb(0.25f, 1.0f, 1.0f, R2, G2, B2);
+    CHECK(R == R2 && G == G2 && B == B2);
+    HsvToRgb(-0.25f, 1.0f, 1.0f, R, G, B);
+    HsvToRgb(0.75f, 1.0f, 1.0f, R2, G2, B2);
+    CHECK(R == R2 && G == G2 && B == B2);
+
+    // S and V clamp; a grey has no hue and must report 0 rather than garbage.
+    float H3 = 0, S3 = 0, V3 = 0;
+    RgbToHsv(0.5f, 0.5f, 0.5f, H3, S3, V3);
+    CHECK(S3 == 0.0f && H3 == 0.0f && V3 == 0.5f);
+    RgbToHsv(0.0f, 0.0f, 0.0f, H3, S3, V3);
+    CHECK(S3 == 0.0f && V3 == 0.0f);
+}
+
+// #174: the SV square's mapping must be an exact inverse, and its axes the conventional way up
+// (bright at the TOP, black along the bottom) — an inverted V axis is the kind of thing that
+// looks plausible in code and wrong the instant you drag it.
+static void TestColorPickerSquare() {
     using Lur::DevGui::ColorPicker;
-    using Lur::DevGui::Slider;
-    const float X = 20, Y = 40, W = 240, RowH = 22, SwatchH = 30, Gap = 6;
-    const float LabelW = 18, ValueW = 44, KnobW = 12;
+    const float X = 20, Y = 40, W = 200, H = 140;
+    float S = -1, V = -1;
 
-    // Rows do not overlap, sit below the swatch, and stay inside the declared panel height.
-    const float PanelH = ColorPicker::PanelH(RowH, SwatchH, Gap);
-    float PrevBottom = Y + SwatchH;
-    for (int I = 0; I < ColorPicker::Channels; ++I) {
+    ColorPicker::SvAt(X, Y, W, H, X, Y, S, V);              // top-left
+    CHECK(S == 0.0f && V == 1.0f);                          // unsaturated, full brightness = white
+    ColorPicker::SvAt(X, Y, W, H, X + W, Y, S, V);          // top-right
+    CHECK(S == 1.0f && V == 1.0f);                          // full hue
+    ColorPicker::SvAt(X, Y, W, H, X, Y + H, S, V);          // bottom-left
+    CHECK(S == 0.0f && V == 0.0f);                          // black
+    ColorPicker::SvAt(X, Y, W, H, X + W * 0.5f, Y + H * 0.5f, S, V);
+    CHECK(S > 0.49f && S < 0.51f && V > 0.49f && V < 0.51f);
+
+    // A drag that leaves the square PINS to the edge rather than jumping or going negative.
+    ColorPicker::SvAt(X, Y, W, H, X - 500, Y + 900, S, V);
+    CHECK(S == 0.0f && V == 0.0f);
+    ColorPicker::SvAt(X, Y, W, H, X + 500, Y - 900, S, V);
+    CHECK(S == 1.0f && V == 1.0f);
+
+    // SvPoint is SvAt's inverse — the reticle sits where the press selected.
+    for (int I = 0; I <= 4; ++I)
+        for (int J = 0; J <= 4; ++J) {
+            const float Ws = static_cast<float>(I) / 4.0f, Wv = static_cast<float>(J) / 4.0f;
+            float Px = 0, Py = 0, S2 = 0, V2 = 0;
+            ColorPicker::SvPoint(X, Y, W, H, Ws, Wv, Px, Py);
+            ColorPicker::SvAt(X, Y, W, H, Px, Py, S2, V2);
+            CHECK(S2 > Ws - 0.01f && S2 < Ws + 0.01f);
+            CHECK(V2 > Wv - 0.01f && V2 < Wv + 0.01f);
+        }
+}
+
+// #174: the three interactive regions must not overlap, and each must resolve to ITS OWN kind of
+// value — a press on the hue strip that reported a saturation would be silently wrong.
+static void TestColorPickerRegions() {
+    using Lur::DevGui::ColorPicker;
+    using EHit = ColorPicker::EHit;
+    const float X = 10, Y = 20, W = 200, SwH = 26, SqH = 140, StH = 18, RoH = 16, Gap = 6;
+    const float Knob = 10;
+    const float PanelH = ColorPicker::PanelH(SwH, SqH, StH, RoH, Gap);
+
+    auto Centre = [&](void (*Fn)(float, float, float, float, float, float, float,
+                                 float&, float&, float&, float&), float& Cx, float& Cy) {
         float Rx, Ry, Rw, Rh;
-        ColorPicker::RowRect(X, Y, W, RowH, SwatchH, Gap, I, Rx, Ry, Rw, Rh);
-        CHECK(Ry >= PrevBottom);
-        CHECK(Ry + Rh <= Y + PanelH + 0.01f);
-        PrevBottom = Ry + Rh;
-    }
+        Fn(X, Y, W, SwH, SqH, StH, Gap, Rx, Ry, Rw, Rh);
+        Cx = Rx + Rw * 0.5f; Cy = Ry + Rh * 0.5f;
+    };
+    float A = -1, B = -1, Cx = 0, Cy = 0;
 
-    // A press in the middle of each row resolves to THAT channel, and to the value the knob
-    // would be drawn at for it. Off-by-one in the row index is the bug this catches.
-    for (int I = 0; I < ColorPicker::Channels; ++I) {
-        float Tx, Ty, Tw, Th;
-        ColorPicker::TrackRect(X, Y, W, RowH, SwatchH, Gap, I, LabelW, ValueW, Tx, Ty, Tw, Th);
-        const float Want = 0.6f;
-        const float Kx = Slider::KnobX(Tx, Tw, KnobW, Want, 0.0f, 1.0f);
-        float Got = -1.0f;
-        const int Chan = ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
-                                          Kx, Ty + Th * 0.5f, Got);
-        CHECK(Chan == I);
-        CHECK(Got > Want - 0.01f && Got < Want + 0.01f);
-    }
-
-    // Pressing the LABEL still selects the row (point-anywhere): a 12 px knob is unhittable on
-    // a phone, so the whole row is the target.
+    // Square.
     {
         float Rx, Ry, Rw, Rh;
-        ColorPicker::RowRect(X, Y, W, RowH, SwatchH, Gap, 2, Rx, Ry, Rw, Rh);
-        float V = -1.0f;
-        CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
-                               Rx + 2.0f, Ry + Rh * 0.5f, V) == 2);
-        CHECK(V == 0.0f);   // far left of the track clamps to 0, not to a negative
+        ColorPicker::SquareRect(X, Y, W, SwH, SqH, Gap, Rx, Ry, Rw, Rh);
+        CHECK(Ry >= Y + SwH);                       // below the swatch
+        CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob,
+                               Rx + Rw * 0.5f, Ry + Rh * 0.5f, A, B) == EHit::SvSquare);
+        CHECK(A > 0.49f && A < 0.51f && B > 0.49f && B < 0.51f);
     }
+    // Hue strip.
+    Centre(&ColorPicker::HueRect, Cx, Cy);
+    CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob, Cx, Cy, A, B) == EHit::HueStrip);
+    CHECK(A > 0.49f && A < 0.51f);
+    // Alpha strip.
+    Centre(&ColorPicker::AlphaRect, Cx, Cy);
+    CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob, Cx, Cy, A, B) == EHit::AlphaStrip);
 
-    // A press on the swatch, or outside the panel, hits no channel.
-    float V = -1.0f;
-    CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
-                           X + W * 0.5f, Y + SwatchH * 0.5f, V) == -1);
-    CHECK(ColorPicker::Tap(X, Y, W, RowH, SwatchH, Gap, LabelW, ValueW, KnobW,
-                           X - 50, Y - 50, V) == -1);
+    // The swatch and the readout row are DISPLAY, not controls — pressing them does nothing.
+    CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob,
+                           X + W * 0.5f, Y + SwH * 0.5f, A, B) == EHit::None);
+    float Ox, Oy, Ow, Oh;
+    ColorPicker::ReadoutRect(X, Y, W, SwH, SqH, StH, RoH, Gap, Ox, Oy, Ow, Oh);
+    CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob,
+                           Ox + Ow * 0.5f, Oy + Oh * 0.5f, A, B) == EHit::None);
+    CHECK(Oy + Oh <= Y + PanelH + 0.01f);   // everything fits the height the caller reserved
+    CHECK(ColorPicker::Hit(X, Y, W, SwH, SqH, StH, Gap, Knob, X - 50, Y - 50, A, B) == EHit::None);
 
     CHECK(std::string(ColorPicker::ChannelLabel(0)) == "R");
     CHECK(std::string(ColorPicker::ChannelLabel(3)) == "A");
@@ -316,7 +388,9 @@ int main() {
     TestCategoryTree();
     TestPopoverPlacement();
     TestSliderRoundTrips();
-    TestColorPickerRows();
+    TestColorMathRoundTrip();
+    TestColorPickerSquare();
+    TestColorPickerRegions();
     if (GFailures == 0) { std::printf("devgui_tests: ALL PASS\n"); return 0; }
     std::printf("devgui_tests: %d FAILURE(S)\n", GFailures);
     return 1;

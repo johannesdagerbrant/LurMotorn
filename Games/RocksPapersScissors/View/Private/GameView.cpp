@@ -16,6 +16,7 @@
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
 #include "Lur/Core/DevCommand.h"  // #116: commands rendered as buttons
+#include "Lur/DevGui/ColorMath.h"
 #include "Lur/DevGui/ColorPicker.h"  // #117: RGBA picker popover
 #include "Lur/Render/ColorString.h"  // CVar<Color> ADL codec  // #117: RGBA picker popover
 #include "Lur/DevGui/DevTheme.h"
@@ -140,6 +141,29 @@ Lur::Render::MeshHandle MakeGradientStrip(IRenderer* R, const GradStop* Stops, i
         const Lur::Math::Vec4 VC{C.R, C.G, C.B, C.A * Alpha};
         V[2 * I + 0] = {{0.0f, Stops[I].P, 0.0f}, Nrm, {0.0f, Stops[I].P}, VC};
         V[2 * I + 1] = {{1.0f, Stops[I].P, 0.0f}, Nrm, {1.0f, Stops[I].P}, VC};
+    }
+    uint32_t K = 0;
+    for (int I = 0; I < N - 1; ++I) {
+        const uint32_t A = 2 * I;
+        Idx[K++] = A; Idx[K++] = A + 1; Idx[K++] = A + 3;
+        Idx[K++] = A; Idx[K++] = A + 3; Idx[K++] = A + 2;
+    }
+    return R->CreateMesh(V, static_cast<uint32_t>(2 * N), Idx, K);
+}
+
+// The same idea rotated: a gradient across X instead of down Y (#174's colour picker needs both
+// axes). Kept separate rather than parameterised on an axis — two eight-line functions read
+// better than one with a branch in the vertex loop, and the vertex layout differs only in which
+// coordinate the stop drives.
+Lur::Render::MeshHandle MakeHGradientStrip(IRenderer* R, const GradStop* Stops, int N) {
+    Lur::Render::Vertex V[2 * 8];
+    uint32_t Idx[6 * 7];
+    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
+    for (int I = 0; I < N; ++I) {
+        const Color& C = Stops[I].C;
+        const Lur::Math::Vec4 VC{C.R, C.G, C.B, C.A};
+        V[2 * I + 0] = {{Stops[I].P, 0.0f, 0.0f}, Nrm, {Stops[I].P, 0.0f}, VC};
+        V[2 * I + 1] = {{Stops[I].P, 1.0f, 0.0f}, Nrm, {Stops[I].P, 1.0f}, VC};
     }
     uint32_t K = 0;
     for (int I = 0; I < N - 1; ++I) {
@@ -365,6 +389,32 @@ void GameView::CreateResources(IRenderer* Renderer) {
     // #175: the colour-row swatch ring, retinted per visible row each frame.
     for (int I = 0; I < DevRowSwatchCount; ++I)
         DevRowSwatchMat[I] = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
+
+    // ---- #174 colour picker v2 ----
+    // The SV square is three layers, which is what makes it exactly S(across) x V(down):
+    // a white quad, then a white->transparent ramp TINTED with the live hue (saturation), then
+    // a black ramp down Y (value). The shader does OutColor = InColor * Tint, so a mesh with
+    // per-vertex alpha and a retinted material gives the hue ramp with no mesh rebuild.
+    {
+        const GradStop SatStops[2] = {{0.0f, {1.0f, 1.0f, 1.0f, 0.0f}},
+                                      {1.0f, {1.0f, 1.0f, 1.0f, 1.0f}}};
+        SvSatMesh = MakeHGradientStrip(Renderer, SatStops, 2);
+        const GradStop ValStops[2] = {{0.0f, {0.0f, 0.0f, 0.0f, 0.0f}},
+                                      {1.0f, {0.0f, 0.0f, 0.0f, 1.0f}}};
+        SvValMesh = MakeGradientStrip(Renderer, ValStops, 2, 1.0f);
+        // Hue strip: six segments round the wheel, per-vertex coloured. Seven stops so the last
+        // segment closes back on red — a strip ending at magenta reads as a bug.
+        GradStop HueStops[7];
+        for (int I = 0; I < 7; ++I) {
+            const float H = static_cast<float>(I) / 6.0f;
+            float R2 = 0, G2 = 0, B2 = 0;
+            Lur::DevGui::ColorMath::HueColor(H, R2, G2, B2);
+            HueStops[I] = {H, {R2, G2, B2, 1.0f}};
+        }
+        HueStripMesh = MakeHGradientStrip(Renderer, HueStops, 7);
+        PickHueMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 0.0f, 0.0f, 1.0f});
+        PickAlphaMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
+    }
 #endif
 
     Font.Init(Lur::Text::InterFont());
@@ -1994,22 +2044,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             if (Numpad_.TakeEnter()) CommitNumpad();  // commit the typed value to the selected CVar
         }
 
-        // ---- Colour picker popover (#117) — same anchor + dismissal as the numpad ----
-        // A colour is four numbers; typing them one at a time through a numpad means never
-        // seeing what you are making. Sliders with a live swatch make CVar<Color> usable now,
-        // without answering the open v2 question (whether DrawGlyphs can draw the untextured
-        // gradient triangles an HSV square needs, spec §7).
+        // ---- Colour picker popover (#117 v1, #174 v2) — same anchor + dismissal as the numpad ----
+        // SV square + hue strip + alpha strip. The three-layer construction and the reason the
+        // working HSV state is authoritative are documented on ColorPicker itself.
         using Picker = Lur::DevGui::ColorPicker;
-        const float PickRowH = 22.0f * HS, PickSwatchH = 30.0f * HS, PickGap = 6.0f * HS;
-        const float PickLabelW = 18.0f * HS, PickValueW = 44.0f * HS, PickKnobW = 12.0f * HS;
+        namespace CMath = Lur::DevGui::ColorMath;
+        const float PickSwatchH = 26.0f * HS, PickStripH = 18.0f * HS;
+        const float PickReadoutH = 16.0f * HS, PickGap = 6.0f * HS, PickKnobW = 10.0f * HS;
         const float PickW = OW * 0.62f;
+        const float PickSquareH = PickW * 0.72f;
         const float PickX = (OW - PickW) * 0.5f;
-        const float PickH = Picker::PanelH(PickRowH, PickSwatchH, PickGap);
+        const float PickH =
+            Picker::PanelH(PickSwatchH, PickSquareH, PickStripH, PickReadoutH, PickGap);
         const float PickY = Lur::DevGui::PlaceBelowOrAbove(
             RowScreenY(SelectedCvar_, HeightPx * 0.45f), LineH, PickH + 10.0f * HS, PickGap,
             HeightPx) + 5.0f * HS;
         // Cancel sits where the numpad's does, so dismissing either editor is the same gesture.
-        const float PickCancelS = PickSwatchH * 0.62f;
+        const float PickCancelS = PickSwatchH * 0.72f;
         const float PickCancelX = PickX + PickW + 6.0f * HS;
         const float PickCancelY = PickY + (PickSwatchH - PickCancelS) * 0.5f;
 
@@ -2017,24 +2068,48 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             float Ch[4] = {0, 0, 0, 1};
             SelectedCvar_->GetColorChannels(Ch);
 
+            // Re-derive HSV ONLY when the binding changed (picker just opened on this row) or the
+            // value moved from OUTSIDE us (console edit, the row's R button). Deriving every frame
+            // would fight the drag: RGB->HSV cannot recover a hue at S==0 or V==0, so sliding into
+            // the white or black edge of the square would snap the hue handle back to red.
+            const bool Rebind = (PickBound_ != SelectedCvar_);
+            const bool External = Ch[0] != PickWrote_[0] || Ch[1] != PickWrote_[1] ||
+                                  Ch[2] != PickWrote_[2] || Ch[3] != PickWrote_[3];
+            if (Rebind || External) {
+                CMath::RgbToHsv(Ch[0], Ch[1], Ch[2], PickH_, PickS_, PickV_);
+                PickA_ = Ch[3];
+                PickBound_ = SelectedCvar_;
+                for (int I = 0; I < 4; ++I) PickWrote_[I] = Ch[I];
+            }
+
             if (TapPending && !TapUsed &&
                 Lur::DevGui::HitRect(PickCancelX, PickCancelY, PickCancelS, PickCancelS,
                                      TapX, TapY)) {
                 PickerOpen_ = false; TapUsed = true;   // dismiss; edits already committed live
             }
             if (TapPending && !TapUsed) {
-                float V = 0.0f;
-                const int Chan = Picker::Tap(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap,
-                                             PickLabelW, PickValueW, PickKnobW, TapX, TapY, V);
-                if (Chan >= 0) {
-                    // Commit LIVE, on every press, down the same hook the numpad's Enter uses —
-                    // a colour you have to press Enter to see is a colour you cannot tune.
-                    Ch[Chan] = V;
-                    SelectedCvar_->SetColorChannels(Ch);
+                float A = 0.0f, B = 0.0f;
+                const Picker::EHit Hit =
+                    Picker::Hit(PickX, PickY, PickW, PickSwatchH, PickSquareH, PickStripH,
+                                PickGap, PickKnobW, TapX, TapY, A, B);
+                if (Hit != Picker::EHit::None) {
+                    if (Hit == Picker::EHit::SvSquare)        { PickS_ = A; PickV_ = B; }
+                    else if (Hit == Picker::EHit::HueStrip)   { PickH_ = A; }
+                    else                                      { PickA_ = A; }
+                    // Write RGBA out and commit LIVE, down the same hook the numpad's Enter uses:
+                    // a colour you must press Enter to see is a colour you cannot tune. H,S,V stay
+                    // ours — this is the write side of the working-state rule.
+                    float R2 = 0, G2 = 0, B2 = 0;
+                    CMath::HsvToRgb(PickH_, PickS_, PickV_, R2, G2, B2);
+                    const float Out[4] = {R2, G2, B2, PickA_};
+                    SelectedCvar_->SetColorChannels(Out);
+                    for (int I = 0; I < 4; ++I) PickWrote_[I] = Out[I];
                     if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);
                     TapUsed = true;
                 }
             }
+        } else if (!PickerOpen_) {
+            PickBound_ = nullptr;   // next open re-derives, even onto the same row
         }
 
         ColorRowsDrawn_ = 0;  // #175: rewind the swatch ring for this frame's visible rows
@@ -2227,47 +2302,74 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                       Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
         }
 
-        // ---- The colour picker (#117): live swatch + four RGBA sliders ----
+        // ---- The colour picker (#174 v2): swatch, SV square, hue strip, alpha strip ----
         if (PickerOpen_ && SelectedCvar_ && SelectedCvar_->IsColor()) {
             float Ch[4] = {0, 0, 0, 1};
             SelectedCvar_->GetColorChannels(Ch);
             Blit(DevPanelMat, PickX + PickW * 0.5f, PickY + PickH * 0.5f, PickW + 10.0f * HS,
                  PickH + 10.0f * HS);
 
-            // Swatch — the whole reason this is not a numpad. Drawn with the CVar's OWN colour
-            // through a transient material, so what you see is literally the value.
+            // Swatch — retint ONE material, never create per frame (CreateMaterial allocates a
+            // descriptor set and grows a vector nothing reclaims).
             float Sx, Sy2, Sw, Sh;
             Picker::SwatchRect(PickX, PickY, PickW, PickSwatchH, Sx, Sy2, Sw, Sh);
-            // Retint ONE material rather than creating one per frame: CreateMaterial allocates
-            // a descriptor set and grows a vector that is never reclaimed, so a live swatch built
-            // that way exhausts the pool within a minute of having the picker open.
-            Renderer->SetMaterialTint(DevSwatchMat,
-                                      Lur::Render::Color{Ch[0], Ch[1], Ch[2], Ch[3]});
+            Renderer->SetMaterialTint(DevSwatchMat, {Ch[0], Ch[1], Ch[2], Ch[3]});
             Blit(DevSwatchMat, Sx + Sw * 0.5f, Sy2 + Sh * 0.5f, Sw, Sh);
 
+            // SV square: white base, then the saturation ramp TINTED WITH THE LIVE HUE, then the
+            // value ramp. Layer 2's tint is why dragging the hue strip re-colours the square with
+            // no mesh rebuild — the vertex shader does InColor * Tint.
+            float Qx, Qy, Qw, Qh;
+            Picker::SquareRect(PickX, PickY, PickW, PickSwatchH, PickSquareH, PickGap,
+                               Qx, Qy, Qw, Qh);
+            using Lur::Math::Mat4;
+            float Hr = 0, Hg = 0, Hb = 0;
+            CMath::HueColor(PickH_, Hr, Hg, Hb);
+            Renderer->SetMaterialTint(PickHueMat, {Hr, Hg, Hb, 1.0f});
+            const Mat4 SquareXf = Mat4::Translation({Qx, Qy, 0.0f}) * Mat4::Scale({Qw, Qh, 1.0f});
+            Blit(WhiteMat, Qx + Qw * 0.5f, Qy + Qh * 0.5f, Qw, Qh);
+            Renderer->DrawMesh(SvSatMesh, PickHueMat, SquareXf);
+            Renderer->DrawMesh(SvValMesh, WhiteMat, SquareXf);
+            // Reticle: a small cross-free box, drawn twice for a light-on-dark outline so it stays
+            // visible against both the white and the black corners of the square.
+            float Rx2 = 0, Ry2 = 0;
+            Picker::SvPoint(Qx, Qy, Qw, Qh, PickS_, PickV_, Rx2, Ry2);
+            const float RetS = 9.0f * HS;
+            Blit(WhiteMat, Rx2, Ry2, RetS + 3.0f * HS, RetS + 3.0f * HS);
+            Renderer->SetMaterialTint(PickAlphaMat, {Ch[0], Ch[1], Ch[2], 1.0f});
+            Blit(PickAlphaMat, Rx2, Ry2, RetS, RetS);
+
+            // Hue strip + its knob.
+            float Hx, Hy, Hw, Hh;
+            Picker::HueRect(PickX, PickY, PickW, PickSwatchH, PickSquareH, PickStripH, PickGap,
+                            Hx, Hy, Hw, Hh);
+            Renderer->DrawMesh(HueStripMesh, WhiteMat,
+                               Mat4::Translation({Hx, Hy, 0.0f}) * Mat4::Scale({Hw, Hh, 1.0f}));
+            const float HueKnobX = Lur::DevGui::Slider::KnobX(Hx, Hw, PickKnobW, PickH_, 0.0f, 1.0f);
+            Blit(WhiteMat, HueKnobX, Hy + Hh * 0.5f, PickKnobW * 0.5f, Hh + 4.0f * HS);
+
+            // Alpha strip: the current colour ramped transparent -> opaque over the key plate, so
+            // the ramp reads as transparency rather than as a fade to black.
+            float Ax, Ay, Aw, Ah;
+            Picker::AlphaRect(PickX, PickY, PickW, PickSwatchH, PickSquareH, PickStripH, PickGap,
+                              Ax, Ay, Aw, Ah);
+            Blit(DevKeyMat, Ax + Aw * 0.5f, Ay + Ah * 0.5f, Aw, Ah);
+            Renderer->DrawMesh(SvSatMesh, PickAlphaMat,
+                               Mat4::Translation({Ax, Ay, 0.0f}) * Mat4::Scale({Aw, Ah, 1.0f}));
+            const float AKnobX = Lur::DevGui::Slider::KnobX(Ax, Aw, PickKnobW, PickA_, 0.0f, 1.0f);
+            Blit(WhiteMat, AKnobX, Ay + Ah * 0.5f, PickKnobW * 0.5f, Ah + 4.0f * HS);
+
+            // Numeric readouts — updated by EITHER drag, which is the point of showing them.
+            float Tx2, Ty2, Tw2, Th2;
+            Picker::ReadoutRect(PickX, PickY, PickW, PickSwatchH, PickSquareH, PickStripH,
+                                PickReadoutH, PickGap, Tx2, Ty2, Tw2, Th2);
+            const float CellW = Tw2 / static_cast<float>(Picker::Channels);
             for (int I = 0; I < Picker::Channels; ++I) {
-                float Rx, Ry, Rw, Rh;
-                Picker::RowRect(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap, I,
-                                Rx, Ry, Rw, Rh);
-                Text.Draw(Renderer, Picker::ChannelLabel(I), Rx, Ry, PickLabelW, Rh, 12.0f * HS,
-                          Ink, Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
-
-                float Tx, Ty, Tw, Th;
-                Picker::TrackRect(PickX, PickY, PickW, PickRowH, PickSwatchH, PickGap, I,
-                                  PickLabelW, PickValueW, Tx, Ty, Tw, Th);
-                // Track, then the filled portion, then the knob — painter's order, no depth.
-                Blit(DevKeyMat, Tx + Tw * 0.5f, Ty + Th * 0.5f, Tw, Th - 8.0f * HS);
-                const float KnobCx =
-                    Lur::DevGui::Slider::KnobX(Tx, Tw, PickKnobW, Ch[I], 0.0f, 1.0f);
-                const float FillW = KnobCx - Tx;
-                if (FillW > 0.0f)
-                    Blit(DevAccentMat, Tx + FillW * 0.5f, Ty + Th * 0.5f, FillW, Th - 10.0f * HS);
-                Blit(DevAccentMat, KnobCx, Ty + Th * 0.5f, PickKnobW, Th - 2.0f * HS);
-
-                char Vs[16];
-                std::snprintf(Vs, sizeof(Vs), "%.2f", static_cast<double>(Ch[I]));
-                Text.Draw(Renderer, Vs, Rx + Rw - PickValueW, Ry, PickValueW - 4.0f * HS, Rh,
-                          11.0f * HS, Ink, Lur::Text::EHAlign::Right,
+                char Vs[24];
+                std::snprintf(Vs, sizeof(Vs), "%s %.2f", Picker::ChannelLabel(I),
+                              static_cast<double>(Ch[I]));
+                Text.Draw(Renderer, Vs, Tx2 + static_cast<float>(I) * CellW, Ty2, CellW, Th2,
+                          10.5f * HS, Ink, Lur::Text::EHAlign::Center,
                           Lur::Text::EVAlign::Middle);
             }
 

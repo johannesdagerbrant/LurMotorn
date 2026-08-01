@@ -284,6 +284,20 @@ private:
     static constexpr int DevRowSwatchCount = 16;
     Lur::Render::MaterialHandle DevRowSwatchMat[DevRowSwatchCount] = {};
     int                ColorRowsDrawn_ = 0;         //   reset each frame; indexes the ring
+    // ---- #174 colour picker v2 ----
+    Lur::Render::MeshHandle     SvSatMesh = 0;      // white alpha ramp across X (saturation)
+    Lur::Render::MeshHandle     SvValMesh = 0;      // black alpha ramp down Y (value)
+    Lur::Render::MeshHandle     HueStripMesh = 0;   // 6-segment hue wheel, per-vertex coloured
+    Lur::Render::MaterialHandle PickHueMat = 0;     // retinted with the LIVE hue each frame
+    Lur::Render::MaterialHandle PickAlphaMat = 0;   // retinted with the live RGB for the A strip
+    // The picker's WORKING state. H,S,V are authoritative while it is open and RGBA is written
+    // out; HSV is re-derived from the CVar only when the binding changes or the value is edited
+    // from OUTSIDE (console, reset button). RGB->HSV is lossy at the grey/black/white corners —
+    // hue is undefined when S or V is 0 — so round-tripping every frame would snap the hue handle
+    // to red the instant a drag reaches an edge of the square.
+    float              PickH_ = 0.0f, PickS_ = 0.0f, PickV_ = 0.0f, PickA_ = 1.0f;
+    Lur::Core::ICVar*  PickBound_ = nullptr;        // which cvar the working state describes
+    float              PickWrote_[4] = {0, 0, 0, 0};// last RGBA we wrote, to detect external edits
     CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
     void*              CvCommitCtx_ = nullptr;
     // #119 keyboard queue: written by the input thread, drained by the render thread inside

@@ -1,23 +1,35 @@
 #pragma once
-// Lur::DevGui::ColorPicker — the v1 RGBA picker (#117), a popover the console opens for a
-// CVar<Color> row in place of the numpad. A colour is four numbers, and typing them one at a
-// time through a numeric pad is not editing a colour: you cannot see what you are making.
+// Lur::DevGui::ColorPicker — the console's colour editor (#117 v1, #174 v2), a popover opened
+// for a CVar<Color> row where the numpad would go. A colour is four numbers, and typing them one
+// at a time through a numeric pad means never seeing what you are making.
 //
-// Layout:  [ swatch                          ]
-//          R  [=========o===============]
-//          G  [==o======================]
-//          B  [==============o==========]
-//          A  [========================o]
+// Layout:  +-----------------------+  <- swatch (the CVar's live value)
+//          |                       |
+//          |     S V   s q u a r e |  <- saturation across, brightness/value down
+//          |                       |
+//          +-----------------------+
+//          [######## hue ##########]  <- hue strip
+//           R 0.88  G 0.31  B 0.22  A 1.00   <- readouts, updated live by either drag
 //
-// v2 (the HSV square + hue strip) is deliberately NOT here. It needs per-vertex-coloured
-// gradient triangles, and whether DrawGlyphs can draw untextured — or whether we owe the
-// renderer a DrawVerts / 1px-white-texture path — is an open question (spec §7). Four sliders
-// and a live swatch make CVar<Color> fully usable today without answering it.
+// HOW THE SV SQUARE IS BUILT (correctness-critical, and the reason v2 was once deferred):
+// three layers, which is what makes it exactly S(horizontal) x V(vertical).
+//   1. a white quad;
+//   2. a quad whose vertex ALPHA ramps 0 -> 1 left to right, material-tinted with the CURRENT
+//      HUE — so dragging the hue strip re-tints it via SetMaterialTint with no mesh rebuild;
+//   3. a black quad whose vertex alpha ramps 0 -> 1 top to bottom.
+// Compositing 1+2 gives white -> hue across (saturation); 3 darkens downward (value).
 //
-// PURE geometry + hit-testing, like Numpad: one function produces the rect the renderer draws
-// and the tap tests, so a visible control is always pressable. The host owns the colour; this
-// type holds no state at all, which is what makes a drag trivially correct (there is nothing
-// to keep in sync with the CVar).
+// Spec §7 asked whether this needed a renderer extension (DrawGlyphs untextured, or a new
+// DrawVerts / 1px-white texture). It does not: Lur::Render::Vertex already carries a Vec4 colour
+// and meshes with per-vertex colour are already built for the field backdrop.
+//
+// WORKING-STATE RULE: the host keeps H,S,V as the picker's live state while it is open and writes
+// RGBA out to the CVar. It must only re-derive HSV from the CVar when the bound value changes
+// EXTERNALLY. RGB->HSV is lossy at the grey/black/white corners (hue is undefined when S or V is
+// 0), so round-tripping every frame snaps the hue handle to red the instant you drag into one.
+//
+// PURE geometry + hit-testing, like Numpad: one function produces the rect the renderer draws and
+// the tap tests, so a visible control is always pressable. Holds no state.
 #include "Lur/DevGui/Widgets.h"
 
 namespace Lur::DevGui {
@@ -31,58 +43,81 @@ struct ColorPicker {
         return (I >= 0 && I < Channels) ? L[I] : "";
     }
 
-    // Total height for a panel with the given row metrics, so the caller can place the popover
-    // (PlaceBelowOrAbove needs the height BEFORE anything is laid out).
-    static float PanelH(float RowH, float SwatchH, float Gap) {
-        return SwatchH + Gap + static_cast<float>(Channels) * (RowH + Gap);
+    // What a press landed on. The host needs to distinguish these because they write different
+    // parts of the working state: the square sets S and V, the strip sets H, and alpha is its own
+    // channel that neither touches.
+    enum class EHit { None, SvSquare, HueStrip, AlphaStrip };
+
+    // Total height, so the caller can place the popover before anything is laid out
+    // (PlaceBelowOrAbove needs the height up front).
+    static float PanelH(float SwatchH, float SquareH, float StripH, float ReadoutH, float Gap) {
+        return SwatchH + Gap + SquareH + Gap + StripH + Gap + StripH + Gap + ReadoutH;
     }
 
     static void SwatchRect(float X, float Y, float W, float SwatchH,
                            float& Rx, float& Ry, float& Rw, float& Rh) {
         Rx = X; Ry = Y; Rw = W; Rh = SwatchH;
     }
-
-    // Row I's full-width band — the hit target. Deliberately the WHOLE row, not just the track:
-    // on a phone a 4 px knob is unhittable, and point-anywhere is the standard behaviour anyway.
-    static void RowRect(float X, float Y, float W, float RowH, float SwatchH, float Gap, int I,
-                        float& Rx, float& Ry, float& Rw, float& Rh) {
+    static void SquareRect(float X, float Y, float W, float SwatchH, float SquareH, float Gap,
+                           float& Rx, float& Ry, float& Rw, float& Rh) {
+        Rx = X; Ry = Y + SwatchH + Gap; Rw = W; Rh = SquareH;
+    }
+    static void HueRect(float X, float Y, float W, float SwatchH, float SquareH, float StripH,
+                        float Gap, float& Rx, float& Ry, float& Rw, float& Rh) {
+        Rx = X; Ry = Y + SwatchH + Gap + SquareH + Gap; Rw = W; Rh = StripH;
+    }
+    static void AlphaRect(float X, float Y, float W, float SwatchH, float SquareH, float StripH,
+                          float Gap, float& Rx, float& Ry, float& Rw, float& Rh) {
+        Rx = X; Ry = Y + SwatchH + Gap + SquareH + Gap + StripH + Gap; Rw = W; Rh = StripH;
+    }
+    static void ReadoutRect(float X, float Y, float W, float SwatchH, float SquareH, float StripH,
+                            float ReadoutH, float Gap,
+                            float& Rx, float& Ry, float& Rw, float& Rh) {
         Rx = X;
-        Ry = Y + SwatchH + Gap + static_cast<float>(I) * (RowH + Gap);
-        Rw = W;
-        Rh = RowH;
+        Ry = Y + SwatchH + Gap + SquareH + Gap + StripH + Gap + StripH + Gap;
+        Rw = W; Rh = ReadoutH;
     }
 
-    // The slider track inside a row, after the channel letter and before the numeric readout.
-    static void TrackRect(float X, float Y, float W, float RowH, float SwatchH, float Gap, int I,
-                          float LabelW, float ValueW,
-                          float& Tx, float& Ty, float& Tw, float& Th) {
+    // Saturation/value at a point in the square. Saturation runs left(0) -> right(1); VALUE runs
+    // top(1) -> bottom(0), the conventional orientation — bright at the top, black along the
+    // bottom edge. Clamped, so a drag that leaves the square pins to the edge instead of jumping.
+    static void SvAt(float Sx, float Sy, float Sw, float Sh, float Px, float Py,
+                     float& OutS, float& OutV) {
+        float S = (Sw > 0.0f) ? (Px - Sx) / Sw : 0.0f;
+        float V = (Sh > 0.0f) ? 1.0f - (Py - Sy) / Sh : 0.0f;
+        OutS = S < 0.0f ? 0.0f : (S > 1.0f ? 1.0f : S);
+        OutV = V < 0.0f ? 0.0f : (V > 1.0f ? 1.0f : V);
+    }
+    // Inverse: where the reticle is drawn for the current S,V.
+    static void SvPoint(float Sx, float Sy, float Sw, float Sh, float S, float V,
+                        float& OutX, float& OutY) {
+        OutX = Sx + S * Sw;
+        OutY = Sy + (1.0f - V) * Sh;
+    }
+
+    // Hit-test a press against the interactive parts, in draw order. Returns what was hit and
+    // writes the value(s) it selects. A press ANYWHERE in a region acts — a knob a few pixels
+    // wide is unhittable on a phone, and point-anywhere is the standard behaviour regardless.
+    static EHit Hit(float X, float Y, float W, float SwatchH, float SquareH, float StripH,
+                    float Gap, float KnobW, float Px, float Py,
+                    float& OutA, float& OutB) {
         float Rx, Ry, Rw, Rh;
-        RowRect(X, Y, W, RowH, SwatchH, Gap, I, Rx, Ry, Rw, Rh);
-        Tx = Rx + LabelW;
-        Ty = Ry;
-        Tw = Rw - LabelW - ValueW;
-        if (Tw < 1.0f) Tw = 1.0f;
-        Th = Rh;
-    }
-
-    // Hit-test a press. Returns the channel index touched (0..3) and writes the value it
-    // selects, or -1 for a press that missed every row. Channels are 0..1 — the picker is the
-    // one place a colour IS clamped, because a swatch cannot show you 2.0 and a slider has
-    // nowhere to put it. (Typing an out-of-range channel in the console still works; see
-    // ColorString.h.)
-    static int Tap(float X, float Y, float W, float RowH, float SwatchH, float Gap,
-                   float LabelW, float ValueW, float KnobW, float Px, float Py,
-                   float& OutValue) {
-        for (int I = 0; I < Channels; ++I) {
-            float Rx, Ry, Rw, Rh;
-            RowRect(X, Y, W, RowH, SwatchH, Gap, I, Rx, Ry, Rw, Rh);
-            if (!HitRect(Rx, Ry, Rw, Rh, Px, Py)) continue;
-            float Tx, Ty, Tw, Th;
-            TrackRect(X, Y, W, RowH, SwatchH, Gap, I, LabelW, ValueW, Tx, Ty, Tw, Th);
-            OutValue = Slider::ValueAt(Tx, Tw, KnobW, Px, 0.0f, 1.0f);
-            return I;
+        SquareRect(X, Y, W, SwatchH, SquareH, Gap, Rx, Ry, Rw, Rh);
+        if (HitRect(Rx, Ry, Rw, Rh, Px, Py)) {
+            SvAt(Rx, Ry, Rw, Rh, Px, Py, OutA, OutB);   // OutA = S, OutB = V
+            return EHit::SvSquare;
         }
-        return -1;
+        HueRect(X, Y, W, SwatchH, SquareH, StripH, Gap, Rx, Ry, Rw, Rh);
+        if (HitRect(Rx, Ry, Rw, Rh, Px, Py)) {
+            OutA = Slider::ValueAt(Rx, Rw, KnobW, Px, 0.0f, 1.0f);  // OutA = H
+            return EHit::HueStrip;
+        }
+        AlphaRect(X, Y, W, SwatchH, SquareH, StripH, Gap, Rx, Ry, Rw, Rh);
+        if (HitRect(Rx, Ry, Rw, Rh, Px, Py)) {
+            OutA = Slider::ValueAt(Rx, Rw, KnobW, Px, 0.0f, 1.0f);  // OutA = alpha
+            return EHit::AlphaStrip;
+        }
+        return EHit::None;
     }
 };
 
