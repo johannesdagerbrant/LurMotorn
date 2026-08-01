@@ -31,6 +31,14 @@ public:
                                  Lur::Text::EVAlign VAlign = Lur::Text::EVAlign::Top,
                                  bool Wrap = true) const;
 
+    // Measure WITHOUT drawing: the wrapped block's pixel size and line count. For callers that
+    // must size a panel to its content before they can draw into it — the console's toaster
+    // (#176), which was built for a one-line tooltip and crammed multi-line command output into
+    // the same fixed box. The font is private, so measuring is not otherwise reachable.
+    // Returns false (and zeroes the outputs) before CreateResources has bound a font.
+    bool Measure(const char* Text, float MaxWidthPx, float PixelSize, bool Wrap,
+                 float& OutWidthPx, float& OutHeightPx, int& OutLineCount) const;
+
     void SetDebugOverflow(bool On) { DebugOverflow = On; }
 
 private:

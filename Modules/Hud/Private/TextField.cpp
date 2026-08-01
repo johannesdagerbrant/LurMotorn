@@ -79,4 +79,15 @@ Lur::Text::LayoutResult TextField::Draw(Lur::Render::IRenderer* Renderer, const 
     return R;
 }
 
+bool TextField::Measure(const char* Text, float MaxWidthPx, float PixelSize, bool Wrap,
+                        float& OutWidthPx, float& OutHeightPx, int& OutLineCount) const {
+    OutWidthPx = 0.0f;
+    OutHeightPx = 0.0f;
+    OutLineCount = 0;
+    if (Font == nullptr || Text == nullptr) return false;
+    Lur::Text::MeasureText(*Font, Text, static_cast<int>(std::strlen(Text)), MaxWidthPx,
+                           PixelSize, Wrap, OutWidthPx, OutHeightPx, OutLineCount);
+    return true;
+}
+
 } // namespace Lur::Hud

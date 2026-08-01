@@ -256,7 +256,13 @@ private:
     std::atomic<float> DevTapY_{-1.0e9f};
     std::atomic<bool>  DevTapPending_{false};
     bool               DevOverlayOpen_ = false;     // console shown? (two-finger triple-tap / desktop §)
-    Lur::Core::ICVar*  SelectedCvar_ = nullptr;     // highlighted cvar (numpad target)
+    Lur::Core::ICVar*  SelectedCvar_ = nullptr;     // the OPEN EDITOR's target (numpad/picker)
+    // #173: the keyboard highlight, distinct from SelectedCvar_. Arrows move it; Enter promotes it
+    // to the editor. Held as a KEY, never an index into the flattened row list — that list is
+    // rebuilt each frame and its indices shift whenever a category folds. Exactly one is active:
+    // HiCvar_ for a cvar row, HiCat_ (a category PATH) for a header, neither before first use.
+    Lur::Core::ICVar*  HiCvar_ = nullptr;
+    std::string        HiCat_;
     std::unordered_set<std::string> CollapsedCats_; // folded category headers, keyed by FULL path
     std::atomic<float> DevScrollAccum_{0.0f};       // input-thread scroll delta -> render thread
     float              ScrollY_ = 0.0f;             // console scroll offset (px into the content)
@@ -271,6 +277,13 @@ private:
     bool               PickerOpen_ = false;
     Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
     Lur::Render::MaterialHandle DevSwatchMat = 0;   //   #117 picker swatch: retinted, not recreated
+    // #175: a small RING of materials for the colour-row swatches. One per VISIBLE colour row is
+    // all that is ever needed (rows outside the clip band are not drawn), and reusing them means
+    // the draw loop never calls CreateMaterial — which allocates a descriptor set and grows a
+    // vector nothing reclaims. 16 is far more colour cvars than will ever share a screen.
+    static constexpr int DevRowSwatchCount = 16;
+    Lur::Render::MaterialHandle DevRowSwatchMat[DevRowSwatchCount] = {};
+    int                ColorRowsDrawn_ = 0;         //   reset each frame; indexes the ring
     CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
     void*              CvCommitCtx_ = nullptr;
     // #119 keyboard queue: written by the input thread, drained by the render thread inside

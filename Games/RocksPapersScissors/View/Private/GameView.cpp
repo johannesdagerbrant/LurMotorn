@@ -362,6 +362,9 @@ void GameView::CreateResources(IRenderer* Renderer) {
     DevKeyMat    = FlatMat(Renderer, Lur::DevGui::DevTheme::KeyFace);
     // #117: the picker's swatch, retinted each frame via SetMaterialTint (never re-created).
     DevSwatchMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
+    // #175: the colour-row swatch ring, retinted per visible row each frame.
+    for (int I = 0; I < DevRowSwatchCount; ++I)
+        DevRowSwatchMat[I] = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
 #endif
 
     Font.Init(Lur::Text::InterFont());
@@ -1790,7 +1793,73 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             NumpadOpen_ = false;
         };
 
-        // ---- Physical keyboard (#119) — desktop in practice, ADDITIVE to the on-screen pad ----
+        // ---- #173: the keyboard HIGHLIGHT — a cursor over the flattened row list ----
+        // Stored as a KEY (cvar pointer / category path), never an index. Vis is rebuilt every
+        // frame and its indices shift the moment any category folds, so an index would quietly
+        // start pointing at a different row after an expand/collapse.
+        //
+        // The highlight is DISTINCT from SelectedCvar_, which is the open editor's target. Arrows
+        // move the highlight; Enter promotes it to the editor. Tapping still does both at once, so
+        // the phone (which has no keyboard) behaves exactly as before.
+        auto HighlightIndex = [&]() -> int {
+            for (std::size_t I = 0; I < Vis.size(); ++I) {
+                if (Vis[I].Kind == 1 && HiCvar_ != nullptr && Vis[I].Cv == HiCvar_)
+                    return static_cast<int>(I);
+                if (Vis[I].Kind == 0 && !HiCat_.empty() && Vis[I].Node->Path == HiCat_)
+                    return static_cast<int>(I);
+            }
+            return -1;
+        };
+        auto SetHighlight = [&](const VItem& It) {
+            if (It.Kind == 1) { HiCvar_ = It.Cv; HiCat_.clear(); }
+            else              { HiCvar_ = nullptr; HiCat_ = It.Node->Path; }
+            // Follow the cursor with the viewport. Without this, Down walks the highlight off the
+            // bottom of the clip band and keeps going invisibly — so the list appears frozen and
+            // then jumps several rows when you finally press Enter.
+            const float RowH2 = (It.Kind == 0) ? CatH : LineH;
+            if (It.Cy < ScrollY_) ScrollY_ = It.Cy;
+            else if (It.Cy + RowH2 > ScrollY_ + ViewH) ScrollY_ = It.Cy + RowH2 - ViewH;
+            if (ScrollY_ < 0.0f) ScrollY_ = 0.0f;
+            if (ScrollY_ > MaxScroll) ScrollY_ = MaxScroll;
+        };
+        auto MoveHighlight = [&](int Delta) {
+            if (Vis.empty()) return;
+            int I = HighlightIndex();
+            // Nothing highlighted yet: Down starts at the top, Up starts at the bottom.
+            if (I < 0) I = (Delta > 0) ? -1 : static_cast<int>(Vis.size());
+            I += Delta;
+            if (I < 0) I = 0;
+            if (I >= static_cast<int>(Vis.size())) I = static_cast<int>(Vis.size()) - 1;
+            SetHighlight(Vis[static_cast<std::size_t>(I)]);
+        };
+        // Enter with no editor open: act on whatever is highlighted.
+        auto OpenHighlighted = [&]() {
+            if (!HiCat_.empty()) {   // a category folds/unfolds — its only meaningful action
+                if (CollapsedCats_.find(HiCat_) != CollapsedCats_.end()) CollapsedCats_.erase(HiCat_);
+                else CollapsedCats_.insert(HiCat_);
+                return;
+            }
+            if (HiCvar_ == nullptr) return;
+            if (HiCvar_->IsBool()) {
+                // A bool has no editor to open — a numpad for a two-state knob is a keypad to type
+                // "1" into. Enter toggles it in place, matching what a TAP on a bool row does.
+                HiCvar_->SetFromString(HiCvar_->RawValue() != 0 ? "false" : "true");
+                if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *HiCvar_);
+                return;
+            }
+            SelectedCvar_ = HiCvar_;
+            Numpad_.Clear();
+            NumpadOpen_ = !HiCvar_->IsColor();
+            PickerOpen_ = HiCvar_->IsColor();
+        };
+        auto ScrubHighlighted = [&](int Steps) {
+            // Left/Right move the LIVE value. ICVar::Nudge picks the step from T and declines on
+            // an enum, which leaves the value untouched and uncommitted.
+            if (HiCvar_ == nullptr) return;
+            if (HiCvar_->Nudge(Steps) && CvCommitFn_) CvCommitFn_(CvCommitCtx_, *HiCvar_);
+        };
+
+        // ---- Physical keyboard (#119/#173) — desktop in practice, ADDITIVE to the on-screen pad ----
         // Nothing here draws: the console renders identically on both platforms, and a phone
         // simply never queues a key. Drained before the taps so a keystroke and a click in the
         // same frame resolve in the order a human would expect.
@@ -1804,29 +1873,31 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 char Ch = '\0';
                 if (Vk >= 0x30 && Vk <= 0x39)      Ch = static_cast<char>('0' + (Vk - 0x30));
                 else if (Vk >= 0x60 && Vk <= 0x69) Ch = static_cast<char>('0' + (Vk - 0x60));
-                else if (Vk == 0xBE || Vk == 0x6E) Ch = '.';  // VK_OEM_PERIOD / VK_DECIMAL
+                else if (Vk == 0xBE || Vk == 0x6E) Ch = '.';   // VK_OEM_PERIOD / VK_DECIMAL
+                else if (Vk == 0xBD || Vk == 0x6D) Ch = '-';   // VK_OEM_MINUS / VK_SUBTRACT
 
                 if (Ch != '\0') {
-                    // Typing on a selected numeric row opens the pad if a click hasn't already,
-                    // so "click the row, then type" works without a second click on the pad.
-                    if (SelectedCvar_ && !SelectedCvar_->IsBool()) NumpadOpen_ = true;
-                    if (NumpadOpen_) Numpad_.Press(Ch);
-                } else if (Vk == 0x0D) {          // VK_RETURN (the numpad's Enter is the same VK)
-                    if (NumpadOpen_) CommitNumpad();
-                } else if (Vk == 0x08) {          // VK_BACK
-                    if (NumpadOpen_) Numpad_.Backspace();
-                } else if (Vk == 0x26 || Vk == 0x28) {  // VK_UP / VK_DOWN — scrub the value
-                    // An arrow means "move the LIVE value", not "edit a pending string", so any
-                    // half-typed buffer is discarded rather than combined — otherwise "12" +
-                    // Up would have two defensible answers and no obvious one. ICVar::Nudge
-                    // picks the step from T; it declines on an enum, and that leaves the value
-                    // untouched and uncommitted. (Its bool branch is unreachable from here today:
-                    // tapping a bool row toggles it and clears the selection, so no bool is ever
-                    // the highlighted row. Correct if that ever changes.)
-                    if (SelectedCvar_ && SelectedCvar_->Nudge(Vk == 0x26 ? +1 : -1)) {
-                        if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *SelectedCvar_);
+                    // Typing on a highlighted numeric row opens the pad without a separate Enter,
+                    // so "arrow to the row, then type" flows.
+                    if (!NumpadOpen_ && !PickerOpen_ && HiCvar_ != nullptr &&
+                        !HiCvar_->IsBool() && !HiCvar_->IsColor()) {
+                        SelectedCvar_ = HiCvar_;
                         Numpad_.Clear();
+                        NumpadOpen_ = true;
                     }
+                    if (NumpadOpen_) Numpad_.Press(Ch);
+                } else if (Vk == 0x0D) {            // VK_RETURN (the pad's Enter is the same VK)
+                    if (NumpadOpen_)      CommitNumpad();
+                    else if (PickerOpen_) PickerOpen_ = false;   // Enter closes the picker too
+                    else                  OpenHighlighted();     // #173
+                } else if (Vk == 0x1B) {            // VK_ESCAPE — dismiss without committing
+                    Numpad_.Clear(); NumpadOpen_ = false; PickerOpen_ = false;
+                } else if (Vk == 0x08) {            // VK_BACK
+                    if (NumpadOpen_) Numpad_.Backspace();
+                } else if (Vk == 0x26 || Vk == 0x28) {           // VK_UP / VK_DOWN
+                    MoveHighlight(Vk == 0x26 ? -1 : +1);         // #173: MOVE, don't scrub
+                } else if (Vk == 0x25 || Vk == 0x27) {           // VK_LEFT / VK_RIGHT
+                    ScrubHighlighted(Vk == 0x27 ? +1 : -1);      // #173: scrub the value
                 }
             }
             if (NKeys > 0) DevKeyCount_.store(0, std::memory_order_release);
@@ -1966,6 +2037,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             }
         }
 
+        ColorRowsDrawn_ = 0;  // #175: rewind the swatch ring for this frame's visible rows
+
         // Row columns (constant right edge, so values align down a true column).
         const float RowPad = 4.0f * HS;
         const float ResetS = LineH - 4.0f * HS;
@@ -1988,15 +2061,24 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     TapY >= Sy && TapY <= Sy + CatH) {
                     if (Collapsed) CollapsedCats_.erase(It.Node->Path);
                     else CollapsedCats_.insert(It.Node->Path);
+                    // #173: a tap moves the keyboard cursor here too, so switching between mouse
+                    // and keyboard mid-session resumes from where you were looking.
+                    HiCvar_ = nullptr; HiCat_ = It.Node->Path;
                     TapUsed = true;
                 }
                 Blit(DevKeyMat, (IndentX + X0 + PW) * 0.5f, Sy + CatH * 0.5f,
                      (X0 + PW - IndentX) - 6.0f * HS, CatH - 3.0f * HS);
+                // #173: categories are highlightable now, so they need the same cursor marker
+                // cvar rows get — otherwise arrowing onto one looks like the highlight vanished.
+                const bool CatHi = !HiCat_.empty() && It.Node->Path == HiCat_;
+                if (CatHi)
+                    Blit(DevAccentMat, IndentX + 2.0f * HS, Sy + CatH * 0.5f, 3.0f * HS,
+                         CatH - 5.0f * HS);
                 char H[96];
                 std::snprintf(H, sizeof(H), "[%c] %s  (%d)", Collapsed ? '+' : '-',
                               It.Node->Segment.c_str(), It.Node->TotalLeaves);
                 Text.Draw(Renderer, H, IndentX + 10.0f * HS, Sy, X0 + PW - IndentX - 14.0f * HS,
-                          CatH, 13.0f * HS, CatInk);
+                          CatH, 13.0f * HS, CatHi ? Accent : CatInk);
                 continue;
             }
 
@@ -2026,6 +2108,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 TapUsed = true;
             } else if (TapPending && !TapUsed && InBand && TapX >= IndentX && TapX <= X0 + PW &&
                        TapY >= Sy && TapY <= Sy + LineH) {
+                HiCvar_ = C; HiCat_.clear();   // #173: mouse and keyboard share one cursor
                 if (C->IsBool()) {
                     // A bool TOGGLES in place (#156) — a numpad for a two-state knob is a keypad to
                     // type "1" into. One tap flips it and commits down the same hook every other
@@ -2034,6 +2117,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                     if (CvCommitFn_) CvCommitFn_(CvCommitCtx_, *C);
                     // Never leave the numpad bound to a row that no longer uses it.
                     if (C == SelectedCvar_) { Numpad_.Clear(); NumpadOpen_ = false; SelectedCvar_ = nullptr; }
+                    PickerOpen_ = false;
                 } else {
                     // A colour gets the picker; everything else gets the numpad (#117).
                     SelectedCvar_ = C;
@@ -2044,7 +2128,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 TapUsed = true;
             }
 
-            const bool Selected = (C == SelectedCvar_);
+            // #173: the row reads as current when the keyboard cursor is on it OR it is the open
+            // editor's target. They are usually the same row; they differ while you arrow away
+            // from an open numpad, and BOTH deserve to be visible when they do.
+            const bool Selected = (C == HiCvar_) || (C == SelectedCvar_);
             // "i" button — active (accent) when a tooltip exists, greyed + inert otherwise.
             Blit(DevKeyMat, InfoX + InfoS * 0.5f, Sy + LineH * 0.5f, InfoS, InfoS);
             Text.Draw(Renderer, "i", InfoX, Sy + (LineH - InfoS) * 0.5f, InfoS, InfoS, 12.0f * HS,
@@ -2060,18 +2147,36 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 Text.Draw(Renderer, "AG", ValX - AgW, Sy, AgW - 3.0f * HS, LineH, 9.5f * HS, DimInk,
                           Lur::Text::EHAlign::Right, Lur::Text::EVAlign::Middle);
             Blit(DevKeyMat, ValX + ValW * 0.5f, Sy + LineH * 0.5f, ValW, LineH - 4.0f * HS);
-            char VS[64];
-            // A bool reads as a CHECKBOX, centred, so it is obvious at a glance that the row is a
-            // toggle and not a number to type into. ASCII on purpose — the MSDF atlas is cooked from
-            // the glyphs we ship, so a ballot-box codepoint is not guaranteed to be in it.
-            if (C->IsBool())
-                std::snprintf(VS, sizeof(VS), "%s", C->RawValue() != 0 ? "[x]" : "[ ]");
-            else if (NumpadOpen_ && Selected) std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
-            else                              std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
-            Text.Draw(Renderer, VS, ValX + 5.0f * HS, Sy, ValW - 10.0f * HS, LineH, 12.5f * HS,
-                      Overridden ? Accent : Ink,
-                      C->IsBool() ? Lur::Text::EHAlign::Center : Lur::Text::EHAlign::Right,
-                      Lur::Text::EVAlign::Middle);
+            if (C->IsColor()) {
+                // #175: a SWATCH where a numeric row draws its value. "0.88 0.31 0.22 1" is not a
+                // colour anyone can read, which defeats the point of having the type at all.
+                // Retinted from a small ring of materials rather than created per row per frame:
+                // CreateMaterial allocates a descriptor set and grows a vector nothing reclaims,
+                // so doing it in a draw loop exhausts the pool (the bug #117 caught in the swatch).
+                float Cc[4] = {0, 0, 0, 1};
+                C->GetColorChannels(Cc);
+                const Lur::Render::MaterialHandle SwMat =
+                    DevRowSwatchMat[ColorRowsDrawn_ % DevRowSwatchCount];
+                Renderer->SetMaterialTint(SwMat, {Cc[0], Cc[1], Cc[2], Cc[3]});
+                ++ColorRowsDrawn_;
+                // Inset so the DevKeyMat plate still frames it — the swatch reads as a value IN
+                // the column, not as the column itself.
+                Blit(SwMat, ValX + ValW * 0.5f, Sy + LineH * 0.5f, ValW - 10.0f * HS,
+                     LineH - 9.0f * HS);
+            } else {
+                char VS[64];
+                // A bool reads as a CHECKBOX, centred, so it is obvious at a glance that the row is a
+                // toggle and not a number to type into. ASCII on purpose — the MSDF atlas is cooked from
+                // the glyphs we ship, so a ballot-box codepoint is not guaranteed to be in it.
+                if (C->IsBool())
+                    std::snprintf(VS, sizeof(VS), "%s", C->RawValue() != 0 ? "[x]" : "[ ]");
+                else if (NumpadOpen_ && Selected) std::snprintf(VS, sizeof(VS), "%s_", Numpad_.Buffer().c_str());
+                else                              std::snprintf(VS, sizeof(VS), "%s", C->ValueString().c_str());
+                Text.Draw(Renderer, VS, ValX + 5.0f * HS, Sy, ValW - 10.0f * HS, LineH, 12.5f * HS,
+                          Overridden ? Accent : Ink,
+                          C->IsBool() ? Lur::Text::EHAlign::Center : Lur::Text::EHAlign::Right,
+                          Lur::Text::EVAlign::Middle);
+            }
             Blit(DevKeyMat, ResetX + ResetS * 0.5f, Sy + LineH * 0.5f, ResetS, ResetS);
             Text.Draw(Renderer, "R", ResetX, Sy + (LineH - ResetS) * 0.5f, ResetS, ResetS,
                       12.0f * HS, Overridden ? Accent : DimInk, Lur::Text::EHAlign::Center,
@@ -2173,16 +2278,37 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                       Lur::Text::EVAlign::Middle);
         }
 
-        // The tooltip toaster — a panel + the cvar's help text, anchored below/above its row.
+        // The toaster — a panel + text, anchored below/above the row it came from. It shows two
+        // very different things: a one-line CVar tooltip (#129, what it was built for) and a
+        // dev-command's result (#116), which is one line PER overridden cvar. The fixed 40 px box
+        // crammed the second case into the first case's height (#176), so MEASURE and size to fit.
         if (!ToastText_.empty()) {
             const float TW = PW - 20.0f * HS, TX = X0 + (PW - TW) * 0.5f;
-            const float TH = 40.0f * HS;
+            const float TPad = 8.0f * HS, TFont = 12.0f * HS;
+            float MW = 0.0f, MH = 0.0f;
+            int MLines = 0;
+            Text.Measure(ToastText_.c_str(), TW - 2.0f * TPad, TFont, /*Wrap*/ true, MW, MH,
+                         MLines);
+            // Floor at the old single-line height so a short tooltip looks unchanged, and CAP at
+            // a fraction of the screen so `dev.list_overrides` on a heavily tuned build produces a
+            // scrollable-looking panel rather than one taller than the display. The text field is
+            // given the FULL measured height and top-aligned, so an over-cap block is clipped from
+            // the bottom — losing the tail, which is far better than losing the top.
+            const float TMin = 40.0f * HS, TMax = HeightPx * 0.55f;
+            float TH = MH + 2.0f * TPad;
+            if (TH < TMin) TH = TMin;
+            if (TH > TMax) TH = TMax;
             const float TAnchorY = RowScreenY(ToastCvar_, HeightPx * 0.4f);
             const float TY = Lur::DevGui::PlaceBelowOrAbove(TAnchorY, LineH, TH, NumGap, HeightPx);
             Blit(DevPanelMat, TX + TW * 0.5f, TY + TH * 0.5f, TW, TH);
             Blit(DevAccentMat, TX + TW * 0.5f, TY + 2.0f * HS, TW, 2.0f * HS);  // accent top edge
-            Text.Draw(Renderer, ToastText_.c_str(), TX + 8.0f * HS, TY, TW - 16.0f * HS, TH,
-                      12.0f * HS, Ink, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
+            // Multi-line output reads top-down; a single line still wants to be centred, which is
+            // what the TMin floor plus Middle would give — so pick the alignment from the content.
+            const bool Multi = MLines > 1;
+            Text.Draw(Renderer, ToastText_.c_str(), TX + TPad, TY + (Multi ? TPad : 0.0f),
+                      TW - 2.0f * TPad, TH - (Multi ? 2.0f * TPad : 0.0f), TFont, Ink,
+                      Lur::Text::EHAlign::Left,
+                      Multi ? Lur::Text::EVAlign::Top : Lur::Text::EVAlign::Middle);
         }
 
         if (TapPending) DevTapPending_.store(false, std::memory_order_release);  // one-shot
