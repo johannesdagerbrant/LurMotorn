@@ -1836,7 +1836,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                                                           NumGap, HeightPx) + 5.0f * HS;
         // Cancel: a small 4th button just right of the top row (1 2 3 -> x) that closes the
         // numpad WITHOUT committing a value. Hit-tested before the grid.
-        const float NumKeyH = (NumH - NumGap * 3.0f) / 4.0f;
+        // Derived from the pad's OWN row count — a hardcoded 4 here silently mis-placed the
+        // cancel button the moment the layout grew a row.
+        const float NumKeyH = (NumH - NumGap * (Lur::DevGui::Numpad::Rows - 1)) /
+                              static_cast<float>(Lur::DevGui::Numpad::Rows);
         const float CancelS = NumKeyH * 0.62f;
         const float CancelX = NumX + NumW + 6.0f * HS;
         const float CancelY = NumY + (NumKeyH - CancelS) * 0.5f;
@@ -1966,21 +1969,35 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Blit(DevAccentMat, TrackX + TrackW * 0.5f, ThumbY + ThumbH * 0.5f, TrackW, ThumbH);
         }
 
-        // The numpad: a backing panel + the 4x3 key grid (shared KeyRect geometry).
+        // The numpad: a backing panel + the key grid (shared KeyRect geometry).
         if (NumpadOpen_) {
+            using Pad = Lur::DevGui::Numpad;
             Blit(DevPanelMat, NumX + NumW * 0.5f, NumY + NumH * 0.5f, NumW + 10.0f * HS,
                  NumH + 10.0f * HS);
-            for (int R = 0; R < Lur::DevGui::Numpad::Rows; ++R)
-                for (int C = 0; C < Lur::DevGui::Numpad::Cols; ++C) {
+            for (int R = 0; R < Pad::Rows; ++R) {
+                // Enter spans its whole row: draw it ONCE across RowRect instead of per cell,
+                // or the label would be stamped in each column of the strip.
+                if (R == Pad::EnterRow) {
                     float Kx, Ky, Kw, Kh;
-                    Lur::DevGui::Numpad::KeyRect(NumX, NumY, NumW, NumH, NumGap, R, C, Kx, Ky, Kw, Kh);
-                    const bool Ent = Lur::DevGui::Numpad::IsEnter(R, C);
-                    Blit(Ent ? DevAccentMat : DevKeyMat, Kx + Kw * 0.5f, Ky + Kh * 0.5f, Kw, Kh);
-                    Text.Draw(Renderer, Lur::DevGui::Numpad::Label(R, C), Kx, Ky, Kw, Kh,
-                              Ent ? 15.0f * HS : 22.0f * HS,
-                              Ent ? Lur::Render::Color{0.04f, 0.07f, 0.07f, 1.0f} : Ink,
+                    Pad::RowRect(NumX, NumY, NumW, NumH, NumGap, R, Kx, Ky, Kw, Kh);
+                    Blit(DevAccentMat, Kx + Kw * 0.5f, Ky + Kh * 0.5f, Kw, Kh);
+                    Text.Draw(Renderer, Pad::Label(R, 0), Kx, Ky, Kw, Kh, 15.0f * HS,
+                              Lur::Render::Color{0.04f, 0.07f, 0.07f, 1.0f},
+                              Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
+                    continue;
+                }
+                for (int C = 0; C < Pad::Cols; ++C) {
+                    float Kx, Ky, Kw, Kh;
+                    Pad::KeyRect(NumX, NumY, NumW, NumH, NumGap, R, C, Kx, Ky, Kw, Kh);
+                    const char* Lbl = Pad::Label(R, C);
+                    Blit(DevKeyMat, Kx + Kw * 0.5f, Ky + Kh * 0.5f, Kw, Kh);
+                    // "+/-" is three glyphs where the digits are one — shrink it so it fits
+                    // the key instead of overflowing into its neighbours.
+                    const float FontPx = (std::strlen(Lbl) > 1 ? 15.0f : 22.0f) * HS;
+                    Text.Draw(Renderer, Lbl, Kx, Ky, Kw, Kh, FontPx, Ink,
                               Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
                 }
+            }
             // Cancel "x" — small, right of the top row; dismisses without writing.
             const Lur::Render::Color Warn{0.94f, 0.52f, 0.46f, 1.0f};
             Blit(DevKeyMat, CancelX + CancelS * 0.5f, CancelY + CancelS * 0.5f, CancelS, CancelS);

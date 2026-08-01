@@ -24,29 +24,84 @@ static int GFailures = 0;
 static void TestLayout() {
     CHECK(std::string(Numpad::Label(0, 0)) == "1");
     CHECK(std::string(Numpad::Label(2, 2)) == "9");
-    CHECK(std::string(Numpad::Label(3, 0)) == ".");
+    // Bottom digit row: sign LEFT of 0, dot RIGHT of it.
+    CHECK(std::string(Numpad::Label(3, 0)) == "+/-");
     CHECK(std::string(Numpad::Label(3, 1)) == "0");
-    CHECK(std::string(Numpad::Label(3, 2)) == "Enter");
-    CHECK(Numpad::IsEnter(3, 2) && !Numpad::IsEnter(0, 0));
+    CHECK(std::string(Numpad::Label(3, 2)) == ".");
+    // Enter is the row below, spanning it entirely.
+    CHECK(Numpad::IsEnter(Numpad::EnterRow, 0) && !Numpad::IsEnter(0, 0));
+    CHECK(!Numpad::IsEnter(3, 2));  // the dot key is NOT part of the Enter strip
 }
 
 static void TestPressBuildsBuffer() {
     Numpad N;
     N.Press(0, 0);  // 1
     N.Press(3, 1);  // 0
-    N.Press(3, 0);  // .
+    N.Press(3, 2);  // .
     N.Press(1, 1);  // 5
     CHECK(N.Buffer() == "10.5");
     CHECK(!N.TakeEnter());
-    N.Press(3, 0);  // second '.' ignored
+    N.Press(3, 2);  // second '.' ignored
     CHECK(N.Buffer() == "10.5");
     N.Backspace();
     CHECK(N.Buffer() == "10.");
-    N.Press(3, 2);  // Enter
+    N.Press(Numpad::EnterRow, 0);  // Enter
     CHECK(N.TakeEnter());
     CHECK(!N.TakeEnter());  // one-shot
     N.Clear();
     CHECK(N.Buffer().empty());
+}
+
+// The sign key is what makes a negative value expressible at all. Tapping "+/-" and typing
+// '-' must be the same action, or the pad and the keyboard disagree about one widget.
+static void TestSignKey() {
+    Numpad N;
+    N.Press(3, 0);  // +/- on an EMPTY buffer: leaves a lone '-' so "sign then digits" works
+    CHECK(N.Buffer() == "-");
+    N.Press(1, 1);  // 5
+    N.Press(3, 2);  // .
+    N.Press(0, 0);  // 1
+    CHECK(N.Buffer() == "-5.1");
+
+    N.Press(3, 0);  // toggles back off — the minus is removed, the digits are untouched
+    CHECK(N.Buffer() == "5.1");
+    N.Press(3, 0);
+    CHECK(N.Buffer() == "-5.1");
+
+    // The sign lives at the FRONT however it was reached, so backspace still eats digits.
+    N.Backspace();
+    CHECK(N.Buffer() == "-5.");
+
+    // '-' typed on the keyboard toggles rather than appends: a blind append would make "5-"
+    // reachable by keyboard and not by pad.
+    Numpad K;
+    for (char C : std::string("5.1")) CHECK(K.Press(C));
+    CHECK(K.Press('-'));
+    CHECK(K.Buffer() == "-5.1");
+    CHECK(K.Press('-'));
+    CHECK(K.Buffer() == "5.1");
+}
+
+// Enter is one key spanning the whole bottom row: every column commits, and RowRect covers
+// the full width so the renderer draws it once. Label carries the text on the first cell only.
+static void TestEnterSpansBottomRow() {
+    const float X = 100, Y = 200, W = 300, H = 400, Gap = 10;
+    for (int C = 0; C < Numpad::Cols; ++C) {
+        CHECK(Numpad::IsEnter(Numpad::EnterRow, C));
+        Numpad Probe;
+        Probe.Press(Numpad::EnterRow, C);
+        CHECK(Probe.TakeEnter());          // any column of the strip commits
+        CHECK(Probe.Buffer().empty());     // and none of them appends a label to the buffer
+    }
+    CHECK(std::string(Numpad::Label(Numpad::EnterRow, 0)) == "Enter");
+    CHECK(std::string(Numpad::Label(Numpad::EnterRow, 1)).empty());  // drawn once, not thrice
+
+    // RowRect spans every column, and shares the grid's row geometry.
+    float Rx, Ry, Rw, Rh, Kx, Ky, Kw, Kh;
+    Numpad::RowRect(X, Y, W, H, Gap, Numpad::EnterRow, Rx, Ry, Rw, Rh);
+    Numpad::KeyRect(X, Y, W, H, Gap, Numpad::EnterRow, 0, Kx, Ky, Kw, Kh);
+    CHECK(Rw == W);
+    CHECK(Rx == Kx && Ry == Ky && Rh == Kh);
 }
 
 // The tap hit-test must resolve to the same key the renderer would draw at that rect.
@@ -57,7 +112,7 @@ static void TestPressCharMatchesTappedKeys() {
     for (char C : std::string("10.5")) CHECK(Typed.Press(C));
     Tapped.Press(0, 0);  // 1
     Tapped.Press(3, 1);  // 0
-    Tapped.Press(3, 0);  // .
+    Tapped.Press(3, 2);  // .
     Tapped.Press(1, 1);  // 5
     CHECK(Typed.Buffer() == Tapped.Buffer());
     CHECK(Typed.Buffer() == "10.5");
@@ -66,10 +121,7 @@ static void TestPressCharMatchesTappedKeys() {
     CHECK(!Typed.Press('.'));
     CHECK(Typed.Buffer() == "10.5");
 
-    // Non-numeric keys are declined so the caller can let them fall through. '-' is declined
-    // ON PURPOSE: the pad has no sign key, and a keyboard able to enter values the pad cannot
-    // would break the one-UI-both-platforms rule.
-    CHECK(!Typed.Press('-'));
+    // Keys with no pad equivalent are declined so the caller can let them fall through.
     CHECK(!Typed.Press('a'));
     CHECK(!Typed.Press(' '));
     CHECK(Typed.Buffer() == "10.5");
@@ -90,6 +142,7 @@ static void TestTapHitTest() {
             const bool Hit = Probe.Tap(X, Y, W, H, Gap, Kx + Kw * 0.5f, Ky + Kh * 0.5f);
             CHECK(Hit);
             if (Numpad::IsEnter(R, C)) CHECK(Probe.TakeEnter());
+            else if (std::string(Numpad::Label(R, C)) == "+/-") CHECK(Probe.Buffer() == "-");
             else CHECK(Probe.Buffer() == Numpad::Label(R, C));
         }
     // A tap outside the pad misses.
@@ -164,6 +217,8 @@ static void TestPopoverPlacement() {
 int main() {
     TestLayout();
     TestPressBuildsBuffer();
+    TestSignKey();
+    TestEnterSpansBottomRow();
     TestPressCharMatchesTappedKeys();
     TestTapHitTest();
     TestCategoryTree();
