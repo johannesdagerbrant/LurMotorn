@@ -333,6 +333,19 @@ Rps::Fixed WorldToFixed(float Wv) {
 // verb — the grammar is shared (Rps/AgentControl.h) precisely so the two cannot drift, which is the
 // mistake this batch has already had to fix three times (#147's cvar slots, #151's gesture, #159's
 // recording sentinel — iOS the odd one out every time).
+// #170: name the misroute instead of letting it pass. Input produced while the app is still in its
+// opening AI match goes to the SOLO sim, so the peer sits at stall=1 waiting for a camp that was never
+// sent — and every step of that reports success. Mirrors WarnIfSolo in the Android main.
+- (void)warnIfSolo:(const char*)What {
+    if (!_SoloActive) return;
+    if (_Session.IsReady())
+        os_log_error(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the SOLO sim, not the linked peer "
+                     "(a peer IS linked). The other phone will wait forever. Send `linked` first, "
+                     "then re-send this.", What);
+    else
+        os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the solo sim (no peer linked yet)", What);
+}
+
 - (void)applyAgentCommand:(const Rps::AgentCommand&)Cmd {
     switch (Cmd.Kind) {
         case Rps::EAgentCmd::Place: {
@@ -343,11 +356,13 @@ Rps::Fixed WorldToFixed(float Wv) {
                 _Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A,
                    Cmd.B, static_cast<unsigned>(_Team));
+            [self warnIfSolo:"place"];
             [self placeLocal:E];
             break;
         }
         case Rps::EAgentCmd::Queue:
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
+            [self warnIfSolo:"queue"];
             [self placeLocal:Rps::InputEvent::Queue(_Team, Cmd.A, Cmd.B)];
             break;
         case Rps::EAgentCmd::Stress: {
@@ -400,6 +415,16 @@ Rps::Fixed WorldToFixed(float Wv) {
             }
             break;
         }
+        case Rps::EAgentCmd::Linked:
+            // #170: the ONE route into the linked session a harness can rely on. It sets the same flag
+            // the selector's "Linked opponent" row sets, and that route is deliberately exempt from the
+            // `!HasMinerCamp(0)` gate the AUTO-switch carries — so it still works after a stray `place`
+            // has put a camp in the solo sim, which is the state the auto-switch can never leave.
+            // The flag is LATCHED (see the switch site): sending this before the link is up is fine,
+            // it takes effect on the frame the peer becomes ready.
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT linked -> requesting the switch to the linked opponent");
+            _SwitchToLinked = true;
+            break;
         case Rps::EAgentCmd::None:
             break;
     }
@@ -568,16 +593,23 @@ Rps::Fixed WorldToFixed(float Wv) {
     // must resync rather than re-Init. The selector stays the deliberate way across, from ANY state.
     const bool LinkEdge = PeerReady && !_PrevPeerReady;
     _PrevPeerReady = PeerReady;
+    // #170: the manual pick LATCHES until it can be honoured. It used to be cleared every frame
+    // regardless, so a pick that arrived while the link was still coming up was silently dropped —
+    // invisible to a human (the row only exists once a peer is linked) but the normal case for a
+    // harness, which sends `linked` the moment it launches the app. The flag is only cleared when the
+    // switch actually happens, or when there is nothing left to switch out of.
     const bool ManualPick = _SwitchToLinked;
-    _SwitchToLinked = false;
     const bool AutoSwitch = LinkEdge && !_SoloSim.HasMinerCamp(0);   // unstarted AI match only
     if (_SoloActive && PeerReady && (AutoSwitch || ManualPick)) {
         _SoloActive = false;
+        _SwitchToLinked = false;
         _Team = 0;
         _View.SelectLinkedOpponent();   // name the peer in the HUD instead of the AI tier
         os_log(OS_LOG_DEFAULT, "OnlyRps: switch solo -> linked (%{public}s)",
                AutoSwitch ? "auto: link established, AI match not started"
                           : "player picked the linked opponent");
+    } else if (ManualPick && !_SoloActive) {
+        _SwitchToLinked = false;   // already linked: moot
     }
 
     if (_SoloActive) {

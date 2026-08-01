@@ -33,6 +33,7 @@ enum class EAgentCmd : uint8_t {
     Console,  // A=0/1                         -> force the dev console overlay open/closed (#151)
     Gesture,  // (none)                        -> drive the shared two-finger-tap recognizer (#151)
     KillOwn,  // A=unit type                   -> destroy our own building of that type (#160 setup)
+    Linked,   // (none)                        -> take the selector's "Linked opponent" route (#170)
 };
 
 struct AgentCommand {
@@ -45,6 +46,19 @@ struct AgentCommand {
 // to the gesture cannot silently leave the harness pressing twice.
 constexpr int AgentGestureTaps = 3;
 
+// WHICH SIM A COMMAND REACHES (#170). The app OPENS in a solo match vs the AI, so `place` sent before
+// the phone has switched to the linked session lands in the SOLO sim — accepted, logged, and useless,
+// while the other phone waits forever for a camp that went somewhere else. A human cannot make this
+// mistake (they can see the AI match on screen and pick the linked opponent); an assistant driving
+// headlessly cannot see it at all. Worse, the misrouted camp then makes the solo->linked AUTO-switch
+// refuse for the life of the process, because that switch deliberately never abandons an AI match the
+// player has started.
+//
+// So `linked` exists: it takes the same route the player's selector does, which is exempt from that
+// gate. Send it FIRST in any two-phone scenario, and check the log says the switch happened, before
+// sending anything that produces input. The mains also warn when a `place`/`queue` is about to land in
+// solo while a peer is ready, so the misroute names itself rather than passing silently.
+//
 // Wire format: "<seq> <verb> [a [b [c]]]", e.g. "7 place 17 16 0".
 //
 // The SEQUENCE NUMBER is what makes a polled channel usable: both channels are level-triggered (a
@@ -129,6 +143,7 @@ private:
         if (Match(P, "console")) { Cmd.Kind = EAgentCmd::Console; return true; }
         if (Match(P, "gesture")) { Cmd.Kind = EAgentCmd::Gesture; return true; }
         if (Match(P, "killown")) { Cmd.Kind = EAgentCmd::KillOwn; return true; }
+        if (Match(P, "linked"))  { Cmd.Kind = EAgentCmd::Linked;  return true; }
         return false;
     }
     uint32_t LastSeq_ = 0;

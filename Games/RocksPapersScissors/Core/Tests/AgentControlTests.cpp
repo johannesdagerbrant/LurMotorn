@@ -40,6 +40,28 @@ static void TestParsesEachVerb() {
     CHECK(Cmd.Kind == EAgentCmd::Gesture);
     CHECK(C.Poll("8 killown 0", Cmd));
     CHECK(Cmd.Kind == EAgentCmd::KillOwn && Cmd.A == 0);
+    CHECK(C.Poll("9 linked", Cmd));                       // #170
+    CHECK(Cmd.Kind == EAgentCmd::Linked);
+}
+
+// #170: `linked` takes no arguments, and it must not be confused with a prefix of anything else.
+// Worth pinning because Match() is a hand-rolled word compare and the verb list is scanned in
+// order — a verb that accepted a prefix would swallow commands meant for another one, silently,
+// on a channel whose whole point is that nobody is watching it.
+static void TestLinkedVerbIsExactAndArgumentless() {
+    AgentControl C;
+    AgentCommand Cmd;
+    CHECK(C.Poll("1 linked", Cmd));
+    CHECK(Cmd.Kind == EAgentCmd::Linked && Cmd.A == 0 && Cmd.B == 0 && Cmd.C == 0);
+    CHECK(!C.Poll("2 link", Cmd));                        // a PREFIX is not the verb
+    CHECK(!C.Poll("3 linkedx", Cmd));                     // nor is a longer word
+    CHECK(C.Poll("4 linked  77", Cmd));                   // stray args are parsed, then ignored by the mains
+    CHECK(Cmd.Kind == EAgentCmd::Linked && Cmd.A == 77);
+    // A rejected verb must NOT consume the sequence number, so fixing the typo in place still works
+    // — the channel is level-triggered and the operator only gets to rewrite the same file/property.
+    CHECK(!C.Poll("5 linkd", Cmd));
+    CHECK(C.Poll("5 linked", Cmd));
+    CHECK(Cmd.Kind == EAgentCmd::Linked);
 }
 
 // THE property that makes a level-triggered channel usable. A system property and a file both HOLD
@@ -120,6 +142,7 @@ static void TestOversizedArgumentsClamp() {
 
 int main() {
     TestParsesEachVerb();
+    TestLinkedVerbIsExactAndArgumentless();   // #170
     TestSameCommandIsAppliedExactlyOnce();
     TestOlderSequencesAreIgnored();
     TestMissingArgumentsDefaultToZero();

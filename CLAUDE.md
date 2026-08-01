@@ -145,7 +145,7 @@ rather than idle, and **leave no device state behind** — clear properties and 
 warning naming the hazard.
 
 **The harness that lives behind it (RPS).** `Rps/AgentControl.h` defines one command grammar —
-`<seq> <verb> [args]`, verbs `place queue stress corrupt droptx console gesture killown` — so an
+`<seq> <verb> [args]`, verbs `place queue stress corrupt droptx console gesture killown linked` — so an
 assistant can drive both phones with no hands. It exists because the interesting failures aren't
 reachable by tapping: a BLE link won't drop one frame on request, a deterministic sim won't diverge on
 request, drag-to-place *snaps to the nearest valid square* so a placement can never land on an exact
@@ -157,11 +157,22 @@ CI job (`gh workflow run "macOS CI" -f agent=true`) — never an ordinary push, 
 next to the player one. The command PARSER is compiled always (it can't drive anything, and that keeps
 its grammar in the host suite); the channel and every effect are `#if LUR_AGENT`.
 
-Two traps worth knowing before using it. The RPS sim loop `continue`s for solo (**the mode the app opens
+**`linked` goes FIRST in any two-phone scenario (#170).** The app *opens in a solo AI match*, so a
+`place` sent before the phone has crossed over lands in the **solo** sim — accepted, logged, and useless,
+while the other phone waits forever for a camp that went elsewhere. `linked` takes the selector's manual
+route, which is exempt from the `!HasMinerCamp(0)` gate the auto-switch carries; the auto-switch itself
+refuses forever once *anything* has put a camp in the solo sim, so a single mistimed `place` used to cost
+a relaunch. The flag latches, so sending `linked` before the link is up is fine. Both mains now log an
+**error** when a `place`/`queue` is about to land in solo while a peer is ready — if you see that line,
+the command did nothing useful.
+
+Three traps worth knowing before using it. The RPS sim loop `continue`s for solo (**the mode the app opens
 in**), for a decided match and for the post-match hold — so anything that must always run, agent poll and
-diagnostics included, belongs at the **top** of the loop, not the bottom. And `WorldHeight` is **240**:
+diagnostics included, belongs at the **top** of the loop, not the bottom. `WorldHeight` is **240**:
 team 0's opening camp is `(17, 16)`, team 1's mirror is `(17, 224)`, and a placement outside a team's
-frontier is rejected **silently** — gold simply doesn't drop.
+frontier is rejected **silently** — gold simply doesn't drop. And the two mains route local input from
+*separate* copies of the same decision (`RouteLocalEvent` vs `placeLocal:`), which have already drifted
+once — change one, change both.
 
 **`LUR_CONFIG` is the single dial — it drives optimization too, not just the macros (issue #89).**
 `EngineFlags.cmake` derives `CMAKE_BUILD_TYPE` from it (the *Opt* column above), so

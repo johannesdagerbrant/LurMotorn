@@ -45,6 +45,9 @@
 #include "Rps/Tunables.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyRps", __VA_ARGS__)
+// Same "OnlyRps" tag, so `logcat -s OnlyRps:*` still catches it — the LEVEL is the point, for the
+// handful of lines that mean "what you just asked for did not happen the way you think" (#170).
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "OnlyRps", __VA_ARGS__)
 
 namespace {
 
@@ -196,17 +199,31 @@ void RouteLocalEvent(AppState* S, const Rps::InputEvent& E) {
 // bypassing the snap, and this is the bypass.
 void ApplyAgentCommand(AppState& S, const Rps::AgentCommand& Cmd) {
     const uint8_t Team = S.LinkedTeam.load(std::memory_order_relaxed);
+    // #170: name the misroute instead of letting it pass. Input produced while the app is still in its
+    // opening AI match goes to the SOLO sim, so the peer sits at stall=1 waiting for a camp that was
+    // never sent — and every step of that reports success. Session is sim-thread-owned and this runs on
+    // the sim thread, so IsReady() is safe to ask here.
+    auto WarnIfSolo = [&S](const char* What) {
+        if (!S.SoloActive.load(std::memory_order_acquire)) return;
+        if (S.Session.IsReady())
+            LOGE("AGENT %s -> the SOLO sim, not the linked peer (a peer IS linked). The other phone "
+                 "will wait forever. Send `linked` first, then re-send this.", What);
+        else
+            LOGI("AGENT %s -> the solo sim (no peer linked yet)", What);
+    };
     switch (Cmd.Kind) {
         case Rps::EAgentCmd::Place: {
             const Rps::InputEvent E = Rps::InputEvent::Place(
                 Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
             LOGI("AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A, Cmd.B,
                  static_cast<unsigned>(Team));
+            WarnIfSolo("place");
             RouteLocalEvent(&S, E);
             break;
         }
         case Rps::EAgentCmd::Queue:
             LOGI("AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
+            WarnIfSolo("queue");
             RouteLocalEvent(&S, Rps::InputEvent::Queue(Team, Cmd.A, Cmd.B));
             break;
         case Rps::EAgentCmd::Stress: {
@@ -262,6 +279,16 @@ void ApplyAgentCommand(AppState& S, const Rps::AgentCommand& Cmd) {
             }
             break;
         }
+        case Rps::EAgentCmd::Linked:
+            // #170: the ONE route into the linked session a harness can rely on. It sets the same flag
+            // the selector's "Linked opponent" row sets, and that route is deliberately exempt from the
+            // `!HasMinerCamp(0)` gate the AUTO-switch carries — so it still works after a stray `place`
+            // has put a camp in the solo sim, which is the state the auto-switch can never leave.
+            // The flag is LATCHED (see the switch site): sending this before the link is up is fine,
+            // it takes effect on the frame the peer becomes ready.
+            LOGI("AGENT linked -> requesting the switch to the linked opponent");
+            S.SwitchToLinked.store(true, std::memory_order_release);
+            break;
         case Rps::EAgentCmd::None:
             break;
     }
@@ -815,14 +842,23 @@ void android_main(android_app* App) {
                 State.PeerLosses_.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
                 State.PeerDraws_.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
             }
-            const bool ManualPick = State.SwitchToLinked.exchange(false, std::memory_order_acq_rel);
+            // #170: the manual pick LATCHES until it can be honoured. It used to be exchange()d away
+            // every frame regardless, so a pick that arrived while the link was still coming up was
+            // silently dropped — invisible to a human (the row only exists once a peer is linked) but
+            // the normal case for a harness, which sends `linked` the moment it launches the app. The
+            // flag is only cleared when the switch actually happens, or when there is nothing left to
+            // switch out of.
+            const bool ManualPick = State.SwitchToLinked.load(std::memory_order_acquire);
             const bool AutoSwitch = LinkEdge && !State.SoloSim.HasMinerCamp(0);  // unstarted AI match only
             if (SoloRunning && PeerReady && (AutoSwitch || ManualPick)) {
                 SoloRunning = false;
+                State.SwitchToLinked.store(false, std::memory_order_release);
                 State.SoloActive.store(false, std::memory_order_release);
                 State.SelectLinkedRow.store(true, std::memory_order_release);  // glue: name the peer in the HUD
                 LOGI("switch solo -> linked (%s)", AutoSwitch ? "auto: link established, AI match not started"
                                                              : "player picked the linked opponent");
+            } else if (ManualPick && !SoloRunning) {
+                State.SwitchToLinked.store(false, std::memory_order_release);  // already linked: moot
             }
 
             if (SoloRunning) {
