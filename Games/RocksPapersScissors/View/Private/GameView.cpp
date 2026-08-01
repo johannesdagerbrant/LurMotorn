@@ -15,7 +15,9 @@
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Math/Mat4.h"
-#include "Lur/DevGui/DevTheme.h"   // #113: the one home for dev-layer colours
+#include "Lur/Core/DevCommand.h"  // #116: commands rendered as buttons
+#include "Lur/DevGui/DevTheme.h"
+#include "Lur/DevGui/Widgets.h"   // HitRect / Slider   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Text/BuiltinFonts.h"
@@ -1704,7 +1706,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float PW = OW - 4.0f * Pad;
         const float X0 = 2.0f * Pad, Y0 = HeightPx * 0.06f;
         const float PH = HeightPx * 0.86f;
-        const float ViewTop = Y0 + TitleH + 4.0f * HS;   // content clip band
+        // The dev-command button strip sits between the title and the cvar list (#116); the
+        // content band starts BELOW it, or the first rows would be drawn under the buttons and
+        // hit-test against them.
+        const float CmdStripH = 18.0f * HS;
+        const float CmdStripY = Y0 + TitleH + 2.0f * HS;
+        const float ViewTop = CmdStripY + CmdStripH + 4.0f * HS;   // content clip band
         const float ViewBot = Y0 + PH - 4.0f * HS;
         const float ViewH = ViewBot - ViewTop;
 
@@ -1813,6 +1820,46 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float TapX = DevTapX_.load(std::memory_order_relaxed);
         const float TapY = DevTapY_.load(std::memory_order_relaxed);
         bool TapUsed = false;
+
+        // ---- Dev commands as BUTTONS (#116) ----
+        // Not ergonomics: this is the ONLY way to invoke a DevCommand. Neither platform has text
+        // entry — the console edits numbers through a numpad — so a command with no button is a
+        // command nobody can run. Laid out as an evenly-split strip under the title, using the
+        // same rect for the draw and the hit-test so a visible button is always pressable.
+        {
+            int CmdCount = 0;
+            Lur::Core::DevCommandRegistry::ForEach([&](Lur::Core::DevCommand*) { ++CmdCount; });
+            if (CmdCount > 0) {
+                const float CbW = (PW - 8.0f * HS) / static_cast<float>(CmdCount);
+                int Idx = 0;
+                Lur::Core::DevCommandRegistry::ForEach([&](Lur::Core::DevCommand* C) {
+                    const float Cbx = X0 + 4.0f * HS + static_cast<float>(Idx) * CbW;
+                    const float Cby = CmdStripY, Cbh = CmdStripH;
+                    const float Cbw = CbW - 4.0f * HS;
+                    if (TapPending && !TapUsed &&
+                        Lur::DevGui::HitRect(Cbx, Cby, Cbw, Cbh, TapX, TapY)) {
+                        std::string Out;
+                        C->Run(Lur::Core::DevArgs{}, Out);
+                        // The console has no scrollback pane, so the result goes to the toaster
+                        // the "i" button already uses — one output surface, not a second one
+                        // invented for commands.
+                        ToastText_ = Out.empty() ? std::string(C->Name()) + ": done" : Out;
+                        ToastCvar_ = nullptr;
+                        ToastAge_ = 0.0f;
+                        TapUsed = true;
+                    }
+                    Blit(DevKeyMat, Cbx + Cbw * 0.5f, Cby + Cbh * 0.5f, Cbw, Cbh);
+                    // Leaf name only — the category prefix is redundant on a strip this small,
+                    // and the full name is what the tooltip/result line reports.
+                    const char* Dot = std::strrchr(C->Name(), '.');
+                    Text.Draw(Renderer, Dot ? Dot + 1 : C->Name(), Cbx, Cby, Cbw, Cbh,
+                              11.0f * HS, Accent, Lur::Text::EHAlign::Center,
+                              Lur::Text::EVAlign::Middle);
+                    ++Idx;
+                });
+            }
+        }
+
 
         // A visible toaster is modal-lite: the next tap ANYWHERE dismisses it (and is consumed),
         // so it can't also trigger a row underneath. Auto-expires after a few seconds.

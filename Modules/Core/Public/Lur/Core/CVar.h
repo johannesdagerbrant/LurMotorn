@@ -79,6 +79,15 @@ public:
     // (leaving the value untouched) for a type with no sensible nudge — an enum, whose valid
     // range this layer cannot know, would otherwise scrub to a value that isn't a member.
     virtual bool        Nudge(int Steps) = 0;
+    // ---- Optional declared range (#116) ----
+    // Advisory for the UI and ENFORCED on commit: a value outside [Min,Max] is clamped rather
+    // than rejected, so a fat-fingered "1000" on a 0..1 weight lands at 1 instead of wedging a
+    // match. Only numeric types can carry one. HasRange() false = unbounded (the common case).
+    virtual bool        HasRange() const = 0;
+    // Range and current value as floats, for widgets that must not know T (the slider).
+    virtual float       RangeMinF() const = 0;
+    virtual float       RangeMaxF() const = 0;
+    virtual float       ValueF() const = 0;
 
     ICVar* NextRegistered_ = nullptr;  // intrusive singly-linked registry list
 
@@ -138,6 +147,10 @@ public:
     // Shipping: store ONLY Default_. The extra dev args are dropped by the macro, so the
     // object is a pure value the optimizer folds. constexpr ctor => constant-initialized.
     constexpr CVar(const char* /*Name*/, T Default) noexcept : Default_(Default) {}
+    // Ranged form: min/max are dev-only metadata, so shipping keeps just the default and the
+    // object stays the single value the optimizer folds (§1.1's structural condition).
+    constexpr CVar(const char* /*Name*/, T Default, T /*Min*/, T /*Max*/) noexcept
+        : Default_(Default) {}
 
     constexpr T Get() const noexcept { return Default_; }
     constexpr operator T() const noexcept { return Default_; }
@@ -146,6 +159,12 @@ public:
          const char* Tooltip = nullptr, ECVarOrigin Origin = ECVarOrigin::Game)
         : Default_(Default), Value_(Default), Name_(Name),
           Tooltip_(Tooltip), Flags_(Flags), Origin_(Origin) {}
+
+    // Ranged form (#116). Min/Max are inclusive and enforced on every commit path.
+    CVar(const char* Name, T Default, T Min, T Max, uint32_t Flags,
+         const char* Tooltip, ECVarOrigin Origin = ECVarOrigin::Game)
+        : Default_(Default), Value_(Default), Name_(Name), Tooltip_(Tooltip), Flags_(Flags),
+          Origin_(Origin), Min_(Min), Max_(Max), HasRange_(true) {}
 
     T Get() const noexcept {
         LUR_ASSERT_MSG(GCVarMainEntered, "CVar '%s' read before main()", Name_);
@@ -163,7 +182,7 @@ public:
     bool        SetFromString(const char* S) override {
         T Parsed{};
         if (!FromString(S, Parsed)) return false;  // unqualified: ADL finds Sim's Fixed overload
-        Value_ = Parsed;
+        Value_ = Clamped(Parsed);
         return true;
     }
     void        Reset() override { Value_ = Default_; }
@@ -179,6 +198,12 @@ public:
         else if constexpr (requires(const T& V) { V.Raw; }) return Value_.Raw;  // Fixed-like
         else return 0;  // float (never AffectsGameplay) — not sent on the wire
     }
+    // ---- Range (#116) ----
+    bool  HasRange() const override { return HasRange_; }
+    float RangeMinF() const override { return AsFloat(Min_); }
+    float RangeMaxF() const override { return AsFloat(Max_); }
+    float ValueF() const override { return AsFloat(Value_); }
+
     bool Nudge(int Steps) override {
         if (Steps == 0) return true;
         // bool FIRST: it is integral, so the integral branch would otherwise claim it and
@@ -186,15 +211,17 @@ public:
         if constexpr (std::is_same_v<T, bool>) { Value_ = !Value_; return true; }
         else if constexpr (std::is_enum_v<T>) { return false; }  // no known valid range
         else if constexpr (std::is_integral_v<T>) {
-            Value_ = static_cast<T>(Value_ + static_cast<T>(Steps));
+            Value_ = Clamped(static_cast<T>(Value_ + static_cast<T>(Steps)));
             return true;
         } else if constexpr (requires { T::One; } && requires(const T& V) { V.Raw; }) {
             // Fixed: 1/64 of a unit. Fine enough to feel out a flock weight, coarse enough
             // that holding the key visibly moves the sim.
-            Value_.Raw += Steps * (T::One / 64);
+            T Next = Value_;
+            Next.Raw += Steps * (T::One / 64);
+            Value_ = Clamped(Next);
             return true;
         } else if constexpr (std::is_floating_point_v<T>) {
-            Value_ = static_cast<T>(Value_ + static_cast<T>(Steps) * static_cast<T>(0.01));
+            Value_ = Clamped(static_cast<T>(Value_ + static_cast<T>(Steps) * static_cast<T>(0.01)));
             return true;
         } else {
             return false;
@@ -203,10 +230,40 @@ public:
 
     // Typed accessors for code that holds the concrete CVar (not through ICVar).
     T    Default() const { return Default_; }
-    void Set(T V) { Value_ = V; }
+    void Set(T V) { Value_ = Clamped(V); }
 #endif
 
 private:
+#if !LUR_SHIPPING
+    // Clamp to the declared range, if there is one. Comparison uses operator< so it works for
+    // int, float AND Fixed (which defines the relationals) without a per-type branch; a type
+    // with no ordering (Color) can never have HasRange_ set, because the ranged ctor is only
+    // reachable through LUR_CVAR_RANGE and that is documented numeric-only.
+    T Clamped(T V) const {
+        if constexpr (std::is_same_v<T, bool> || std::is_enum_v<T>) {
+            return V;  // nothing to clamp against
+        } else if constexpr (requires(const T& A, const T& B) { A < B; }) {
+            if (!HasRange_) return V;
+            if (V < Min_) return Min_;
+            if (Max_ < V) return Max_;
+            return V;
+        } else {
+            return V;  // unordered (Color): ranges are not offered
+        }
+    }
+
+    // One value as a float, for widgets that must not know T. Fixed divides out its scale so a
+    // slider sees 0.75 rather than 49152 — a knob positioned by raw units would be unusable.
+    static float AsFloat(const T& V) {
+        if constexpr (std::is_same_v<T, bool>) return V ? 1.0f : 0.0f;
+        else if constexpr (std::is_enum_v<T>) return static_cast<float>(static_cast<int>(V));
+        else if constexpr (requires { T::One; } && requires(const T& X) { X.Raw; })
+            return static_cast<float>(V.Raw) / static_cast<float>(T::One);
+        else if constexpr (std::is_arithmetic_v<T>) return static_cast<float>(V);
+        else return 0.0f;  // Color and friends: no single scalar
+    }
+#endif
+
     T Default_;
 #if !LUR_SHIPPING
     T           Value_;
@@ -215,6 +272,9 @@ private:
     uint32_t    Flags_;
     ECVarOrigin Origin_;
     uint64_t    EditWallMs_ = 0;
+    T           Min_{};
+    T           Max_{};
+    bool        HasRange_ = false;
 #endif
 };
 
@@ -252,6 +312,29 @@ CVar(const char*, T, A...) -> CVar<T>;
                       "AffectsGameplay CVar may not be float (determinism, spec §1): " Name);  \
         static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
         inline ::Lur::Core::CVar Var { Name, Default, (Flags), (Tooltip) };                    \
+        inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
+#endif
+
+// LUR_CVAR_RANGE(Var, "name", Default, Min, Max, Flags, "Description") — a CVar declaring an
+// inclusive [Min,Max]. NUMERIC TYPES ONLY (int / float / Fixed): the range is enforced by
+// clamping every commit path (console, keyboard scrub, cvars.cfg load, peer sync), and the
+// console renders a slider for it instead of a bare field.
+//
+// Clamping rather than rejecting is deliberate. A tuner typing 1000 into a 0..1 weight wants
+// "as high as it goes", not an error toast and an unchanged value — and on a phone, where the
+// only editor is a numpad, an extra keystroke is easy and a rejected commit is invisible.
+// Out-of-range is still ALLOWED to be expressed (the console warns), it just lands at the bound.
+#if LUR_SHIPPING
+    #define LUR_CVAR_RANGE(Var, Name, Default, Min, Max, Flags, Tooltip)                      \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
+        inline constexpr ::Lur::Core::CVar Var { Name, Default, Min, Max }
+#else
+    #define LUR_CVAR_RANGE(Var, Name, Default, Min, Max, Flags, Tooltip)                      \
+        static_assert(!(::std::is_same_v<::std::decay_t<decltype(Default)>, float> &&          \
+                        (((Flags) & ::Lur::Core::CVarFlagAffectsGameplay) != 0)),              \
+                      "AffectsGameplay CVar may not be float (determinism, spec §1): " Name);  \
+        static_assert(sizeof(Tooltip) > 1, "every CVar needs a description: " Name);           \
+        inline ::Lur::Core::CVar Var { Name, Default, Min, Max, (Flags), (Tooltip) };          \
         inline const ::Lur::Core::CVarRegistrar Var##_Reg { Var }
 #endif
 

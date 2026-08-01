@@ -55,6 +55,17 @@ private:
     const char*  Category_;
 };
 
+// LUR_DEV_COMMAND(Var, "name", "help", Fn, Category) — declare + register in one line, the
+// DevCommand mirror of LUR_CVAR. Dev-only by construction: this whole header is excluded from
+// shipping, so a command cannot leak into a build a player runs.
+//
+// The console renders every registered command as a BUTTON grouped under its Category (#116).
+// That is not ergonomics — it is the only way to invoke one. Neither platform has text entry
+// (the console edits numbers through a numpad), so a command nobody can click is a command
+// nobody can run.
+#define LUR_DEV_COMMAND(Var, Name, Help, Fn, Category) \
+    inline ::Lur::Core::DevCommand Var { Name, Help, Fn, nullptr, Category }
+
 // Meyers-singleton registry (static-init-order independent across TUs, same as CVars).
 class DevCommandRegistry {
 public:
@@ -103,6 +114,35 @@ inline DevCommand::DevCommand(const char* Name, const char* Help, DevCommandFn F
     : Name_(Name), Help_(Help), Fn_(Fn), Ctx_(Ctx), Category_(Category) {
     DevCommandRegistry::Register(this);  // dev-only: ctor-side-effect registration is fine
 }
+
+// ---- Engine commands (#116) ----
+// The registry had zero entries until now, which made "commands as buttons" untestable and
+// unverifiable — an empty strip proves nothing. These two are genuinely useful while tuning
+// and exercise both shapes the console needs to render (a destructive action, a report).
+inline void DevCmdResetCvars(const DevArgs&, std::string& Out, void*) {
+    int N = 0;
+    CVarRegistry::ForEach([&](ICVar* C) {
+        if (C->Overridden()) { C->Reset(); ++N; }
+    });
+    Out += "reset " + std::to_string(N) + " overridden cvar(s) to defaults";
+}
+LUR_DEV_COMMAND(GCmdResetCvars, "dev.reset_cvars",
+                "Reset every overridden CVar to its compile-time default", DevCmdResetCvars,
+                "dev");
+
+inline void DevCmdListOverrides(const DevArgs&, std::string& Out, void*) {
+    int N = 0;
+    CVarRegistry::ForEach([&](ICVar* C) {
+        if (!C->Overridden()) return;
+        Out += std::string(C->Name()) + " = " + C->ValueString() +
+               " (default " + C->DefaultString() + ")\n";
+        ++N;
+    });
+    if (N == 0) Out += "no cvars overridden";
+}
+LUR_DEV_COMMAND(GCmdListOverrides, "dev.list_overrides",
+                "List every CVar differing from its default, with both values",
+                DevCmdListOverrides, "dev");
 
 }  // namespace Lur::Core
 #endif  // !LUR_SHIPPING

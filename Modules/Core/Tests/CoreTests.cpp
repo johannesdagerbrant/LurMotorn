@@ -9,6 +9,7 @@
 
 #include "Lur/Core/CVar.h"
 #include "Lur/Core/CVarConfig.h"
+#include "Lur/Core/DevCommand.h"
 #include "Lur/Core/FlightRecorder.h"
 #include "Lur/Core/FromString.h"
 #include "Lur/Core/Hash.h"
@@ -17,6 +18,8 @@
 // ADL FromString/ToString overloads CVar<Fixed> needs — Fixed.h alone leaves it unprintable.
 #include "Lur/Sim/Fixed.h"
 #include "Lur/Sim/FixedString.h"
+// #116: CVar<Color> — the ADL overloads live in Lur::Render, test-only here as with Fixed.
+#include "Lur/Render/ColorString.h"
 
 static int GFailures = 0;
 
@@ -198,6 +201,145 @@ static void TestCVarNudge() {
     CHECK(!CvNudgeInt.Overridden());
 }
 
+// ---- #116: a declared [Min,Max] is ENFORCED on every commit path, not just advisory ----
+LUR_CVAR_RANGE(CvRangedInt, "range.int", 5, 0, 10, ::Lur::Core::CVarFlagNone,
+               "Test fixture: ranged int");
+LUR_CVAR_RANGE(CvRangedFixed, "range.fixed", ::Lur::Sim::Fixed::FromInt(1),
+               ::Lur::Sim::Fixed::FromInt(0), ::Lur::Sim::Fixed::FromInt(2),
+               ::Lur::Core::CVarFlagAffectsGameplay, "Test fixture: ranged Fixed");
+
+static void TestCVarRange() {
+    CHECK(CvRangedInt.HasRange());
+    CHECK(!CvTestInt.HasRange());   // unranged is the default and stays that way
+    CHECK(CvRangedInt.RangeMinF() == 0.0f && CvRangedInt.RangeMaxF() == 10.0f);
+
+    // Typed input clamps rather than being rejected: a tuner entering 1000 wants "as high as it
+    // goes". SetFromString still returns TRUE — the value was accepted, just bounded.
+    CHECK(CvRangedInt.SetFromString("1000"));
+    CHECK(CvRangedInt.Get() == 10);
+    CHECK(CvRangedInt.SetFromString("-40"));
+    CHECK(CvRangedInt.Get() == 0);
+    CHECK(CvRangedInt.SetFromString("7") && CvRangedInt.Get() == 7);
+    CvRangedInt.Reset();
+
+    // The keyboard scrub (#119) goes through the same clamp — walking Up off the top must stop
+    // at the bound, not run away.
+    CvRangedInt.Set(9);
+    CHECK(CvRangedInt.Nudge(+5) && CvRangedInt.Get() == 10);
+    CHECK(CvRangedInt.Nudge(+1) && CvRangedInt.Get() == 10);   // already at the top: no-op
+    CvRangedInt.Set(1);
+    CHECK(CvRangedInt.Nudge(-9) && CvRangedInt.Get() == 0);
+    CvRangedInt.Reset();
+
+    // Set() clamps too, so no code path can plant an out-of-range value behind the UI's back.
+    CvRangedInt.Set(99);
+    CHECK(CvRangedInt.Get() == 10);
+    CvRangedInt.Reset();
+
+    // Fixed ranges work through the same operator< path, and ValueF divides out the Q16.16
+    // scale so a slider sees 0.75 rather than 49152.
+    CHECK(CvRangedFixed.HasRange());
+    CHECK(CvRangedFixed.RangeMaxF() == 2.0f);
+    CHECK(CvRangedFixed.SetFromString("9.5"));
+    CHECK(CvRangedFixed.Get() == ::Lur::Sim::Fixed::FromInt(2));
+    CHECK(CvRangedFixed.SetFromString("0.75"));
+    CHECK(CvRangedFixed.ValueF() > 0.749f && CvRangedFixed.ValueF() < 0.751f);
+    CvRangedFixed.Reset();
+}
+
+// ---- #116: CVar<Color>. Found by ADL in Lur::Render, exactly like Fixed's overloads, so
+//      Modules/Core still depends on neither Render nor Sim. ----
+LUR_CVAR(CvTestColor, "color.tint", (::Lur::Render::Color{0.5f, 0.25f, 0.125f, 1.0f}),
+         ::Lur::Core::CVarFlagNone, "Test fixture: colour CVar");
+
+static void TestCVarColor() {
+    using ::Lur::Render::Color;
+    CHECK(!CvTestColor.Overridden());
+    CHECK(CvTestColor.ValueString() == "0.5 0.25 0.125 1");
+
+    CHECK(CvTestColor.SetFromString("1 0 0 1"));
+    CHECK(CvTestColor.Get().R == 1.0f && CvTestColor.Get().G == 0.0f);
+    CHECK(CvTestColor.Overridden());
+
+    // Alpha is optional and defaults to 1 — most tuned colours are opaque, and typing the
+    // trailing 1 every time is friction.
+    CHECK(CvTestColor.SetFromString("0.2 0.4 0.6"));
+    CHECK(CvTestColor.Get().A == 1.0f && CvTestColor.Get().B == 0.6f);
+
+    // A malformed component leaves the value ENTIRELY untouched — a typo must not half-apply a
+    // colour (three channels set, one stale), which is the failure that would look like a
+    // rendering bug rather than a parse error.
+    const Color Before = CvTestColor.Get();
+    CHECK(!CvTestColor.SetFromString("0.1 nope 0.3"));
+    CHECK(CvTestColor.Get() == Before);
+    CHECK(!CvTestColor.SetFromString("0.1 0.2"));           // too few components
+    CHECK(!CvTestColor.SetFromString("0.1 0.2 0.3 0.4 0.5"));  // too many
+    CHECK(CvTestColor.Get() == Before);
+
+    // Not clamped on parse: a tint used as a multiplier can legitimately exceed 1.
+    CHECK(CvTestColor.SetFromString("2 0 0 1") && CvTestColor.Get().R == 2.0f);
+
+    // A colour has no single scalar and no ordering, so it offers neither a range nor a nudge.
+    CHECK(!CvTestColor.HasRange());
+    CHECK(!CvTestColor.Nudge(+1));
+    CHECK(!CvTestColor.IsBool());
+
+    // Channel helpers: the console's `.r/.g/.b/.a` and the picker's four sliders must agree
+    // about which letter is which slot.
+    CHECK(::Lur::Render::ColorChannelIndex('r') == 0);
+    CHECK(::Lur::Render::ColorChannelIndex('A') == 3);
+    CHECK(::Lur::Render::ColorChannelIndex('x') == -1);
+    Color C{0.1f, 0.2f, 0.3f, 0.4f};
+    CHECK(::Lur::Render::GetColorChannel(C, 2) == 0.3f);
+    ::Lur::Render::SetColorChannel(C, 1, 0.9f);
+    CHECK(C.G == 0.9f);
+
+    CvTestColor.Reset();
+    CHECK(!CvTestColor.Overridden());
+}
+
+// ---- #116: dev commands. The registry had ZERO entries before this, so "commands as buttons"
+//      would have rendered an empty strip and proved nothing. ----
+static void TestDevCommands() {
+    using Lur::Core::DevCommandRegistry;
+    CHECK(DevCommandRegistry::Find("dev.reset_cvars") != nullptr);
+    CHECK(DevCommandRegistry::Find("dev.list_overrides") != nullptr);
+    CHECK(DevCommandRegistry::Find("dev.nope") == nullptr);
+
+    CvTestInt.Set(4242);
+    CHECK(CvTestInt.Overridden());
+
+    std::string Out;
+    CHECK(DevCommandRegistry::Dispatch("dev.list_overrides", Out));
+    CHECK(Out.find("test.int") != std::string::npos);
+    CHECK(Out.find("4242") != std::string::npos);
+    CHECK(Out.find("(default 7)") != std::string::npos);   // both values, so the report is usable
+
+    Out.clear();
+    CHECK(DevCommandRegistry::Dispatch("dev.reset_cvars", Out));
+    CHECK(!CvTestInt.Overridden() && CvTestInt.Get() == 7);
+    CHECK(Out.find("reset") != std::string::npos);
+
+    // A second reset finds nothing left to do and says so rather than lying about a count.
+    Out.clear();
+    CHECK(DevCommandRegistry::Dispatch("dev.reset_cvars", Out));
+    CHECK(Out.find("reset 0") != std::string::npos);
+    Out.clear();
+    CHECK(DevCommandRegistry::Dispatch("dev.list_overrides", Out));
+    CHECK(Out.find("no cvars overridden") != std::string::npos);
+
+    // An unknown name is declined (false, no output) so a caller can try other interpretations.
+    Out.clear();
+    CHECK(!DevCommandRegistry::Dispatch("not.a.command", Out));
+    CHECK(Out.empty());
+
+    // Every registered command carries a category, which is what groups its button.
+    DevCommandRegistry::ForEach([&](Lur::Core::DevCommand* C) {
+        CHECK(C->Category()[0] != '\0');
+        CHECK(C->Help()[0] != '\0');
+    });
+}
+
 static void TestCVarMechanism() {
     CHECK(CvTestInt.Get() == 7);
     CHECK(int(CvTestInt) == 7);                // operator T
@@ -276,6 +418,9 @@ int main() {
     TestFromStringGeneric();
     TestCVarMechanism();
     TestCVarNudge();
+    TestCVarRange();
+    TestCVarColor();
+    TestDevCommands();
     TestCVarRegistry();
     TestCVarConfig();
 
