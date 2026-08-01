@@ -515,10 +515,13 @@ void GameView::RefreshSelector() {
             // RED: the link is up but the match will be REFUSED, because the two builds cannot
             // agree on the CVar id list, the tick order or the hash (#112). Saying so here is the
             // whole point — the refusal is otherwise invisible and reads as a freeze (#178).
-            // A ring as well as the fill, so it is distinguishable from the red AI tier at a glance.
+            //
+            // NO RING, deliberately. The ring is chess's "your turn" marker, and RPS is a realtime
+            // sim with no turns — reusing it here would import turn-based vocabulary into a game
+            // that has none, and teach two different meanings for one mark. The red fill plus the
+            // sublabel already separate this from the red AI tier: that row carries a tier name
+            // and no explanation, this one carries a device id and a reason.
             Items[N].LeadFill = Color{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};
-            Items[N].Ring = true;
-            Items[N].RingColor = Color{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), 1.0f};
             Items[N].Sublabel = "different build - rebuild both";
         } else {
             // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth
