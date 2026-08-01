@@ -142,6 +142,36 @@ needs no device: `powershell -ExecutionPolicy Bypass -File Tools\DeviceRig\test-
 After that, `device-rig.bat -Action cycle` fetches, signs, installs, launches, arms, plays,
 measures, and repeats with no human touch.
 
+## The no-hang invariant (read this before adding a call)
+
+**No code path in this script may wait on an external service without a bound.** Every call out
+to a device — `adb`, `pymobiledevice3`, `zsign` — goes through `Invoke-Bounded`.
+
+This is a rule, not a nicety, because a stall that never returns is *indistinguishable from a
+crash*. The caller cannot tell "busy" from "broken", so the only way out has been a human
+noticing and swiping the app away — which has been the single biggest time sink in iOS work on
+this project. We fixed it for `apps install` (#168) after it cost a session, and months later
+found `dvt screenshot` doing exactly the same thing (#179). Fixing instances does not fix the
+class.
+
+Three things make a timeout *recoverable* rather than contagious:
+
+1. **Kill the tree, not the process.** `Invoke-Bounded` uses a real pid and `taskkill /T`. The
+   direct child is python or adb; orphaning it leaves the device's service socket held open, and
+   then the *next* call hangs too — one stall becomes a dead rig until something gets rebooted.
+2. **Reap orphans from the job-based helpers.** `Invoke-BoundedPmd` / `Invoke-BoundedInstall` use
+   `Start-Job`, and `Stop-Job` kills the child PowerShell but not its python grandchild.
+   `Kill-StrayPmd` sweeps those, scoped by start time so a syslog tail you started earlier is
+   never touched.
+3. **Never let a timeout look like success.** Some actions deliberately continue past a bounded
+   failure (a screenshot is not worth aborting a test run for), so the script prints a red
+   summary of everything it killed and **exits 2**. Without that, a run ends showing only its
+   successes and the operator concludes the device is healthy.
+
+Current bounds: adb 30s, pymobiledevice3 60s, `developer dvt` 45s, `dvt screenshot` 20s, zsign
+90s, `apps install` 240s, `apps list` 150s. They are generous enough that a healthy call never
+trips one — pick the same way if you add another: several times the slowest healthy measurement.
+
 ## App config (`$App` in device-rig.ps1)
 
 ```

@@ -105,14 +105,66 @@ $env:Path = [Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
 function Say($m)  { Write-Host "[device-rig] $m" -ForegroundColor Cyan }
 function Warn($m) { Write-Host "[device-rig] $m" -ForegroundColor Yellow }
 
+# --- THE NO-HANG INVARIANT ----------------------------------------------------------
+# EVERY call out to a device — adb, pymobiledevice3, zsign — goes through Invoke-Bounded.
+# Nothing in this script may wait on an external service without a bound.
+#
+# Why this is a rule and not a nicety: a remote device can always stall, and a stall that
+# never returns is INDISTINGUISHABLE from a crash. The caller cannot tell "busy" from
+# "broken", so the only way out has been a human noticing and swiping the app away. That has
+# been the single biggest time sink in iOS work on this project. #168 bounded the install
+# case after it cost a session; #179 found `dvt screenshot` doing exactly the same thing
+# months later. Fixing instances does not fix the class — this does.
+#
+# A REAL pid, not Start-Job: on timeout we must kill the whole TREE. The direct child is
+# python or adb, and orphaning it leaves the device's service socket held open — which makes
+# the NEXT invocation hang too, turning one stall into a dead rig until someone reboots
+# something. Killing the tree is what makes a timeout recoverable rather than contagious.
+$script:TimedOut = @()
+function Invoke-Bounded {
+    param(
+        [Parameter(Mandatory)][string]$What,      # human description, used in the timeout message
+        [Parameter(Mandatory)][int]$TimeoutSec,
+        [Parameter(Mandatory)][string]$Exe,
+        [string[]]$CmdArgs = @(),
+        [switch]$Quiet,                           # discard output (stderr-benign calls)
+        [switch]$NoThrow                          # return $null on timeout instead of throwing
+    )
+    if (-not $Exe) { throw "Invoke-Bounded: no executable for '$What'" }
+    $so = [System.IO.Path]::GetTempFileName()
+    $se = [System.IO.Path]::GetTempFileName()
+    try {
+        $p = Start-Process -FilePath $Exe -ArgumentList $CmdArgs -NoNewWindow -PassThru `
+                           -RedirectStandardOutput $so -RedirectStandardError $se
+        if (-not $p.WaitForExit($TimeoutSec * 1000)) {
+            # /T kills descendants too — see the tree note above.
+            & taskkill.exe /PID $p.Id /T /F 2>&1 | Out-Null
+            $script:TimedOut += $What
+            $msg = "TIMEOUT after ${TimeoutSec}s: $What - killed it and its children rather than hanging."
+            if ($NoThrow) { Warn $msg; return $null }
+            throw $msg
+        }
+        if ($Quiet) { return $null }
+        return (Get-Content $so -Raw -ErrorAction SilentlyContinue)
+    } finally {
+        Remove-Item $so, $se -Force -ErrorAction SilentlyContinue
+    }
+}
+# Per-class default bounds. Generous enough that a healthy call never trips one, short enough
+# that a stalled call is noticed in seconds rather than never.
+$script:TmoAdb    = 30    # any adb round-trip (install has its own, below)
+$script:TmoPmd    = 60    # lockdown-level pymobiledevice3 (usbmux, apps push/rm)
+$script:TmoPmdDev = 45    # `developer dvt` over the userspace tunnel
+
 # --- Android peer (adb) ------------------------------------------------------------
 $adb = (Get-Command adb -ErrorAction SilentlyContinue).Source
-function Adb { & $adb @args }
+function Adb { Invoke-Bounded -What "adb $($args -join ' ')" -TimeoutSec $script:TmoAdb -Exe $adb -CmdArgs $args }
 # For adb calls whose native stderr is benign (monkey/force-stop): PS 5.1 turns ANY native
 # stderr into a fatal NativeCommandError under ErrorActionPreference=Stop, so relax it here.
 function AdbQuiet {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-    try { & $adb @args 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
+    try { Invoke-Bounded -What "adb $($args -join ' ')" -TimeoutSec $script:TmoAdb -Exe $adb -CmdArgs $args -Quiet -NoThrow | Out-Null }
+    finally { $ErrorActionPreference = $prev }
 }
 # A bounded adb round-trip: `adb devices` LIES about half-dead wireless transports (the
 # cached entry stays "device" while every real command hangs forever - the silent-stall
@@ -174,7 +226,8 @@ function Launch-Android {
     # VERIFY the process actually came up - monkey fails silently (locked profile,
     # missing app, disabled package). A dead peer must abort loudly, not idle (#75).
     for ($i = 0; $i -lt 10; $i++) {
-        $p = (& $adb shell pidof $App.AndroidPackage 2>$null)
+        $p = (Invoke-Bounded -What "adb shell pidof" -TimeoutSec 10 -Exe $adb -NoThrow `
+                             -CmdArgs @('-s', $AndroidSerial, 'shell', 'pidof', $App.AndroidPackage))
         if ($p) { Say "android: app up (pid $($p.Trim()))"; return }
         Start-Sleep -Milliseconds 500
     }
@@ -193,15 +246,31 @@ function Shot-Android($path) {
 # launch/screenshot use the iOS 17+ *userspace* tunnel (`--userspace`), a pure-Python
 # network stack that needs NO root/admin - so the old `sudo remote tunneld` step is gone.
 # Install of a NEW binary is the one Apple gate (code signing) - see Install-Ios.
-function Pmd    { & python -m pymobiledevice3 @args }
+function Pmd { Invoke-Bounded -What "pymobiledevice3 $($args -join ' ')" -TimeoutSec $script:TmoPmd `
+                             -Exe 'python' -CmdArgs (@('-m','pymobiledevice3') + $args) }
 # For pmd calls whose stderr is benign progress logging (provision dump etc.): PS 5.1
 # turns native stderr into a fatal NativeCommandError under EAP=Stop (see AdbQuiet).
 function PmdQuiet {
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-    try { & python -m pymobiledevice3 @args 2>&1 | Out-Null } finally { $ErrorActionPreference = $prev }
+    try {
+        Invoke-Bounded -What "pymobiledevice3 $($args -join ' ')" -TimeoutSec $script:TmoPmd `
+                       -Exe 'python' -CmdArgs (@('-m','pymobiledevice3') + $args) -Quiet -NoThrow | Out-Null
+    } finally { $ErrorActionPreference = $prev }
 }
 # A `developer dvt` call that stands up its own userspace tunnel in-process (no admin).
-function PmdDev { & python -m pymobiledevice3 developer dvt @args --userspace }
+function PmdDev {
+    Invoke-Bounded -What "dvt $($args -join ' ')" -TimeoutSec $script:TmoPmdDev -Exe 'python' `
+                   -CmdArgs (@('-m','pymobiledevice3','developer','dvt') + $args + @('--userspace'))
+}
+# Same, with a caller-chosen bound. Deliberately a separate function rather than a -Timeout
+# parameter on PmdDev: a param block would make `PmdDev screenshot out.png` try to bind
+# "screenshot" positionally to an int and fail. First arg is the timeout, rest is the command.
+function PmdDevT {
+    $t = [int]$args[0]
+    $rest = @($args[1..($args.Count - 1)])
+    Invoke-Bounded -What "dvt $($rest -join ' ')" -TimeoutSec $t -Exe 'python' -NoThrow `
+                   -CmdArgs (@('-m','pymobiledevice3','developer','dvt') + $rest + @('--userspace'))
+}
 function Ensure-Ios {
     $j = (Pmd usbmux list 2>$null) | Out-String
     if (-not ($j -match 'iPhone|iPad|DeviceClass')) { throw 'no iOS device reachable via pymobiledevice3 (USB).' }
@@ -386,11 +455,30 @@ function Diff-Rec-Pairs($andDir, $iosDir) {
 # while the CLI sat unreturned for over ten minutes. iOS mints a fresh Bundle/Application UUID on
 # every reinstall, so a changed record proves the new binary arrived regardless of what the CLI
 # did. Returns $null when the app is absent or the query fails.
+# Kill pymobiledevice3 processes started since $Since. Stop-Job kills the child PowerShell but
+# NOT its python grandchild, so a timed-out job can leave python alive holding the device's
+# service socket — and then the next call hangs too. That is how one stall becomes a dead rig
+# until someone reboots something, and it is the reason "we tried to prevent this" kept failing.
+# Scoped by start time so a concurrent syslog tail the operator started earlier is never touched.
+function Kill-StrayPmd([datetime]$Since) {
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+                 Where-Object { $_.CommandLine -like '*pymobiledevice3*' -and $_.CreationDate -ge $Since }
+        foreach ($q in $procs) {
+            Warn "reaped orphaned pymobiledevice3 (pid $($q.ProcessId)) left behind by a timeout"
+            & taskkill.exe /PID $q.ProcessId /T /F 2>&1 | Out-Null
+        }
+    } catch { }
+}
+
 function Invoke-BoundedPmd([string[]]$PmdArgs, [int]$TimeoutSec = 60) {
+    $t0 = Get-Date
     $job = Start-Job -ScriptBlock { param($a) & python -m pymobiledevice3 @a 2>$null } -ArgumentList (, $PmdArgs)
     if (-not (Wait-Job $job -Timeout $TimeoutSec)) {
         Stop-Job   $job -ErrorAction SilentlyContinue
         Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Kill-StrayPmd $t0
+        $script:TimedOut += "pymobiledevice3 $($PmdArgs -join ' ')"
         return $null
     }
     $out = (Receive-Job $job) -join "`n"
@@ -467,6 +555,7 @@ function Stop-IosApp {
 # `apps install` with a HARD bound, and its exit code actually returned. -1 means it was still
 # running at the deadline and we killed it.
 function Invoke-BoundedInstall([string]$Path, [int]$TimeoutSec) {
+    $t0 = Get-Date
     # A JOB, not `Start-Process -PassThru`. That was the first attempt and its Process object does not
     # reliably expose ExitCode: a real install printed "Installation succeed." and the rig then said
     # "install FAILED (exit code )" from a $null that matched neither 0 nor -1. Reading $LASTEXITCODE
@@ -481,6 +570,8 @@ function Invoke-BoundedInstall([string]$Path, [int]$TimeoutSec) {
     if (-not (Wait-Job $job -Timeout $TimeoutSec)) {
         Stop-Job   $job -ErrorAction SilentlyContinue
         Remove-Job $job -Force -ErrorAction SilentlyContinue
+        Kill-StrayPmd $t0
+        $script:TimedOut += 'pymobiledevice3 apps install'
         return -1
     }
     $code = @(Receive-Job $job) | Where-Object { $_ -is [int] } | Select-Object -Last 1
@@ -495,7 +586,8 @@ function Install-IpaHeadless([string]$Path, [string]$What) {
     if ($ForceUninstall) {
         Warn 'ios: -ForceUninstall - uninstalling first (WIPES the container: device GUID, opponent history, unpulled .rec files).'
         $prev = $ErrorActionPreference; $ErrorActionPreference = 'SilentlyContinue'
-        try { & python -m pymobiledevice3 apps uninstall $App.IosBundleId 2>$null | Out-Null } catch {}
+        try { Invoke-Bounded -What 'pymobiledevice3 apps uninstall' -TimeoutSec 120 -Exe 'python' -Quiet -NoThrow `
+                             -CmdArgs @('-m','pymobiledevice3','apps','uninstall', $App.IosBundleId) | Out-Null } catch {}
         $ErrorActionPreference = $prev
     }
     $before = Get-IosAppRecord
@@ -589,9 +681,13 @@ print(best[1] if best else '')
         if (-not (Test-Path $Ipa)) { throw "unsigned ipa not found: $Ipa" }
         $signed = Join-Path $logs 'signed.ipa'
         Say 'ios: zsign the unsigned CI ipa (persisted cert + freshest device profile)'
-        if ($cert) { & $zsign -k $key -c $cert -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
-        else       { & $zsign -k $key -p $ZsignPassword -m $prov -b $App.IosBundleId -o $signed -z 5 $Ipa | Out-Host }
-        if ($LASTEXITCODE -ne 0) { throw 'zsign failed (profile expired? renew via Sideloadly once, then retry).' }
+        # Local, but bounded like everything else: a wedged signer hangs the install path just
+        # as effectively as a wedged device, and 90s is many times a normal 0.7s sign.
+        $zargs = if ($cert) { @('-k', $key, '-c', $cert, '-m', $prov, '-b', $App.IosBundleId, '-o', $signed, '-z', '5', $Ipa) }
+                 else       { @('-k', $key, '-p', $ZsignPassword, '-m', $prov, '-b', $App.IosBundleId, '-o', $signed, '-z', '5', $Ipa) }
+        $zout = Invoke-Bounded -What 'zsign' -TimeoutSec 90 -Exe $zsign -CmdArgs $zargs
+        if ($zout) { Write-Host $zout }
+        if (-not (Test-Path $signed)) { throw 'zsign produced no output ipa (profile expired? renew via Sideloadly once, then retry).' }
         return (Install-IpaHeadless $signed 'zsigned')
     }
     Warn 'ios: headless signing material incomplete (zsign / key+cert PEMs / profile) - falling back to Sideloadly.'
@@ -670,8 +766,14 @@ function Uninstall-Android {
     & $adb uninstall $App.AndroidPackage 2>$null | Out-Host
 }
 function Shot-Ios($path) {
-    try { PmdDev screenshot $path 2>&1 | Out-Null; Say "ios: screenshot -> $path" }
-    catch { Warn 'ios: screenshot failed (userspace tunnel) - is the device unlocked + Developer Mode on?' }
+    # 20s, not the 45s dvt default (#179). This is the call that actually stalls: with the app
+    # foregrounded, `dvt proclist` answers in seconds while `dvt screenshot` never returns at
+    # all — no output, no error, no file. A screenshot that has not answered in 20s is not
+    # coming, and the old `try/catch` could never help because a HANG throws nothing.
+    Remove-Item $path -Force -ErrorAction SilentlyContinue
+    PmdDevT 20 screenshot $path | Out-Null
+    if (Test-Path $path) { Say "ios: screenshot -> $path" }
+    else { Warn 'ios: no screenshot (timed out, or device locked / Developer Mode off) - continuing' }
 }
 # NOTE: there is deliberately NO Kill-Ios. `dvt kill`/`dvt pkill` proved unreliable on
 # this device (they report the kill but the process survives), so the ONLY dependable
@@ -869,4 +971,18 @@ switch ($Action) {
         }
         Say "=== cycle complete: $Iterations iteration(s) ==="
     }
+}
+
+# --- Post-run report: a timeout must never be mistaken for success ------------------
+# Several actions deliberately continue past a bounded failure (a screenshot is not worth
+# aborting a test run for), so without this the run ends printing nothing but its successes
+# and the exit code says fine. That is the same "silent stall" trap one level up: the
+# operator concludes the device is healthy when in fact a call was killed.
+if ($script:TimedOut.Count -gt 0) {
+    Write-Host ''
+    Write-Host "[device-rig] $($script:TimedOut.Count) call(s) TIMED OUT and were killed:" -ForegroundColor Red
+    foreach ($t in $script:TimedOut) { Write-Host "  - $t" -ForegroundColor Red }
+    Write-Host '[device-rig] The device did not answer in time. Nothing is hung now (the process' -ForegroundColor Red
+    Write-Host '[device-rig] tree was killed), but the result above is INCOMPLETE.' -ForegroundColor Red
+    exit 2
 }
