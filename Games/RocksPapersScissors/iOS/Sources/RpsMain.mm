@@ -684,6 +684,25 @@ static void UnblockStdio() {
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
 
+#if LUR_AGENT
+    // #103 A/B AUTOPILOT: iOS has no touch injection and no on-device cvars.cfg, so the console-driven
+    // render_scale sweep can't be done by hand headlessly. Cycle it here instead — one agent run then
+    // yields a labelled fps/TRACE sample per scale (applyRenderScaleIfChanged logs "render_scale -> X"
+    // on each step; bucket the TRACE/HEARTBEAT lines that follow until the next such line). LUR_AGENT,
+    // not LUR_INTERNAL: auto-forcing render state is acting for the player, so it is absent from any
+    // build handed over. The manual CVar (below) stays the human's tool in a Development build.
+    {
+        static const char* const kScaleSweep[] = {"1", "0.7", "0.5"};
+        static int      SweepIdx     = 0;
+        static uint64_t SweepAccumNs = 0;
+        SweepAccumNs += ElapsedNs;
+        if (SweepAccumNs > 12'000'000'000ull) {  // 12 s/scale — ~6 TRACE windows to average over
+            SweepAccumNs = 0;
+            SweepIdx = (SweepIdx + 1) % 3;
+            CvRenderScale.SetFromString(kScaleSweep[SweepIdx]);  // applyRenderScaleIfChanged picks it up
+        }
+    }
+#endif
 #if !LUR_SHIPPING
     [self applyRenderScaleIfChanged];  // #103: pick up a rps.dev.render_scale edit before we acquire
 #endif
