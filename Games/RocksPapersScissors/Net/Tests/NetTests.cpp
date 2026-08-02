@@ -1042,6 +1042,54 @@ static void TestDuplicateInputFrameIsNotAGap() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 }
 
+// ---- #172/#159: a LONG two-peer soak under continuous duplicate delivery — the host analog of the
+// hardware determinism soak ----
+// The 07-30 divergence's demonstrated mechanism (#159) is a duplicated frame silently skewing the
+// peer timeline: harmless while the duplicated batches are empty, fatal the instant one carries a
+// real event, and therefore surfacing at an arbitrary later tick unrelated to when the fault began.
+// TestDuplicateInputFrameIsNotAGap proves the signed-sequence discard over 16 ticks; this proves it
+// holds over THOUSANDS, with real events landing at irregular, seeded intervals so a one-index skew
+// cannot hide in a run of empty batches (which is exactly how the hardware skew stayed invisible for
+// ~13 minutes). Every A->B frame is delivered twice for the whole run — the half-open duplicate
+// shape #163 found on hardware. If the discard ever regresses to buffering the second copy, the two
+// sims diverge here within a few hundred ticks, long before a 20-minute hardware run would show it.
+static void TestTwoPeerDuplicateSoakStaysIdentical() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x5017A, 0, Enqueue, &Qa);
+    B.Init(0x5017A, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    SplitMix64 Rng(0x9E3779B97F4A7C15ull);
+    constexpr int Ticks = 2500;   // ~250 anchors; well past the point a skew would surface if broken
+    for (int I = 0; I < Ticks; ++I) {
+        // Real production orders at irregular, seeded ticks on BOTH sides. A duplicated Queue event
+        // applied twice would enqueue a phantom unit and diverge the hash — so this is precisely the
+        // input that makes a silent skew observable. Type/count mirror DriveInput; count kept low so
+        // the field (and this test's runtime) stays bounded as units meet and cull.
+        if (Rng.NextBounded(12) == 0) A.QueueLocalEvent(InputEvent::Queue(0, 2, 2));
+        if (Rng.NextBounded(12) == 0) B.QueueLocalEvent(InputEvent::Queue(1, 3, 2));
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        DeliverDuplicatingInputs(Qa, B);   // every A frame reaches B twice (the half-open shape)
+        Deliver(Qb, A);                    // B -> A stays clean, so the fault is one-directional
+        if ((I % 500) == 0) CHECK(!A.Desynced() && !B.Desynced());
+    }
+    for (int I = 0; I < 8; ++I) {   // settle: drain both to a common frontier
+        A.Tick(OneTickNs); B.Tick(OneTickNs); DeliverDuplicatingInputs(Qa, B); Deliver(Qb, A);
+    }
+
+    CHECK(B.DuplicateFrames() > Ticks / 2);   // duplication really was sustained for the whole run
+    CHECK(B.InputGaps() == 0);                // and never once misread as a loss (the 255-missing bug)
+    CHECK(A.InputGaps() == 0);
+    CHECK(B.RecoveryAttempts() == 0 && B.GapRecoveries() == 0);  // no budget spent on a phantom fault
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.ExecTick() > Ticks - 100);        // the match ran the full distance, not a stalled stub
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // bit-identical after thousands of ticks
+}
+
 // ---- #167: repairing a lost frame must not spend the DESYNC budget ----
 // MaxDesyncRecoveries is what finally declares a draw. The gap path shares the request machinery but
 // not the meaning: it is caused by the radio, it is repaired before the hole executes, and an ordinary
@@ -2223,6 +2271,7 @@ int main() {
     TestPreMatchAcceptsUnaffordableCampOnLegalGround();  // #167: spatial only, by design
     TestLostInputFrameIsDetectedAndLocated();    // #163
     TestDuplicateInputFrameIsNotAGap();          // #163
+    TestTwoPeerDuplicateSoakStaysIdentical();    // #172/#159: long-duration host soak
     TestInputGapDoesNotSpendTheDesyncBudget();   // #167
     TestPreMatchStallIsReported();               // #163
     TestStarvedCeilingEndsTheMatch();                   // #162
