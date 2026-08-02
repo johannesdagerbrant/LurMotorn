@@ -686,7 +686,18 @@ static void UnblockStdio() {
     // snapshot is re-rendered with a fresh interpolation alpha, so there's nothing new to copy. Before
     // the first publish, Consume returns false and _Snap stays the default (empty) sim = the menu.
     const uint32_t Pub = _PublishedTick.load(std::memory_order_acquire);
-    if (Pub != _LastConsumedTick && _Mailbox.Consume(_Snap)) _LastConsumedTick = Pub;
+    if (Pub != _LastConsumedTick && _Mailbox.Consume(_Snap)) {
+        _LastConsumedTick = Pub;
+        // RE-ANCHOR interpolation to the RENDER clock. The fixed-timestep tween ramps alpha 0->1 over
+        // one 100 ms tick; anchoring that ramp to the sim thread's own PublishNs was choppy, because
+        // that timestamp carries the sim thread's ~2 ms-poll + heavy-tick jitter, and sampling it at
+        // this GPU-bound ~40 fps render cadence (#103, ~4 frames/tick) ALIASES the per-tick start alpha
+        // (0.05, 0.20, 0.10 ...) into visible judder. Stamping "first seen" with render-thread time
+        // here makes every tick start at alpha~0 on the frame it lands, so the ramp is smooth and
+        // render-locked — exactly what the pre-#69 single-threaded path did (it set _TickLandedNs on
+        // the render thread). Visual only: PublishNs never crosses the determinism boundary.
+        _Snap.PublishNs = NowNs();
+    }
 
 #if LUR_INTERNAL
     // Always-on render-health heartbeat (#73) — NOT gated on the link (a past diagnosis was blinded
