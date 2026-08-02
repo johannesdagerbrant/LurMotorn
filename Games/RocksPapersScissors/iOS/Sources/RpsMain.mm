@@ -14,13 +14,14 @@
 #include <fcntl.h>   // O_NONBLOCK on stdout/stderr — see UnblockStdio
 #include <unistd.h>
 
+#include <atomic>    // #69: the sim<->render cross-thread surface (mirrors Android's AppState atomics)
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>   // setenv: MoltenVK log level, before any vkCreateInstance
 #include <ctime>     // the flight recorder's per-match filename stamp
 #include <string>
-#include <vector>
+#include <thread>    // #69: the dedicated sim/net thread, off the CADisplayLink render cadence
 
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
@@ -40,7 +41,8 @@
 #include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
 #include "Rps/SessionWiring.h" // the ONE Session->LockstepPeer routing table (#160)
-#include "Rps/Snapshot.h"
+#include "Rps/Snapshot.h"      // Snapshot + SnapshotMailbox (the sim->render hand-off)
+#include "Rps/SoloInput.h"     // #69: SoloInputInbox — the thread-safe glue->sim solo event queue
 #include "Rps/Tunables.h"
 
 namespace {
@@ -98,19 +100,25 @@ Rps::Fixed WorldToFixed(float Wv) {
 @interface RpsViewController : UIViewController
 @end
 
+// #69: iOS mirrors Android's #91 split — a dedicated SIM thread owns Session + Lp + the solo sim
+// (pumps BLE, ticks the lockstep/solo sim ~500 Hz, publishes snapshots), while the CADisplayLink
+// render loop (renderFrame) does ONLY input + render. Before this the iPhone serviced the transport
+// once per vsync-locked frame, so an inbound datagram waited up to ~16 ms (measured: ble.toApply
+// 0.2 -> ~11 ms, the textbook render-gate). The cross-thread surface below is the whole boundary:
+// the Mailbox (snapshot sim->main), the SoloIn inbox + Lp.QueueLocalEvent (input main->sim, both
+// thread-safe), and the atomics. Renderer/View/Cam/DevGesture are main-only; Session/Lp/Sim are
+// sim-only after the thread starts. Partition matches RpsMain.cpp's AppState verbatim.
 @implementation RpsViewController {
+    // ---- MAIN (render/input/lifecycle) thread only ----
     Lur::Render::IRenderer* _Renderer;
     Rps::GameView _View;
-    Lur::Transport::ITransport* _Transport;
-    Lur::Net::Session _Session;
-    Rps::LockstepPeer _Lp;
-    Lur::Save::Store* _Store;
+    Lur::Transport::ITransport* _Transport;   // created on main; the CB delegate pushes to the (thread-safe) inbox
+    Lur::Save::Store* _Store;  // main uses it once (device id + score load) BEFORE the thread; sim-only after
     std::string _SaveDir;      // Application Support — the Store's dir, kept for the .rec paths
     std::string _DeviceId;
-    Rps::Snapshot _Snap;
-    bool _Started;
-    uint32_t _LastTick;
-    uint64_t _TickLandedNs;
+    Rps::Snapshot _Snap;       // main's consume target (the latest published snapshot)
+    uint32_t _LastConsumedTick;  // main: consume from the mailbox only when the published tick changes
+    bool _ViewLinkedApplied;   // main: one-shot — the peer row + blink is applied once
     Rps::CameraScroll _Cam;
     bool _CamInit;
     float _DownX, _DownY;
@@ -118,23 +126,8 @@ Rps::Fixed WorldToFixed(float Wv) {
     // simply absent here (the recognizer had never been written for iOS), so the console was
     // unreachable on the iPhone and on-device tuning was Android-only. Shared with the Android and
     // desktop shims rather than hand-written a third time; the three copies had already drifted.
+    // MAIN thread only (it owns the touch stream).
     Lur::Input::ConsoleGesture _DevGesture;
-#if LUR_AGENT
-    // ---- Assistant remote control (CLAUDE.md's LUR_AGENT axis) ----
-    // Channel: Documents/agent.cmd inside the app container, holding "<seq> <verb> [args]". A FILE
-    // rather than a system property because iOS has no equivalent, and because the dev rig can already
-    // push into the container (`pymobiledevice3 apps push <bundle> <local> Documents/<name>`) — the
-    // same mechanism the role/clearsave markers use. Polled on the render thread, which on iOS is also
-    // the sim thread, so a command may touch _Lp/_SoloSim directly.
-    //
-    // This is the half that most needs it: there is no touch injection for iOS at all, so without this
-    // every two-phone scenario needs a person tapping the iPhone. Absent from every ordinary build;
-    // clear the file when handing the phone back.
-    Rps::AgentControl _AgentCtl;
-    std::string _AgentCmdPath;
-    uint64_t _AgentPollNs;
-#endif
-    uint8_t _Team;
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;
     bool _Ready;
@@ -145,28 +138,59 @@ Rps::Fixed WorldToFixed(float Wv) {
     // proven by 898999b).
     bool _InitWhileInactive;
     bool _BecameActive;
-    // Score vs the linked peer + a one-shot tally latch. These four are the DISPLAY copy; the
-    // all-time record behind them is _Scores, persisted through _Store (iOS is single-threaded here,
-    // so there is no handoff to arrange — the render loop owns all of it).
-    int _PeerW, _PeerL, _PeerD;
-    bool _Scored;
-    Rps::ScoreBook _Scores;
-    // #2/#127 solo-vs-AI on iOS (single-threaded — the solo sim ticks in renderFrame). Mirrors the
-    // Android session: auto-start Easy, a selector pick (re)starts a tier, a peer link offers a switch.
-    Rps::Sim _SoloSim;
+
+    // ---- SIM thread only (after _SimThread starts) ----
+    Lur::Net::Session _Session;
+    Rps::LockstepPeer _Lp;
+    Rps::ScoreBook _Scores;    // loaded on MAIN before the thread starts (the handoff), sim-only after
+    Rps::Sim _SoloSim;         // #2/#127 solo-vs-AI local sim
     Rps::AiController _SoloAi;
-    bool _SoloActive;
-    int _SoloTier;
-    uint64_t _SoloAccumNs;
-    bool _SoloScored;
-    uint64_t _SoloPostNs;      // #149 wall time held on the solo win/lose screen
-    uint32_t _ScoredIdx;       // #149 which Lp match index _Scored refers to
-    std::vector<Rps::InputEvent> _SoloPending;  // human events queued (main thread), drained per tick
-    int _PendingTier;          // one-shot selector pick -> (re)start solo (-1 = none)
-    bool _SwitchToLinked;      // selector: switch from solo to the linked peer
-    bool _PeerEverReady;       // rising-edge latch for the peer-link notice
-    bool _PrevPeerReady;       // feedback: link-ESTABLISHED edge for the solo->linked auto-switch
-    int _AiW[Rps::AiTierCount], _AiL[Rps::AiTierCount], _AiD[Rps::AiTierCount];
+#if LUR_AGENT
+    // ---- Assistant remote control (CLAUDE.md's LUR_AGENT axis) ----
+    // Channel: Documents/agent.cmd inside the app container, holding "<seq> <verb> [args]". A FILE
+    // rather than a system property because iOS has no equivalent, and because the dev rig can already
+    // push into the container (`pymobiledevice3 apps push <bundle> <local> Documents/<name>`) — the
+    // same mechanism the role/clearsave markers use. Polled on the SIM thread (as on Android), which
+    // is the only thread allowed to touch _Lp/_SoloSim; the one command that needs the touch recognizer
+    // (`gesture`) hands across via _AgentGestureRequest, exactly as Android does.
+    //
+    // This is the half that most needs it: there is no touch injection for iOS at all, so without this
+    // every two-phone scenario needs a person tapping the iPhone. Absent from every ordinary build;
+    // clear the file when handing the phone back.
+    Rps::AgentControl _AgentCtl;   // sim thread
+    std::string _AgentCmdPath;     // set on main, read-only after
+    uint64_t _AgentPollNs;         // sim thread
+#endif
+
+    // ---- Cross-thread surface (the ONLY state that crosses the boundary) ----
+    std::thread _SimThread;
+    Rps::SnapshotMailbox _Mailbox;         // sim publishes, main consumes
+    Rps::SoloInputInbox  _SoloIn;          // main pushes solo place/queue events, sim drains (thread-safe)
+    std::atomic<bool>     _SimRunning;     // main -> sim: keep looping (cleared + joined on teardown)
+    std::atomic<bool>     _MatchLive;      // sim -> main: a match (solo or peer) is live (drives touch routing)
+    std::atomic<uint8_t>  _LinkedTeam;     // sim -> main: which team you play (0 in solo)
+    std::atomic<uint32_t> _PublishedTick;  // sim -> main: consume only on a new tick
+    std::atomic<uint32_t> _PresentedFrames;// main -> sim: for the LOCKSTEP diag / heartbeat
+    std::atomic<bool>     _Recovering;     // sim -> main: #161 desync repair in flight (drives the HUD)
+    std::atomic<bool>     _LinkHalfOpen;   // sim -> main: #163 half-open link (drives the HUD banner)
+    std::atomic<int>      _SoloAiTier;     // main -> sim: one-shot AI tier pick -> (re)start solo (-1 = none)
+    std::atomic<bool>     _SoloActiveAtomic;   // sim -> main: solo match running (tap routing + view side)
+    std::atomic<bool>     _PeerLinkedAtomic;   // sim -> main: a real peer connected (row + blink)
+    std::atomic<bool>     _SwitchToLinkedAtomic;  // main -> sim: player picked the linked-opponent row
+    std::atomic<bool>     _SelectLinkedRow;    // sim -> main: we switched to the peer; name it in the HUD
+    // #139/feedback: sim -> main, the camp the player committed while the opponent hasn't placed theirs.
+    // Pre-match it is NOT in the sim (both camps become tick 0's input together), so the view draws it
+    // from here. RAW Fixed so no float crosses the boundary in a different form than the wire.
+    std::atomic<bool>     _PendingCampAtomic;
+    std::atomic<int32_t>  _PendingCampX, _PendingCampY;
+    std::atomic<int>      _AiWinsA[Rps::AiTierCount], _AiLossesA[Rps::AiTierCount],
+                          _AiDrawsA[Rps::AiTierCount];   // sim -> main: per-AI-tier W-L-D display
+    std::atomic<int>      _PeerWinsA, _PeerLossesA, _PeerDrawsA;  // sim -> main: vs the linked peer
+#if LUR_AGENT
+    // Agent `gesture`: the console recognizer lives on the MAIN thread (it owns the touch stream), so a
+    // sim-thread command hands the request across rather than touching _DevGesture directly.
+    std::atomic<bool>     _AgentGestureRequest;
+#endif
 #if LUR_INTERNAL
     // #144 SOLO FLIGHT RECORDER — parity with Android, which has had it since #156 made it a dev-build
     // default. Without it an iPhone playtest is unreadable afterwards: you get the score and nothing
@@ -230,7 +254,6 @@ static void UnblockStdio() {
     UnblockStdio();
     // Then give the engine logger a home, before anything can try to report a problem.
     Lur::Log::Init(&EngineLogSink, "OnlyRps");
-    _LastTick = 0xFFFFFFFFu;
 #if LUR_INTERNAL
     // #159: "no recording open yet" must be a value MatchIndex can never take, and an Obj-C ivar is
     // ZERO-initialised — which is exactly the index of the FIRST match. The open-on-match-started edge
@@ -272,15 +295,19 @@ static void UnblockStdio() {
     }
 #endif
     _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
-    // All-time W-L-D per AI tier / per rival. Seeded into the view's rows here so the dropdown shows
-    // the real record on its first open, not 0-0-0 until this session's first match resolves.
+    // All-time W-L-D per AI tier / per rival, loaded on MAIN before the sim thread exists (thread
+    // creation is the handoff — from then on _Scores is written ONLY by the sim thread). Seeding the
+    // display atomics here is what makes the ladder show the real record the moment the dropdown first
+    // opens, instead of 0-0-0 until this session's first match resolves; renderFrame pushes them to
+    // the view every frame.
     _Scores.Load(*_Store);
     for (int T = 0; T < Rps::AiTierCount; ++T) {
         const Rps::Tally S = _Scores.Ai(T);
-        _AiW[T] = static_cast<int>(S.Wins);
-        _AiL[T] = static_cast<int>(S.Losses);
-        _AiD[T] = static_cast<int>(S.Draws);
-        _View.SetAiScore(T, _AiW[T], _AiL[T], _AiD[T]);
+        _AiWinsA[T].store(static_cast<int>(S.Wins), std::memory_order_relaxed);
+        _AiLossesA[T].store(static_cast<int>(S.Losses), std::memory_order_relaxed);
+        _AiDrawsA[T].store(static_cast<int>(S.Draws), std::memory_order_relaxed);
+        _View.SetAiScore(T, static_cast<int>(S.Wins), static_cast<int>(S.Losses),
+                         static_cast<int>(S.Draws));
     }
 
     _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
@@ -298,9 +325,26 @@ static void UnblockStdio() {
     _Session.Start(_Transport, _DeviceId);
     os_log(OS_LOG_DEFAULT, "OnlyRps: session started (device id %zuB)", _DeviceId.size());
 
-    // #2: open straight into a match vs the Easy AI (renderFrame consumes this on its first tick).
-    // The player can pick another tier — or the linked opponent — from the selector at any time.
-    _PendingTier = static_cast<int>(Rps::EAiTier::Easy);
+    // Initialise the cross-thread surface before the sim thread reads any of it. The zero-defaults
+    // (all the sim->main flags, false/0) rely on ObjC's zeroed ivar storage; these three are the ones
+    // that need a non-zero start.
+    _LastConsumedTick = 0xFFFFFFFFu;
+    _SimRunning.store(true, std::memory_order_relaxed);
+    // #2: open straight into a match vs the Easy AI (the sim thread consumes this one-shot on its first
+    // iteration). The player can pick another tier — or the linked opponent — from the selector at any
+    // time. Set BEFORE the thread starts so the very first sim iteration brings a live match up.
+    _SoloAiTier.store(static_cast<int>(Rps::EAiTier::Easy), std::memory_order_release);
+
+    // ---- SIM thread (#69/#91 parity): owns Session + Lp + the solo sim; pumps BLE, ticks the sim,
+    // publishes snapshots — the datagram-driven service loop OFF the CADisplayLink render cadence. The
+    // lambda captures self as a raw pointer (no ARC retain in a C++ closure); the VC lives for the app
+    // and -dealloc stops + joins the thread before its C++ ivars are destroyed. ----
+    _SimThread = std::thread([self] { [self simThreadLoop]; });
+}
+
+- (void)dealloc {
+    _SimRunning.store(false, std::memory_order_release);  // stop the loop, then wait it out
+    if (_SimThread.joinable()) _SimThread.join();
 }
 
 - (void)viewDidLayoutSubviews {
@@ -372,7 +416,7 @@ static void UnblockStdio() {
 // opening AI match goes to the SOLO sim, so the peer sits at stall=1 waiting for a camp that was never
 // sent — and every step of that reports success. Mirrors WarnIfSolo in the Android main.
 - (void)warnIfSolo:(const char*)What {
-    if (!_SoloActive) return;
+    if (!_SoloActiveAtomic.load(std::memory_order_acquire)) return;
     if (_Session.IsReady())
         os_log_error(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the SOLO sim, not the linked peer "
                      "(a peer IS linked). The other phone will wait forever. Send `linked` first, "
@@ -387,10 +431,11 @@ static void UnblockStdio() {
             // EXACT coordinates, which the touch UI cannot produce: drag-to-place snaps to the nearest
             // VALID square and emits nothing on an invalid drop, so a human cannot place onto the
             // square an existing camp occupies — and that is exactly the #160 collision.
+            const uint8_t Team = _LinkedTeam.load(std::memory_order_relaxed);
             const Rps::InputEvent E = Rps::InputEvent::Place(
-                _Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
+                Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A,
-                   Cmd.B, static_cast<unsigned>(_Team));
+                   Cmd.B, static_cast<unsigned>(Team));
             [self warnIfSolo:"place"];
             [self placeLocal:E];
             break;
@@ -398,10 +443,12 @@ static void UnblockStdio() {
         case Rps::EAgentCmd::Queue:
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
             [self warnIfSolo:"queue"];
-            [self placeLocal:Rps::InputEvent::Queue(_Team, Cmd.A, Cmd.B)];
+            [self placeLocal:Rps::InputEvent::Queue(_LinkedTeam.load(std::memory_order_relaxed),
+                                                    Cmd.A, Cmd.B)];
             break;
         case Rps::EAgentCmd::Stress: {
-            Rps::Sim& Sm = _SoloActive ? _SoloSim : const_cast<Rps::Sim&>(_Lp.GetSim());
+            Rps::Sim& Sm = _SoloActiveAtomic.load(std::memory_order_acquire)
+                               ? _SoloSim : const_cast<Rps::Sim&>(_Lp.GetSim());
             Sm.StressFill(Cmd.A, static_cast<uint8_t>(Cmd.B));
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT stress %d/team type %d -> count=%d", Cmd.A, Cmd.B,
                    Sm.Count);
@@ -419,28 +466,22 @@ static void UnblockStdio() {
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT console %d", Cmd.A);
             _View.SetDevOverlayOpen(Cmd.A != 0);
             break;
-        case Rps::EAgentCmd::Gesture: {
+        case Rps::EAgentCmd::Gesture:
             // #151's real subject: drive the SHARED recognizer with a synthetic two-finger triple-tap.
-            // It proves the recognizer plus its wiring to SetDevOverlayOpen — the piece that was simply
-            // absent on iOS — without needing touch injection, which iOS does not offer at all.
-            const uint64_t T0 = NowNs();
-            bool Opened = false;
-            for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
-                const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
-                _DevGesture.PointersDown(1, Down);
-                _DevGesture.PointersDown(2, Down);
-                Opened = _DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
-            }
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture -> recognizer says open=%d", Opened ? 1 : 0);
-            if (Opened) _View.SetDevOverlayOpen(true);
+            // The recognizer lives on the MAIN thread (it owns the touch stream), so this command — on
+            // the SIM thread — hands the request across via the atomic instead of driving _DevGesture
+            // directly, exactly as Android's ApplyAgentCommand does (it can't touch the glue-owned
+            // recognizer either).
+            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture: synthetic two-finger triple-tap requested");
+            _AgentGestureRequest.store(true, std::memory_order_release);
             break;
-        }
         case Rps::EAgentCmd::KillOwn: {
             // #160 setup: free the ground under our own camp so it can be rebuilt on the same square —
             // the only route to a produced placement whose coordinates equal the opening camp's.
+            const uint8_t Team = _LinkedTeam.load(std::memory_order_relaxed);
             Rps::Sim& Sm = const_cast<Rps::Sim&>(_Lp.GetSim());
             for (int32_t I = 0; I < Sm.Count; ++I) {
-                if (!Sm.IsAlive(I) || Sm.Team[I] != _Team) continue;
+                if (!Sm.IsAlive(I) || Sm.Team[I] != Team) continue;
                 if (!Sm.IsBuilding(I) || Sm.IsHomeBase(I)) continue;
                 if (Sm.Type[I] != static_cast<uint8_t>(Cmd.A & 3)) continue;
                 os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT killown slot=%d at (%d,%d)", I,
@@ -458,7 +499,7 @@ static void UnblockStdio() {
             // The flag is LATCHED (see the switch site): sending this before the link is up is fine,
             // it takes effect on the frame the peer becomes ready.
             os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT linked -> requesting the switch to the linked opponent");
-            _SwitchToLinked = true;
+            _SwitchToLinkedAtomic.store(true, std::memory_order_release);
             break;
         case Rps::EAgentCmd::None:
             break;
@@ -500,7 +541,8 @@ static void UnblockStdio() {
     std::strftime(Stamp, sizeof(Stamp), "%Y%m%d-%H%M%S", &Tm);
     _LinkedRecFile = _SaveDir + "/rps-vs-" + Stamp + "-" + std::to_string(++_LinkedMatchNo) + ".rec";
     // tier -1 = "not an AI match"; the human team is OUR side, which is what orients the file.
-    _LinkedRec.Begin(_LinkedRecFile.c_str(), _Lp.GetSim(), /*tier*/ -1, _Team);
+    _LinkedRec.Begin(_LinkedRecFile.c_str(), _Lp.GetSim(), /*tier*/ -1,
+                     _LinkedTeam.load(std::memory_order_relaxed));
     os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked -> %{public}s", _LinkedRecFile.c_str());
 }
 #endif
@@ -589,353 +631,87 @@ static void UnblockStdio() {
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
 #if LUR_AGENT
-    // Poll the agent channel FIRST, and unconditionally — it must be serviced whatever mode the app is
-    // in. Putting it inside the linked branch (as this first was) makes it unreachable in solo, which
-    // is the mode the app OPENS in, so a scenario could not be driven until a peer appeared.
-    [self pollAgentChannel:ElapsedNs];
+    // Agent `gesture`: the recognizer lives here on the MAIN thread (it owns the touch stream), so a
+    // sim-thread `gesture` command hands the request across via the atomic. Feed the SHARED recognizer
+    // a synthetic two-finger triple-tap — three taps, each inside the hold + chain windows, exactly as
+    // a finger pair would — proving the recognizer and its wiring to SetDevOverlayOpen without touch
+    // injection (which iOS lacks entirely). Mirrors the Android glue thread.
+    if (_AgentGestureRequest.exchange(false, std::memory_order_acquire)) {
+        const uint64_t T0 = NowNs();
+        bool Opened = false;
+        for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
+            const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
+            _DevGesture.PointersDown(1, Down);
+            _DevGesture.PointersDown(2, Down);
+            Opened = _DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
+        }
+        os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture -> recognizer says open=%d (console now %d)",
+               Opened ? 1 : 0, _View.DevOverlayOpen() ? 1 : 0);
+        if (Opened) _View.SetDevOverlayOpen(true);
+    }
 #endif
 
-    // #2/#127: consume a selector tier pick -> (re)start a solo AI match at once (even mid-match).
-    // App-open sets Easy, so a match is live immediately (the empty pre-match sim that showed no
-    // base/mines/frontier is gone).
-    if (_PendingTier >= 0) {
-        _SoloSim.Init(kMatchSeed);
-        _SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(_PendingTier));
-        _SoloActive = true; _SoloTier = _PendingTier; _SoloScored = false; _SoloPostNs = 0;
-        _SoloAccumNs = 0; _LastTick = 0xFFFFFFFFu; _Started = false; _Team = 0; _CamInit = false;
-        _SoloPending.clear();
-        os_log(OS_LOG_DEFAULT, "OnlyRps: solo AI match (re)started (tier %d)", _PendingTier);
-#if LUR_INTERNAL
-        [self soloRecBegin:_PendingTier];   // one recording per match, opened as the match opens
-#endif
-        _PendingTier = -1;
+    // ---- Reflect the sim thread's published view-state into the HUD. The heavy lifting — session
+    // pump, solo/linked auto-switch, the sim ticks, and scoring — is on the sim thread now
+    // (simThreadLoop); renderFrame only applies the atomics it published and renders. ----
+    // #2: the Linked-opponent ROW + "opponent link established" blink appear when a real PEER connects.
+    // Fire once on the rising edge. GetPeerGuid is set once at handshake, so reading it here on main
+    // (after the acquire load establishes happens-before) is safe even though Session is sim-owned.
+    if (!_ViewLinkedApplied && _PeerLinkedAtomic.load(std::memory_order_acquire)) {
+        _View.SetLinked(true, _Session.GetPeerGuid());   // label the row with the peer's id (#178)
+        _View.NotifyPeerLinked();                        // blink the bar
+        _ViewLinkedApplied = true;
     }
-
-    // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake — that
-    // raises the "opponent link established" notice + the Linked-opponent row.
-    _Session.Tick(ElapsedNs);
-    const bool PeerReady = _Session.IsReady();
-    if (PeerReady && !_PeerEverReady) {
-        _PeerEverReady = true;
-        // Peer's device id as the row label (#178) — see the matching note in RpsMain.cpp.
-        _View.SetLinked(true, _Session.GetPeerGuid());
-        _View.NotifyPeerLinked();    // blink the bar
-    }
-    // Every frame, not just the link edge — see the matching note in RpsMain.cpp.
+    // Every frame, not just the link edge: a mismatch is discovered when the peer's fingerprint ARRIVES
+    // (which can be after link-up) and clears on reinstall. BuildMismatch() is a monotonic bool the sim
+    // thread sets; reading it from main is the same benign cross-thread read Android's glue does
+    // (RpsMain.cpp SetBuildMismatch), and the setter early-outs when unchanged.
     _View.SetBuildMismatch(_Lp.BuildMismatch());
-    _View.SetLinkHalfOpen(_Session.IsLinkHalfOpen());  // #163: "LINK STALLED" banner (single-threaded here)
-    // AUTO-switch solo -> linked, on the EDGE where the link establishes and ONLY out of an AI match
-    // the player has not started (no mine camp dragged in yet). Two freshly opened phones therefore
-    // pair and front-load the match with zero taps, and because both peers switch on the same
-    // Session-ready edge they enter lockstep within ~a frame of each other — the proven direct-link
-    // timing (a manual tap drifted the two Lp.Init calls seconds apart, so the peer that switched
-    // first ran lockstep alone and desynced at tick 10, #147).
-    //
-    // Never auto-switch out of a STARTED AI match (that would destroy a game in progress), and never
-    // out of a linked match, started or not: _SoloActive is false there, and a re-link after a blip
-    // must resync rather than re-Init. The selector stays the deliberate way across, from ANY state.
-    const bool LinkEdge = PeerReady && !_PrevPeerReady;
-    _PrevPeerReady = PeerReady;
-    // #170: the manual pick LATCHES until it can be honoured. It used to be cleared every frame
-    // regardless, so a pick that arrived while the link was still coming up was silently dropped —
-    // invisible to a human (the row only exists once a peer is linked) but the normal case for a
-    // harness, which sends `linked` the moment it launches the app. The flag is only cleared when the
-    // switch actually happens, or when there is nothing left to switch out of.
-    const bool ManualPick = _SwitchToLinked;
-    const bool AutoSwitch = LinkEdge && !_SoloSim.HasMinerCamp(0);   // unstarted AI match only
-    if (_SoloActive && PeerReady && (AutoSwitch || ManualPick)) {
-        _SoloActive = false;
-        _SwitchToLinked = false;
-        _Team = 0;
-        _View.SelectLinkedOpponent();   // name the peer in the HUD instead of the AI tier
-        os_log(OS_LOG_DEFAULT, "OnlyRps: switch solo -> linked (%{public}s)",
-               AutoSwitch ? "auto: link established, AI match not started"
-                          : "player picked the linked opponent");
-    } else if (ManualPick && !_SoloActive) {
-        _SwitchToLinked = false;   // already linked: moot
-    }
+    // The sim switched us to the peer -> point the selector at that row (gated on the row existing, so
+    // the flag is never consumed before SetLinked ran).
+    if (_ViewLinkedApplied && _SelectLinkedRow.exchange(false, std::memory_order_acq_rel))
+        _View.SelectLinkedOpponent();
+    // Per-opponent session scores (no-op when unchanged, so the list only rebuilds on a real change).
+    for (int T = 0; T < Rps::AiTierCount; ++T)
+        _View.SetAiScore(T, _AiWinsA[T].load(std::memory_order_relaxed),
+                         _AiLossesA[T].load(std::memory_order_relaxed),
+                         _AiDrawsA[T].load(std::memory_order_relaxed));
+    _View.SetPeerScore(_PeerWinsA.load(std::memory_order_relaxed),
+                       _PeerLossesA.load(std::memory_order_relaxed),
+                       _PeerDrawsA.load(std::memory_order_relaxed));
+    _View.SetRecovering(_Recovering.load(std::memory_order_relaxed));     // #161 "resyncing with opponent"
+    _View.SetLinkHalfOpen(_LinkHalfOpen.load(std::memory_order_relaxed)); // #163 "LINK STALLED" banner
 
-    if (_SoloActive) {
-        // PRE-MATCH HOLD, mirroring the linked path (#139/#149): until you place your opening camp
-        // the clock does not run, and your camp and the AI's land in the SAME tick — as two peers
-        // both apply their camps at tick 0. Elapsed time while held is dropped, not banked.
-        //
-        // Gated on the match being ONGOING as well: after a loss the player's camps are usually gone,
-        // and without that test this branch would sit there trying to open a match that is already
-        // decided. (On Android the same confusion was worse — the equivalent gate `continue`d past the
-        // result handling entirely and stuck the player on "you lose".)
-        if (_SoloSim.Result == Rps::ResultOngoing && !_SoloSim.HasMinerCamp(0)) {
-            _SoloAccumNs = 0;
-            Rps::InputEvent Evs[Rps::MaxEventsPerTick];
-            int Kept = 0;
-            for (const Rps::InputEvent& E : _SoloPending)
-                if (Kept < Rps::MaxEventsPerTick && E.Kind == Rps::EventPlaceBuilding &&
-                    E.Type == Rps::UnitMiner &&
-                    _SoloSim.CanPlaceBuilding(0, Rps::UnitMiner, Rps::Fixed{E.X}, Rps::Fixed{E.Y}))
-                    Evs[Kept++] = E;
-            _SoloPending.clear();   // pre-match only the camp counts; the rest is dropped
-            if (Kept > 0) {
-                int AiCount = 0;
-                _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Kept,
-                                     Rps::MaxEventsPerTick - Kept, AiCount);
-                _SoloSim.StepEvents(Evs, Kept + AiCount);
-#if LUR_INTERNAL
-                // The opening camps are ONE tick's batch (yours and the AI's together) and it is the
-                // tick the whole replay is anchored on — dropping it would leave a recording whose
-                // first event is unexplained.
-                _SoloRec.Events(_SoloSim.Tick - 1, Evs, Kept + AiCount);
-#endif
-            }
-        } else {
-        _SoloAccumNs += ElapsedNs;
-        while (_SoloAccumNs >= kStepNs) {   // fixed 10 Hz
-            _SoloAccumNs -= kStepNs;
-            Rps::InputEvent Evs[Rps::MaxEventsPerTick];
-            int Count = 0;
-            for (const Rps::InputEvent& E : _SoloPending)
-                if (Count < Rps::MaxEventsPerTick) Evs[Count++] = E;
-            _SoloPending.clear();
-            {
-                int AiCount = 0;
-                _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Count, Rps::MaxEventsPerTick - Count, AiCount);
-                Count += AiCount;
-            }
-            _SoloSim.StepEvents(Evs, Count);
-#if LUR_INTERNAL
-            // #144: the COMBINED batch (yours + the AI's), recorded at the tick it was applied on, so
-            // a dev machine replays this match bit-for-bit (Rps::ReplayMatch).
-            _SoloRec.Events(_SoloSim.Tick - 1, Evs, Count);
-#endif
-        }
-#if LUR_INTERNAL
-        // #144 telemetry: a census every 2 s into the recording AND the syslog, so the match is
-        // readable live and replayable afterwards. The AI's own state + countered type go in it — a
-        // recording that shows only what it BUILT cannot tell "mis-countered" from "production-bound".
-        _RecCensusNs += ElapsedNs;
-        if (_RecCensusNs >= 2'000'000'000ull) {
-            _RecCensusNs = 0;
-            _SoloRec.Census(_SoloSim, /*human*/ 0, static_cast<int>(_SoloAi.State()),
-                            static_cast<int>(_SoloAi.CounterEnemy()));
-        }
-#endif
-        }
-        if (!_SoloScored && _SoloSim.Result != Rps::ResultOngoing && _SoloTier >= 0) {
-            _SoloScored = true;
-#if LUR_INTERNAL
-            // Finalise BEFORE the tally, exactly as Android does: a recording without its `end` line
-            // replays as an abandoned match, and the last census is what makes the final state
-            // readable without replaying at all.
-            if (_SoloRec.IsOpen()) {
-                _SoloRec.Census(_SoloSim, 0, static_cast<int>(_SoloAi.State()),
-                                static_cast<int>(_SoloAi.CounterEnemy()));
-                _SoloRec.End(_SoloSim);
-                os_log(OS_LOG_DEFAULT, "OnlyRps: REC match finished: result=%u tick=%u -> %{public}s",
-                       static_cast<unsigned>(_SoloSim.Result), _SoloSim.Tick, _SoloRecFile.c_str());
-            }
-#endif
-            // Persist first, then show what was persisted (so the row and the disk cannot disagree).
-            _Scores.RecordAi(_SoloTier, _SoloSim.Result, /*MyTeam*/ 0);
-            _Scores.Save(*_Store);
-            const Rps::Tally T = _Scores.Ai(_SoloTier);
-            _AiW[_SoloTier] = static_cast<int>(T.Wins);
-            _AiL[_SoloTier] = static_cast<int>(T.Losses);
-            _AiD[_SoloTier] = static_cast<int>(T.Draws);
-            _View.SetAiScore(_SoloTier, _AiW[_SoloTier], _AiL[_SoloTier], _AiD[_SoloTier]);
-        }
-        // #149: hold the win/lose screen, then begin a FRESH match at the same tier from Seed+1 —
-        // back in the pre-match state (the AI waits for your camp; the camera re-locks itself).
-        if (_SoloSim.Result != Rps::ResultOngoing) {
-            _SoloPostNs += ElapsedNs;
-            if (_SoloPostNs >= Rps::PostMatchHoldNs && _SoloTier >= 0) {
-                const uint64_t NextSeed = _SoloSim.Seed + 1;
-                _SoloSim.Init(NextSeed);
-                _SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(_SoloTier));
-                _SoloScored = false; _SoloPostNs = 0; _SoloAccumNs = 0;
-                _SoloPending.clear();
-                os_log(OS_LOG_DEFAULT, "OnlyRps: solo next match begins (tier %d)", _SoloTier);
-#if LUR_INTERNAL
-                [self soloRecBegin:_SoloTier];   // the auto-restart is a new match: a new recording
-#endif
-            }
-        } else {
-            _SoloPostNs = 0;
-        }
-    } else {
-        if (!_Started && PeerReady) {
-            const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
-            _Team = Team;  // per-player view flip
-            _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
-#if LUR_INTERNAL
-            // #147/#112: refuse a mismatched build, and exchange our gameplay-CVar override set
-            // so both peers converge on ONE merged set (and one Init-derived state) before tick 0.
-            // iOS has no on-device cvars.cfg today, so the seed loop is normally a no-op — but the
-            // SEND is not: an empty set is still this peer's half of the exchange, and the loop is
-            // in place for the day iOS gets on-device tuning.
-            Rps::LockstepPeer* Lp = &_Lp;   // ObjC method: no `this` to capture, take the ivar's address
-            Lp->SendFingerprint();
-            Lur::Core::CVarRegistry::ForEach([Lp](Lur::Core::ICVar* C) {
-                if (!C->AffectsGameplay() || !C->Overridden()) return;
-                const int Id = Rps::GameplayIdForName(C->Name());
-                if (Id >= 0) Lp->SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(), C->EditWallMs());
-            });
-            Lp->SendCvarSync();
-#endif
-            // #148: reconcile on ENTERING the match, not only on a reconnect edge — a freshly
-            // launched app never takes that edge, so it never offered its frontier and the peer
-            // that kept running sat in Awaiting forever. Harmless for a fresh pair (empty
-            // histories, marker F=0 both ways). After Init so Init can't wipe it.
-            _Lp.BeginResync();
-            _Started = true; _Scored = false; _ScoredIdx = _Lp.MatchIndex();
-#if LUR_INTERNAL
-            // #159: route every executed tick into the linked recording. The sink is app wiring and
-            // survives match restarts, so it is armed once here; the C function pointer takes `self`
-            // as its context (the ivars are C++ members of this object).
-            _Lp.SetTickSink(
-                [](void* C, uint32_t Tick, const Rps::InputEvent* Batch, int Count, uint64_t Hash) {
-                    RpsViewController* Vc = (__bridge RpsViewController*)C;
-                    [Vc recordLinkedTick:Tick batch:Batch count:Count hash:Hash];
-                },
-                (__bridge void*)self);
-            // #180: and the OPEN is driven by the netcode's match-start edge, not by this class
-            // watching MatchStarted() from renderFrame. The poll lost tick 0 whenever the match
-            // started while DELIVERING the peer's camp rather than during our own Tick, and tick 0 is
-            // the tick carrying both camps — so the file diffed as "EVENTS differ at tick 0 ... look
-            // at the transport" on a clean match. Still not at Lp.Init: the header would then snapshot
-            // this peer's pre-merge CVar set (see linkedRecBegin).
-            _Lp.SetMatchStartSink(
-                [](void* C) { [(__bridge RpsViewController*)C linkedRecBegin]; },
-                (__bridge void*)self);
-#endif
-            // The peer's GUID is known now, so show the ALL-TIME record against THIS rival rather
-            // than 0-0-0 until the first match of the session ends.
-            {
-                const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
-                _PeerW = static_cast<int>(T.Wins);
-                _PeerL = static_cast<int>(T.Losses);
-                _PeerD = static_cast<int>(T.Draws);
-                _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
-            }
-            os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
-        }
-        if (_Started) _Lp.Tick(ElapsedNs);
-        // #161: tell the player a desync repair is in flight — the match holds and may rewind a second
-        // of play, which is worse than the freeze it replaced if it happens without explanation.
-        _View.SetRecovering(_Started && !_SoloActive && _Lp.Recovering());
-        // #149: one Lp spans many matches now (it holds the win screen, then rebuilds), so the
-        // tally latch is keyed on the match INDEX — re-armed exactly once per restart.
-        if (_Started && _ScoredIdx != _Lp.MatchIndex()) { _ScoredIdx = _Lp.MatchIndex(); _Scored = false; }
-        // #2: tally the linked result ONCE (you are _Team) and show the session W-L-D on the peer row.
-        if (_Started && !_Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
-            _Scored = true;
-            const uint8_t R = _Lp.GetSim().Result;
-#if LUR_INTERNAL
-            // Close the recording on the RESULT, not at the next Begin: the end line stamps the
-            // result and tick, and by the next Begin the sim has been rebuilt for the match after
-            // this one. A desync-declared draw (e6d6abf) lands here too, so the file that captured a
-            // divergence is always complete.
-            if (_LinkedRec.IsOpen()) {
-                _LinkedRec.Census(_Lp.GetSim(), _Team, /*no AI*/ -1, -1);
-                _LinkedRec.End(_Lp.GetSim());
-                os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked match finished: result=%u tick=%u "
-                       "desync=%d -> %{public}s", static_cast<unsigned>(R), _Lp.GetSim().Tick,
-                       _Lp.Desynced() ? 1 : 0, _LinkedRecFile.c_str());
-            }
-#endif
-            // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed
-            // or absent id rather than inventing a rivalry row, so keep the session count in that case.
-            const std::string& PeerGuid = _Session.GetPeerGuid();
-            if (_Scores.RecordPeer(PeerGuid, _DeviceId, R, _Team)) {
-                _Scores.Save(*_Store);
-                const Rps::Tally T = _Scores.Peer(PeerGuid, _DeviceId);
-                _PeerW = static_cast<int>(T.Wins);
-                _PeerL = static_cast<int>(T.Losses);
-                _PeerD = static_cast<int>(T.Draws);
-            } else {
-                os_log(OS_LOG_DEFAULT, "OnlyRps: peer result not persisted (peer guid %zuB)",
-                       PeerGuid.size());
-                if (R == Rps::ResultDraw) ++_PeerD;
-                else if ((R == Rps::ResultTeam0Wins && _Team == 0) || (R == Rps::ResultTeam1Wins && _Team == 1)) ++_PeerW;
-                else ++_PeerL;
-            }
-            _View.SetPeerScore(_PeerW, _PeerL, _PeerD);
-        }
-    }
+    // Consume the latest published snapshot, but only when the tick CHANGED — between ticks the held
+    // snapshot is re-rendered with a fresh interpolation alpha, so there's nothing new to copy. Before
+    // the first publish, Consume returns false and _Snap stays the default (empty) sim = the menu.
+    const uint32_t Pub = _PublishedTick.load(std::memory_order_acquire);
+    if (Pub != _LastConsumedTick && _Mailbox.Consume(_Snap)) _LastConsumedTick = Pub;
 
 #if LUR_INTERNAL
-    // Dev build: log the lockstep tick/desync every ~2 s so sync is observable from
-    // syslog. (The bring-up autoplay is gone — phones are for HUMAN playtesting now;
-    // the desktop's --auto flag covers soak needs.)
-    static uint64_t DiagAccumNs = 0;
-    // Always-on render-health heartbeat (#73) — deliberately NOT gated on the link:
-    // today's diagnosis was blinded because every periodic line needed _Started.
+    // Always-on render-health heartbeat (#73) — NOT gated on the link (a past diagnosis was blinded
+    // because every periodic line needed a started match). MAIN-thread only: it reads window / renderer
+    // / scene state. The lockstep/convergence DIAG line AND the #69 TRACE line now live on the SIM
+    // thread (simThreadLoop), where the sim state and the ble.toApply drain actually are — which is the
+    // whole point of the split: the drain no longer rides this vsync-locked frame.
     static uint64_t BeatAccumNs = 0;
     BeatAccumNs += ElapsedNs;
     if (BeatAccumNs > 2'000'000'000ull) {
         BeatAccumNs = 0;
-        // win/key/scene/host: hunting an in-process signal for the never-composited
-        // state (#73). scene: UISceneActivationState (0=fg-active). host: root layer
-        // parented into the window's layer tree.
+        // win/key/scene/host: hunting an in-process signal for the never-composited state (#73). scene:
+        // UISceneActivationState (0=fg-active). host: root layer parented into the window's layer tree.
         UIWindow* Win = self.view.window;
+        const bool LinkedLive = _MatchLive.load(std::memory_order_relaxed) &&
+                                !_SoloActiveAtomic.load(std::memory_order_relaxed);
         os_log(OS_LOG_DEFAULT,
                "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld "
                "host=%d scenes=%lu",
                _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
                UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
-               _Started ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
+               LinkedLive ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
                (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
                self.view.layer.superlayer != nil ? 1 : 0,
                (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
-    }
-    if (_Started || _SoloActive) {
-        DiagAccumNs += ElapsedNs;
-        if (DiagAccumNs > 2'000'000'000ull) {
-            DiagAccumNs = 0;
-            // presented= distinguishes "rendering but invisible" from a dead swapchain
-            // (issue #73): black screen + advancing count = compositor problem; stuck
-            // count = the renderer itself isn't presenting.
-            // #147: hash + gold + frontier are the CONVERGENCE readout — pre-match they MUST match
-            // the peer's line exactly. The anchor cross-check only begins once the match does, so
-            // before either camp is placed a divergence was otherwise invisible.
-            const Rps::Sim& DS = _SoloActive ? _SoloSim : _Lp.GetSim();
-            // badbuild= mirrors Android's: #112 detects a build-fingerprint mismatch and sets
-            // BuildMismatch(), but nothing read it and its own log line had no sink — so when this
-            // pair desynced on 2026-07-30, "were the two builds even the same?" was unanswerable.
-            // #163: gaps/gapat/stall, matching Android's line field for field — the pair is only
-            // readable side by side, and this direction (peripheral -> central) is the one that went
-            // half-open, so the iPhone's copy is the more important of the two. gaps>0 names a frame
-            // the link dropped without reporting an error; stall=1 names the pre-match hang that
-            // otherwise looks exactly like a frozen app.
-            os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u "
-                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d",
-                   _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
-                   _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
-                   _Lp.BuildMismatch() ? 1 : 0,
-                   _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
-                   static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
-                   DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),
-                   _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0),
-                   _SoloActive ? 0 : _Lp.InputGaps(), _SoloActive ? 0u : _Lp.LastInputGapTick(),
-                   (!_SoloActive && _Lp.PreMatchStalled()) ? 1 : 0,
-                   // #163: half-open verdict, matching Android field-for-field (the pair is read side
-                   // by side). This peripheral->central direction is the one that wedges, so the
-                   // iPhone's halfopen= is the more important of the two.
-                   (!_SoloActive && _Session.IsLinkHalfOpen()) ? 1 : 0,
-                   // #182: hard radio restarts fired this half-open episode (capped). The iPhone is the
-                   // peripheral whose notify path wedges, so THIS is the side where the escalation runs
-                   // — a climbing restarts= here is the on-device proof the fix fired.
-                   _SoloActive ? 0 : _Session.RadioRestartsAttempted());
-            // #69: emit the perf TRACE line (parity with Android's). ble.toApply is the number that
-            // matters — time from a datagram landing in the EventInbox to it being drained/applied. On
-            // this single-threaded main the drain rides renderFrame, so this measures the render-gate.
-            char TraceLine[512];
-            if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
-                os_log(OS_LOG_DEFAULT, "OnlyRps: TRACE %{public}s", TraceLine);
-            // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
-            // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
-            // stdio buffer until End, so a killed app or a match that never resolves leaves nothing
-            // on disk, which is the exact failure this recorder exists to survive.
-            if (!_SoloActive) _LinkedRec.Census(_Lp.GetSim(), _Team, -1, -1);
-        }
     }
 #endif
 
@@ -943,50 +719,383 @@ static void UnblockStdio() {
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float H = static_cast<float>(Layer.drawableSize.height);
     const uint64_t Stamp = NowNs();
-    const Rps::Sim& ActiveSim = _SoloActive ? _SoloSim : _Lp.GetSim();  // #127 solo or #76 linked
-    if (ActiveSim.Tick != _LastTick) { _LastTick = ActiveSim.Tick; _TickLandedNs = Stamp; }
-    _Snap.CaptureFrom(ActiveSim, _TickLandedNs, kStepNs);
+    const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
     const float VisibleH = H / Ppu(W);
     const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
-    // OS safe areas (#85 feedback): notch/status bar above the HUD, home indicator
-    // below the plates. Points -> pixels via the layer scale.
+    // OS safe areas (#85 feedback): notch/status bar above the HUD, home indicator below the plates.
+    // Points -> pixels via the layer scale.
     const CGFloat SaScale = [self metalLayer].contentsScale;
     const UIEdgeInsets Sa = self.view.safeAreaInsets;
     _View.SetInsets(static_cast<float>(Sa.top * SaScale), static_cast<float>(Sa.bottom * SaScale));
     const float MaxCam = FieldMax + _View.TopHudWorldUnits(W);
     const float MinCam = -_View.BottomHudWorldUnits(W);
     if (!_CamInit) { _Cam.Y = MinCam; _CamInit = true; }
-    // Camera LOCKED at the baseline until you place your first mining camp (feedback) — free scroll after.
-    if (!_Snap.HasMinerCamp(_Team)) _Cam.Y = MinCam;
+    // Camera LOCKED at the baseline until you place your first mining camp (feedback) — free scroll
+    // after. Over the CONSUMED snapshot; a fresh match (no camp) re-locks the view here regardless.
+    if (!_Snap.HasMinerCamp(MyTeam)) _Cam.Y = MinCam;
     else _Cam.Update(static_cast<float>(ElapsedNs) / 1.0e9f, MaxCam, MinCam);  // momentum + clamp
     // #139/feedback: your camp, committed and waiting on the opponent's — it is NOT in the sim yet
-    // (both camps become tick 0's input together), so without this the field looked empty right
-    // after the drop. Single-threaded here, so read the peer directly. Never in solo: there the
-    // place applies immediately and the real camp is in the snapshot.
+    // (both camps become tick 0's input together), so without this the field looks empty right after
+    // the drop. Published by the SIM thread via the atomics (never set in solo: there the place applies
+    // immediately and the real camp is already in the snapshot).
     {
-        const bool Pend = !_SoloActive && _Started && _Lp.HasLocalCamp() && !_Lp.MatchStarted();
+        const bool Pend = _PendingCampAtomic.load(std::memory_order_acquire);
         constexpr float FixedOne = static_cast<float>(Rps::Fixed::One);
         _View.SetPendingCamp(Pend,
-                             static_cast<float>(_Lp.LocalCamp().X) / FixedOne,
-                             static_cast<float>(_Lp.LocalCamp().Y) / FixedOne);
+                             static_cast<float>(_PendingCampX.load(std::memory_order_relaxed)) / FixedOne,
+                             static_cast<float>(_PendingCampY.load(std::memory_order_relaxed)) / FixedOne);
     }
-    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, _Team == 1,
+    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, MyTeam == 1,
                  static_cast<float>(ElapsedNs) / 1.0e9f);
+    // main -> sim: the presented-frame count for the LOCKSTEP diag + heartbeat (the sim thread can't
+    // touch the renderer).
+    _PresentedFrames.store(_Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
+                           std::memory_order_relaxed);
+}
+
+// #69: the SIM/NET thread. Owns Session + Lp + the solo sim; pumps BLE, ticks the sim ~500 Hz, and
+// publishes a Snapshot per tick — the datagram-driven service loop OFF the CADisplayLink render
+// cadence. A direct port of RpsMain.cpp's SimThread lambda; all the ivars it touches are sim-owned
+// after this thread starts (see the partition in the ivar block). The ONLY cross-thread traffic is the
+// Mailbox (snapshot out), the SoloIn inbox + Lp.QueueLocalEvent (input in), and the atomics.
+- (void)simThreadLoop {
+    auto PrevTime = std::chrono::steady_clock::now();
+    uint32_t LastPubTick = 0xFFFFFFFFu;
+    // Solo (sim-thread) match state — locals, exactly like Android's lambda locals.
+    int      SoloTier = -1;
+    bool     SoloScored = false;
+    uint64_t SoloAccumNs = 0;
+    uint64_t SoloPostNs = 0;
+    // Linked (sim-thread) match state.
+    bool     Started = false;
+    bool     Scored = false;
+    uint32_t ScoredIdx = 0xFFFFFFFFu;
+    bool     PeerEverReady = false;
+    bool     PrevPeerReady = false;
+#if LUR_INTERNAL
+    uint64_t DiagAccumNs = 0;
+#endif
+    while (_SimRunning.load(std::memory_order_acquire)) {
+        const auto Now = std::chrono::steady_clock::now();
+        const uint64_t ElapsedNs =
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
+        PrevTime = Now;
+#if LUR_AGENT
+        // Poll the agent channel FIRST, unconditionally — it must be serviced whatever mode the app is
+        // in, and this is the only thread allowed to touch _Lp/_SoloSim (see RpsMain.cpp for why the
+        // poll belongs at the TOP of the loop).
+        [self pollAgentChannel:ElapsedNs];
+#endif
+#if LUR_INTERNAL
+        // The lockstep/convergence DIAG + the #69 TRACE line, at the TOP (they read sim state). SOLO
+        // counts too: the TRACE line rides on this, and solo is the mode you want for a clean perf
+        // measurement (no peer to perturb ble.toApply).
+        const bool SoloDiag = _SoloActiveAtomic.load(std::memory_order_acquire);
+        if (Started || SoloDiag) {
+            DiagAccumNs += ElapsedNs;
+            if (DiagAccumNs > 2'000'000'000ull) {
+                DiagAccumNs = 0;
+                const Rps::Sim& DS = SoloDiag ? _SoloSim : _Lp.GetSim();
+                const uint8_t Me = _LinkedTeam.load(std::memory_order_relaxed);
+                os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d "
+                       "presented=%u hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d "
+                       "halfopen=%d restarts=%d",
+                       SoloDiag ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
+                       (!SoloDiag && _Lp.Desynced()) ? 1 : 0, _Lp.BuildMismatch() ? 1 : 0,
+                       _PresentedFrames.load(std::memory_order_relaxed),
+                       static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
+                       DS.Teams[SoloDiag ? 0 : Me].Gold, DS.FrontierT0.ToInt(),
+                       SoloDiag ? 1 : (_Lp.MatchStarted() ? 1 : 0),
+                       SoloDiag ? 0 : _Lp.InputGaps(), SoloDiag ? 0u : _Lp.LastInputGapTick(),
+                       (!SoloDiag && _Lp.PreMatchStalled()) ? 1 : 0,
+                       (!SoloDiag && _Session.IsLinkHalfOpen()) ? 1 : 0,
+                       SoloDiag ? 0 : _Session.RadioRestartsAttempted());
+                // #69: the perf TRACE line. ble.toApply — datagram-in-EventInbox to drained/applied —
+                // is now serviced on THIS ~500 Hz thread, so it should read ~1-2 ms instead of the old
+                // ~5-6 ms render-gate. FormatLineAndReset drains what the netcode recorded this window.
+                char TraceLine[512];
+                if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: TRACE %{public}s", TraceLine);
+                // #159: the linked recording's periodic census — carries the economy snapshot AND
+                // FLUSHES the file (else the capture sits in the stdio buffer until End).
+                if (!SoloDiag) _LinkedRec.Census(_Lp.GetSim(), Me, -1, -1);
+            }
+        }
+#endif
+        // #2/#127: consume a selector tier pick -> (re)start a solo AI match at once (even mid-match).
+        // App-open stored Easy, so a live match comes up on the very first iteration.
+        const int NewTier = _SoloAiTier.exchange(-1, std::memory_order_acq_rel);
+        if (NewTier >= 0) {
+            _SoloSim.Init(kMatchSeed);
+            _SoloAi.Init(kMatchSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(NewTier));
+            SoloTier = NewTier; SoloScored = false; SoloPostNs = 0; SoloAccumNs = 0;
+            LastPubTick = 0xFFFFFFFFu;
+            Started = false;                                       // drop any linked match — solo takes over
+            _SoloActiveAtomic.store(true, std::memory_order_release);
+            _LinkedTeam.store(0, std::memory_order_relaxed);       // you are team 0 (no view flip)
+            _MatchLive.store(true, std::memory_order_release);
+            os_log(OS_LOG_DEFAULT, "OnlyRps: solo AI match (re)started (tier %d)", NewTier);
+#if LUR_INTERNAL
+            [self soloRecBegin:NewTier];
+#endif
+        }
+
+        // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake — that
+        // raises the "opponent link established" notice + the Linked-opponent row.
+        _Session.Tick(ElapsedNs);
+        const bool PeerReady = _Session.IsReady();
+        if (PeerReady && !PeerEverReady) {
+            PeerEverReady = true;
+            _PeerLinkedAtomic.store(true, std::memory_order_release);   // main: View.SetLinked + blink
+        }
+        // AUTO-switch solo -> linked on the link-established EDGE, ONLY out of an unstarted AI match.
+        // (Full rationale in RpsMain.cpp.) Never out of a started AI match or a linked match.
+        const bool LinkEdge = PeerReady && !PrevPeerReady;
+        PrevPeerReady = PeerReady;
+        // On the link edge the peer's GUID is finally known, so publish the ALL-TIME record vs THIS
+        // rival (else the row would read 0-0-0 until the session's first match ended).
+        if (LinkEdge) {
+            const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
+            _PeerWinsA.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+            _PeerLossesA.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+            _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+        }
+        const bool ManualPick = _SwitchToLinkedAtomic.load(std::memory_order_acquire);
+        const bool AutoSwitch = LinkEdge && !_SoloSim.HasMinerCamp(0);   // unstarted AI match only
+        const bool SoloActiveNow = _SoloActiveAtomic.load(std::memory_order_acquire);
+        if (SoloActiveNow && PeerReady && (AutoSwitch || ManualPick)) {
+            _SoloActiveAtomic.store(false, std::memory_order_release);
+            _SwitchToLinkedAtomic.store(false, std::memory_order_release);
+            _SelectLinkedRow.store(true, std::memory_order_release);     // main: name the peer in the HUD
+            os_log(OS_LOG_DEFAULT, "OnlyRps: switch solo -> linked (%{public}s)",
+                   AutoSwitch ? "auto: link established, AI match not started"
+                              : "player picked the linked opponent");
+        } else if (ManualPick && !SoloActiveNow) {
+            _SwitchToLinkedAtomic.store(false, std::memory_order_release);   // already linked: moot
+        }
+
+        if (_SoloActiveAtomic.load(std::memory_order_acquire)) {
+            // ---- SOLO path (#139/#149 pre-match hold; parity with the single-threaded original) ----
+            if (_SoloSim.Result == Rps::ResultOngoing && !_SoloSim.HasMinerCamp(0)) {
+                SoloAccumNs = 0;
+                Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+                const int Drained = _SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
+                int Kept = 0;
+                for (int I = 0; I < Drained; ++I)
+                    if (Evs[I].Kind == Rps::EventPlaceBuilding && Evs[I].Type == Rps::UnitMiner &&
+                        _SoloSim.CanPlaceBuilding(0, Rps::UnitMiner, Rps::Fixed{Evs[I].X},
+                                                  Rps::Fixed{Evs[I].Y}))
+                        Evs[Kept++] = Evs[I];
+                if (Kept > 0) {
+                    int AiCount = 0;
+                    _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Kept,
+                                         Rps::MaxEventsPerTick - Kept, AiCount);
+                    _SoloSim.StepEvents(Evs, Kept + AiCount);
+#if LUR_INTERNAL
+                    _SoloRec.Events(_SoloSim.Tick - 1, Evs, Kept + AiCount);
+#endif
+                }
+            } else {
+                SoloAccumNs += ElapsedNs;
+                while (SoloAccumNs >= kStepNs) {   // fixed 10 Hz, decoupled from this ~500 Hz loop
+                    SoloAccumNs -= kStepNs;
+                    Rps::InputEvent Evs[Rps::MaxEventsPerTick];
+                    int Count = _SoloIn.Drain(Evs, Rps::MaxEventsPerTick);
+                    {
+                        int AiCount = 0;
+                        _SoloAi.DecideEvents(_SoloSim, _SoloSim.Tick, Evs + Count,
+                                             Rps::MaxEventsPerTick - Count, AiCount);
+                        Count += AiCount;
+                    }
+                    _SoloSim.StepEvents(Evs, Count);
+#if LUR_INTERNAL
+                    _SoloRec.Events(_SoloSim.Tick - 1, Evs, Count);
+#endif
+                }
+#if LUR_INTERNAL
+                _RecCensusNs += ElapsedNs;
+                if (_RecCensusNs >= 2'000'000'000ull) {
+                    _RecCensusNs = 0;
+                    _SoloRec.Census(_SoloSim, /*human*/ 0, static_cast<int>(_SoloAi.State()),
+                                    static_cast<int>(_SoloAi.CounterEnemy()));
+                }
+#endif
+            }
+            if (!SoloScored && _SoloSim.Result != Rps::ResultOngoing && SoloTier >= 0) {
+                SoloScored = true;
+#if LUR_INTERNAL
+                if (_SoloRec.IsOpen()) {
+                    _SoloRec.Census(_SoloSim, 0, static_cast<int>(_SoloAi.State()),
+                                    static_cast<int>(_SoloAi.CounterEnemy()));
+                    _SoloRec.End(_SoloSim);
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: REC match finished: result=%u tick=%u -> %{public}s",
+                           static_cast<unsigned>(_SoloSim.Result), _SoloSim.Tick, _SoloRecFile.c_str());
+                }
+#endif
+                _Scores.RecordAi(SoloTier, _SoloSim.Result, /*MyTeam*/ 0);
+                _Scores.Save(*_Store);
+                const Rps::Tally T = _Scores.Ai(SoloTier);
+                _AiWinsA[SoloTier].store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                _AiLossesA[SoloTier].store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                _AiDrawsA[SoloTier].store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+            }
+            if (_SoloSim.Result != Rps::ResultOngoing) {
+                SoloPostNs += ElapsedNs;
+                if (SoloPostNs >= Rps::PostMatchHoldNs && SoloTier >= 0) {
+                    const uint64_t NextSeed = _SoloSim.Seed + 1;
+                    _SoloSim.Init(NextSeed);
+                    _SoloAi.Init(NextSeed, /*AI team*/ 1, static_cast<Rps::EAiTier>(SoloTier));
+                    SoloScored = false; SoloPostNs = 0; SoloAccumNs = 0;
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: solo next match begins (tier %d)", SoloTier);
+#if LUR_INTERNAL
+                    [self soloRecBegin:SoloTier];
+#endif
+                }
+            } else {
+                SoloPostNs = 0;
+            }
+            // Publish the solo tick to the render thread (it draws from the mailbox now). Covers the
+            // fresh (tick 0) sim on (re)start/rebuild too, since 0 != LastPubTick after a finished match.
+            if (_SoloSim.Tick != LastPubTick) {
+                LastPubTick = _SoloSim.Tick;
+                _Mailbox.Back().CaptureFrom(_SoloSim, NowNs(), kStepNs);
+                _Mailbox.Publish();
+                _PublishedTick.store(_SoloSim.Tick, std::memory_order_release);
+            }
+            _Recovering.store(false, std::memory_order_relaxed);
+            _LinkHalfOpen.store(false, std::memory_order_relaxed);
+            _PendingCampAtomic.store(false, std::memory_order_release);
+        } else {
+            // ---- LINKED path ----
+            if (!Started && PeerReady) {
+                const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
+                _LinkedTeam.store(Team, std::memory_order_relaxed);
+                _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
+#if LUR_INTERNAL
+                // #147/#112: refuse a mismatched build, exchange our gameplay-CVar override set so both
+                // peers converge on ONE merged set before tick 0. iOS has no on-device cvars.cfg today,
+                // so the seed loop is normally a no-op — but the SEND is still this peer's half of the
+                // exchange, and the loop is in place for the day iOS gets on-device tuning.
+                Rps::LockstepPeer* Lp = &_Lp;
+                Lp->SendFingerprint();
+                Lur::Core::CVarRegistry::ForEach([Lp](Lur::Core::ICVar* C) {
+                    if (!C->AffectsGameplay() || !C->Overridden()) return;
+                    const int Id = Rps::GameplayIdForName(C->Name());
+                    if (Id >= 0) Lp->SeedGameplayCvar(static_cast<uint8_t>(Id), C->RawValue(),
+                                                      C->EditWallMs());
+                });
+                Lp->SendCvarSync();
+#endif
+                // #148: reconcile on ENTERING the match, not only on a reconnect edge (a freshly
+                // launched app never takes that edge). Harmless for a fresh pair; after Init so Init
+                // can't wipe it.
+                _Lp.BeginResync();
+                Started = true; Scored = false; ScoredIdx = _Lp.MatchIndex();
+                _MatchLive.store(true, std::memory_order_release);
+#if LUR_INTERNAL
+                // #159: route every executed tick into the linked recording, and #180: OPEN on the
+                // netcode's match-start edge (not a MatchStarted() poll, which lost tick 0). Both sinks
+                // fire on THIS thread from inside _Lp.Tick, touching only sim-owned recorder state.
+                _Lp.SetTickSink(
+                    [](void* C, uint32_t Tick, const Rps::InputEvent* Batch, int Count, uint64_t Hash) {
+                        [(__bridge RpsViewController*)C recordLinkedTick:Tick batch:Batch count:Count
+                                                                    hash:Hash];
+                    },
+                    (__bridge void*)self);
+                _Lp.SetMatchStartSink(
+                    [](void* C) { [(__bridge RpsViewController*)C linkedRecBegin]; },
+                    (__bridge void*)self);
+#endif
+                // Peer's GUID known now -> show the ALL-TIME record vs THIS rival rather than 0-0-0.
+                {
+                    const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
+                    _PeerWinsA.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                    _PeerLossesA.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                    _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+                }
+                os_log(OS_LOG_DEFAULT, "OnlyRps: linked - lockstep started (team %d)", Team);
+            }
+            if (Started) _Lp.Tick(ElapsedNs);   // produce+send input, execute (sim.step nests)
+            _Recovering.store(Started && _Lp.Recovering(), std::memory_order_relaxed);          // #161 -> HUD
+            _LinkHalfOpen.store(Started && _Session.IsLinkHalfOpen(), std::memory_order_relaxed); // #163 -> HUD
+            // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can show it
+            // while we wait for the opponent. Clears the moment the match starts.
+            const bool Pending = Started && _Lp.HasLocalCamp() && !_Lp.MatchStarted();
+            if (Pending) {
+                _PendingCampX.store(_Lp.LocalCamp().X, std::memory_order_relaxed);
+                _PendingCampY.store(_Lp.LocalCamp().Y, std::memory_order_relaxed);
+            }
+            _PendingCampAtomic.store(Pending, std::memory_order_release);
+            // Publish a snapshot only when a NEW exec tick landed (per-tick, 10 Hz).
+            if (Started) {
+                const uint32_t T = _Lp.ExecTick();
+                if (T != LastPubTick) {
+                    LastPubTick = T;
+                    _Mailbox.Back().CaptureFrom(_Lp.GetSim(), NowNs(), kStepNs);
+                    _Mailbox.Publish();
+                    _PublishedTick.store(T, std::memory_order_release);
+                }
+            }
+            // #149: the tally latch is per MATCH INDEX — re-armed exactly once per restart.
+            if (Started && ScoredIdx != _Lp.MatchIndex()) { ScoredIdx = _Lp.MatchIndex(); Scored = false; }
+            // #2: tally the linked result ONCE (you are _LinkedTeam) and publish the W-L-D atomics.
+            if (Started && !Scored && _Lp.GetSim().Result != Rps::ResultOngoing) {
+                Scored = true;
+                const uint8_t R = _Lp.GetSim().Result;
+                const uint8_t Me = _LinkedTeam.load(std::memory_order_relaxed);
+#if LUR_INTERNAL
+                // Close the recording on the RESULT (the end line stamps result + tick); a desync-
+                // declared draw lands here too, so the file that captured a divergence is complete.
+                if (_LinkedRec.IsOpen()) {
+                    _LinkedRec.Census(_Lp.GetSim(), Me, /*no AI*/ -1, -1);
+                    _LinkedRec.End(_Lp.GetSim());
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked match finished: result=%u tick=%u "
+                           "desync=%d -> %{public}s", static_cast<unsigned>(R), _Lp.GetSim().Tick,
+                           _Lp.Desynced() ? 1 : 0, _LinkedRecFile.c_str());
+                }
+#endif
+                // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed
+                // or absent id rather than inventing a rivalry row, so keep the session count then.
+                const std::string& PeerGuid = _Session.GetPeerGuid();
+                if (_Scores.RecordPeer(PeerGuid, _DeviceId, R, Me)) {
+                    _Scores.Save(*_Store);
+                    const Rps::Tally T = _Scores.Peer(PeerGuid, _DeviceId);
+                    _PeerWinsA.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
+                    _PeerLossesA.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
+                    _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
+                } else {
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: peer result not persisted (peer guid %zuB)",
+                           PeerGuid.size());
+                    if (R == Rps::ResultDraw) _PeerDrawsA.fetch_add(1, std::memory_order_relaxed);
+                    else if ((R == Rps::ResultTeam0Wins && Me == 0) ||
+                             (R == Rps::ResultTeam1Wins && Me == 1))
+                        _PeerWinsA.fetch_add(1, std::memory_order_relaxed);
+                    else _PeerLossesA.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
+        // ~500 Hz service: datagram-to-Step latency stays ~ms without busy-spinning a core.
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
 }
 
 // Touch (#139/#140, mirror of the desktop/Android mains): a touch-down on a build plate starts a
 // drag-to-place (the ghost follows the finger, lifted up-left of it by ~its size so the thumb
 // doesn't hide it; a valid release emits a Place event); any other drag pans the camera; a tap on
-// a building's x1/x5 button queues units. Single-threaded here, so Lp.QueueLocalEvent is called
-// directly. Placement is gated on _Started (a live match). You play _Team.
+// a building's x1/x5 button queues units. MAIN thread: unit input crosses to the sim thread via
+// placeLocal (the thread-safe SoloIn inbox / Lp.QueueLocalEvent). Placement is gated on _MatchLive (a
+// live solo or peer match). You play _LinkedTeam (published by the sim thread; 0 in solo).
 - (float)ghostOffPxForWidth:(float)W {
     return static_cast<float>(_Snap.Cv.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
 }
-// Route a local place/queue event to whichever match is live: the solo sim's pending queue (drained
-// in renderFrame's solo tick) or the linked peer's inbox. Single-threaded, so both are safe here.
+// Route a local place/queue event (produced on the MAIN thread by the drag-place UI, or by the agent
+// harness on the sim thread) to whichever match is live: the solo sim's thread-safe SoloIn inbox
+// (drained by the sim thread's solo tick) or the linked peer's own glue->sim inbox. BOTH are
+// thread-safe (#91), so this is safe to call from either thread. _SoloActiveAtomic implies _MatchLive,
+// so it is checked first — mirrors RpsMain.cpp's RouteLocalEvent.
 - (void)placeLocal:(Rps::InputEvent)E {
-    if (_SoloActive) _SoloPending.push_back(E);
-    else if (_Started) _Lp.QueueLocalEvent(E);
+    if (_SoloActiveAtomic.load(std::memory_order_acquire)) _SoloIn.Push(E);
+    else if (_MatchLive.load(std::memory_order_acquire)) _Lp.QueueLocalEvent(E);
 }
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
@@ -1009,13 +1118,14 @@ static void UnblockStdio() {
 #endif
     const float W = static_cast<float>(Layer.drawableSize.width);
     const float Off = [self ghostOffPxForWidth:W];
-    const bool Live = _SoloActive || _Started;
+    const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);   // sim thread publishes it
+    const bool Live = _MatchLive.load(std::memory_order_acquire);          // solo OR peer match live
     const int Plate = Live ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
     if (Plate >= 0) {
         _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // sets the ghost type; seed at the offset spot
         const float H = static_cast<float>(Layer.drawableSize.height);
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
+        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
         // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
         _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
     } else {
@@ -1037,8 +1147,9 @@ static void UnblockStdio() {
 #endif
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
+        const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy);
+        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
         _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
         _DevGesture.Cancel();  // #151: a placement drag is not a console tap
     } else {
@@ -1062,10 +1173,11 @@ static void UnblockStdio() {
 #endif
     if (_View.IsPlacing()) {
         const float Off = [self ghostOffPxForWidth:W];
+        const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
         bool Placed = false;
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        if (_View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, _Team == 1, _Snap, _Team, Wx, Wy, Gsx, Gsy)) {
-            [self placeLocal:Rps::InputEvent::Place(_Team, static_cast<uint8_t>(_View.PlacingType()),
+        if (_View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy)) {
+            [self placeLocal:Rps::InputEvent::Place(MyTeam, static_cast<uint8_t>(_View.PlacingType()),
                                                     WorldToFixed(Wx), WorldToFixed(Wy))];
             Placed = true;
         }
@@ -1094,13 +1206,15 @@ static void UnblockStdio() {
         const int Hit = _View.OnTap(X, Y);
         const int Tier = _View.TakeAiTier();
         if (Tier >= 0) {
-            _PendingTier = Tier;                                   // (re)start solo at this tier (#2)
+            _SoloAiTier.store(Tier, std::memory_order_release);          // (re)start solo at this tier (#2)
         } else if (_View.TakePeerPick()) {
-            _SwitchToLinked = true;                                // switch to the linked peer (#2)
-        } else if ((_SoloActive || _Started) && Hit == -1) {
+            _SwitchToLinkedAtomic.store(true, std::memory_order_release);  // switch to the linked peer (#2)
+        } else if (_MatchLive.load(std::memory_order_acquire) && Hit == -1) {
             int32_t Slot = -1;
             const int Cnt = _View.OnProductionButton(X, Y, Slot);
-            if (Cnt > 0) [self placeLocal:Rps::InputEvent::Queue(_Team, Slot, Cnt)];
+            if (Cnt > 0)
+                [self placeLocal:Rps::InputEvent::Queue(_LinkedTeam.load(std::memory_order_relaxed),
+                                                        Slot, Cnt)];
         }
     }
 }
