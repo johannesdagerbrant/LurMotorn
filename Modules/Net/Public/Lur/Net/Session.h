@@ -141,6 +141,17 @@ public:
     uint32_t GetDatagramsReceived() const { return DatagramsReceived; }
     uint64_t GetNsSinceRecv() const { return SinceRecvNs; }
 
+    // #163: a HALF-OPEN link — we are connected and our writes leave, but the peer's notify path is
+    // wedged so NO inbound ever arrives. Distinct from a transient blip (which brings traffic and
+    // resets the count) and from a clean drop (IsConnected goes false). True once
+    // HalfOpenResetThreshold consecutive peer-silent resets have fired with no inbound between them;
+    // cleared the instant real traffic resumes. Exposed so the app can TELL the player the actual
+    // fix — a soft reset cannot clear a wedged BLE stack; the silent peer must toggle Bluetooth or
+    // reboot (proven on hardware 2026-08-02) — instead of the silent reconnect-cycle that reads as a
+    // freeze, which is the whole complaint in #163.
+    bool IsLinkHalfOpen() const { return LinkHalfOpen_; }
+    int  ConsecutiveSilentResets() const { return SilentResets_; }
+
     // Register the handler for one application message type (framed, >=2 bytes).
     void SetHandler(EMsgType Type, Handler H);
 
@@ -212,6 +223,16 @@ private:
     static constexpr uint64_t HelloResendNs = 500'000'000ull;   // resend Hello every ~0.5s
     static constexpr uint64_t KeepaliveNs   = 1'000'000'000ull; // keepalive every ~1s
     static constexpr uint64_t LinkTimeoutNs = 5'000'000'000ull; // ~5s of silence -> dead
+    // #163: past this many CONSECUTIVE peer-silent resets (no inbound between them) the link is not
+    // blipping, it is HALF-OPEN — a wedged notify path. ~3 * LinkTimeoutNs (~15s connected-but-
+    // silent) before we say so, long enough that a genuine reconnect blip — which brings traffic and
+    // zeroes the count — never trips it.
+    static constexpr int      HalfOpenResetThreshold = 3;
+    // Once half-open, STOP churning the radio every LinkTimeoutNs. A soft ResetLink cannot clear a
+    // stuck BLE stack, and the churn is what degrades it further — on hardware 2026-08-02 the central
+    // did 80 soft resets in a row and cleared nothing; only a reboot did. Back off to this slower
+    // cadence and let the surfaced state drive the real (human) fix.
+    static constexpr uint64_t HalfOpenResetNs = 20'000'000'000ull; // ~20s between resets once wedged
     // If the peer's link-time Sync never arrives (e.g. it adopted a different game),
     // stop blocking moves after this so a missing Sync can't wedge the game forever.
     static constexpr uint64_t ResyncTimeoutNs = 3'000'000'000ull; // ~3s fallback
@@ -240,6 +261,8 @@ private:
     uint64_t HelloResendAccumNs = 0; // ns since our last Hello (handshake)
     uint64_t KeepaliveAccumNs   = 0; // ns since our last keepalive send
     uint64_t SinceRecvNs        = 0; // ns since ANY datagram arrived (liveness)
+    int      SilentResets_      = 0;  // #163: consecutive peer-silent resets, no inbound between them
+    bool     LinkHalfOpen_      = false; // #163: notify path wedged -> report + back off, don't churn
     uint32_t DatagramsSent      = 0; // total datagrams sent (overlay/debug)
     uint32_t DatagramsReceived  = 0; // total datagrams received (overlay/debug)
     bool     EverConnected      = false;  // for Disconnected vs never-connected

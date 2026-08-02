@@ -63,8 +63,23 @@ void Session::Tick(uint64_t ElapsedNs) {
         KeepaliveAccumNs += ElapsedNs;
         if (KeepaliveAccumNs >= KeepaliveNs) { KeepaliveAccumNs = 0; SendKeepalive(); }
         SinceRecvNs += ElapsedNs;
-        if (SinceRecvNs >= LinkTimeoutNs) {
-            Logf("link timeout — peer silent, resetting transport");
+        // #163: once the link is confirmed HALF-OPEN, back off — a soft reset cannot clear a wedged
+        // BLE stack, and hammering ResetLink every LinkTimeoutNs churns the radio further (that churn
+        // is what wedges it). Until then, reset aggressively so a genuine transient blip recovers fast.
+        const uint64_t ResetAfterNs = LinkHalfOpen_ ? HalfOpenResetNs : LinkTimeoutNs;
+        if (SinceRecvNs >= ResetAfterNs) {
+            ++SilentResets_;
+            // The half-open verdict, logged ONCE on the transition — not every cycle, which would
+            // bury the log at exactly the moment someone is trying to read why the match won't start.
+            if (SilentResets_ >= HalfOpenResetThreshold && !LinkHalfOpen_) {
+                LinkHalfOpen_ = true;
+                Logf("link HALF-OPEN — %d peer-silent resets, no inbound between them: we are "
+                     "connected and our writes leave, but the peer's notify path is wedged. A soft "
+                     "reset cannot clear a stuck BLE stack — the SILENT peer must toggle Bluetooth or "
+                     "reboot. Backing off resets to stop churning the radio.", SilentResets_);
+            } else if (!LinkHalfOpen_) {
+                Logf("link timeout — peer silent, resetting transport");
+            }
             SinceRecvNs = 0;
             if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
         }
@@ -149,6 +164,12 @@ void Session::RequestResync() {
 void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (Size == 0) return;
     SinceRecvNs = 0;  // any traffic from the peer proves the link is alive
+    // #163: real inbound proves the notify path is working, so a half-open verdict — or the count
+    // building toward one — is retired HERE and nowhere else: it clears on evidence, not a timer,
+    // the same discipline the RPS diagnostics use so a stale latch can't outlive its fault.
+    if (LinkHalfOpen_) Logf("link recovered — inbound traffic resumed after a half-open stall");
+    SilentResets_ = 0;
+    LinkHalfOpen_ = false;
     ++DatagramsReceived;
 
     // A bare 1-byte datagram is a live move (framed messages are always >=2 bytes).

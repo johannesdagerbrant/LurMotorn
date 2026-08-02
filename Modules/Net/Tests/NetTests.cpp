@@ -178,6 +178,51 @@ static void TestKeepaliveTimeoutResetsLink() {
     CHECK(T.ResetCount == 1);  // fired once (ResetLink drops Connected, so it can't re-fire)
 }
 
+// A transport that RECONNECTS-but-stays-silent after a reset — the #163 half-open shape. The real
+// backend re-establishes the GATT link every cycle (so IsConnected stays true) but the peer's notify
+// path is wedged, so no inbound ever arrives. Unlike SilentTransport (which goes down on ResetLink
+// and so can only fire once), this keeps the link "up", so the Session keeps timing out and the
+// consecutive-silent-reset count climbs — exactly the cycle seen on hardware (80 resets in a row).
+struct ReconnectingSilentTransport : Lur::Transport::ITransport {
+    int      ResetCount = 0;
+    Receiver Rx;
+    void Send(const uint8_t*, std::size_t) override {}
+    void SetReceiver(Receiver R) override { Rx = std::move(R); }
+    bool IsConnected() const override { return true; }
+    void ResetLink() override { ++ResetCount; }  // reconnects instantly, still silent
+    void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
+};
+
+// #163: a PERSISTENT half-open (connected + silent, cycle after cycle) must be recognised as such —
+// distinct from a transient blip — and must stop churning the radio once it is. On hardware this
+// cycled ~80 times every ~6s, a soft reset each time, clearing nothing (only a reboot did) and
+// reading to the player as a frozen app. The Session now names the state and backs the resets off.
+static void TestHalfOpenLinkIsDetectedAndBacksOff() {
+    ReconnectingSilentTransport T;
+    Session S;
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', /*ready*/ true); T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+    CHECK(!S.IsLinkHalfOpen());
+
+    // Silence at the aggressive cadence: resets at ~5/10/15s trip the half-open verdict.
+    for (int i = 0; i < 1200 && !S.IsLinkHalfOpen(); ++i) S.Tick(FrameNs);
+    CHECK(S.IsLinkHalfOpen());
+    CHECK(S.ConsecutiveSilentResets() >= 3);   // threshold reached (HalfOpenResetThreshold)
+    const int ResetsAtVerdict = T.ResetCount;
+
+    // Back-off: a further ~15s (< HalfOpenResetNs ~20s) produces NO new reset — the churn has stopped.
+    for (int i = 0; i < 900; ++i) S.Tick(FrameNs);
+    CHECK(T.ResetCount == ResetsAtVerdict);
+
+    // ...but it recovers on EVIDENCE, not a timer: one inbound keepalive (the notify path working
+    // again) clears the verdict and the count at once.
+    const uint8_t KA[2] = { static_cast<uint8_t>(EMsgType::Keepalive), 0 };
+    T.Deliver(KA, sizeof(KA));
+    CHECK(!S.IsLinkHalfOpen());
+    CHECK(S.ConsecutiveSilentResets() == 0);
+}
+
 // Steady peer traffic (keepalives) keeps the link alive — no false timeout.
 static void TestKeepaliveKeepsLinkAlive() {
     SilentTransport T;
@@ -667,6 +712,7 @@ int main() {
     TestMoveFramingDisambiguation();
     TestGameHistoryResync();
     TestKeepaliveTimeoutResetsLink();
+    TestHalfOpenLinkIsDetectedAndBacksOff();   // #163
     TestKeepaliveKeepsLinkAlive();
     TestLongGameSyncNotDropped();
     TestOversizedFramedSendRefused();
