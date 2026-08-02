@@ -331,6 +331,15 @@ priority, state, *or* design. Read a journal batch for rationale and context; ac
 re-verify every code claim in an old snapshot against HEAD before acting on it (paths and symbols
 drift).
 
+**Never mirror another issue's open/closed status into prose — point to a live query instead.** A
+tracker/orientation issue that hand-lists "what's open" becomes a second copy of state with nothing
+forcing it current, and it *will* rot (issue #80 did: on 2026-08-02 it still listed four
+already-closed issues as open, and got quoted as current). "What's open for X" is a label query
+(`gh issue list --state open --label <x>`), not a typed list. Durable per-game orientation (layout,
+build/run, device ops, hard rules) belongs in a checked-in `README.md` beside the code — it versions
+in diffs and can't drift from HEAD — **not** in a long-lived issue, which has no diff review and
+never closes.
+
 ## Documentation (CodeViewer sessions)
 
 Walkthroughs live in `CodeViewerSessions/`. The authoring recipe (the `base_dir` relocation and the
