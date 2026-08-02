@@ -355,19 +355,31 @@ void BuildThreatBrute(const Sim& S, ThreatSet& T) {
             if (S.IsAlive(J)) AddThreat(S, M, J, T);
     }
 }
-// Grid twin: per miner, walk only the cells its GuardAlertR box overlaps; AddThreat
-// re-tests the radius, so the flagged SET is identical to brute regardless of order.
+// Grid twin: per miner, walk only the cells its GuardAlertR box overlaps; the radius is re-tested
+// per candidate, so the flagged SET is identical to brute regardless of order.
+// #181: read each candidate from the cache-local packed row (Grid::Pk) instead of S.Type[J]/Team[J]/
+// PosX[J]/PosY[J] by scattered slot — the same phone-memory win the flock gather and target
+// acquisition got. Bit-identical to AddThreat(S,M,Q.Idx): same enemy-warrior filter, same Chebyshev
+// vs GuardAlertRaw, same flagged id — so grid==brute (against the unchanged SoA brute path) holds.
 void BuildThreatGrid(const Sim& S, const Grid& G, ThreatSet& T) {
     T.Clear();
     for (int32_t M = 0; M < S.Count; ++M) {
         if (!S.IsAlive(M) || !IsGuardedAsset(S, M)) continue;
+        const int64_t Mx = S.PosX[M].Raw, My = S.PosY[M].Raw;
+        const uint8_t MTeam = S.Team[M];
         const int32_t Cx0 = CellX(S.PosX[M] - GuardAlertR), Cx1 = CellX(S.PosX[M] + GuardAlertR);
         const int32_t Cy0 = CellY(S.PosY[M] - GuardAlertR), Cy1 = CellY(S.PosY[M] + GuardAlertR);
         for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
             for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
                 const int32_t C = Gy * GridCols + Gx;
-                for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
-                    AddThreat(S, M, G.Order[P], T);
+                const int32_t End = G.Start[C + 1];
+                for (int32_t P = G.Start[C]; P < End; ++P) {
+                    const Grid::Packed& Q = G.Pk[P];
+                    if (Q.Type == UnitMiner || Q.Team == MTeam) continue;  // only enemy warriors raid
+                    int64_t Dx = Mx - Q.PosX.Raw; if (Dx < 0) Dx = -Dx;
+                    int64_t Dy = My - Q.PosY.Raw; if (Dy < 0) Dy = -Dy;
+                    if ((Dx > Dy ? Dx : Dy) <= GuardAlertRaw) T.Set(Q.Idx);  // Chebyshev raw == AddThreat
+                }
             }
     }
 }
@@ -1135,8 +1147,9 @@ void RunTick(Sim& S) {
     MineGrid MG;
     { LUR_TRACE_SCOPE("sim.grid"); G.Build(S); MG.Build(S); }  // after production so spawns are bucketed
     ThreatSet Threat;
-    if (S.UseBruteForce) BuildThreatBrute(S, Threat);
-    else BuildThreatGrid(S, G, Threat);
+    { LUR_TRACE_SCOPE("sim.threat");                              // #181: was untraced (between grid & acq)
+      if (S.UseBruteForce) BuildThreatBrute(S, Threat);
+      else BuildThreatGrid(S, G, Threat); }
     { LUR_TRACE_SCOPE("sim.acq");  TargetAcquire(S, G); }          // phase 2
     { LUR_TRACE_SCOPE("sim.move"); Movement(S, G, MG, Threat); }       // phase 3
     UpdateFrontier(S);        // phase 3b (#133): extend the per-team high-water build line
