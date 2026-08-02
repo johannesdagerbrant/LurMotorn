@@ -1329,6 +1329,14 @@ static void UnblockStdio() {
 @end
 
 int main(int argc, char* argv[]) {
+    // #103: let vkQueueSubmit return WITHOUT blocking on Metal command-buffer scheduling. MoltenVK
+    // defaults this ON, so every submit stalled a full vsync in nextDrawable (measured es.submit
+    // ~16ms) — the CPU could never run ahead even with 2 frames in flight. Turning it off is safe
+    // ONLY because the backend now pipelines N frames with per-slot fences + per-image semaphores
+    // (VulkanBackend.cpp), which order the GPU work that async submit no longer serializes. Set here,
+    // before UIApplicationMain, so it lands before the first vkCreateInstance. Env-var form (not the
+    // vk_mvk_moltenvk API) keeps the shared backend free of MoltenVK headers.
+    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", /*overwrite*/ 1);
     @autoreleasepool {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([RpsAppDelegate class]));
     }
