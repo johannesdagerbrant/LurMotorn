@@ -42,6 +42,23 @@ public:
     // killed. Backends that always receive a real disconnect callback (any central,
     // and Android's GATT server) can leave this a no-op.
     virtual void ResetLink() {}
+
+    // A HARDER reset than ResetLink, for a link the net layer has judged HALF-OPEN: still
+    // connected, our writes leave, but the peer's notify path is wedged so nothing inbound
+    // ever arrives (issue #163). A soft ResetLink drops+rediscovers the *link*; it provably
+    // cannot clear a stuck BLE **stack** — on hardware 2026-08-02 the central did 80 soft
+    // resets and a full Bluetooth toggle with no effect. So this tears down the radio object
+    // one level deeper and rebuilds it: Android closes+reopens the whole BluetoothGatt (and
+    // refresh()es the stale service cache) rather than merely disconnecting; iOS re-adds the
+    // CBPeripheralManager service so a stale subscription is re-established, not just
+    // re-advertised. The net layer invokes it a BOUNDED number of times (see Session's
+    // MaxRadioRestarts) so the recovery can't itself become the churn that degrades the radio,
+    // then falls back to telling the player to reboot. Best-effort and per-OS; a backend with
+    // no deeper reset than ResetLink (loopback, tests) leaves this a no-op — the escalation
+    // then simply achieves nothing and the human-action banner is the floor, which is #182's
+    // whole premise (a radio restart may only help a SUBSET of wedges). Not host-testable end
+    // to end (the wedge is a real-radio phenomenon); the Session-side bounding IS unit-tested.
+    virtual void RestartRadio() {}
 };
 
 } // namespace Lur::Transport

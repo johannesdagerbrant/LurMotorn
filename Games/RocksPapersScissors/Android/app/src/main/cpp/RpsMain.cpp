@@ -758,7 +758,7 @@ void android_main(android_app* App) {
                     // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
                     // to the player (and in the log) exactly like a frozen app.
                     LOGI("%s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
-                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d",
+                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d",
                          SoloDiag ? "SOLO" : "LOCKSTEP",
                          SoloDiag ? DS.Tick : State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
                          (!SoloDiag && State.Lp.Desynced()) ? 1 : 0,
@@ -774,7 +774,11 @@ void android_main(android_app* App) {
                          // #163: the half-open verdict on the line everyone reads — a wedged notify
                          // path (connected, our writes leave, the peer never notifies) now reads as
                          // halfopen=1 instead of a silent freeze.
-                         (!SoloDiag && State.Session.IsLinkHalfOpen()) ? 1 : 0);
+                         (!SoloDiag && State.Session.IsLinkHalfOpen()) ? 1 : 0,
+                         // #182: hard radio restarts fired this half-open episode (capped at
+                         // MaxRadioRestarts). On real hardware this is the ONLY proof the escalation ran
+                         // — the wedge isn't host-reproducible, so a climbing restarts= is the test.
+                         SoloDiag ? 0 : State.Session.RadioRestartsAttempted());
                     // #159: the linked recording's periodic census. It carries the economy snapshot
                     // AND it is what FLUSHES the file — without it the whole capture sits in the
                     // stdio buffer until End, so a killed app or a match that never resolves leaves

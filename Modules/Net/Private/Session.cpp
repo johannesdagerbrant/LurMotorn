@@ -69,6 +69,7 @@ void Session::Tick(uint64_t ElapsedNs) {
         const uint64_t ResetAfterNs = LinkHalfOpen_ ? HalfOpenResetNs : LinkTimeoutNs;
         if (SinceRecvNs >= ResetAfterNs) {
             ++SilentResets_;
+            SinceRecvNs = 0;
             // The half-open verdict, logged ONCE on the transition — not every cycle, which would
             // bury the log at exactly the moment someone is trying to read why the match won't start.
             if (SilentResets_ >= HalfOpenResetThreshold && !LinkHalfOpen_) {
@@ -76,12 +77,28 @@ void Session::Tick(uint64_t ElapsedNs) {
                 Logf("link HALF-OPEN — %d peer-silent resets, no inbound between them: we are "
                      "connected and our writes leave, but the peer's notify path is wedged. A soft "
                      "reset cannot clear a stuck BLE stack — the SILENT peer must toggle Bluetooth or "
-                     "reboot. Backing off resets to stop churning the radio.", SilentResets_);
-            } else if (!LinkHalfOpen_) {
-                Logf("link timeout — peer silent, resetting transport");
+                     "reboot. Backing off resets and escalating to a hard radio restart.", SilentResets_);
             }
-            SinceRecvNs = 0;
-            if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
+            if (!LinkHalfOpen_) {
+                // Transient blip: a soft ResetLink recovers it fast, so reset aggressively.
+                Logf("link timeout — peer silent, resetting transport");
+                if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
+            } else if (RadioRestarts_ < MaxRadioRestarts) {
+                // #182 escalation: the soft reset above provably can't clear a WEDGED stack (80 of them
+                // cleared nothing on hardware), so once half-open, escalate to the harder per-OS radio
+                // restart — bounded by MaxRadioRestarts so the recovery can't itself become the churn
+                // that degrades the radio further (#163's lesson). RestartRadio() also rediscovers, so a
+                // peer that reboots mid-episode still reconnects.
+                ++RadioRestarts_;
+                Logf("half-open: escalating to a full radio restart (attempt %d/%d) — a soft reset "
+                     "can't clear a wedged BLE stack", RadioRestarts_, MaxRadioRestarts);
+                if (Transport) Transport->RestartRadio();
+            }
+            // else: cap reached — neither soft nor hard reset cleared it. Stop touching the radio (the
+            // last RestartRadio left discovery running, so a human fix on the far phone still reconnects)
+            // and let the surfaced LINK STALLED banner drive the guaranteed fix. Silent by design: the
+            // "attempt N/N" line above already said the last try fired; re-logging every 20s would only
+            // bury it.
         }
         return;
     }
@@ -170,6 +187,7 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     if (LinkHalfOpen_) Logf("link recovered — inbound traffic resumed after a half-open stall");
     SilentResets_ = 0;
     LinkHalfOpen_ = false;
+    RadioRestarts_ = 0;  // #182: next half-open episode gets a fresh budget of hard restarts
     ++DatagramsReceived;
 
     // A bare 1-byte datagram is a live move (framed messages are always >=2 bytes).

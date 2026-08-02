@@ -152,6 +152,14 @@ public:
     bool IsLinkHalfOpen() const { return LinkHalfOpen_; }
     int  ConsecutiveSilentResets() const { return SilentResets_; }
 
+    // #182: how many HARD per-OS radio restarts (ITransport::RestartRadio) we have fired during the
+    // current half-open episode — the escalation past a soft ResetLink that provably can't clear a
+    // wedged BLE stack. Capped at MaxRadioRestarts so the recovery can't itself become churn; reset
+    // to 0 the instant inbound traffic proves the link recovered. Exposed for the on-device diag line
+    // (`restarts=`) so a real-radio verification can confirm the escalation actually fired — this half
+    // is not host-testable end to end, so seeing the count climb on the phone is the proof.
+    int  RadioRestartsAttempted() const { return RadioRestarts_; }
+
     // Register the handler for one application message type (framed, >=2 bytes).
     void SetHandler(EMsgType Type, Handler H);
 
@@ -233,6 +241,13 @@ private:
     // did 80 soft resets in a row and cleared nothing; only a reboot did. Back off to this slower
     // cadence and let the surfaced state drive the real (human) fix.
     static constexpr uint64_t HalfOpenResetNs = 20'000'000'000ull; // ~20s between resets once wedged
+    // #182: once half-open, escalate each backed-off cycle from a soft ResetLink to the HARDER
+    // ITransport::RestartRadio — but only this many times. A soft reset can't clear a wedged stack and
+    // a hard one may only help a subset of wedges (the hardware case needed the SILENT peer to reboot),
+    // so past the cap we stop touching the radio entirely and let the "LINK STALLED" banner drive the
+    // guaranteed human fix. Bounded on purpose: the #163 lesson is that churn degrades the radio, so the
+    // recovery must not become the churn. 3 * ~20s ≈ 1 min of hard retries before we defer to the human.
+    static constexpr int      MaxRadioRestarts = 3;
     // If the peer's link-time Sync never arrives (e.g. it adopted a different game),
     // stop blocking moves after this so a missing Sync can't wedge the game forever.
     static constexpr uint64_t ResyncTimeoutNs = 3'000'000'000ull; // ~3s fallback
@@ -263,6 +278,7 @@ private:
     uint64_t SinceRecvNs        = 0; // ns since ANY datagram arrived (liveness)
     int      SilentResets_      = 0;  // #163: consecutive peer-silent resets, no inbound between them
     bool     LinkHalfOpen_      = false; // #163: notify path wedged -> report + back off, don't churn
+    int      RadioRestarts_     = 0;  // #182: hard RestartRadio()s fired this half-open episode (capped)
     uint32_t DatagramsSent      = 0; // total datagrams sent (overlay/debug)
     uint32_t DatagramsReceived  = 0; // total datagrams received (overlay/debug)
     bool     EverConnected      = false;  // for Disconnected vs never-connected

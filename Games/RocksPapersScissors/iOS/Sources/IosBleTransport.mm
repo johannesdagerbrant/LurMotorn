@@ -480,7 +480,14 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 - (void)peripheralManagerDidUpdateState:(CBPeripheralManager*)peripheral {
     if (peripheral.state != CBManagerStatePoweredOn) return;
     NSLog(@"OnlyRps BLE: peripheral powered on, publishing service");
+    [self publishService];
+}
 
+// Build + add the GATT service (datagram + device-id characteristics). Factored out of
+// peripheralManagerDidUpdateState so #182's restartRadio can RE-publish it: removing and re-adding
+// the service is how a wedged peripheral sheds a stale subscription (candidate 1 in #163).
+- (void)publishService {
+    if (_Peripheral.state != CBManagerStatePoweredOn) return;
     _LocalDatagram = [[CBMutableCharacteristic alloc]
         initWithType:_DatagramUuid
           properties:(CBCharacteristicPropertyWrite | CBCharacteristicPropertyWriteWithoutResponse |
@@ -498,7 +505,42 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 
     CBMutableService* Service = [[CBMutableService alloc] initWithType:_ServiceUuid primary:YES];
     Service.characteristics = @[_LocalDatagram, DeviceIdChar];
-    [peripheral addService:Service];
+    [_Peripheral addService:Service];
+}
+
+// #182: the HARDER reset the net layer escalates to when it judges the link HALF-OPEN — connected, our
+// writes leave, but the peer's notify path is wedged so nothing inbound ever arrives. resetLink (which
+// just forces onLinkLost -> re-advertise) provably can't clear a wedged BLE stack. The iOS-specific
+// deeper move: REMOVE AND RE-ADD the peripheral service, so a stale central subscription is rebuilt
+// rather than merely re-advertised — candidate 1 in #163. Also drops any central-side connection and
+// rescans. Bounded by the Session (MaxRadioRestarts) so it can't become churn; may still not clear a
+// device-level wedge (the hardware case needed the SILENT peer to reboot), so the LINK STALLED banner
+// stays the floor. Runs on the CB delegate queue (nil == main), same thread as every callback here.
+- (void)restartRadio {
+    NSLog(@"OnlyRps BLE: restartRadio (#182): republishing service + dropping the link — a soft reset "
+          @"can't clear a wedged BLE stack");
+    // Central side: drop any outgoing connection so it re-forms cleanly.
+    _Connecting = false;
+    _RemoteDatagram = nil;
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    // Peripheral side: shed the wedged notify path by removing + re-adding the service.
+    _Subscriber = nil;
+    _Binding.Clear();                 // #83: link is going down, reopen the binding
+    _SendQueue.clear();               // drop stale backlog (#72)
+    if (_Peripheral.state == CBManagerStatePoweredOn) {
+        if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
+        [_Peripheral removeAllServices];   // drop the stale service + its subscription...
+        _LocalDatagram = nil;
+        [self publishService];             // ...and re-add it (didAddService re-advertises)
+    }
+    // Link/role state resets exactly as a real loss would; the engine sees IsConnected() go false on
+    // its next Pump (iOS reports connection via the _Connected flag, no explicit disconnect event).
+    _Linked = _Connected = false;
+    _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
+    // Central rediscovery (role-aware, mirroring onLinkLost).
+    if (_Central.state == CBManagerStatePoweredOn && [self shouldScan])
+        [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
+    [self armDiscoveryWatchdog];      // #79: one-sidedness may not outlive the watchdog
 }
 
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
@@ -569,6 +611,7 @@ public:
     bool IsConnected() const override { return Driver && [Driver isConnected]; }
     void Pump() override { if (Driver) [Driver pumpInbox]; }  // engine-frame delivery (#40)
     void ResetLink() override { if (Driver) [Driver resetLink]; }
+    void RestartRadio() override { if (Driver) [Driver restartRadio]; }  // #182: harder, per-OS reset
 
 private:
     IosBleDriver* Driver = nil;  // ARC-retained

@@ -184,12 +184,15 @@ static void TestKeepaliveTimeoutResetsLink() {
 // and so can only fire once), this keeps the link "up", so the Session keeps timing out and the
 // consecutive-silent-reset count climbs — exactly the cycle seen on hardware (80 resets in a row).
 struct ReconnectingSilentTransport : Lur::Transport::ITransport {
-    int      ResetCount = 0;
+    int      ResetCount   = 0;
+    int      RestartCount = 0;  // #182: hard RestartRadio()s the Session escalated to
     Receiver Rx;
     void Send(const uint8_t*, std::size_t) override {}
     void SetReceiver(Receiver R) override { Rx = std::move(R); }
     bool IsConnected() const override { return true; }
     void ResetLink() override { ++ResetCount; }  // reconnects instantly, still silent
+    void RestartRadio() override { ++RestartCount; }  // #182: the harder reset; still silent (a wedge
+    // a radio restart can't clear is the worst case the banner exists for)
     void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
 };
 
@@ -221,6 +224,44 @@ static void TestHalfOpenLinkIsDetectedAndBacksOff() {
     T.Deliver(KA, sizeof(KA));
     CHECK(!S.IsLinkHalfOpen());
     CHECK(S.ConsecutiveSilentResets() == 0);
+}
+
+// #182: once the link is confirmed HALF-OPEN, a soft ResetLink provably can't clear the wedged BLE
+// STACK (80 of them cleared nothing on hardware), so the Session escalates to the harder per-OS
+// ITransport::RestartRadio — but a BOUNDED number of times, so the recovery can't itself become the
+// churn that degrades the radio (#163's lesson). Past the cap it stops touching the radio entirely and
+// leaves the LINK STALLED banner to drive the guaranteed human fix. This is the host-testable half of
+// #182 (the real radio teardown is not host-reproducible; the Session-side bounding is exactly this).
+static void TestHalfOpenEscalatesToRadioRestartThenStops() {
+    ReconnectingSilentTransport T;
+    Session S;
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', /*ready*/ true); T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+
+    // Drive to the half-open verdict. The very cycle that trips it ALSO fires the first hard restart:
+    // escalation is immediate once we conclude the stack is wedged, not one back-off cycle later.
+    for (int i = 0; i < 1200 && !S.IsLinkHalfOpen(); ++i) S.Tick(FrameNs);
+    CHECK(S.IsLinkHalfOpen());
+    CHECK(T.RestartCount == 1);
+    CHECK(S.RadioRestartsAttempted() == 1);
+
+    // Hold the link connected-but-silent well past several ~20s back-off windows. The restarts climb
+    // to the cap (MaxRadioRestarts == 3) and then STOP — a fourth would be exactly the runaway churn
+    // the bound exists to prevent.
+    for (int i = 0; i < 4000; ++i) S.Tick(FrameNs);
+    CHECK(T.RestartCount == 3);
+    CHECK(S.RadioRestartsAttempted() == 3);
+
+    // Another ~50s (>2 further windows) proves the cap truly holds, not merely lags.
+    for (int i = 0; i < 3000; ++i) S.Tick(FrameNs);
+    CHECK(T.RestartCount == 3);
+
+    // Recovery on EVIDENCE resets the whole episode: a fresh wedge later gets a fresh restart budget.
+    const uint8_t KA[2] = { static_cast<uint8_t>(EMsgType::Keepalive), 0 };
+    T.Deliver(KA, sizeof(KA));
+    CHECK(!S.IsLinkHalfOpen());
+    CHECK(S.RadioRestartsAttempted() == 0);
 }
 
 // Steady peer traffic (keepalives) keeps the link alive — no false timeout.
@@ -713,6 +754,7 @@ int main() {
     TestGameHistoryResync();
     TestKeepaliveTimeoutResetsLink();
     TestHalfOpenLinkIsDetectedAndBacksOff();   // #163
+    TestHalfOpenEscalatesToRadioRestartThenStops();  // #182
     TestKeepaliveKeepsLinkAlive();
     TestLongGameSyncNotDropped();
     TestOversizedFramedSendRefused();

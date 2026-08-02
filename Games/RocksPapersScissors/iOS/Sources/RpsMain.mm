@@ -905,7 +905,7 @@ static void UnblockStdio() {
             // the link dropped without reporting an error; stall=1 names the pre-match hang that
             // otherwise looks exactly like a frozen app.
             os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u "
-                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d",
+                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d",
                    _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                    _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
                    _Lp.BuildMismatch() ? 1 : 0,
@@ -918,7 +918,11 @@ static void UnblockStdio() {
                    // #163: half-open verdict, matching Android field-for-field (the pair is read side
                    // by side). This peripheral->central direction is the one that wedges, so the
                    // iPhone's halfopen= is the more important of the two.
-                   (!_SoloActive && _Session.IsLinkHalfOpen()) ? 1 : 0);
+                   (!_SoloActive && _Session.IsLinkHalfOpen()) ? 1 : 0,
+                   // #182: hard radio restarts fired this half-open episode (capped). The iPhone is the
+                   // peripheral whose notify path wedges, so THIS is the side where the escalation runs
+                   // — a climbing restarts= here is the on-device proof the fix fired.
+                   _SoloActive ? 0 : _Session.RadioRestartsAttempted());
             // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
             // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
             // stdio buffer until End, so a killed app or a match that never resolves leaves nothing

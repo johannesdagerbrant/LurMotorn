@@ -35,6 +35,7 @@ public:
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
     void ResetLink() override;
+    void RestartRadio() override;
     void Pump() override { Inbox.Drain(*this); }  // engine thread: dispatch queued events
 
     // EventInbox::Sink — invoked by Drain() on the engine thread, in arrival order.
@@ -55,8 +56,9 @@ AndroidBleTransport g_Transport;
 // JNI plumbing cached at load / shim-registration time.
 JavaVM*   g_Vm         = nullptr;
 jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
-jmethodID g_SendMethod  = nullptr; // BleShim.send([B)V
-jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
+jmethodID g_SendMethod    = nullptr; // BleShim.send([B)V
+jmethodID g_ResetMethod   = nullptr; // BleShim.resetLink()V
+jmethodID g_RestartMethod = nullptr; // BleShim.restartRadio()V  (#182 hard reset)
 
 // Get a JNIEnv for the calling thread, attaching it if necessary. android_main
 // runs on a native thread the JVM doesn't know about, so Send() may need attach.
@@ -93,6 +95,18 @@ void AndroidBleTransport::ResetLink() {
     Env->CallVoidMethod(g_Shim, g_ResetMethod);
 }
 
+// #182: the harder reset the net layer escalates to once a link is judged HALF-OPEN — a soft
+// ResetLink (above) merely drops the link and rediscovers; on a WEDGED BLE stack that clears
+// nothing (80 tried on hardware). This tears the whole BluetoothGatt down (close, not just
+// disconnect) and refresh()es its stale service cache before rebuilding the radio — the Kotlin
+// side does the real work. Bounded by the Session (MaxRadioRestarts) so it can't become churn.
+void AndroidBleTransport::RestartRadio() {
+    if (g_Shim == nullptr || g_RestartMethod == nullptr) return;
+    JNIEnv* Env = EnvForThisThread();
+    if (Env == nullptr) return;
+    Env->CallVoidMethod(g_Shim, g_RestartMethod);
+}
+
 } // namespace
 
 ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
@@ -112,8 +126,9 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
-    g_SendMethod  = Env->GetMethodID(Cls, "send", "([B)V");
-    g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
+    g_SendMethod    = Env->GetMethodID(Cls, "send", "([B)V");
+    g_ResetMethod   = Env->GetMethodID(Cls, "resetLink", "()V");
+    g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
 }
 
 namespace {

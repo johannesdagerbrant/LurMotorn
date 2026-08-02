@@ -249,6 +249,67 @@ class BleShim(private val context: Context) {
         }
     }
 
+    /** #182: a HARDER reset than resetLink(), escalated to by the net layer once it judges the link
+     *  HALF-OPEN — still connected, our writes leave, but the peer's notify path is wedged so nothing
+     *  inbound ever arrives. resetLink()/onLinkLost() merely drop+rediscover the LINK; on a wedged BLE
+     *  STACK that clears nothing (80 soft resets tried on hardware, only a reboot worked). This tears the
+     *  whole radio down and rebuilds it: it refresh()es the client GATT to purge Android's stale
+     *  service/subscription cache before closing it, and — unlike onLinkLost — CLOSES AND REOPENS the
+     *  GATT SERVER, because the notify path we SERVE as peripheral lives there and re-publishing the
+     *  service is the only way to shed a stale subscription. Then discovery restarts from scratch.
+     *  Bounded by the Session (MaxRadioRestarts) so it can't itself become the churn that degrades the
+     *  radio. May STILL not clear a device-level wedge (the hardware case needed the silent peer to
+     *  reboot), so the "LINK STALLED" banner stays the guaranteed floor. */
+    @Suppress("unused")
+    fun restartRadio() {
+        handler.post {
+            synchronized(this) {
+                if (!started) return@synchronized
+                Log.i(TAG, "restartRadio (#182): full radio teardown + rebuild — a soft reset can't " +
+                           "clear a wedged BLE stack")
+                val wasLinked = linked
+                // Client (central side): purge the cached GATT db, then close it fully.
+                gattClient?.let { g ->
+                    gattRefresh(g)
+                    try { g.disconnect(); g.close() } catch (_: SecurityException) {}
+                }
+                gattClient = null
+                clientDatagram = null
+                // Server (peripheral side): resetLink/onLinkLost never touch this, but a wedged notify
+                // path we serve lives HERE — closing + reopening re-publishes the service and drops any
+                // stale subscription (#163 candidate 1). startGattServer() below rebuilds it.
+                try { gattServer?.close() } catch (_: SecurityException) {}
+                gattServer = null
+                serverDatagram = null
+                connectedCentral = null
+                stopScanning()
+                stopAdvertising()
+                // Link state resets exactly as a real loss would: engine goes to Searching, role reopens.
+                linked = false
+                decidedPeripheral = false
+                connecting = false
+                synchronized(sendLock) { sendQueue.clear(); sendInFlight = false; ++sendWatchdogTok }
+                if (wasLinked) nativeOnDisconnected()
+                startGattServer()   // fresh server + service
+                startDiscovery()    // role-aware rediscovery, same as after a link loss
+            }
+        }
+    }
+
+    /** Clear a BluetoothGatt's cached services/CCCD state via the hidden refresh() method (#182).
+     *  Android caches the peer's GATT database and subscription across reconnects; a wedged notify path
+     *  can be that stale cache, and refresh() is the only way to drop it — there is no public API, so
+     *  reflection is the documented workaround. A failure is non-fatal: the close() that follows still
+     *  helps, and the whole escalation is best-effort under a cap. */
+    private fun gattRefresh(gatt: BluetoothGatt) {
+        try {
+            val ok = gatt.javaClass.getMethod("refresh").invoke(gatt) as? Boolean ?: false
+            Log.i(TAG, "gatt.refresh() = $ok (#182: purge stale service/subscription cache)")
+        } catch (e: Exception) {
+            Log.i(TAG, "gatt.refresh() unavailable (${e.javaClass.simpleName}) — relying on close() (#182)")
+        }
+    }
+
     // --- Called from OnlyRpsActivity once permissions are granted ---
 
     fun onPermissionsReady() {
