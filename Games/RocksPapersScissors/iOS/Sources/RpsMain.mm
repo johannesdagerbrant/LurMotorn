@@ -31,6 +31,7 @@
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
+#include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
 #include "Lur/Transport/Ble.h"
 #include "Rps/AiController.h"
 #include "Rps/CameraScroll.h"
@@ -923,6 +924,12 @@ static void UnblockStdio() {
                    // peripheral whose notify path wedges, so THIS is the side where the escalation runs
                    // — a climbing restarts= here is the on-device proof the fix fired.
                    _SoloActive ? 0 : _Session.RadioRestartsAttempted());
+            // #69: emit the perf TRACE line (parity with Android's). ble.toApply is the number that
+            // matters — time from a datagram landing in the EventInbox to it being drained/applied. On
+            // this single-threaded main the drain rides renderFrame, so this measures the render-gate.
+            char TraceLine[512];
+            if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+                os_log(OS_LOG_DEFAULT, "OnlyRps: TRACE %{public}s", TraceLine);
             // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
             // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
             // stdio buffer until End, so a killed app or a match that never resolves leaves nothing

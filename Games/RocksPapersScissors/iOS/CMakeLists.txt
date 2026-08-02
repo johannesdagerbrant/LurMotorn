@@ -44,6 +44,10 @@ target_compile_definitions(OnlyRps PRIVATE
     LUR_INTERNAL=${LUR_INTERNAL}
     LUR_ASSERTS=${LUR_ASSERTS}
     LUR_SLOW=${LUR_SLOW}
+    # #69: compile the Lur::Trace CPU scopes/latencies (sim.step, ble.toApply, ...) into the iPhone
+    # build too. It was Android-only, so the iOS main could never MEASURE its own net-service latency —
+    # which is exactly the number #69 needs to decide whether the render-driven pump costs a frame.
+    LUR_TRACE=${LUR_TRACE}
     # LUR_AGENT was MISSING here, which meant the app target silently compiled agent code out even
     # when the engine tree was configured with -DLUR_AGENT=ON — the iPhone is the half that most needs
     # remote control, since it has no touch injection at all. LUR_AGENT_ON is the derived value
@@ -64,6 +68,7 @@ target_link_libraries(OnlyRps PRIVATE
     lur::save
     lur::sim
     lur::math
+    lur::trace     # #69: named CPU scopes + the ble.toApply latency — now LUR_TRACE=1 references its symbols
     lur::input)  # #151: the shared dev-console gesture (two-finger triple-tap + drag-scroll)
 
 # The .mm sources are Objective-C++ with ARC (CMake's Xcode generator doesn't default it on).
