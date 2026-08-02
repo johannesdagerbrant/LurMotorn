@@ -170,11 +170,12 @@ public:
             if (DescriptorSetLayout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(Device, DescriptorSetLayout, nullptr);
             if (Sampler != VK_NULL_HANDLE)        vkDestroySampler(Device, Sampler, nullptr);
         }
-        DestroySwapchain();
+        DestroySwapchain();   // also destroys the per-image RenderFinished semaphores
         if (Device != VK_NULL_HANDLE) {
-            if (RenderFinished != VK_NULL_HANDLE) vkDestroySemaphore(Device, RenderFinished, nullptr);
-            if (ImageAvailable != VK_NULL_HANDLE) vkDestroySemaphore(Device, ImageAvailable, nullptr);
-            if (InFlight != VK_NULL_HANDLE)       vkDestroyFence(Device, InFlight, nullptr);
+            for (uint32_t i = 0; i < FramesInFlight; ++i) {
+                if (ImageAvailable[i] != VK_NULL_HANDLE) vkDestroySemaphore(Device, ImageAvailable[i], nullptr);
+                if (InFlight[i] != VK_NULL_HANDLE)       vkDestroyFence(Device, InFlight[i], nullptr);
+            }
             if (CommandPool != VK_NULL_HANDLE)    vkDestroyCommandPool(Device, CommandPool, nullptr);
             vkDestroyDevice(Device, nullptr);
         }
@@ -308,10 +309,12 @@ public:
             return;
         }
 
-        vkWaitForFences(Device, 1, &InFlight, VK_TRUE, UINT64_MAX);
+        // Wait for THIS slot's frame from N-FramesInFlight ago (not the immediately previous frame) —
+        // that gap is what lets the CPU run ahead of the display.
+        vkWaitForFences(Device, 1, &InFlight[CurrentFrame], VK_TRUE, UINT64_MAX);
 
         VkResult Acq = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX,
-                                             ImageAvailable, VK_NULL_HANDLE, &ImageIndex);
+                                             ImageAvailable[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
         if (Acq == VK_ERROR_OUT_OF_DATE_KHR) {
             NeedsRecreate = true;
             if (++DeadFrames == 1 || DeadFrames % 60 == 0)
@@ -335,7 +338,17 @@ public:
         if (!FrameAcquired) return;          // still no image (dead frame / recreating)
         FrameAcquired = false;               // consume this frame's acquisition
 
-        vkResetFences(Device, 1, &InFlight);
+        CommandBuffer = CommandBuffers[CurrentFrame];  // the draw path below records into this slot
+
+        // Acquire can hand back an image a DIFFERENT slot is still rendering into (fewer images than
+        // frames, or out-of-order release). Wait that slot's fence out before we reuse the image, then
+        // stake this slot's fence as the image's owner.
+        if (ImageIndex < ImagesInFlight.size() && ImagesInFlight[ImageIndex] != VK_NULL_HANDLE)
+            vkWaitForFences(Device, 1, &ImagesInFlight[ImageIndex], VK_TRUE, UINT64_MAX);
+        if (ImageIndex < ImagesInFlight.size())
+            ImagesInFlight[ImageIndex] = InFlight[CurrentFrame];
+
+        vkResetFences(Device, 1, &InFlight[CurrentFrame]);
         vkResetCommandBuffer(CommandBuffer, 0);
 
         VkCommandBufferBeginInfo BeginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -535,24 +548,27 @@ public:
         VkPipelineStageFlags WaitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo Submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
         Submit.waitSemaphoreCount = 1;
-        Submit.pWaitSemaphores = &ImageAvailable;
+        Submit.pWaitSemaphores = &ImageAvailable[CurrentFrame];   // this slot's acquire
         Submit.pWaitDstStageMask = &WaitStage;
         Submit.commandBufferCount = 1;
         Submit.pCommandBuffers = &CommandBuffer;
         Submit.signalSemaphoreCount = 1;
-        Submit.pSignalSemaphores = &RenderFinished;
+        Submit.pSignalSemaphores = &RenderFinished[ImageIndex];   // per-image (WSI-safe)
         { LUR_TRACE_SCOPE("es.submit");
-          VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight)); }
+          VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight[CurrentFrame])); }
 
         VkPresentInfoKHR Present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         Present.waitSemaphoreCount = 1;
-        Present.pWaitSemaphores = &RenderFinished;
+        Present.pWaitSemaphores = &RenderFinished[ImageIndex];
         Present.swapchainCount = 1;
         Present.pSwapchains = &Swapchain;
         Present.pImageIndices = &ImageIndex;
         VkResult Pres;
         { LUR_TRACE_SCOPE("es.present");
           Pres = vkQueuePresentKHR(GraphicsQueue, &Present); }
+
+        // Advance the slot LAST — everything above used a stable CurrentFrame for this frame.
+        CurrentFrame = (CurrentFrame + 1) % FramesInFlight;
         if (Pres == VK_SUCCESS || Pres == VK_SUBOPTIMAL_KHR) {
             // SUBOPTIMAL still presented — count it, but also refresh the swapchain.
             ++FramesPresented;
@@ -696,18 +712,33 @@ private:
         VkCommandBufferAllocateInfo Alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         Alloc.commandPool = CommandPool;
         Alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        Alloc.commandBufferCount = 1;
-        VK_CHECK(vkAllocateCommandBuffers(Device, &Alloc, &CommandBuffer));
-        return CommandPool != VK_NULL_HANDLE && CommandBuffer != VK_NULL_HANDLE;
+        Alloc.commandBufferCount = FramesInFlight;
+        VK_CHECK(vkAllocateCommandBuffers(Device, &Alloc, CommandBuffers));
+        return CommandPool != VK_NULL_HANDLE && CommandBuffers[0] != VK_NULL_HANDLE;
     }
 
+    // Per-frame-slot sync (constant N, created once). The per-IMAGE RenderFinished semaphores depend
+    // on the swapchain image count, so they live in CreatePresentSync() with the swapchain instead.
     bool CreateSyncObjects() {
         VkSemaphoreCreateInfo SemInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VkFenceCreateInfo FenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-        FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-        VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable));
-        VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &RenderFinished));
-        VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight));
+        FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;   // first WaitForFrame per slot must not block
+        for (uint32_t i = 0; i < FramesInFlight; ++i) {
+            VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable[i]));
+            VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight[i]));
+        }
+        return true;
+    }
+
+    // One present-wait semaphore per swapchain image (WSI-safe reuse; see the member note), plus the
+    // per-image in-flight fence tracker. Tied to the swapchain: (re)built by CreateSwapchain, torn
+    // down by DestroySwapchain.
+    bool CreatePresentSync() {
+        VkSemaphoreCreateInfo SemInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+        RenderFinished.resize(SwapImages.size(), VK_NULL_HANDLE);
+        for (VkSemaphore& S : RenderFinished)
+            VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &S));
+        ImagesInFlight.assign(SwapImages.size(), VK_NULL_HANDLE);
         return true;
     }
 
@@ -1208,7 +1239,7 @@ private:
         SwapImages.resize(Got);
         vkGetSwapchainImagesKHR(Device, Swapchain, &Got, SwapImages.data());
 
-        return CreateImageViews() && CreateRenderPass() && CreateFramebuffers();
+        return CreateImageViews() && CreateRenderPass() && CreateFramebuffers() && CreatePresentSync();
     }
 
     VkSurfaceFormatKHR ChooseSurfaceFormat() {
@@ -1294,6 +1325,9 @@ private:
 
     void DestroySwapchain() {
         if (Device == VK_NULL_HANDLE) return;
+        for (VkSemaphore S : RenderFinished) if (S) vkDestroySemaphore(Device, S, nullptr);
+        RenderFinished.clear();
+        ImagesInFlight.clear();   // references to InFlight[] fences — no ownership, just drop them
         for (VkFramebuffer Fb : Framebuffers) if (Fb) vkDestroyFramebuffer(Device, Fb, nullptr);
         Framebuffers.clear();
         if (RenderPass != VK_NULL_HANDLE) { vkDestroyRenderPass(Device, RenderPass, nullptr); RenderPass = VK_NULL_HANDLE; }
@@ -1390,11 +1424,24 @@ private:
     std::vector<Texture>  Textures;
     TextureHandle         DefaultTexture = 0;
 
+    // #103: TWO frames in flight. The renderer used to keep exactly one — every vkQueueSubmit then
+    // stalled a full vsync in MoltenVK's lazy CAMetalDrawable acquisition (measured ~16 ms/frame on
+    // iPhone, es.submit), because the CPU could never run ahead of the display. With N=2, frame N
+    // waits only on frame N-2's fence, so the CPU records N+1 while the display still holds N and the
+    // drawable is already free at submit. Per-frame-slot: command buffer, acquire semaphore, fence.
+    static constexpr uint32_t FramesInFlight = 2;
     VkCommandPool   CommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;
-    VkSemaphore     ImageAvailable = VK_NULL_HANDLE;
-    VkSemaphore     RenderFinished = VK_NULL_HANDLE;
-    VkFence         InFlight = VK_NULL_HANDLE;
+    VkCommandBuffer CommandBuffers[FramesInFlight] = {};   // one per in-flight slot
+    VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;        // == CommandBuffers[CurrentFrame]; the draw path uses this
+    VkSemaphore     ImageAvailable[FramesInFlight] = {};   // acquire signals this (per slot)
+    VkFence         InFlight[FramesInFlight] = {};          // submit signals this (per slot)
+    uint32_t        CurrentFrame = 0;                       // 0..FramesInFlight-1, advances each EndFrame
+    // Per swapchain IMAGE, not per slot: a present-wait semaphore reused across slots trips the WSI
+    // reuse rule, but an image is re-acquired only after its present completes, so keying on ImageIndex
+    // is safe. ImagesInFlight tracks which slot's InFlight fence last drew each image (no ownership),
+    // so a slot never renders into an image another slot is still using.
+    std::vector<VkSemaphore> RenderFinished;               // [swapchain image count]
+    std::vector<VkFence>     ImagesInFlight;               // [swapchain image count]
     bool            FrameAcquired = false;  // WaitForFrame acquired an image this frame (consumed by BeginFrame)
 
     std::vector<Mesh>     Meshes;
