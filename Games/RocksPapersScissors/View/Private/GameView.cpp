@@ -1745,12 +1745,42 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // to a header-sized pill would push the bottom of the menu into the build plates.
     Selector.Draw(Renderer, nullptr, 0.0f, SelTop, WidthPx, SelH, /*MenuRowH*/ 26.0f * HS);
 
+    // #178: a build-fingerprint MISMATCH refuses the match before tick 0, and that refusal was
+    // invisible in the game view — the selector row goes red (RefreshSelector) but the dropdown is
+    // shut while you wait, so all the player sees is a placed camp and a screen that never starts.
+    // "A correct refusal reads as a freeze" is the whole bug. Say it on the field, unmissably and
+    // PERSISTENTLY (no timer — the condition only clears on a rebuild, unlike the transient link/
+    // resync banners): a centered headline so it cannot be mistaken for a hang, plus the one action
+    // that fixes it. Driven by BuildMismatch_ per frame, so it vanishes the instant a matching peer
+    // reconnects. Drawn BEFORE and mutually exclusive with the transient banners below — a refused
+    // match is not being linked or repaired, and this message outranks either.
+    //
+    // Gated on SelPeer_ (the linked peer is our CURRENT opponent), not on BuildMismatch_ alone: a
+    // mismatched peer can link while you are mid-AI-match (that is exactly what the #2 link blink is
+    // for), and shouting "DIFFERENT BUILD" over a game the mismatch is not blocking would be wrong —
+    // the selector's red row already carries the standing warning for that case. The mid-screen
+    // banner is for when the refusal is actually stopping the match YOU are trying to play.
+    const bool ShowBuildMismatch = BuildMismatch_ && SelPeer_;
+    if (ShowBuildMismatch) {
+        const float Throb = 0.6f + 0.4f * std::sin(PulseT_ * 5.0f);   // reuse the #143 animation clock
+        const Color BadC{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};   // the selector's mismatch red
+        const Color BadThrob{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), Throb};
+        Text.Draw(Renderer, "DIFFERENT BUILD", 0.0f, HeightPx * 0.40f, WidthPx, 34.0f * HS,
+                  26.0f * HS, BadThrob, EHAlign::Center, EVAlign::Middle, false);
+        Text.Draw(Renderer, "opponent is on a different build - the match cannot start",
+                  Pad, HeightPx * 0.40f + 34.0f * HS, WidthPx - 2.0f * Pad, 16.0f * HS, 13.0f * HS,
+                  BadC, EHAlign::Center, EVAlign::Middle, false);
+        Text.Draw(Renderer, "rebuild BOTH devices from the same commit",
+                  Pad, HeightPx * 0.40f + 54.0f * HS, WidthPx - 2.0f * Pad, 16.0f * HS, 13.0f * HS,
+                  BadC, EHAlign::Center, EVAlign::Middle, false);
+    }
+
     // #2: "opponent link established" — a peer linked while an AI match was running. Blink a green
     // line for a few seconds (the player can pick the "Linked opponent" row to switch). Time it out
     // here; NotifyPeerLinked() (main, on the link edge) re-arms it.
     // BELOW the status panel now: the bar it used to sit inside grew to fill its whole band, so at
     // the old Y it drew on top of the opponent's name.
-    if (PeerLinkBannerT_ > 0.0f) {
+    if (!ShowBuildMismatch && PeerLinkBannerT_ > 0.0f) {
         PeerLinkBannerT_ -= DtSec;
         const float Blink = 0.5f + 0.5f * std::sin(PeerLinkBannerT_ * 8.0f);  // ~1.3 Hz throb
         const Color LinkC{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), Blink};
@@ -1764,7 +1794,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // a worse experience than the freeze it replaced. Amber, and in the same slot as the link banner
     // (the two cannot coexist: one is a fresh link, the other a live match being repaired). Driven by
     // the actual state per frame, so it disappears the instant the repair lands rather than on a timer.
-    if (Recovering_) {
+    if (!ShowBuildMismatch && Recovering_) {
         const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 7.0f);  // reuse the #143 animation clock
         const Color WarnC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
         Text.Draw(Renderer, "resyncing with opponent...", Pad, PanelY + PanelH + 6.0f * HS,
