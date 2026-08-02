@@ -995,6 +995,45 @@ static void TestMinerPathIgnoresNeighbours() {
     CHECK(Same);
 }
 
+// #181: soldier production must HOLD at the per-team ceiling, so sim.move is bounded by construction
+// rather than chased with constant-factor micro-opts (the P1/aggregate path, which the closely-spaced
+// force radii cap at ~4%). Set a tiny cap, queue far more soldiers than it, and assert the live soldier
+// count tops out AT the cap (never over), the order is HELD (queue not silently dropped), carts are
+// exempt, and a death frees exactly one slot for the held order.
+static void TestUnitCeilingHoldsSoldierProduction() {
+    static Sim S;
+    S.Init(0);
+    ClearField(S);
+    S.Cv.UnitCeiling = 5;  // tiny cap -> a fast, exact test
+    const int Rock = S.Count; PlaceBuilding(S, S.Count, F(17), F(20), 0, UnitRock);  ++S.Count;
+    S.Queue[Rock] = 50;    // far more soldiers than the cap
+    const int Mine = S.Count; PlaceBuilding(S, S.Count, F(25), F(20), 0, UnitMiner); ++S.Count;
+    S.Queue[Mine] = 50;    // carts: uncapped
+
+    for (int T = 0; T < 4000; ++T) S.StepEvents(nullptr, 0);
+
+    int32_t Soldiers = 0, Carts = 0;
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Team[I] == 0)
+            (S.Type[I] == UnitMiner ? Carts : Soldiers) += 1;
+    CHECK(Soldiers == 5);          // exactly the cap, never over
+    CHECK(S.Queue[Rock] > 0);      // the order is still owed, not silently dropped
+    CHECK(Carts > 5);              // carts exempt from the soldier ceiling
+
+    // Free ONE soldier slot -> the held order must pop exactly one replacement, back to the cap.
+    const int32_t QBefore = S.Queue[Rock];
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Type[I] == UnitRock) {
+            S.AliveBits[I >> 6] &= ~(1ull << (I & 63)); break;  // POD-is-public kill (no combat here)
+        }
+    S.StepEvents(nullptr, 0);      // held building spawns immediately (BuildProgress was at completion)
+    int32_t After = 0;
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Team[I] == 0 && S.Type[I] != UnitMiner) ++After;
+    CHECK(After == 5);                     // refilled to the cap, not over
+    CHECK(S.Queue[Rock] == QBefore - 1);   // and the held order was consumed by exactly one
+}
+
 static void TestStressTickBudget() {
     static Sim S;
     S.Init(0x57A9E55);
@@ -1073,6 +1112,7 @@ int main() {
     TestDepletedMinesStopEconomy();
     TestEconomyGathersGold();
 #if LUR_INTERNAL
+    TestUnitCeilingHoldsSoldierProduction();  // #181
     TestStressTickBudget();
 #endif
 

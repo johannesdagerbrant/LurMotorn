@@ -230,16 +230,33 @@ void BuildMap(Sim& S) {
 // building state) — no global SpawnCounter. Flat cadence means at most one spawn per building
 // per tick (BuildProgress can't leap past BuildTicks in one +1), so no inner loop.
 void ProductionBuildings(Sim& S) {
+    // #181: count live SOLDIERS per team once, up front (O(units)), then keep it current as we spawn
+    // below. Both peers walk the same slot order over the same state, so the counts — and every
+    // ceiling decision they drive — are identical: grid==brute and cross-peer determinism hold.
+    int32_t Soldiers[2] = {0, 0};
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && !S.IsBuilding(I) && S.Type[I] != UnitMiner) ++Soldiers[S.Team[I]];
+
     for (int32_t B = 0; B < S.Count; ++B) {
         if (!S.IsAlive(B) || !S.IsBuilding(B)) continue;
         if (S.Queue[B] <= 0) { S.BuildProgress[B] = 0; continue; }  // no banked progress
         const uint8_t Ty = S.Type[B];
         S.BuildProgress[B] += 1;  // FLAT
         if (S.BuildProgress[B] >= S.Units[Ty].BuildTicks) {
+            // #181: at the soldier ceiling, HOLD — keep the completed progress so the unit pops the
+            // instant a slot frees (a death), and do NOT decrement the queue (the order is still owed).
+            // Carts are exempt: they don't gather, and stalling the economy on a soldier-cost bound
+            // would be a balance bug. Clamping to BuildTicks (not leaving it above) stops any runaway
+            // accumulation while capped.
+            if (Ty != UnitMiner && Soldiers[S.Team[B]] >= S.Cv.UnitCeiling) {
+                S.BuildProgress[B] = S.Units[Ty].BuildTicks;
+                continue;
+            }
             S.BuildProgress[B] -= S.Units[Ty].BuildTicks;
             const int32_t Slot = static_cast<int32_t>(static_cast<uint32_t>(S.Cooldown[B]) % RingSlots);
             ++S.Cooldown[B];
             SpawnUnitAt(S, S.Team[B], Ty, S.PosX[B] + RingX[Slot], S.PosY[B] + RingY[Slot]);
+            if (Ty != UnitMiner) ++Soldiers[S.Team[B]];  // keep the running count exact within this tick
             --S.Queue[B];
             if (S.Queue[B] <= 0) S.BuildProgress[B] = 0;
         }
@@ -592,27 +609,29 @@ struct FlockAcc {
 // at contact, zero at R — dir_cheb × (R − cheb)/R × strength. Chebyshev-normalized
 // direction (one axis is ±1), no sqrt. Reads only the passed Prev positions, so the sum
 // is order-independent. Shared verbatim by unit separation AND mine repel.
-void AddRepel(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R, Fixed Strength,
+// #181: the offset (Dx,Dy = away from J) and its Chebyshev distance are computed ONCE by the caller
+// (AccumFlock) and threaded into every force below, instead of each re-deriving them from raw
+// positions. f2a456e noted a pair used to pay "up to four separate Chebyshev computations of the same
+// distance"; this removes that. Bit-identical: same operands, same arithmetic, just not recomputed —
+// grid==brute + the determinism tests are the guard.
+void AddRepel(Fixed Dx, Fixed Dy, Fixed Cheb, Fixed R, Fixed Strength,
               int64_t& Ax, int64_t& Ay) {
-    const Fixed Dx = Ix - Jx, Dy = Iy - Jy;          // away from J
-    const Fixed Cheb = Max(Abs(Dx), Abs(Dy));
     if (Cheb.Raw == 0 || Cheb >= R) return;          // exact overlap (no dir) or out of range
     const Fixed Scale = (R - Cheb) / R * Strength;   // (R−cheb)/R · strength
     Ax += (Dx / Cheb * Scale).Raw;                   // dir_cheb · scale
     Ay += (Dy / Cheb * Scale).Raw;
 }
-// Cohesion gather: accumulate the offset TOWARD each in-range neighbour + a count.
-void AddCohesion(Fixed Ix, Fixed Iy, Fixed Jx, Fixed Jy, Fixed R,
+// Cohesion gather: accumulate the offset TOWARD each in-range neighbour + a count. Dx,Dy are AWAY
+// from J (Ix−Jx), so toward-J is −Dx: subtracting the raw is bit-identical to the old (Jx−Ix).Raw add.
+void AddCohesion(Fixed Dx, Fixed Dy, Fixed Cheb, Fixed R,
                  int64_t& Ax, int64_t& Ay, int32_t& N) {
-    const Fixed Dx = Jx - Ix, Dy = Jy - Iy;          // toward J
-    if (Max(Abs(Dx), Abs(Dy)) >= R) return;          // out of (Chebyshev) range
-    Ax += Dx.Raw; Ay += Dy.Raw; ++N;
+    if (Cheb >= R) return;                           // out of (Chebyshev) range
+    Ax -= Dx.Raw; Ay -= Dy.Raw; ++N;                 // toward J = −(Ix−Jx)
 }
-// Alignment gather (#97): sum the neighbour's velocity Δ = Pos − Prev if it's within
-// AlignR (position range). Reads Δ — valid ONLY before the tick's bulk Prev=Pos copy.
-void AddAlignment(const Sim& S, int32_t I, int32_t J, FlockAcc& A) {
-    const Fixed Ox = S.PosX[I] - S.PosX[J], Oy = S.PosY[I] - S.PosY[J];
-    if (Max(Abs(Ox), Abs(Oy)) >= S.Cv.AlignRadius) return;
+// Alignment gather (#97): sum the neighbour's velocity Δ = Pos − Prev if it's within AlignR (the same
+// Chebyshev distance the caller already has). Reads Δ — valid ONLY before the tick's bulk Prev=Pos copy.
+void AddAlignment(const Sim& S, int32_t J, Fixed Cheb, FlockAcc& A) {
+    if (Cheb >= S.Cv.AlignRadius) return;
     A.AlnX += static_cast<int64_t>(S.PosX[J].Raw) - S.PrevX[J].Raw;
     A.AlnY += static_cast<int64_t>(S.PosY[J].Raw) - S.PrevY[J].Raw;
     ++A.AlnN;
@@ -625,50 +644,50 @@ void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, Flo
     if (J == I) return;
     const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
     const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
+    // #181: derive the offset AWAY from J and its Chebyshev distance ONCE, then thread both into every
+    // force. Previously each Add re-derived them from raw positions, so a single pair paid up to four
+    // separate Max(Abs,Abs) computations of the same distance (f2a456e). This is a pure hoist — same
+    // operands, same arithmetic — so grid==brute and the determinism tests still hold it.
+    const Fixed Dx = Ix - Jx, Dy = Iy - Jy;
+    const Fixed Cheb = Max(Abs(Dx), Abs(Dy));
     // #162: one Chebyshev test up front against the WIDEST radius, before any per-force work. Every
     // Add below re-tests its own radius, and GatherR is by construction the max of all of them
-    // (DeriveUnits), so a neighbour at or beyond it contributes exactly nothing — this is a pure
-    // early-out, not a behaviour change (grid==brute and the determinism tests both hold it).
-    //
+    // (DeriveUnits), so a neighbour at or beyond it contributes exactly nothing — a pure early-out.
     // It pays because the grid walks whole CELLS: the queried box is ceil(GatherR/CellSize) cells in
-    // each direction, so it reaches up to about GatherR + CellSize and most of the pairs it yields are
-    // out of range of every force. Those used to run the full body — several branches and up to four
-    // separate Chebyshev computations of the same distance — to conclude nothing.
-    if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) >= S.GatherR) return;
+    // each direction, so most of the pairs it yields are out of range of every force.
+    if (Cheb >= S.GatherR) return;
     // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it (no
     // pathfinding). Reuse the corrected separation falloff, its own radius/strength, on ALL
     // buildings (friend or foe). Buildings carry no cohesion/alignment/flee/cart semantics,
     // so short-circuit before the unit-affinity logic.
     if (S.IsBuilding(J)) {
-        AddRepel(Ix, Iy, Jx, Jy, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength,
-                 A.SepX, A.SepY);
+        AddRepel(Dx, Dy, Cheb, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength, A.SepX, A.SepY);
         // #146: a friendly HOME BASE is a protected asset like a cart — a defender that also sees a
         // raider steers to screen it (reuses the #98 interpose accumulator, so no new force/tuning).
-        if (S.IsHomeBase(J) && S.Team[J] == S.Team[I] &&
-            Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
+        if (S.IsHomeBase(J) && S.Team[J] == S.Team[I] && Cheb < S.Cv.InterposeRadius) {
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;
         }
         return;
     }
     if (S.Team[J] == S.Team[I]) {
-        AddRepel(Ix, Iy, Jx, Jy, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
+        AddRepel(Dx, Dy, Cheb, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
         if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
-            AddCohesion(Ix, Iy, Jx, Jy, S.Cv.CohAllRadius, A.AllX, A.AllY, A.AllN);
+            AddCohesion(Dx, Dy, Cheb, S.Cv.CohAllRadius, A.AllX, A.AllY, A.AllN);
             if (S.Type[J] == S.Type[I]) {
-                AddCohesion(Ix, Iy, Jx, Jy, S.Cv.CohSameRadius, A.SameX, A.SameY, A.SameN);
-                AddAlignment(S, I, J, A);
+                AddCohesion(Dx, Dy, Cheb, S.Cv.CohSameRadius, A.SameX, A.SameY, A.SameN);
+                AddAlignment(S, J, Cheb, A);
             }
-        } else if (Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
+        } else if (Cheb < S.Cv.InterposeRadius) {
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;  // a friendly cart to screen (#98)
         }
     } else {
-        AddRepel(Ix, Iy, Jx, Jy, S.Cv.EnemySepRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
+        AddRepel(Dx, Dy, Cheb, S.Cv.EnemySepRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
         // Flee your PREDATOR — the enemy type that beats me (UnitTable[Type[J]].Beats == my
         // type): steer away, larger radius, so I never walk toward my counter.
         if (UnitTable[S.Type[J]].Beats == S.Type[I])
-            AddRepel(Ix, Iy, Jx, Jy, S.Cv.PredatorFleeRadius, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
+            AddRepel(Dx, Dy, Cheb, S.Cv.PredatorFleeRadius, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
         // A flagged RAIDER within InterposeR: note it so I can interpose (#98).
-        if (Threat.Get(J) && Max(Abs(Ix - Jx), Abs(Iy - Jy)) < S.Cv.InterposeRadius) {
+        if (Threat.Get(J) && Cheb < S.Cv.InterposeRadius) {
             A.RaidX += Jx.Raw; A.RaidY += Jy.Raw; ++A.RaidN;
         }
     }
@@ -705,8 +724,8 @@ void AddMineRepel(const Sim& S, const MineGrid& MG, int32_t I, int64_t& Ax, int6
             const int32_t C = Gy * GridCols + Gx;
             for (int32_t P = MG.Start[C]; P < MG.Start[C + 1]; ++P) {
                 const int32_t Mn = MG.Order[P];
-                AddRepel(S.PosX[I], S.PosY[I], S.MineX[Mn], S.MineY[Mn],
-                         R, S.Cv.SeparationStrength, Ax, Ay);
+                const Fixed Dx = S.PosX[I] - S.MineX[Mn], Dy = S.PosY[I] - S.MineY[Mn];
+                AddRepel(Dx, Dy, Max(Abs(Dx), Abs(Dy)), R, S.Cv.SeparationStrength, Ax, Ay);
             }
         }
 }

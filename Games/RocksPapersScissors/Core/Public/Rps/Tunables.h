@@ -92,6 +92,14 @@ constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 // Speed is Fixed. Range/Cooldown and the RPS Beats relation stay compile-time in UnitTable
 // (Beats is wire/order-load-bearing, not a number to twiddle). The Sim latches these into
 // Sim::Units[] (DeriveUnits) each tick. ----
+// #181: per-team SOLDIER ceiling. Soldiers pay an O(units) neighbourhood gather every tick (the
+// remaining #162 collapse vector after f2a456e made carts free), so bound the live soldier count per
+// team and sim.move is bounded BY CONSTRUCTION rather than chased with constant-factor micro-opts.
+// Soldier production HOLDS past the cap (the order stays owed, pops when a slot frees); carts are
+// uncapped (cheap, and the economy shouldn't stall). Deterministic — both peers count the same live
+// units and read the same synced value — so it holds grid==brute / cross-peer. Below the 2048 hard
+// slot cap; tune per the phone tick budget.
+LUR_CVAR(CvUnitCeiling,    "rps.unit.ceiling",         1200,    CVarFlagAffectsGameplay, "Max live soldiers per team; production holds past it so sim.move stays bounded (#181)");
 LUR_CVAR(CvMinerCost,      "rps.unit.miner.cost",      50,      CVarFlagAffectsGameplay, "Gold to queue a miner cart");
 LUR_CVAR(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffectsGameplay, "Miner hit points");
 LUR_CVAR(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
@@ -868,6 +876,7 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     FX(NoiseGain,               CvNoiseGain)               \
     FX(NoiseLacunarity,         CvNoiseLacunarity)         \
     IX(CounterMultiplier,       CvCounterMultiplier)       \
+    IX(UnitCeiling,             CvUnitCeiling)             \
     IX(MinerCost,               CvMinerCost)               \
     IX(MinerHp,                 CvMinerHp)                 \
     FX(MinerSpeed,              CvMinerSpeed)              \
