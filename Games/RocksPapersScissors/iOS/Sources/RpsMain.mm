@@ -83,6 +83,21 @@ Rps::Fixed WorldToFixed(float Wv) {
 }
 }  // namespace
 
+// #103: iOS-ONLY render-resolution knob for the fillrate-vs-encoding A/B. Multiplies the CAMetalLayer
+// backing scale so the whole scene renders into a smaller drawable and Core Animation upscales it to
+// the panel — one dial that shrinks BOTH the render extent and (because the touch handlers read the
+// same contentsScale) the input mapping, so nothing goes out of register. RENDER ONLY (CVarFlagNone):
+// never enters the sim/hash/wire, so the two phones may legitimately disagree on it — exactly like
+// rps.mine.visual_size. Declared here, not in Tunables.h, because only the iPhone honours it: a knob
+// that did nothing on Android would be a console footgun. The number is what the last comment on #103
+// asked for — drop below native retina (~0.7×) and watch the TRACE line: if fps locks to 60 it is
+// fillrate/overdraw-bound, if it stays ~40 it is CPU/MoltenVK-encoding-bound.
+namespace {
+LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), Rps::F(1),
+               Lur::Core::CVarFlagNone,
+               "iOS render-resolution multiplier (1.0 = native retina; lower = cheaper fill). #103 A/B");
+}  // namespace
+
 // A Metal-backed view: its backing layer is a CAMetalLayer, which MoltenVK turns into
 // a Vulkan surface.
 @interface RpsView : UIView
@@ -138,6 +153,13 @@ Rps::Fixed WorldToFixed(float Wv) {
     // proven by 898999b).
     bool _InitWhileInactive;
     bool _BecameActive;
+#if !LUR_SHIPPING
+    // #103: the render-resolution A/B. Tracks the render-scale (Fixed raw) currently baked into the
+    // swapchain, so renderFrame recreates it ONLY when rps.dev.render_scale actually changes. Seeded
+    // to Fixed::One by the init paths (they build the layer at native scale, i.e. k=1.0), so a match
+    // played at the default never triggers a recreate.
+    int32_t _AppliedRenderScaleRaw;
+#endif
 
     // ---- SIM thread only (after _SimThread starts) ----
     Lur::Net::Session _Session;
@@ -369,6 +391,9 @@ static void UnblockStdio() {
             _View.CreateResources(_Renderer);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(renderFrame)];
             [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
+#if !LUR_SHIPPING
+            _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: swapchain is at native scale (k=1.0)
+#endif
         }
     } else {
         _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
@@ -603,7 +628,35 @@ static void UnblockStdio() {
            _Ready ? "ok" : "FAILED", (int)Layer.drawableSize.width,
            (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
     if (_Ready) _View.CreateResources(_Renderer);
+#if !LUR_SHIPPING
+    _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: rebuilt at native scale; renderFrame re-applies any override
+#endif
 }
+
+#if !LUR_SHIPPING
+// #103: apply rps.dev.render_scale by rescaling the CAMetalLayer's backing store + recreating the
+// swapchain — but ONLY when the value actually changed (a swapchain recreate is not free). Setting
+// contentsScale AND drawableSize together keeps the render extent and the touch-point mapping (which
+// reads contentsScale in touchesBegan/Moved/Ended) in the same coordinate space. Called at the top of
+// renderFrame, before WaitForFrame, so the fence/acquire below targets the fresh swapchain.
+- (void)applyRenderScaleIfChanged {
+    if (!_Ready || _Renderer == nullptr) return;
+    const int32_t Raw = CvRenderScale.Get().Raw;
+    if (Raw == _AppliedRenderScaleRaw) return;
+    const float K = static_cast<float>(Raw) / static_cast<float>(Rps::Fixed::One);
+    const CGFloat Eff = UIScreen.mainScreen.scale * K;   // native retina * multiplier
+    CAMetalLayer* Layer = [self metalLayer];
+    Layer.contentsScale = Eff;
+    Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Eff,
+                                    self.view.bounds.size.height * Eff);
+    if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;  // not laid out yet — retry next frame
+    _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
+                      static_cast<int>(Layer.drawableSize.height));
+    _AppliedRenderScaleRaw = Raw;
+    os_log(OS_LOG_DEFAULT, "OnlyRps: render_scale -> %.3f (drawable %dx%d) #103", K,
+           (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
+}
+#endif
 
 - (void)renderFrame {
     // #73, measured 2026-07-19: after a DVT kill-existing relaunch the app can run
@@ -630,6 +683,19 @@ static void UnblockStdio() {
     const double Now = CACurrentMediaTime();
     const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
     _PrevFrameTime = Now;
+
+#if !LUR_SHIPPING
+    [self applyRenderScaleIfChanged];  // #103: pick up a rps.dev.render_scale edit before we acquire
+#endif
+    // #103: split the per-frame cost into GPU-WAIT vs CPU work, so the TRACE line can say whether the
+    // iPhone's ~40 fps FIFO is fillrate/GPU-bound (gpu.wait dominates) or MoltenVK-encoding-bound
+    // (render.view dominates). Mirrors Android's wait-early: pull the fence+acquire idle out front so
+    // render.view below measures ONLY command recording + submit + present, not the vsync stall. On
+    // iOS input is event-driven (touchesMoved), not sampled here, so waiting early costs no input
+    // freshness — it only isolates the measurement (and BeginFrame then finds the image already
+    // acquired and skips its lazy wait, so GPU behaviour is unchanged).
+    if (_Renderer != nullptr) { LUR_TRACE_SCOPE("gpu.wait"); _Renderer->WaitForFrame(); }
+    LUR_TRACE_SCOPE("frame.render");  // whole-frame CPU cost from here to return (nests render.view)
 #if LUR_AGENT
     // Agent `gesture`: the recognizer lives here on the MAIN thread (it owns the touch stream), so a
     // sim-thread `gesture` command hands the request across via the atomic. Feed the SHARED recognizer
@@ -756,8 +822,11 @@ static void UnblockStdio() {
                              static_cast<float>(_PendingCampX.load(std::memory_order_relaxed)) / FixedOne,
                              static_cast<float>(_PendingCampY.load(std::memory_order_relaxed)) / FixedOne);
     }
-    _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, MyTeam == 1,
-                 static_cast<float>(ElapsedNs) / 1.0e9f);
+    {
+        LUR_TRACE_SCOPE("render.view");  // #103: BeginFrame..EndFrame — CPU command recording + present
+        _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, MyTeam == 1,
+                     static_cast<float>(ElapsedNs) / 1.0e9f);
+    }
     // main -> sim: the presented-frame count for the LOCKSTEP diag + heartbeat (the sim thread can't
     // touch the renderer).
     _PresentedFrames.store(_Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
