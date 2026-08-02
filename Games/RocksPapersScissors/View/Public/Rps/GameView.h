@@ -168,6 +168,11 @@ public:
     // the instant the repair lands, and the honest signal for "we are fixing something" is the actual
     // state, not a timer.
     void SetRecovering(bool On) { Recovering_ = On; }
+    // #163: the link is HALF-OPEN (Session::IsLinkHalfOpen) — connected, but the opponent's phone
+    // has gone silent, so the match won't start/advance. Fed per-frame by the main so the "LINK
+    // STALLED" banner clears the instant traffic resumes, and so it reads as a named, actionable
+    // state rather than the freeze that was the whole #163 complaint.
+    void SetLinkHalfOpen(bool On) { LinkHalfOpen_ = On; }
 #if !LUR_SHIPPING
     // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
     // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
@@ -393,6 +398,7 @@ private:
     int  PeerScoreW_ = 0, PeerScoreL_ = 0, PeerScoreD_ = 0;
     float PeerLinkBannerT_ = 0.0f;        // #2 "opponent link established" blink countdown (seconds)
     bool  Recovering_ = false;            // #161 a desync repair is in flight — say so on screen
+    bool  LinkHalfOpen_ = false;          // #163 link half-open (peer silent) — "LINK STALLED" banner
     Lur::Text::Font ClockFont;            // DSEG7: monospaced digits for the match clock
     Lur::Hud::TextField ClockText;
     float PlateRect[4][4] = {};           // per-type plate {x,y,w,h}, cached for OnTap

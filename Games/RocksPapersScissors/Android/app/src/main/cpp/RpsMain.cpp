@@ -120,6 +120,7 @@ struct AppState {
     // touch Lp (it owns input + render only), and the player needs to be told on screen — an
     // unexplained hold that then rewinds a second of play reads as a glitch or as cheating.
     std::atomic<bool>       Recovering{false};   // sim -> glue (drives View.SetRecovering)
+    std::atomic<bool>       LinkHalfOpen{false}; // sim -> glue (#163: drives View.SetLinkHalfOpen)
 #if LUR_AGENT
     // Agent `gesture`: the console recognizer lives on the GLUE thread (it owns the touch stream), so
     // a sim-thread command hands the request across rather than touching it directly.
@@ -757,7 +758,7 @@ void android_main(android_app* App) {
                     // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
                     // to the player (and in the log) exactly like a frozen app.
                     LOGI("%s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
-                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d",
+                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d",
                          SoloDiag ? "SOLO" : "LOCKSTEP",
                          SoloDiag ? DS.Tick : State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
                          (!SoloDiag && State.Lp.Desynced()) ? 1 : 0,
@@ -769,7 +770,11 @@ void android_main(android_app* App) {
                          SoloDiag ? 1 : (State.Lp.MatchStarted() ? 1 : 0),
                          SoloDiag ? 0 : State.Lp.InputGaps(),
                          SoloDiag ? 0u : State.Lp.LastInputGapTick(),
-                         (!SoloDiag && State.Lp.PreMatchStalled()) ? 1 : 0);
+                         (!SoloDiag && State.Lp.PreMatchStalled()) ? 1 : 0,
+                         // #163: the half-open verdict on the line everyone reads — a wedged notify
+                         // path (connected, our writes leave, the peer never notifies) now reads as
+                         // halfopen=1 instead of a silent freeze.
+                         (!SoloDiag && State.Session.IsLinkHalfOpen()) ? 1 : 0);
                     // #159: the linked recording's periodic census. It carries the economy snapshot
                     // AND it is what FLUSHES the file — without it the whole capture sits in the
                     // stdio buffer until End, so a killed app or a match that never resolves leaves
@@ -1059,6 +1064,8 @@ void android_main(android_app* App) {
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
                 State.Recovering.store(State.Lp.Recovering(), std::memory_order_relaxed);  // #161 -> HUD
+                State.LinkHalfOpen.store(State.Session.IsLinkHalfOpen(),
+                                         std::memory_order_relaxed);  // #163 -> HUD
                 // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can
                 // show it while we wait for the opponent. Clears itself the moment the match starts
                 // (the real camp is then in the snapshot, with its production buttons).
@@ -1221,6 +1228,7 @@ void android_main(android_app* App) {
                                     State.PeerDraws_.load(std::memory_order_relaxed));
             // #161: "resyncing with opponent" while a desync repair is in flight.
             State.View.SetRecovering(State.Recovering.load(std::memory_order_relaxed));
+            State.View.SetLinkHalfOpen(State.LinkHalfOpen.load(std::memory_order_relaxed));  // #163
 #if LUR_AGENT
             // Agent `gesture`: feed the SHARED recognizer a synthetic two-finger triple-tap on the glue
             // thread, which is where it lives. Three taps, each inside the hold window and inside the

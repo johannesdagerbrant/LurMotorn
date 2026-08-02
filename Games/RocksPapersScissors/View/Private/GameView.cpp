@@ -1775,12 +1775,35 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                   BadC, EHAlign::Center, EVAlign::Middle, false);
     }
 
+    // #163: the link is HALF-OPEN — we are connected, but the opponent's phone has gone silent (its
+    // BLE notify path is wedged), so the match cannot start or advance. Until now that read to the
+    // player as a pure freeze — the whole #163 complaint ("placed a camp on both phones and nothing
+    // happened"). The Session detects it (Session::IsLinkHalfOpen) and the main feeds it here. Amber,
+    // NOT the build-mismatch red: this can clear itself (a reconnect that brings traffic retires it),
+    // and when it doesn't the fix is a human one that the sub-line names. Gated on SelPeer_ like the
+    // build banner so it only shows for the linked match you actually picked; persistent (state-
+    // driven, clears the instant traffic resumes), and it outranks the transient link/resync lines.
+    const bool ShowHalfOpen = LinkHalfOpen_ && SelPeer_ && !ShowBuildMismatch;
+    if (ShowHalfOpen) {
+        const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 6.0f);
+        const Color AmbC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), 1.0f};
+        const Color AmbThrob{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
+        Text.Draw(Renderer, "LINK STALLED", 0.0f, HeightPx * 0.40f, WidthPx, 30.0f * HS,
+                  24.0f * HS, AmbThrob, EHAlign::Center, EVAlign::Middle, false);
+        Text.Draw(Renderer, "the opponent's phone went quiet - reconnecting",
+                  Pad, HeightPx * 0.40f + 32.0f * HS, WidthPx - 2.0f * Pad, 16.0f * HS, 13.0f * HS,
+                  AmbC, EHAlign::Center, EVAlign::Middle, false);
+        Text.Draw(Renderer, "if it persists, toggle Bluetooth on the other phone",
+                  Pad, HeightPx * 0.40f + 52.0f * HS, WidthPx - 2.0f * Pad, 16.0f * HS, 13.0f * HS,
+                  AmbC, EHAlign::Center, EVAlign::Middle, false);
+    }
+
     // #2: "opponent link established" — a peer linked while an AI match was running. Blink a green
     // line for a few seconds (the player can pick the "Linked opponent" row to switch). Time it out
     // here; NotifyPeerLinked() (main, on the link edge) re-arms it.
     // BELOW the status panel now: the bar it used to sit inside grew to fill its whole band, so at
     // the old Y it drew on top of the opponent's name.
-    if (!ShowBuildMismatch && PeerLinkBannerT_ > 0.0f) {
+    if (!ShowBuildMismatch && !ShowHalfOpen && PeerLinkBannerT_ > 0.0f) {
         PeerLinkBannerT_ -= DtSec;
         const float Blink = 0.5f + 0.5f * std::sin(PeerLinkBannerT_ * 8.0f);  // ~1.3 Hz throb
         const Color LinkC{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), Blink};
@@ -1794,7 +1817,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // a worse experience than the freeze it replaced. Amber, and in the same slot as the link banner
     // (the two cannot coexist: one is a fresh link, the other a live match being repaired). Driven by
     // the actual state per frame, so it disappears the instant the repair lands rather than on a timer.
-    if (!ShowBuildMismatch && Recovering_) {
+    if (!ShowBuildMismatch && !ShowHalfOpen && Recovering_) {
         const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 7.0f);  // reuse the #143 animation clock
         const Color WarnC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
         Text.Draw(Renderer, "resyncing with opponent...", Pad, PanelY + PanelH + 6.0f * HS,

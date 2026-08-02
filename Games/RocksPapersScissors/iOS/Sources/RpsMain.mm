@@ -622,6 +622,7 @@ static void UnblockStdio() {
     }
     // Every frame, not just the link edge — see the matching note in RpsMain.cpp.
     _View.SetBuildMismatch(_Lp.BuildMismatch());
+    _View.SetLinkHalfOpen(_Session.IsLinkHalfOpen());  // #163: "LINK STALLED" banner (single-threaded here)
     // AUTO-switch solo -> linked, on the EDGE where the link establishes and ONLY out of an AI match
     // the player has not started (no mine camp dragged in yet). Two freshly opened phones therefore
     // pair and front-load the match with zero taps, and because both peers switch on the same
@@ -904,7 +905,7 @@ static void UnblockStdio() {
             // the link dropped without reporting an error; stall=1 names the pre-match hang that
             // otherwise looks exactly like a frozen app.
             os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u "
-                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d",
+                   "hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d",
                    _SoloActive ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                    _SoloActive ? 0 : (_Lp.Desynced() ? 1 : 0),
                    _Lp.BuildMismatch() ? 1 : 0,
@@ -913,7 +914,11 @@ static void UnblockStdio() {
                    DS.Teams[_Team].Gold, DS.FrontierT0.ToInt(),
                    _SoloActive ? 0 : (_Lp.MatchStarted() ? 1 : 0),
                    _SoloActive ? 0 : _Lp.InputGaps(), _SoloActive ? 0u : _Lp.LastInputGapTick(),
-                   (!_SoloActive && _Lp.PreMatchStalled()) ? 1 : 0);
+                   (!_SoloActive && _Lp.PreMatchStalled()) ? 1 : 0,
+                   // #163: half-open verdict, matching Android field-for-field (the pair is read side
+                   // by side). This peripheral->central direction is the one that wedges, so the
+                   // iPhone's halfopen= is the more important of the two.
+                   (!_SoloActive && _Session.IsLinkHalfOpen()) ? 1 : 0);
             // #159: the linked recording's periodic census rides this same 2 s beat. It carries the
             // economy snapshot AND it is what FLUSHES the file — without it the capture sits in the
             // stdio buffer until End, so a killed app or a match that never resolves leaves nothing
