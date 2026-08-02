@@ -26,6 +26,7 @@
 #include "Lur/Render/Sprite2D.h"
 #include "Lur/Text/BuiltinFonts.h"
 #include "Lur/Text/TextLayout.h"      // MeasureText — centring the coin+price group in a button
+#include "Lur/Trace/Trace.h"          // #103: sub-scope render.view (world-record / gui-record / submit)
 #include "Rps/Tunables.h"
 
 // The design-lock glyph set (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html): indices
@@ -810,6 +811,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         Text.Draw(Renderer, S, X, Y, W, H, Px, C, HA, Lur::Text::EVAlign::Middle, false);
     };
 
+#if LUR_TRACE_ENABLED
+    // #103: split render.view (the ~18 ms MoltenVK encoding hog on iOS) at the render-pass
+    // boundaries — world draws / GUI draws / EndFrame(submit+present) — to see where the commands
+    // pile up. Sampled by timestamp rather than RAII-wrapped: this function is ~1700 lines with no
+    // top-level return between BeginFrame and EndFrame, so wrapping it in a block is too invasive.
+    const uint64_t RvT0 = Lur::Trace::NowNs();
+#endif
     Renderer->BeginFrame(Lur::Render::MakeOrthoCamera(WidthPx, HeightPx));
     HealthBars_.clear();     // refilled each frame by the building/unit passes below
     Interactables_.clear();  // ditto — the press targets, flushed on top of everything world-drawn
@@ -1325,6 +1333,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // ---- HUD (GUI layer, pixel space) — the locked layout (#85): opponent
     // dropdown on top, status panel (gold | population | clock) under it, four
     // production plates along the bottom edge. ----
+#if LUR_TRACE_ENABLED
+    const uint64_t RvT1 = Lur::Trace::NowNs();  // #103: end of the world pass, start of GUI
+#endif
     Renderer->BeginGui();
     // ---- THE GUI LAYER'S SUB-LAYER ORDER, and it is a rule rather than an accident ----
     //   1. promoted world overlays  — health/reserve bars: above the field, below anything pressable
@@ -2500,7 +2511,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     }
 #endif
 
+#if LUR_TRACE_ENABLED
+    const uint64_t RvT2 = Lur::Trace::NowNs();  // #103: end of GUI+dev draws, start of submit+present
+#endif
     Renderer->EndFrame();
+#if LUR_TRACE_ENABLED
+    const uint64_t RvT3 = Lur::Trace::NowNs();
+    static const Lur::Trace::ScopeId RvWorld  = Lur::Trace::Register("rv.world");   // BeginFrame + field/grid/units/text
+    static const Lur::Trace::ScopeId RvGui    = Lur::Trace::Register("rv.gui");     // BeginGui + HUD + dev overlay
+    static const Lur::Trace::ScopeId RvSubmit = Lur::Trace::Register("rv.submit");  // EndFrame: vkQueueSubmit + present
+    Lur::Trace::AddSample(RvWorld,  RvT1 - RvT0);
+    Lur::Trace::AddSample(RvGui,    RvT2 - RvT1);
+    Lur::Trace::AddSample(RvSubmit, RvT3 - RvT2);
+#endif
 }
 
 }  // namespace Rps
