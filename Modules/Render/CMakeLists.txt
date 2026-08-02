@@ -13,7 +13,8 @@ if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
     add_library(lur_render STATIC Private/Vulkan/VulkanBackend.cpp)
     target_include_directories(lur_render PUBLIC Public)
     target_compile_features(lur_render PUBLIC cxx_std_20)
-    target_link_libraries(lur_render PUBLIC lur_math)
+    # lur::trace for the EndFrame submit/present sub-scopes (#103; no-op in Shipping).
+    target_link_libraries(lur_render PUBLIC lur_math lur::trace)
 elseif(LUR_DESKTOP AND WIN32)
     # Workbench (roadmap Phase 0.5): the SAME shared backend compiled on the desktop
     # against the installed Vulkan SDK, plus the Win32 surface seam. This is the fast
@@ -24,7 +25,7 @@ elseif(LUR_DESKTOP AND WIN32)
         Platform/Windows/VulkanSurface.cpp)
     target_include_directories(lur_render PUBLIC Public)
     target_compile_features(lur_render PUBLIC cxx_std_20)
-    target_link_libraries(lur_render PUBLIC lur_math PRIVATE lur::core Vulkan::Vulkan)
+    target_link_libraries(lur_render PUBLIC lur_math lur::trace PRIVATE lur::core Vulkan::Vulkan)
     # The Vulkan structs are initialized sType-only ({VK_STRUCTURE_TYPE_x}) by design
     # (the rest zero-inits); that idiom trips -Wmissing-field-initializers. Suppress
     # just that one warning here (overrides the global -Wextra) rather than spell out

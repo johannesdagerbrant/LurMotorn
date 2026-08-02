@@ -18,6 +18,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Render/Vulkan/PlatformSurface.h"
 #include "Lur/Render/Sprite2D.h"   // MakeOrthoCamera — canonical pixel-space GUI camera
+#include "Lur/Trace/Trace.h"       // #103: split EndFrame into endcb / submit / present
 
 // Older SDK headers may predate VK_KHR_portability_enumeration; define the flag
 // so the source compiles everywhere (only ever set when the extension is present).
@@ -524,8 +525,12 @@ public:
         if (!Ready || !Recording) return;
         Recording = false;
 
-        vkCmdEndRenderPass(CommandBuffer);
-        VK_CHECK(vkEndCommandBuffer(CommandBuffer));
+        // #103: rv.submit (EndFrame) is ~90% of the iOS frame. Split it three ways to find which
+        // call holds the time — MoltenVK deferring Vulkan->Metal encoding to vkQueueSubmit (es.submit),
+        // or a FIFO/vsync stall in vkQueuePresentKHR (es.present). Different fixes for each.
+        { LUR_TRACE_SCOPE("es.endcb");
+          vkCmdEndRenderPass(CommandBuffer);
+          VK_CHECK(vkEndCommandBuffer(CommandBuffer)); }
 
         VkPipelineStageFlags WaitStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
         VkSubmitInfo Submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -536,7 +541,8 @@ public:
         Submit.pCommandBuffers = &CommandBuffer;
         Submit.signalSemaphoreCount = 1;
         Submit.pSignalSemaphores = &RenderFinished;
-        VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight));
+        { LUR_TRACE_SCOPE("es.submit");
+          VK_CHECK(vkQueueSubmit(GraphicsQueue, 1, &Submit, InFlight)); }
 
         VkPresentInfoKHR Present{VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
         Present.waitSemaphoreCount = 1;
@@ -544,7 +550,9 @@ public:
         Present.swapchainCount = 1;
         Present.pSwapchains = &Swapchain;
         Present.pImageIndices = &ImageIndex;
-        VkResult Pres = vkQueuePresentKHR(GraphicsQueue, &Present);
+        VkResult Pres;
+        { LUR_TRACE_SCOPE("es.present");
+          Pres = vkQueuePresentKHR(GraphicsQueue, &Present); }
         if (Pres == VK_SUCCESS || Pres == VK_SUBOPTIMAL_KHR) {
             // SUBOPTIMAL still presented — count it, but also refresh the swapchain.
             ++FramesPresented;
