@@ -452,8 +452,17 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
             }
         }
         if (BestId >= 0) {
-            const int64_t MinNext = static_cast<int64_t>(K) * CellRaw;  // ring K+1 lower bound
-            if (MinNext / TargetBandRaw > BS.Band) break;
+            const int64_t MinNext = static_cast<int64_t>(K) * CellRaw;  // ring K+1 lower bound (nearest
+            // possible unit in ring K+1 is K cells = K*CellRaw away — see the cache-box geometry)
+            if (MinNext / TargetBandRaw > BS.Band) break;  // no farther unit can reach the best's band
+            // #181: a TOP-TIER best (Prefer==0: prey or enemy cart) can only be beaten by a NEARER
+            // same-band prefer-0 (a worse type never wins the band; a farther one loses on distance).
+            // So once no farther ring can be nearer than it (MinNext > BS.Dist), stop — don't scan out
+            // the rest of the band. Bit-identical: every unit past MinNext has Dist > BS.Dist, so it
+            // loses on band, prefer, or distance (strict, so it can't even tie on the id key). The
+            // common case in a mixed field — there's usually prey within a cell or two — so this trims
+            // the ring walk that the band width (12 = 4 cells) otherwise forces.
+            if (BS.Prefer == 0 && MinNext > BS.Dist) break;
         }
         if (K > 0 && !AnyInGrid) break;  // the whole ring is outside the grid - nothing farther can be inside
     }
