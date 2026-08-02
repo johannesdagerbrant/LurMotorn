@@ -400,7 +400,14 @@ int32_t NearestEnemyBrute(const Sim& S, int32_t I) {
 // bound's band is STRICTLY worse than the best band, nothing farther can win (an equal
 // band could still flip on counter-preference, so equality keeps scanning).
 int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
-    const int32_t Cx = CellX(S.PosX[I]), Cy = CellY(S.PosY[I]);
+    // #181: score each candidate from the cache-local packed row (Grid::Pk) instead of chasing
+    // S.Team[J]/PosX[J]/PosY[J]/Type[J]/Kind[J] by scattered slot — the SAME memory win the flock
+    // gather got, and target acquisition became the bigger cost once the flock was packed. The packed
+    // score is bit-identical to ScoreOf(S,I,Q.Idx): same Chebyshev, same home-base/type preference,
+    // same id tie-break — so grid==brute (against the unchanged SoA brute path) still holds.
+    const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
+    const uint8_t ITeam = S.Team[I], IType = S.Type[I];
+    const int32_t Cx = CellX(Ix), Cy = CellY(Iy);
     TargetScore BS{};
     int32_t BestId = -1;
     // Cap the ring expansion (#92): stop at TargetSearchMaxK cells even if no enemy was
@@ -418,11 +425,17 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
                 if (!EdgeRow && Gx != X0 && Gx != X1) continue;  // ring K = box perimeter; interior done in earlier K
                 AnyInGrid = true;
                 const int32_t C = Gy * GridCols + Gx;
-                for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P) {
-                    const int32_t J = G.Order[P];
-                    if (S.Team[J] == S.Team[I]) continue;  // J is alive by construction (grid holds only alive)
-                    const TargetScore Sc = ScoreOf(S, I, J);
-                    if (BestId < 0 || Sc.BetterThan(BS)) { BS = Sc; BestId = J; }
+                const int32_t End = G.Start[C + 1];
+                for (int32_t P = G.Start[C]; P < End; ++P) {
+                    const Grid::Packed& Q = G.Pk[P];              // contiguous — no scattered SoA fetch
+                    if (Q.Team == ITeam) continue;               // Q is alive by construction
+                    int64_t Dx = static_cast<int64_t>(Ix.Raw) - Q.PosX.Raw; if (Dx < 0) Dx = -Dx;
+                    int64_t Dy = static_cast<int64_t>(Iy.Raw) - Q.PosY.Raw; if (Dy < 0) Dy = -Dy;
+                    const int64_t D = Dx > Dy ? Dx : Dy;         // Chebyshev raw — matches ChebRaw exactly
+                    // home base (Flags bit1) is prey to every soldier; else RPS type preference (#146).
+                    const int32_t Prefer = (Q.Flags & 2u) != 0 ? 0 : TargetPrefer(IType, Q.Type);
+                    const TargetScore Sc{D / TargetBandRaw, Prefer, D, Q.Idx};
+                    if (BestId < 0 || Sc.BetterThan(BS)) { BS = Sc; BestId = Q.Idx; }
                 }
             }
         }
