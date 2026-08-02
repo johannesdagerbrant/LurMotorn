@@ -74,6 +74,19 @@ constexpr int32_t Abs32(int32_t V) { return V < 0 ? -V : V; }
 struct Grid {
     int32_t Start[GridCells + 1];  // CSR: cell c's units are Order[Start[c] .. Start[c+1])
     int32_t Order[MaxUnits];
+    // #181 cache-local gather: the flock gather reads each neighbour's Pos/Type/Team/flags, and doing
+    // that as S.PosX[J], S.Type[J], ... by scattered slot index J touched ~6 SoA cache lines PER
+    // neighbour (~183 neighbours/unit at 2050 soldiers). Pack the always-read fields here, in Order
+    // order, so the gather walks CONTIGUOUS memory (4 units/cache line). Built in the same scatter pass
+    // — O(units) with scattered reads ONCE, amortised over the O(units×neighbours) gather. Prev (for
+    // alignment) and the threat bit stay looked up by index: both are rare/compact, not worth the
+    // bandwidth. Bit-identical — same values, same visited set — so grid==brute holds.
+    struct Packed {
+        Fixed   PosX, PosY;                 // read for every neighbour (distance)
+        int32_t Idx;                        // original slot: J==I self-skip + Prev/threat lookup
+        uint8_t Type, Team, Flags, Pad;     // Flags: bit0 = building, bit1 = home base
+    };
+    Packed Pk[MaxUnits];
 
     void Build(const Sim& S) {
         for (int32_t C = 0; C <= GridCells; ++C) Start[C] = 0;
@@ -87,7 +100,11 @@ struct Grid {
         for (int32_t I = 0; I < S.Count; ++I)
             if (S.IsAlive(I)) {
                 const int32_t C = CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]);
-                Order[Cursor[C]++] = I;
+                const int32_t P = Cursor[C]++;
+                Order[P] = I;
+                Pk[P] = { S.PosX[I], S.PosY[I], I, S.Type[I], S.Team[I],
+                          static_cast<uint8_t>((S.IsBuilding(I) ? 1u : 0u) |
+                                               (S.IsHomeBase(I) ? 2u : 0u)), 0 };
             }
     }
 };
@@ -628,86 +645,93 @@ void AddCohesion(Fixed Dx, Fixed Dy, Fixed Cheb, Fixed R,
     if (Cheb >= R) return;                           // out of (Chebyshev) range
     Ax -= Dx.Raw; Ay -= Dy.Raw; ++N;                 // toward J = −(Ix−Jx)
 }
-// Alignment gather (#97): sum the neighbour's velocity Δ = Pos − Prev if it's within AlignR (the same
-// Chebyshev distance the caller already has). Reads Δ — valid ONLY before the tick's bulk Prev=Pos copy.
-void AddAlignment(const Sim& S, int32_t J, Fixed Cheb, FlockAcc& A) {
-    if (Cheb >= S.Cv.AlignRadius) return;
-    A.AlnX += static_cast<int64_t>(S.PosX[J].Raw) - S.PrevX[J].Raw;
-    A.AlnY += static_cast<int64_t>(S.PosY[J].Raw) - S.PrevY[J].Raw;
-    ++A.AlnN;
-}
-// One neighbour's WHOLE contribution — the single per-pair function both gather paths
-// call, so brute and grid add bit-identical terms (house rule). Reads Pos for spatial
-// offsets (slice B: Pos is end-of-last-tick during the gather; Prev is one tick older,
-// so it carries velocity) and Δ for alignment.
-void AccumFlock(const Sim& S, int32_t I, int32_t J, const ThreatSet& Threat, FlockAcc& A) {
+// One neighbour's WHOLE contribution — the single per-pair body BOTH gather paths funnel through, so
+// brute and grid add bit-identical terms (house rule). The caller passes I's cached fields once and J's
+// fields however is cheapest for it: brute reads the SoA by slot, grid reads the cache-local packed row
+// (#181). Reads Pos for spatial offsets (slice B: Pos is end-of-last-tick during the gather); Prev
+// (velocity Δ, alignment only) is looked up by slot — rare, so not worth packing.
+inline void AccumFlockCore(const Sim& S, const ThreatSet& Threat,
+                           Fixed Ix, Fixed Iy, int32_t I, uint8_t ITeam, uint8_t IType,
+                           Fixed Jx, Fixed Jy, int32_t J, uint8_t JType, uint8_t JTeam,
+                           bool JBuilding, bool JHomeBase, FlockAcc& A) {
     if (J == I) return;
-    const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
-    const Fixed Jx = S.PosX[J], Jy = S.PosY[J];
     // #181: derive the offset AWAY from J and its Chebyshev distance ONCE, then thread both into every
-    // force. Previously each Add re-derived them from raw positions, so a single pair paid up to four
-    // separate Max(Abs,Abs) computations of the same distance (f2a456e). This is a pure hoist — same
-    // operands, same arithmetic — so grid==brute and the determinism tests still hold it.
+    // force (f2a456e's "up to four separate Chebyshev computations" collapse to one). Pure hoist.
     const Fixed Dx = Ix - Jx, Dy = Iy - Jy;
     const Fixed Cheb = Max(Abs(Dx), Abs(Dy));
-    // #162: one Chebyshev test up front against the WIDEST radius, before any per-force work. Every
-    // Add below re-tests its own radius, and GatherR is by construction the max of all of them
-    // (DeriveUnits), so a neighbour at or beyond it contributes exactly nothing — a pure early-out.
-    // It pays because the grid walks whole CELLS: the queried box is ceil(GatherR/CellSize) cells in
-    // each direction, so most of the pairs it yields are out of range of every force.
+    // #162: one Chebyshev test up front against the WIDEST radius. GatherR is the max of every force's
+    // radius (DeriveUnits), so a neighbour at or beyond it contributes exactly nothing — a pure early-out.
     if (Cheb >= S.GatherR) return;
-    // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it (no
-    // pathfinding). Reuse the corrected separation falloff, its own radius/strength, on ALL
-    // buildings (friend or foe). Buildings carry no cohesion/alignment/flee/cart semantics,
-    // so short-circuit before the unit-affinity logic.
-    if (S.IsBuilding(J)) {
+    // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it. Reuse the
+    // corrected separation falloff; buildings carry no cohesion/alignment/cart semantics, so short-circuit.
+    if (JBuilding) {
         AddRepel(Dx, Dy, Cheb, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength, A.SepX, A.SepY);
         // #146: a friendly HOME BASE is a protected asset like a cart — a defender that also sees a
-        // raider steers to screen it (reuses the #98 interpose accumulator, so no new force/tuning).
-        if (S.IsHomeBase(J) && S.Team[J] == S.Team[I] && Cheb < S.Cv.InterposeRadius) {
+        // raider steers to screen it (reuses the #98 interpose accumulator).
+        if (JHomeBase && JTeam == ITeam && Cheb < S.Cv.InterposeRadius) {
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;
         }
         return;
     }
-    if (S.Team[J] == S.Team[I]) {
+    if (JTeam == ITeam) {
         AddRepel(Dx, Dy, Cheb, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
-        if (S.Type[J] != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
+        if (JType != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
             AddCohesion(Dx, Dy, Cheb, S.Cv.CohAllRadius, A.AllX, A.AllY, A.AllN);
-            if (S.Type[J] == S.Type[I]) {
+            if (JType == IType) {
                 AddCohesion(Dx, Dy, Cheb, S.Cv.CohSameRadius, A.SameX, A.SameY, A.SameN);
-                AddAlignment(S, J, Cheb, A);
+                // Alignment (#97): sum J's velocity Δ = Pos − Prev within AlignR. Pos is Jx/Jy (in hand);
+                // Prev is the one field read by slot here — alignment is a minority of pairs, so the
+                // scattered read is rare and not worth the packed bandwidth.
+                if (Cheb < S.Cv.AlignRadius) {
+                    A.AlnX += static_cast<int64_t>(Jx.Raw) - S.PrevX[J].Raw;
+                    A.AlnY += static_cast<int64_t>(Jy.Raw) - S.PrevY[J].Raw;
+                    ++A.AlnN;
+                }
             }
         } else if (Cheb < S.Cv.InterposeRadius) {
             A.CartX += Jx.Raw; A.CartY += Jy.Raw; ++A.CartN;  // a friendly cart to screen (#98)
         }
     } else {
         AddRepel(Dx, Dy, Cheb, S.Cv.EnemySepRadius, S.Cv.EnemySeparationStrength, A.EneX, A.EneY);
-        // Flee your PREDATOR — the enemy type that beats me (UnitTable[Type[J]].Beats == my
-        // type): steer away, larger radius, so I never walk toward my counter.
-        if (UnitTable[S.Type[J]].Beats == S.Type[I])
+        // Flee your PREDATOR — the enemy type that beats me: steer away, larger radius.
+        if (UnitTable[JType].Beats == IType)
             AddRepel(Dx, Dy, Cheb, S.Cv.PredatorFleeRadius, S.Cv.WPredatorFlee, A.FleeX, A.FleeY);
-        // A flagged RAIDER within InterposeR: note it so I can interpose (#98).
+        // A flagged RAIDER within InterposeR: note it so I can interpose (#98). Threat bit read by slot
+        // (a compact bitset, mostly resident) — not worth packing.
         if (Threat.Get(J) && Cheb < S.Cv.InterposeRadius) {
             A.RaidX += Jx.Raw; A.RaidY += Jy.Raw; ++A.RaidN;
         }
     }
 }
+// Brute path: reads J's fields straight from the SoA by slot. The reference the grid must reproduce.
 void GatherBrute(const Sim& S, int32_t I, const ThreatSet& Threat, FlockAcc& A) {
+    const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
+    const uint8_t ITeam = S.Team[I], IType = S.Type[I];
     for (int32_t J = 0; J < S.Count; ++J)
-        if (S.IsAlive(J)) AccumFlock(S, I, J, Threat, A);
+        if (S.IsAlive(J))
+            AccumFlockCore(S, Threat, Ix, Iy, I, ITeam, IType,
+                           S.PosX[J], S.PosY[J], J, S.Type[J], S.Team[J],
+                           S.IsBuilding(J), S.IsHomeBase(J), A);
 }
-// Grid gather widened to the LARGEST flock radius (FlockGatherR = max of all) so a single
-// query feeds every force; each Add re-tests its own (smaller) radius, so the summed SET —
-// and thus the sum — is identical to brute. Queried by Pos (== each unit's bucketed
-// build-time Pos — nothing has moved yet in the gather pass, so this stays consistent).
+// Grid gather widened to the LARGEST flock radius so a single query feeds every force; each Add
+// re-tests its own (smaller) radius, so the summed SET — and thus the sum — is identical to brute.
+// #181: reads each neighbour from the cache-local packed row (Grid::Pk, built in Order order), so the
+// inner loop walks contiguous memory instead of chasing six SoA arrays by scattered slot.
 void GatherGrid(const Sim& S, const Grid& G, int32_t I, const ThreatSet& Threat, FlockAcc& A) {
-    const int32_t Cx0 = CellX(S.PosX[I] - S.GatherR), Cx1 = CellX(S.PosX[I] + S.GatherR);
-    const int32_t Cy0 = CellY(S.PosY[I] - S.GatherR), Cy1 = CellY(S.PosY[I] + S.GatherR);
+    const Fixed Ix = S.PosX[I], Iy = S.PosY[I];
+    const uint8_t ITeam = S.Team[I], IType = S.Type[I];
+    const int32_t Cx0 = CellX(Ix - S.GatherR), Cx1 = CellX(Ix + S.GatherR);
+    const int32_t Cy0 = CellY(Iy - S.GatherR), Cy1 = CellY(Iy + S.GatherR);
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
-            for (int32_t P = G.Start[C]; P < G.Start[C + 1]; ++P)
-                AccumFlock(S, I, G.Order[P], Threat, A);
+            const int32_t End = G.Start[C + 1];
+            for (int32_t P = G.Start[C]; P < End; ++P) {
+                const Grid::Packed& Q = G.Pk[P];
+                AccumFlockCore(S, Threat, Ix, Iy, I, ITeam, IType,
+                               Q.PosX, Q.PosY, Q.Idx, Q.Type, Q.Team,
+                               (Q.Flags & 1u) != 0, (Q.Flags & 2u) != 0, A);
+            }
         }
 }
 // Live deposits are SOFT OBSTACLES (playtest): units within MineRepelRadius get pushed
