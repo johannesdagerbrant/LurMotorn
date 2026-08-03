@@ -337,6 +337,7 @@ private:
     Lur::Render::Color TeamTypeTintBldg[2][UnitCount] = {};
     Lur::Render::Color TeamTintBldg[2] = {};                          // the HQ (Type is UnitNone)
     Lur::Render::MaterialHandle TypeTintMatBldg[2][UnitCount] = {};   // placed/preview building glyph
+    Lur::Render::MaterialHandle TypeTintMatBldgDim[2][UnitCount] = {}; // ... unaffordable (drag slot)
     // health bars are COLLECTED during the world pass and flushed in the GUI layer. They used
     // to be drawn inline, which put a building's bar underneath the instanced units (the units draw
     // after the per-building pass) — so a bar could be hidden by the very fight that was draining it.
@@ -468,13 +469,16 @@ private:
     int   GhostType_ = -1;
     bool  GhostDragging_ = false;
     float GhostXPx_ = 0.0f, GhostYPx_ = 0.0f;   // RESOLVED spot (or slide-back head) — what gets placed
-    // The pointer's own position, plus a spring on the (resolved - desired) offset. Springing the
-    // OFFSET rather than the position is what keeps the icon on the finger while still smoothing how
-    // obstacles shove it aside. Visual only; the release commits GhostXPx_/GhostYPx_.
-    float GhostDesiredX_ = 0.0f, GhostDesiredY_ = 0.0f;
-    Lur::Math::DoubleSpring GhostPushX_, GhostPushY_;
-    static constexpr float GhostPushHalflife = 0.09f;   // brisk: this must read as reactive, not soft
+    float GhostDesiredX_ = 0.0f, GhostDesiredY_ = 0.0f;   // the finger offset (default, un-snapped) point
+    // The spring acts on the OFFSET (resolved - desired), NOT the world position — so the ghost stays
+    // glued to the finger and only the snap sidestep eases (springing the position lagged the thumb in
+    // open ground). Purely cosmetic: gameplay never sees it, and release commits the resolved spot
+    // regardless of where the spring draws the ghost. Active ONLY while valid; hard-snaps across the
+    // valid<->invalid edge. Full rationale at the spring in the Render block.
+    Lur::Math::DoubleSpring GhostSprX_, GhostSprY_;
+    static constexpr float GhostSpringHalflife = 0.045f;  // twice as fast as the old 0.09 offset spring
     bool  GhostValid_ = false;
+    bool  GhostWasValid_ = false;               // prev-frame validity — detects the invalid->valid snap
     float GhostBlink_ = 0.0f;                    // invalid-blink clock (seconds)
     float SlideT_ = -1.0f;                       // >=0 while the ghost tweens back to its plate
     float SlideFromX_ = 0.0f, SlideFromY_ = 0.0f;

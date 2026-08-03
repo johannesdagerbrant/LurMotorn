@@ -335,6 +335,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
             TeamTypeTintBldg[Tm][Ty] = Hsv(H, BldgSat, BldgVal);
             TypeTintMatBldg[Tm][Ty] = AtlasTinted(TeamTypeTintBldg[Tm][Ty]);
+            Color BDim = TeamTypeTintBldg[Tm][Ty]; BDim.A = 0.4f;   // unaffordable drag slot (same hue, faded)
+            TypeTintMatBldgDim[Tm][Ty] = AtlasTinted(BDim);
             // The production bar's fill: the SAME HUE as the building and the unit, knocked back one
             // more step — darker and less saturated than the BUILDING (feedback 2026-07-30), the way
             // the building is darker and less saturated than its units. So the ramp reads unit >
@@ -679,8 +681,8 @@ void GameView::BeginPlaceDrag(int Type, float XPx, float YPx) {
     GhostValid_ = false;
     GhostXPx_ = XPx; GhostYPx_ = YPx;  // seed at the finger so frame 1 isn't at a stale spot
     GhostDesiredX_ = XPx; GhostDesiredY_ = YPx;
-    GhostPushX_.Snap(0.0f);            // no obstacle push yet; start with zero offset, not last drag's
-    GhostPushY_.Snap(0.0f);
+    GhostSprX_.Snap(0.0f); GhostSprY_.Snap(0.0f);  // zero snap offset; validity starts false
+    GhostWasValid_ = false;
     SlideT_ = -1.0f;  // cancel any in-flight slide-back
 }
 
@@ -717,13 +719,13 @@ bool GameView::PressProductionButton(float XPx, float YPx) {
 void GameView::UpdatePlaceDrag(float XPx, float YPx, bool Valid) {
     if (GhostType_ < 0) return;
     GhostXPx_ = XPx; GhostYPx_ = YPx; GhostValid_ = Valid;
-    GhostDesiredX_ = XPx; GhostDesiredY_ = YPx;   // no separate desired point given: no push to spring
+    GhostDesiredX_ = XPx; GhostDesiredY_ = YPx;   // no separate resolve given: offset is zero
 }
 
 void GameView::UpdatePlaceDrag(float DesXPx, float DesYPx, float ResXPx, float ResYPx, bool Valid) {
     if (GhostType_ < 0) return;
-    GhostDesiredX_ = DesXPx; GhostDesiredY_ = DesYPx;   // where the finger is
-    GhostXPx_ = ResXPx; GhostYPx_ = ResYPx;             // where the sim would accept it
+    GhostDesiredX_ = DesXPx; GhostDesiredY_ = DesYPx;   // where the finger is (default, un-snapped)
+    GhostXPx_ = ResXPx; GhostYPx_ = ResYPx;             // where the sim would accept it (resolved)
     GhostValid_ = Valid;
 }
 
@@ -872,8 +874,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // the unit bars already follow.
         if (Snap.MineGold[T] < MineGoldCapacity) {
             const float BarW = MinePx, BarH = 2.0f * HS, BarY = My - MinePx * 0.5f - 3.0f * HS;
-            Blit(HealthBg, Mx, BarY, BarW, BarH);
-            Blit(GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH);
+            // GUI layer, like the unit/building bars — every bar flushes in BeginGui so the instanced
+            // entities (drawn after this pass) can't paint over one.
+            HealthBars_.push_back({HealthBg, Mx, BarY, BarW, BarH});
+            HealthBars_.push_back({GoldBarFg, Mx - BarW * 0.5f + BarW * Frac * 0.5f, BarY, BarW * Frac, BarH});
         }
     }
 
@@ -1130,17 +1134,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // the whole row; the count sits on top of them, shadowed so it survives both the dark
             // track and the gold fill sliding under it.
             if (Snap.Queue[I] > 0) {
-                // JUST below the icon. The price moved up onto the icon's lower end, so this row
-                // no longer has to clear it — it tucks straight under the bottom edge, and the whole
-                // per-building stack gets shorter (less chance of reaching the building below).
-                // up again, so the row sits FULLY over the icon's bottom rather than under it.
-                // Row is 20*HS tall, so a centre one half-height above the bottom edge puts its whole
-                // height inside the icon. Derived from the edge, not a magic offset, so it stays put
-                // if the icon size changes.
-                // Centre ON the icon's bottom edge: the row straddles it, half over the art and half
-                // below. (This is the "fully inside" position moved back down by half a row height —
-                // the two cancel, so it is simply the edge.)
-                const float RowY = By + Half;
+                // CENTRED ON THE ICON (feedback 2026-08-03): the row sits across the building's own
+                // centre rather than straddling its bottom edge. It reads as "this building is working
+                // on something" — a meter ON the thing it belongs to — instead of a caption hanging
+                // underneath it, and it can never reach down toward the building below. Anchored to By
+                // (the icon centre), not an offset, so it holds if the icon size changes.
+                const float RowY = By;
                 // ONE rect for the whole row: the translucent plate (the count and the bar sit over
                 // open field or mine art, and on gold they were unreadable) IS the bar's track, so
                 // there is no second background to keep in sync with the first.
@@ -1469,13 +1468,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             Blit(Ty == 0 ? GoldFlat : PanelEdge, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f,
                  PlateW + 2.0f, PlateH2 + 2.0f);
         Blit(PlateBg, X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW, PlateH2);
-        // Button glyph is the BUILDING icon (miner = camp) in the LOCAL team's per-type tint —
-        // the exact icon that follows the finger and lands on the field (#139). While THIS plate
-        // is being dragged (or its ghost is sliding home), the icon has "left" the button, so it
-        // is hidden here; it reappears the instant a valid drop lands or the slide-back completes.
+        // Button glyph is the BUILDING icon (miner = camp) in the LOCAL team's per-type BUILDING tint
+        // — the exact colour it lands on the field as (feedback 2026-08-03), so the slot previews the
+        // placed building rather than the brighter unit shade. While THIS plate is being dragged (or its
+        // ghost is sliding home) the icon has "left" the button, so it is hidden here; it reappears the
+        // instant a valid drop lands or the slide-back completes.
         const int PlateGlyph = Ty == UnitMiner ? static_cast<int>(GlyphMineCamp) : Ty;
         if (GhostType_ != Ty)
-            BlitGlyph(PlateGlyph, Afford ? TypeTintMat[My][Ty] : TypeTintMatDim[My][Ty],
+            BlitGlyph(PlateGlyph, Afford ? TypeTintMatBldg[My][Ty] : TypeTintMatBldgDim[My][Ty],
                       X + PlateW * 0.5f, PlateY + PlateH2 * 0.5f, PlateW * 0.52f);
         // Locked: the price is grey (not the red "you can't afford this" — you CAN afford it, the
         // building just isn't available yet), and the coin dims with it.
@@ -1495,22 +1495,34 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // its slide-back target (the plate) is known.
     GhostBlink_ += DtSec;
     if (GhostType_ >= 0) {
-        const float DragPx = FW(Snap.Cv.BuildingFootprint) * 2.0f * P;  // footprint-sized while dragging
+        const float DragPx = BldgPx * 1.1f;   // 1.1x the placed size — reads as "dropped into the ground"
         const float ButtonPx = PlateW * 0.52f;
-        // The ghost tracks the FINGER exactly; only the displacement obstacles push it by is sprung.
-        // That distinction is the whole point: springing the position would make the icon lag the
-        // thumb, which feels broken, whereas springing the OFFSET (a local-space vector from the
-        // finger to the resolved spot) leaves the icon glued to the finger and lets the sidestep
-        // around a mine or another building ease in and out instead of snapping.
+        // The spring acts on the OFFSET the snap imposes — (resolved - desired) — not the world
+        // position. The ghost is drawn at desired + spring(offset), so it stays GLUED to the finger
+        // (the desired point is applied fresh each frame, un-sprung) and only the sidestep around a
+        // mine/building eases. Springing the position instead lagged the thumb even in open ground,
+        // where the offset is zero and the ghost should track the finger exactly.
         //
-        // Nothing here reaches the sim: EndPlaceDrag commits the RESOLVED position, so a building
-        // lands exactly where it would have without any spring — the solver is invisible to gameplay
-        // and to the peer.
+        // Active ONLY while valid, and it HARD-SNAPS across the valid<->invalid edge: a red (invalid)
+        // ghost has offset 0 (resolved == desired), so it sits exactly at the finger; the instant a
+        // valid spot is (re)acquired the offset snaps to its full value (ghost jumps ONTO the spot) and
+        // the spring eases from there as you keep moving in legal territory — not as it pops back in.
+        // Twice as fast as the old spring (0.045 vs 0.09): this has to read as reactive.
+        //
+        // Purely cosmetic: EndPlaceDrag commits GhostXPx_/GhostYPx_ (the resolved spot), so the actual
+        // drop is where the building lands regardless of where the spring draws the ghost.
+        const float OffX = GhostXPx_ - GhostDesiredX_, OffY = GhostYPx_ - GhostDesiredY_;
         if (GhostDragging_) {
-            GhostPushX_.Update(GhostXPx_ - GhostDesiredX_, GhostPushHalflife, DtSec);
-            GhostPushY_.Update(GhostYPx_ - GhostDesiredY_, GhostPushHalflife, DtSec);
+            if (GhostValid_ && GhostWasValid_) {          // staying valid: ease the snap offset
+                GhostSprX_.Update(OffX, GhostSpringHalflife, DtSec);
+                GhostSprY_.Update(OffY, GhostSpringHalflife, DtSec);
+            } else {                                       // (re)acquired validity OR invalid: snap, no ease
+                GhostSprX_.Snap(OffX);                     //   valid -> full offset (onto the spot); invalid -> 0
+                GhostSprY_.Snap(OffY);
+            }
+            GhostWasValid_ = GhostValid_;
         }
-        float Gx = GhostDesiredX_ + GhostPushX_.X, Gy = GhostDesiredY_ + GhostPushY_.X, GPx = DragPx;
+        float Gx = GhostDesiredX_ + GhostSprX_.X, Gy = GhostDesiredY_ + GhostSprY_.X, GPx = DragPx;
         if (!GhostDragging_ && SlideT_ >= 0.0f) {
             SlideT_ += DtSec;
             constexpr float Dur = 0.18f;

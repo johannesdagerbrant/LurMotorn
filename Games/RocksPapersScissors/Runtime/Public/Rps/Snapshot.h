@@ -1,4 +1,6 @@
 #pragma once
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -145,17 +147,58 @@ struct Snapshot {
             return Fixed{static_cast<int32_t>(V * static_cast<float>(Fixed::One) + (V < 0 ? -0.5f : 0.5f))};
         };
         if (WouldAcceptPlace(Team, Type, Fx(Dx), Fx(Dy))) { Ox = Dx; Oy = Dy; return true; }
-        // 8 compass directions × expanding rings; the smallest ring that lands a valid spot wins,
-        // so the snap is to the nearest valid location within the icon-size radius.
-        static constexpr float UX[8] = {1.f, 0.7071068f, 0.f, -0.7071068f, -1.f, -0.7071068f, 0.f, 0.7071068f};
-        static constexpr float UY[8] = {0.f, 0.7071068f, 1.f, 0.7071068f, 0.f, -0.7071068f, -1.f, -0.7071068f};
-        constexpr int Rings = 4;
-        for (int R = 1; R <= Rings; ++R) {
-            const float Rr = Radius * static_cast<float>(R) / static_cast<float>(Rings);
-            for (int D = 0; D < 8; ++D) {
-                const float Cx = Dx + UX[D] * Rr, Cy = Dy + UY[D] * Rr;
-                if (WouldAcceptPlace(Team, Type, Fx(Cx), Fx(Cy))) { Ox = Cx; Oy = Cy; return true; }
-            }
+        // Nothing valid under the finger: snap to the NEAREST valid spot within Radius.
+        //
+        // This is done ANALYTICALLY, not by sampling a grid around the finger, and that is the whole
+        // point (feedback 2026-08-03). A finger-anchored sample lattice moves WITH the thumb, so the
+        // discrete "nearest valid sample" hops between frames as you scrub — the ghost jittered even
+        // though the true nearest feasible point (e.g. a screen corner) was stationary. Projecting the
+        // finger onto the feasible region is a CONTINUOUS function of the finger: a small thumb move
+        // slides the ghost a little instead of teleporting it, and a corner is a hard, stable rest.
+        //
+        // The feasible region is the legal rectangle (map margin + your frontier half-plane) minus a
+        // disc around every building (centres must be ≥ 2*Fp apart) and every live mine (≥ MineClear).
+        // Iterated projection converges to the nearest point of that region: clamp into the rectangle
+        // (its exact nearest point — this alone wedges a corner), then push out of the single most-
+        // penetrated disc, and repeat. One disc per pass, worst-first, so overlapping exclusions
+        // resolve instead of fighting. Bounds are inset by a hair so the Fixed round-trip below can't
+        // land a boundary point back inside a constraint.
+        auto ToF = [](Fixed V) { return static_cast<float>(V.Raw) / static_cast<float>(Fixed::One); };
+        constexpr float Eps = 0.02f;                       // > one Fixed quantum, << every feature size
+        const float Fpf = ToF(Cv.BuildingFootprint);
+        const float Edge = Fpf * 1.5f;                     // matches PlacementAccepts' visual-extent margin
+        const float Xlo = Edge + Eps, Xhi = ToF(WorldWidth) - Edge - Eps;
+        float Ylo = Edge + Eps, Yhi = ToF(WorldHeight) - Edge - Eps;
+        if (Team == 0) Yhi = std::min(Yhi, ToF(FrontierT0) - Eps);   // build no further than your line
+        else           Ylo = std::max(Ylo, ToF(FrontierT1) + Eps);
+        const float BR = 2.0f * Fpf, MR = ToF(Cv.MineClearance);     // building / mine exclusion radii
+        float Px = Dx, Py = Dy;
+        for (int It = 0; It < 12; ++It) {
+            Px = std::min(std::max(Px, Xlo), Xhi);         // nearest point of the legal rectangle
+            Py = std::min(std::max(Py, Ylo), Yhi);
+            float WorstPen = 0.0f, Wcx = 0.0f, Wcy = 0.0f, Wr = 0.0f;
+            auto Consider = [&](float Cx, float Cy, float R) {
+                const float Dx2 = Px - Cx, Dy2 = Py - Cy;
+                const float Pen = R - std::sqrt(Dx2 * Dx2 + Dy2 * Dy2);
+                if (Pen > WorstPen) { WorstPen = Pen; Wcx = Cx; Wcy = Cy; Wr = R; }
+            };
+            for (int32_t J = 0; J < Count; ++J)
+                if (IsAlive(J) && IsBuilding(J)) Consider(ToF(PosX[J]), ToF(PosY[J]), BR);
+            for (int M = 0; M < NumMines; ++M)
+                if (MineGold[M] > 0) Consider(ToF(MineX[M]), ToF(MineY[M]), MR);
+            if (WorstPen <= 0.0f) break;                   // inside the rect, outside every disc → done
+            float Ux = Px - Wcx, Uy = Py - Wcy, Ul = std::sqrt(Ux * Ux + Uy * Uy);
+            if (Ul < 1e-4f) { Ux = 0.0f; Uy = 1.0f; Ul = 1.0f; }   // dead-centre: pick a fixed axis
+            const float Target = Wr + Eps;
+            Px = Wcx + Ux / Ul * Target;                   // push radially out to the disc boundary
+            Py = Wcy + Uy / Ul * Target;
+        }
+        // Accept the projected point only if it is genuinely valid (a cramped multi-disc pocket can
+        // leave the iteration short of feasible) AND within the magnetic radius. Otherwise fall back to
+        // the desired point and blink red — same contract as before.
+        const float PD2 = (Px - Dx) * (Px - Dx) + (Py - Dy) * (Py - Dy);
+        if (PD2 <= Radius * Radius && WouldAcceptPlace(Team, Type, Fx(Px), Fx(Py))) {
+            Ox = Px; Oy = Py; return true;
         }
         Ox = Dx; Oy = Dy; return false;
     }
