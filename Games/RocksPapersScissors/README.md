@@ -72,6 +72,18 @@ Log-reading recipes and their traps (never dump unfiltered logcat; never pipe iO
 3. **`rps.dev.flight_recorder` ON on both** — the Galaxy's `cvars.cfg` fixture persists it `false`,
    which once cost a 22-minute soak its entire recording.
 4. **Read `gaps=` on BOTH peers** — a one-directional fault is invisible from the good end.
+5. **For a PERF trace, both phones must be built at the SAME `LUR_CONFIG` + optimization.** The
+   `LUR_*` macros already match (both default `Development`), but the *optimization* does **not** by
+   default: Android's NDK build is Ninja (single-config) so `EngineFlags` couples `-O2` to
+   `LUR_CONFIG`, while the iOS build is the Xcode generator (multi-config) where that coupling is
+   **ignored** and `xcodebuild -configuration Debug` hard-forces **`-O0`**. On 2026-08-03 this made
+   the iPhone's `sim.step` read ~2.5–3 ms vs the Galaxy's ~0.15 ms — a 20× gap that was **purely the
+   `-O0` iOS build**, not the sim (the cache-friendly AI sim, #181, is shared `Core/Private/Sim.cpp`
+   with no platform `#ifdef` — both phones run it). To compare, build the `.ipa` with
+   `xcodebuild -configuration RelWithDebInfo` (`-O2 -g -DNDEBUG`, matches Android `Development`), or
+   build **both** at `-DLUR_CONFIG=Shipping` for true ship-perf. See CLAUDE.md's "keep the Xcode
+   scheme in sync with `LUR_CONFIG` by hand" caveat / the unfinished iOS tail of #89. (If
+   `macos-ci.yml` has since been switched off `-configuration Debug`, this trap is closed — verify.)
 
 ## RPS-specific HARD RULES
 
