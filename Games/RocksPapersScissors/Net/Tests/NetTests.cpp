@@ -18,6 +18,7 @@
 #include "Rps/EventCodec.h"
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #159: two peers recording one linked match, then compared
+#include "Rps/SnapshotRing.h"  // rollback Phase 1 scaffolding (snapshot ring + peer predictor)
 #include "Rps/SessionWiring.h" // the mains' Session->LockstepPeer routing table, shared verbatim
 
 using namespace Rps;
@@ -206,6 +207,166 @@ static void TestLockstepReadyGate() {
     for (int32_t J = 0; J < S.Count; ++J)
         if (S.IsAlive(J) && S.IsBuilding(J) && S.Type[J] == UnitMiner) ++(S.Team[J] == 0 ? Camps0 : Camps1);
     CHECK(Camps0 >= 1 && Camps1 >= 1);
+}
+
+// ================================================================================================
+// Rollback Phase 1 scaffolding (the responsiveness experiment, Docs/Journal/2026-08-03).
+// The snapshot ring, the peer predictor, and ConfirmedTick() are landed and proven BEFORE Phase 2
+// touches LockstepPeer's execution model. These tests are the "exercised by NetTests + the
+// two-window loopback" the plan asks for; none of them change or depend on execution behaviour.
+// ================================================================================================
+
+// ---- The snapshot ring is a memcpy round-trip: what goes in comes back bit-identical, and stored
+// snapshots are INDEPENDENT copies (mutating the source Sim after Save doesn't touch the stored one).
+static void TestSnapshotRingRoundTrip() {
+    SnapshotRing Ring(RollbackHorizon + 1);
+    CHECK(Ring.Capacity() == RollbackHorizon + 1);
+    CHECK(Ring.Get(0) == nullptr);  // nothing stored yet -> null, not a zeroed Sim
+
+    // A Sim advanced a few ticks so the snapshot carries real, non-default state.
+    auto Src = std::make_unique<Sim>();
+    Src->Init(0x5A0F);
+    for (int I = 0; I < 5; ++I) Src->StepEvents(nullptr, 0);
+    const uint32_t T = Src->Tick;
+    const uint64_t H = Src->StateHash();
+    Ring.Save(T, *Src);
+
+    const Sim* Got = Ring.Get(T);
+    CHECK(Got != nullptr);
+    CHECK(Got->StateHash() == H);        // memcpy preserved the state exactly
+    CHECK(Ring.Get(T + 1) == nullptr);   // a tick we never saved is absent
+
+    // The stored snapshot is a copy: advancing the source must not change what the ring holds.
+    for (int I = 0; I < 3; ++I) Src->StepEvents(nullptr, 0);
+    CHECK(Src->StateHash() != H);        // the source really moved on
+    CHECK(Ring.Get(T)->StateHash() == H);  // ...but the snapshot is still the frozen state
+
+    Ring.Clear();
+    CHECK(Ring.Get(T) == nullptr);       // Clear forgets everything, keeps the allocation
+}
+
+// ---- Eviction is implicit in the modular indexing: saving Capacity+k ticks keeps the LAST Capacity
+// and drops the older ones, and Get's tick-tag check returns null for an evicted tick rather than the
+// stale Sim now occupying its slot. ----
+static void TestSnapshotRingEviction() {
+    const uint32_t Cap = 4;
+    SnapshotRing Ring(Cap);
+    auto S = std::make_unique<Sim>();
+    S->Init(0xE71C);
+    // Save ticks 0..Cap+1 (Cap+2 saves). Each carries a DISTINCT state so a wrong slot is detectable.
+    std::vector<uint64_t> HashAt;
+    for (uint32_t T = 0; T <= Cap + 1; ++T) {
+        S->StepEvents(nullptr, 0);       // advance so each saved state differs
+        HashAt.push_back(S->StateHash());
+        Ring.Save(T, *S);
+    }
+    // The two oldest (ticks 0,1) were evicted by the two newest saves reusing their slots.
+    CHECK(Ring.Get(0) == nullptr);
+    CHECK(Ring.Get(1) == nullptr);
+    // The last Capacity ticks (2..Cap+1) are live and carry their own recorded state — proving the
+    // tag check hands back the RIGHT tick, not just some non-null Sim.
+    for (uint32_t T = 2; T <= Cap + 1; ++T) {
+        const Sim* G = Ring.Get(T);
+        CHECK(G != nullptr);
+        CHECK(G != nullptr && G->StateHash() == HashAt[T]);
+    }
+}
+
+// ---- Exercise the ring against REAL match states from the two-window loopback: snapshot every
+// executed tick, then confirm the last-horizon window restores bit-identically and older ticks have
+// been retired. This is the buffer Phase 2's roll-back-and-resim will restore from. ----
+static void TestSnapshotRingCapturesLoopbackStates() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x210B, 0, Enqueue, &Qa);
+    B.Init(0x210B, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    SnapshotRing Ring(RollbackHorizon + 1);
+    std::vector<uint64_t> HashByTick;  // index = exec tick -> recorded StateHash
+    for (int I = 0; I < 80; ++I) {
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+        const Sim& S = A.GetSim();
+        const uint32_t T = S.Tick;
+        if (T >= HashByTick.size()) HashByTick.resize(T + 1, 0);
+        HashByTick[T] = S.StateHash();
+        Ring.Save(T, S);
+    }
+    const uint32_t Head = A.GetSim().Tick;
+    CHECK(Head > RollbackHorizon + 2);  // enough ran that eviction actually happened
+
+    // The last-horizon window restores exactly; a heap copy stands in for Phase 2's "restore into the
+    // live sim" so we prove the stored bytes are a usable Sim, not just intact in place.
+    int Restored = 0;
+    for (uint32_t T = Head; T + Ring.Capacity() > Head; --T) {  // T in (Head-Capacity, Head]
+        const Sim* G = Ring.Get(T);
+        CHECK(G != nullptr);
+        if (G) {
+            auto Copy = std::make_unique<Sim>(*G);
+            CHECK(Copy->StateHash() == HashByTick[T]);
+            ++Restored;
+        }
+        if (T == 0) break;
+    }
+    CHECK(Restored == static_cast<int>(Ring.Capacity()));  // a full horizon of restorable snapshots
+    // ...and the tick just past the window has been evicted (proves the depth is bounded, not growing).
+    if (Head >= Ring.Capacity()) CHECK(Ring.Get(Head - Ring.Capacity()) == nullptr);
+}
+
+// ---- The peer predictor's contract: "no events this tick" is the empty batch, and it CLEARS whatever
+// it is handed (Phase 2 reuses one scratch vector across ticks, so the clear is load-bearing). ----
+static void TestPredictPeerBatchIsEmpty() {
+    std::vector<InputEvent> Batch;
+    Batch.push_back(InputEvent::Place(0, UnitMiner, F(17), F(16)));  // stale content from a prior tick
+    Batch.push_back(InputEvent::Queue(1, 3, 5));
+    PredictPeerBatch(Batch);
+    CHECK(Batch.empty());  // the prediction is genuinely no input
+}
+
+// ---- ConfirmedTick(): the frontier both peers agree on. It starts at the delay pre-seed, advances
+// monotonically as real frames stream both ways, stays symmetric once the peers settle, and never
+// runs ahead of executed state in the steady loopback. ----
+static void TestConfirmedTickTracksBothTimelines() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0xC0F1, 0, Enqueue, &Qa);
+    B.Init(0xC0F1, 1, Enqueue, &Qb);
+    // Fresh match: ticks 0..Delay-1 are the by-convention empty pre-seed on BOTH timelines, so they
+    // are already confirmed; nothing beyond is. Hence the confirmed frontier is exactly Delay-1.
+    CHECK(A.ConfirmedTick() == static_cast<int64_t>(InputDelayTicks) - 1);
+    CHECK(B.ConfirmedTick() == static_cast<int64_t>(InputDelayTicks) - 1);
+
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    int64_t PrevA = A.ConfirmedTick();
+    for (int I = 0; I < 120; ++I) {
+        DriveInput(A, 0, I);
+        DriveInput(B, 1, I);
+        A.Tick(OneTickNs);
+        B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+        const int64_t CurA = A.ConfirmedTick();
+        CHECK(CurA >= PrevA);                                   // monotonic (no resync -> never rewinds)
+        // Execution never outruns confirmed input — that IS lockstep's guarantee (a tick runs only
+        // once both its inputs are known). The confirmed frontier LEADS exec here, because in the
+        // W+Delay model the input timelines are produced/scheduled Delay ticks ahead of the execution
+        // ceiling; so the real bound is confirmed >= exec-1, never confirmed <= exec.
+        CHECK(CurA >= static_cast<int64_t>(A.ExecTick()) - 1);
+        PrevA = CurA;
+    }
+    for (int I = 0; I < 4; ++I) {  // settle to a common frontier
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.ConfirmedTick() > 100);                    // it genuinely advanced with the match
+    CHECK(A.ConfirmedTick() == B.ConfirmedTick());     // both peers agree on the confirmed frontier
 }
 
 #if LUR_INTERNAL
@@ -2245,6 +2406,12 @@ int main() {
     TestEventBatchFuzz();
     TestLockstepReadyGate();
     TestLockstepStaysInSync();
+    // Rollback Phase 1 scaffolding (Docs/Journal/2026-08-03)
+    TestSnapshotRingRoundTrip();
+    TestSnapshotRingEviction();
+    TestSnapshotRingCapturesLoopbackStates();
+    TestPredictPeerBatchIsEmpty();
+    TestConfirmedTickTracksBothTimelines();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();

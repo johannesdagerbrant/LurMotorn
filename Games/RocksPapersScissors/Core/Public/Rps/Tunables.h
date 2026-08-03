@@ -402,6 +402,15 @@ constexpr int32_t TargetSearchMaxK = 8;
 
 // ---- Netcode (slice 1, NOT the core) — recorded here so the constant has one home ----
 constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (design doc §3)
+// Rollback (the responsiveness experiment, Docs/Journal/2026-08-03): the maximum number of ticks
+// execution may speculate AHEAD of the confirmed tick before it must STALL and wait for the peer.
+// At TickRateHz this is HorizonTicks x 100 ms of tolerated one-way peer latency + jitter; beyond it
+// rollback degrades gracefully to lockstep-style waiting (reusing the #162 ceiling-stall backstop).
+// The snapshot ring is sized RollbackHorizon + 1 so the CONFIRMED tick's snapshot is retained
+// alongside a full horizon of speculative snapshots to restore from. Placeholder — tune on hardware
+// against real BLE jitter (plan §risks: "rollback horizon vs BLE jitter"). Phase 1 scaffolding only;
+// the execution model still schedules at W+InputDelayTicks until Phase 2 replaces it.
+constexpr uint32_t RollbackHorizon = 16;    // 1.6 s at TickRateHz = 10
 // LockstepPeer::Execute drains at most this many ticks per call, so a catch-up burst
 // (post-background / thermal / -O0) can't monopolize the loop and starve input -> ANR
 // (#90; forensics 2026-07-19). Backlog drains over subsequent calls, never discarded.

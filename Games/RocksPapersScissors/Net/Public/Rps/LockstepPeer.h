@@ -228,6 +228,27 @@ public:
 
     const Sim& GetSim() const { return TheSim; }
     uint32_t ExecTick() const { return TheSim.Tick; }
+
+    // Rollback scaffolding (Docs/Journal/2026-08-03, Phase 1): the CONFIRMED tick — the highest tick
+    // whose combined input BOTH peers have really produced, so both sims agree on it beyond any doubt.
+    // This is the frontier rollback treats as immutable (never rolled back past; the snapshot ring
+    // retires below it). Defined in terms of the two input timelines:
+    //   * local:  LocalEvents holds a real (produced, or the by-convention empty delay pre-seed) entry
+    //             for every index in [0, LocalEvents.size()) — so the last known local tick is size-1.
+    //   * peer:   PeerTickNext_ is the exec tick of the next REAL peer frame still owed, so the last
+    //             known peer tick is PeerTickNext_ - 1. Using PeerTickNext_ rather than
+    //             PeerEvents.size() is deliberate and forward-looking: when Phase 2 speculates the peer
+    //             with PredictPeerBatch, PeerEvents will grow with PREDICTED entries that must NOT count
+    //             as confirmed, while PeerTickNext_ still advances only on a delivered frame.
+    // The confirmed tick is the lesser of the two. Returns -1 before anything is confirmed (an
+    // int64_t, not a uint32_t, so "nothing yet" is unambiguous rather than colliding with tick 0).
+    // Read-only and behaviour-neutral in Phase 1 — the execution model still gates on the ceiling.
+    int64_t ConfirmedTick() const {
+        const uint32_t LocalKnown = static_cast<uint32_t>(LocalEvents.size());  // real entries [0,Known)
+        const uint32_t PeerKnown  = PeerTickNext_;                              // real entries [0,Known)
+        const uint32_t Known = LocalKnown < PeerKnown ? LocalKnown : PeerKnown;
+        return Known == 0 ? -1 : static_cast<int64_t>(Known) - 1;
+    }
     // A hash mismatch was seen at an anchor. NOT a terminal state any more: CrossCheck declares the
     // match a DRAW when it trips, so the normal post-match hold + restart runs and clears this. Read
     // it for diagnostics ("that draw was a desync, not a real draw"), not as "the session is over".
