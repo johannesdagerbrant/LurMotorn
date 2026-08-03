@@ -20,8 +20,10 @@
 #include <cstdint>
 #include <cstdlib>   // setenv: MoltenVK log level, before any vkCreateInstance
 #include <ctime>     // the flight recorder's per-match filename stamp
+#include <mutex>     // #183: guards the main->render touch-event queue
 #include <string>
-#include <thread>    // #69: the dedicated sim/net thread, off the CADisplayLink render cadence
+#include <thread>    // #69/#183: the sim/net thread and now the render thread, both off the UIKit main thread
+#include <vector>    // #183: the touch-event queue backing store
 
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
@@ -81,6 +83,18 @@ Rps::Fixed WorldToFixed(float Wv) {
     if (Wv < 0.0f) Wv = 0.0f;
     return Rps::Fixed{static_cast<int32_t>(Wv * static_cast<float>(Rps::Fixed::One) + 0.5f)};
 }
+// #183: a raw touch packaged on the MAIN (UIKit) thread and drained on the RENDER thread. The UIKit
+// handlers must no longer touch _View/_Cam/_DevGesture (those live on the render thread now), so they
+// capture only what UIKit alone can read — the point in DRAWABLE PIXELS (already ×contentsScale), the
+// pointer count (event.allTouches.count, for the two-finger console gesture), and a timestamp for the
+// gesture's hold/chain windows — and push it. The render thread replays the exact hit-test logic.
+struct TouchEvent {
+    enum EPhase : uint8_t { Began, Moved, Ended };
+    uint8_t  Phase;
+    float    X, Y;           // drawable pixels
+    int      PointerCount;   // pointers down at this event (drives the dev-console gesture)
+    uint64_t Ns;             // NowNs() at the touch — feeds ConsoleGesture's timing windows
+};
 }  // namespace
 
 // #103: iOS-ONLY render-resolution knob for the fillrate-vs-encoding A/B. Multiplies the CAMetalLayer
@@ -116,50 +130,57 @@ LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), R
 @end
 
 // #69: iOS mirrors Android's #91 split — a dedicated SIM thread owns Session + Lp + the solo sim
-// (pumps BLE, ticks the lockstep/solo sim ~500 Hz, publishes snapshots), while the CADisplayLink
-// render loop (renderFrame) does ONLY input + render. Before this the iPhone serviced the transport
-// once per vsync-locked frame, so an inbound datagram waited up to ~16 ms (measured: ble.toApply
-// 0.2 -> ~11 ms, the textbook render-gate). The cross-thread surface below is the whole boundary:
-// the Mailbox (snapshot sim->main), the SoloIn inbox + Lp.QueueLocalEvent (input main->sim, both
-// thread-safe), and the atomics. Renderer/View/Cam/DevGesture are main-only; Session/Lp/Sim are
-// sim-only after the thread starts. Partition matches RpsMain.cpp's AppState verbatim.
+// (pumps BLE, ticks the lockstep/solo sim ~500 Hz, publishes snapshots). #183 then took the render
+// loop OFF the main thread too, onto its own free-running RENDER thread (renderThreadLoop). Before
+// #69 the iPhone serviced the transport once per vsync-locked frame, so an inbound datagram waited up
+// to ~16 ms (measured: ble.toApply 0.2 -> ~11 ms, the textbook render-gate). The cross-thread surface
+// below is the whole boundary: the Mailbox (snapshot sim->render), the SoloIn inbox +
+// Lp.QueueLocalEvent (input render->sim, both thread-safe), and the atomics. Renderer/View/Cam/
+// DevGesture are RENDER-only; UIKit is MAIN-only; Session/Lp/Sim are sim-only after the thread starts.
 @implementation RpsViewController {
-    // ---- MAIN (render/input/lifecycle) thread only ----
-    Lur::Render::IRenderer* _Renderer;
-    Rps::GameView _View;
+    // #183: the iPhone render loop now runs on its OWN thread (renderThreadLoop), not the CADisplayLink
+    // main-thread callback. That is the fix for the 40fps MoltenVK vsync BEAT (#103): a main-thread loop
+    // blocked on nextDrawable can never overlap frame N+1's CPU work with frame N's drawable wait, so
+    // FIFO + CADisplayLink beat to 2-of-3 refreshes = 40.0fps. Free-running on its own thread with FIFO as
+    // the ONE vsync clock lets the CPU run ahead -> clean 60. Mirrors #69, which already put sim+net on
+    // their own thread. The hard invariant it buys: the renderer, _View, _Cam, _DevGesture and _Snap are
+    // touched by the RENDER thread ONLY; UIKit objects (window/view/layer) + lifecycle by MAIN only; the
+    // three threads meet solely at the atomics + queues below.
+
+    // ---- MAIN (UIKit / lifecycle) thread only ----
     Lur::Transport::ITransport* _Transport;   // created on main; the CB delegate pushes to the (thread-safe) inbox
-    Lur::Save::Store* _Store;  // main uses it once (device id + score load) BEFORE the thread; sim-only after
+    Lur::Save::Store* _Store;  // main uses it once (device id + score load) BEFORE the sim thread; sim-only after
     std::string _SaveDir;      // Application Support — the Store's dir, kept for the .rec paths
     std::string _DeviceId;
-    Rps::Snapshot _Snap;       // main's consume target (the latest published snapshot)
-    uint32_t _LastConsumedTick;  // main: consume from the mailbox only when the published tick changes
-    bool _ViewLinkedApplied;   // main: one-shot — the peer row + blink is applied once
-    Rps::CameraScroll _Cam;
-    bool _CamInit;
-    float _DownX, _DownY;
-    // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It was
-    // simply absent here (the recognizer had never been written for iOS), so the console was
-    // unreachable on the iPhone and on-device tuning was Android-only. Shared with the Android and
-    // desktop shims rather than hand-written a third time; the three copies had already drifted.
-    // MAIN thread only (it owns the touch stream).
-    Lur::Input::ConsoleGesture _DevGesture;
-    CADisplayLink* _DisplayLink;
-    double _PrevFrameTime;
-    bool _Ready;
-    // #73: a DVT launch can initialise the renderer while the app is NOT active —
-    // the layer created in that state is never composited (presents "succeed" into
-    // the void; screen black). Record the state at init; on becoming active, rebuild
-    // window+view+layer+renderer from scratch (a swapchain recreate is NOT enough —
-    // proven by 898999b).
+    // #73: a DVT launch can initialise the renderer while the app is NOT active — the layer created in
+    // that state is never composited (presents "succeed" into the void; screen black). Recorded on MAIN
+    // when the layer is published (main is the only thread allowed to read applicationState); on becoming
+    // active the lifecycle tick rebuilds window+view+layer+renderer from scratch (a swapchain recreate is
+    // NOT enough — proven by 898999b).
     bool _InitWhileInactive;
     bool _BecameActive;
+    NSTimer* _LifecycleTimer;  // #183: MAIN heartbeat — #73 heal, became-active reattach, render_scale; NO rendering
+    UIView* _RetiringView;     // #183: old view/layer held alive across a reattach until the render thread finishes Shutdown/Init on it (UIView dealloc stays on main)
 #if !LUR_SHIPPING
     // #103: the render-resolution A/B. Tracks the render-scale (Fixed raw) currently baked into the
-    // swapchain, so renderFrame recreates it ONLY when rps.dev.render_scale actually changes. Seeded
-    // to Fixed::One by the init paths (they build the layer at native scale, i.e. k=1.0), so a match
-    // played at the default never triggers a recreate.
+    // swapchain, so the lifecycle tick recreates it ONLY when rps.dev.render_scale actually changes. Seeded
+    // to Fixed::One by the layer-publish paths (native scale, k=1.0), so the default never triggers a recreate.
     int32_t _AppliedRenderScaleRaw;
 #endif
+
+    // ---- RENDER thread only (after _RenderThread starts; touches NO UIKit) ----
+    Lur::Render::IRenderer* _Renderer;
+    Rps::GameView _View;
+    Rps::Snapshot _Snap;         // the render thread's consume target (the latest published snapshot)
+    uint32_t _LastConsumedTick;  // consume from the mailbox only when the published tick changes
+    bool _ViewLinkedApplied;     // one-shot — the peer row + blink is applied once
+    Rps::CameraScroll _Cam;
+    bool _CamInit;
+    float _DownX, _DownY;        // touch-down point (drawable px) for the tap test — render-thread replay state
+    // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It now
+    // runs on the RENDER thread (which owns _View), replayed from the touch queue; the MAIN handlers only
+    // capture pointer counts + timestamps into TouchEvent. Shared recognizer (Lur::Input::ConsoleGesture).
+    Lur::Input::ConsoleGesture _DevGesture;
 
     // ---- SIM thread only (after _SimThread starts) ----
     Lur::Net::Session _Session;
@@ -184,35 +205,58 @@ LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), R
     uint64_t _AgentPollNs;         // sim thread
 #endif
 
-    // ---- Cross-thread surface (the ONLY state that crosses the boundary) ----
+    // ---- Sim <-> RENDER cross-thread surface. The sim publishes; the RENDER thread now consumes these
+    //      (this was the sim<->MAIN surface pre-#183 — the atomics are unchanged, only the consuming thread
+    //      moved off the CADisplayLink main thread onto the render thread). "sim -> main" below therefore
+    //      means "sim -> render thread" now; input atomics (_SoloAiTier etc.) are set from the render thread
+    //      during touch replay instead of from the main touch handlers. ----
     std::thread _SimThread;
-    Rps::SnapshotMailbox _Mailbox;         // sim publishes, main consumes
-    Rps::SoloInputInbox  _SoloIn;          // main pushes solo place/queue events, sim drains (thread-safe)
+    Rps::SnapshotMailbox _Mailbox;         // sim publishes, the render thread consumes
+    Rps::SoloInputInbox  _SoloIn;          // render pushes solo place/queue events, sim drains (thread-safe)
     std::atomic<bool>     _SimRunning;     // main -> sim: keep looping (cleared + joined on teardown)
-    std::atomic<bool>     _MatchLive;      // sim -> main: a match (solo or peer) is live (drives touch routing)
-    std::atomic<uint8_t>  _LinkedTeam;     // sim -> main: which team you play (0 in solo)
-    std::atomic<uint32_t> _PublishedTick;  // sim -> main: consume only on a new tick
-    std::atomic<uint32_t> _PresentedFrames;// main -> sim: for the LOCKSTEP diag / heartbeat
-    std::atomic<bool>     _Recovering;     // sim -> main: #161 desync repair in flight (drives the HUD)
-    std::atomic<bool>     _LinkHalfOpen;   // sim -> main: #163 half-open link (drives the HUD banner)
-    std::atomic<int>      _SoloAiTier;     // main -> sim: one-shot AI tier pick -> (re)start solo (-1 = none)
-    std::atomic<bool>     _SoloActiveAtomic;   // sim -> main: solo match running (tap routing + view side)
-    std::atomic<bool>     _PeerLinkedAtomic;   // sim -> main: a real peer connected (row + blink)
-    std::atomic<bool>     _SwitchToLinkedAtomic;  // main -> sim: player picked the linked-opponent row
-    std::atomic<bool>     _SelectLinkedRow;    // sim -> main: we switched to the peer; name it in the HUD
+    std::atomic<bool>     _MatchLive;      // sim -> render: a match (solo or peer) is live (drives touch routing)
+    std::atomic<uint8_t>  _LinkedTeam;     // sim -> render: which team you play (0 in solo)
+    std::atomic<uint32_t> _PublishedTick;  // sim -> render: consume only on a new tick
+    std::atomic<uint32_t> _PresentedFrames;// render -> sim: for the LOCKSTEP diag / heartbeat
+    std::atomic<bool>     _Recovering;     // sim -> render: #161 desync repair in flight (drives the HUD)
+    std::atomic<bool>     _LinkHalfOpen;   // sim -> render: #163 half-open link (drives the HUD banner)
+    std::atomic<int>      _SoloAiTier;     // render -> sim: one-shot AI tier pick -> (re)start solo (-1 = none)
+    std::atomic<bool>     _SoloActiveAtomic;   // sim -> render: solo match running (tap routing + view side)
+    std::atomic<bool>     _PeerLinkedAtomic;   // sim -> render: a real peer connected (row + blink)
+    std::atomic<bool>     _SwitchToLinkedAtomic;  // render -> sim: player picked the linked-opponent row
+    std::atomic<bool>     _SelectLinkedRow;    // sim -> render: we switched to the peer; name it in the HUD
     // #139/feedback: sim -> main, the camp the player committed while the opponent hasn't placed theirs.
     // Pre-match it is NOT in the sim (both camps become tick 0's input together), so the view draws it
     // from here. RAW Fixed so no float crosses the boundary in a different form than the wire.
     std::atomic<bool>     _PendingCampAtomic;
     std::atomic<int32_t>  _PendingCampX, _PendingCampY;
     std::atomic<int>      _AiWinsA[Rps::AiTierCount], _AiLossesA[Rps::AiTierCount],
-                          _AiDrawsA[Rps::AiTierCount];   // sim -> main: per-AI-tier W-L-D display
-    std::atomic<int>      _PeerWinsA, _PeerLossesA, _PeerDrawsA;  // sim -> main: vs the linked peer
+                          _AiDrawsA[Rps::AiTierCount];   // sim -> render: per-AI-tier W-L-D display
+    std::atomic<int>      _PeerWinsA, _PeerLossesA, _PeerDrawsA;  // sim -> render: vs the linked peer
 #if LUR_AGENT
-    // Agent `gesture`: the console recognizer lives on the MAIN thread (it owns the touch stream), so a
-    // sim-thread command hands the request across rather than touching _DevGesture directly.
+    // Agent `gesture`: the console recognizer lives on the RENDER thread (it owns _DevGesture), so a
+    // sim-thread command hands the request across the atomic rather than touching _DevGesture directly.
     std::atomic<bool>     _AgentGestureRequest;
 #endif
+
+    // ---- MAIN <-> RENDER cross-thread surface (#183). The render thread owns all Vulkan; MAIN owns UIKit.
+    //      Init/Shutdown are handed to the render thread (via _ReinitReq) so the renderer is single-threaded
+    //      even across a #73 rebuild. The pause/ack pair parks the render thread at a safe point for BOTH a
+    //      background transition (a free-running loop must not vend drawables off-screen) and a reattach. ----
+    std::thread          _RenderThread;
+    std::atomic<bool>    _RenderRunning;   // main -> render: keep looping (cleared + joined on teardown)
+    std::atomic<bool>    _Ready;           // render -> main: renderer inited (main's touch gate + lifecycle read it)
+    std::atomic<bool>    _LayerReady;      // main -> render: the first CAMetalLayer is published; Init may run
+    std::atomic<void*>   _LayerPtr;        // main -> render: the current CAMetalLayer (bridged void*)
+    std::atomic<bool>    _ReinitReq;       // main -> render: #73 reattach — Shutdown + Init against _LayerPtr
+    std::atomic<bool>    _ReinitDone;      // render -> main: reinit finished (main may release _RetiringView)
+    std::atomic<bool>    _RenderPauseReq;  // main -> render: park at a safe point (background OR reattach)
+    std::atomic<bool>    _RenderPausedAck; // render -> main: parked, not touching the renderer
+    std::atomic<bool>    _ResizeReq;       // main -> render: drawable size changed -> call Resize at a safe point
+    std::atomic<int32_t> _DrawW, _DrawH;   // main -> render: drawable size in pixels
+    std::atomic<int32_t> _InsetTopPx, _InsetBotPx;  // main -> render: safe-area insets (px)
+    std::mutex           _TouchMx;         // guards _TouchQ
+    std::vector<TouchEvent> _TouchQ;       // main pushes raw touches, the render thread drains once/frame
 #if LUR_INTERNAL
     // #144 SOLO FLIGHT RECORDER — parity with Android, which has had it since #156 made it a dev-build
     // default. Without it an iPhone playtest is unreadable afterwards: you get the score and nothing
@@ -292,11 +336,18 @@ static void UnblockStdio() {
     Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
     Layer.contentsScale = UIScreen.mainScreen.scale;
 
-    // #73: note every activation; renderFrame reattaches if the renderer was born
-    // while the app wasn't active (the black-screen precondition).
+    // #73: note every activation; the lifecycle tick reattaches if the renderer was born while the app
+    // wasn't active (the black-screen precondition), and resumes the render thread parked on resign.
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(onBecameActive)
                                                  name:UIApplicationDidBecomeActiveNotification
+                                               object:nil];
+    // #183: a free-running render thread must be PARKED while inactive/backgrounded — Metal disallows
+    // rendering to an off-screen layer, and the old CADisplayLink loop was auto-paused for us. Resumed by
+    // onBecameActive. Resign (not just background) also covers Control Center / the app switcher briefly.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(onWillResign)
+                                                 name:UIApplicationWillResignActiveNotification
                                                object:nil];
 
     NSArray<NSString*>* Dirs =
@@ -320,8 +371,8 @@ static void UnblockStdio() {
     // All-time W-L-D per AI tier / per rival, loaded on MAIN before the sim thread exists (thread
     // creation is the handoff — from then on _Scores is written ONLY by the sim thread). Seeding the
     // display atomics here is what makes the ladder show the real record the moment the dropdown first
-    // opens, instead of 0-0-0 until this session's first match resolves; renderFrame pushes them to
-    // the view every frame.
+    // opens, instead of 0-0-0 until this session's first match resolves; the render thread pushes them
+    // to the view every frame.
     _Scores.Load(*_Store);
     for (int T = 0; T < Rps::AiTierCount; ++T) {
         const Rps::Tally S = _Scores.Ai(T);
@@ -362,46 +413,77 @@ static void UnblockStdio() {
     // lambda captures self as a raw pointer (no ARC retain in a C++ closure); the VC lives for the app
     // and -dealloc stops + joins the thread before its C++ ivars are destroyed. ----
     _SimThread = std::thread([self] { [self simThreadLoop]; });
+
+    // ---- RENDER thread (#183): owns the renderer + _View + _Cam + _DevGesture; free-runs the frame loop
+    // with FIFO as the one vsync clock (the fix for the #103 40fps beat). It waits for MAIN to publish the
+    // first sized layer (viewDidLayoutSubviews) before creating the renderer. Same raw-self capture /
+    // stop-before-destroy contract as the sim thread. ----
+    _RenderRunning.store(true, std::memory_order_relaxed);
+    _RenderThread = std::thread([self] { [self renderThreadLoop]; });
+
+    // #183: MAIN-thread housekeeping tick (no rendering) — the #73 heal, the became-active reattach, the
+    // render-health heartbeat and the render_scale A/B. Replaces the per-frame lifecycle work the
+    // CADisplayLink renderFrame used to carry. 0.5 s cadence: a recovery/diag loop, not the hot path.
+    _LifecycleTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self
+                                                     selector:@selector(lifecycleTick)
+                                                     userInfo:nil repeats:YES];
 }
 
 - (void)dealloc {
+    [_LifecycleTimer invalidate];
+    // Render thread FIRST — it owns the renderer, which references the layer/surface the OS is about to
+    // tear down. Clear the pause flag too, so a parked thread wakes to observe !running and exits its loop.
+    _RenderRunning.store(false, std::memory_order_release);
+    _RenderPauseReq.store(false, std::memory_order_release);
+    if (_RenderThread.joinable()) _RenderThread.join();
     _SimRunning.store(false, std::memory_order_release);  // stop the loop, then wait it out
     if (_SimThread.joinable()) _SimThread.join();
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
+    // #183: MAIN only sizes the layer and PUBLISHES drawable-size + safe-area insets for the render thread,
+    // which owns the renderer + camera clamp. The renderer is created/resized by the render thread — main
+    // never calls a renderer method (the single-thread-owns-the-renderer invariant).
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat Scale = Layer.contentsScale;
     Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Scale,
                                     self.view.bounds.size.height * Scale);
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
+    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
+    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
+    const UIEdgeInsets Sa = self.view.safeAreaInsets;
+    _InsetTopPx.store(static_cast<int32_t>(Sa.top * Scale), std::memory_order_relaxed);
+    _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Scale), std::memory_order_relaxed);
 
-    if (!_Ready) {
-        _Renderer = Lur::Render::VulkanRenderer::Create();
-        _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
-        // #73 precondition check: a renderer initialised while the app is NOT active
-        // ends up presenting into a layer the window server never composites.
+    if (!_LayerReady.load(std::memory_order_acquire)) {
+        // First valid layout: record the #73 precondition (a renderer born while inactive presents into a
+        // layer the window server never composites), publish the layer, then let the render thread Init.
         _InitWhileInactive =
             UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
-        os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d, appActive=%d)",
-               _Ready ? "ok" : "failed", (int)Layer.drawableSize.width,
-               (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
-        if (_Ready) {
-            _View.CreateResources(_Renderer);
-            _DisplayLink = [CADisplayLink displayLinkWithTarget:self selector:@selector(renderFrame)];
-            [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
 #if !LUR_SHIPPING
-            _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: swapchain is at native scale (k=1.0)
+        _AppliedRenderScaleRaw = Rps::Fixed::One;  // published at native scale (k=1.0)
 #endif
-        }
+        _LayerPtr.store((__bridge void*)Layer, std::memory_order_release);
+        _LayerReady.store(true, std::memory_order_release);
+        os_log(OS_LOG_DEFAULT, "OnlyRps: layer published %dx%d appActive=%d — render thread will init #183",
+               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
     } else {
-        _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
-                          static_cast<int>(Layer.drawableSize.height));
+        _ResizeReq.store(true, std::memory_order_release);  // render thread calls Resize at a safe point
     }
 }
 
-- (void)onBecameActive { _BecameActive = true; }  // handled on the next renderFrame
+- (void)onBecameActive {
+    _BecameActive = true;  // the #73 init-while-inactive reattach is handled by the lifecycle tick
+    // Resume a render thread parked on resign/background. If it was inited while inactive, the tick's
+    // reattach takes over instead (it re-parks + rebuilds), so don't blindly resume in that case.
+    if (_Ready.load(std::memory_order_acquire) && !_InitWhileInactive)
+        _RenderPauseReq.store(false, std::memory_order_release);
+}
+
+- (void)onWillResign {
+    if (_Ready.load(std::memory_order_acquire)) _RenderPauseReq.store(true, std::memory_order_release);
+}
 
 #if LUR_INTERNAL
 // Open a recording for a match that is (re)starting. Mirrors the Android lambda of the same name,
@@ -595,9 +677,17 @@ static void UnblockStdio() {
                (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
         return;
     }
-    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: view unhosted - rebuilding "
-                           "window+view+layer+renderer on scene state=%ld",
-           (long)Scene.activationState);
+    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: view unhosted - pausing render thread + rebuilding "
+                           "window+view+layer on scene state=%ld", (long)Scene.activationState);
+    // #183: the render thread owns the renderer, so PARK it before touching the layer it renders into.
+    // Bounded busy-wait on MAIN — this is a rare heal, not the hot loop; the ack normally lands within one
+    // frame (~16 ms). Proceed best-effort if it somehow doesn't park (better than wedging the heal).
+    _RenderPauseReq.store(true, std::memory_order_release);
+    for (int I = 0; I < 250 && !_RenderPausedAck.load(std::memory_order_acquire); ++I)
+        [NSThread sleepForTimeInterval:0.004];  // ~1 s cap
+    if (!_RenderPausedAck.load(std::memory_order_acquire))
+        os_log_error(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: render thread did not park in time — proceeding");
+
     // Detach the OLD window FIRST: it still holds rootViewController == self, and its
     // later dealloc tears the root VC's view out of whatever window now hosts it —
     // which re-unhosted the fresh view and made this reattach loop every 2 s.
@@ -605,6 +695,11 @@ static void UnblockStdio() {
     UIWindow* Old = Delegate.window;
     Old.hidden = YES;
     Old.rootViewController = nil;
+    // Hold the OLD view (and its CAMetalLayer) alive until the render thread finishes Shutdown/Init on it —
+    // the old VkSurfaceKHR wraps that layer, and vkDestroySurfaceKHR runs on the render thread AFTER this
+    // method returns. Released on the render thread's _ReinitDone ack (in lifecycleTick), on MAIN, so the
+    // UIView still deallocs on the main thread.
+    _RetiringView = self.view;
     RpsView* NewView = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
     self.view = NewView;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
@@ -620,27 +715,33 @@ static void UnblockStdio() {
     [NewWindow makeKeyAndVisible];
     Delegate.window = NewWindow;
 
-    _Renderer->Shutdown();  // full teardown (device, surface, everything)
-    _Ready = _Renderer->Init((__bridge void*)Layer);
+    // Publish the fresh layer + size + insets, record the precondition, then hand the Shutdown/Init to the
+    // render thread and RESUME it — it re-inits against _LayerPtr and signals _ReinitDone.
+    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
+    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
+    const UIEdgeInsets Sa = NewView.safeAreaInsets;
+    _InsetTopPx.store(static_cast<int32_t>(Sa.top * Layer.contentsScale), std::memory_order_relaxed);
+    _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Layer.contentsScale), std::memory_order_relaxed);
+    _LayerPtr.store((__bridge void*)Layer, std::memory_order_release);
     _InitWhileInactive =
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
-    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: re-init %{public}s (drawable %dx%d, appActive=%d)",
-           _Ready ? "ok" : "FAILED", (int)Layer.drawableSize.width,
-           (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
-    if (_Ready) _View.CreateResources(_Renderer);
 #if !LUR_SHIPPING
-    _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: rebuilt at native scale; renderFrame re-applies any override
+    _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: rebuilt at native scale; the tick re-applies any override
 #endif
+    _ReinitReq.store(true, std::memory_order_release);
+    _RenderPauseReq.store(false, std::memory_order_release);
+    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: handed reinit to the render thread (drawable %dx%d, appActive=%d)",
+           (int)Layer.drawableSize.width, (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
 }
 
 #if !LUR_SHIPPING
-// #103: apply rps.dev.render_scale by rescaling the CAMetalLayer's backing store + recreating the
-// swapchain — but ONLY when the value actually changed (a swapchain recreate is not free). Setting
-// contentsScale AND drawableSize together keeps the render extent and the touch-point mapping (which
-// reads contentsScale in touchesBegan/Moved/Ended) in the same coordinate space. Called at the top of
-// renderFrame, before WaitForFrame, so the fence/acquire below targets the fresh swapchain.
+// #103: apply rps.dev.render_scale by rescaling the CAMetalLayer's backing store (MAIN, UIKit) and asking
+// the render thread to recreate the swapchain — but ONLY when the value actually changed (a swapchain
+// recreate is not free). Setting contentsScale AND drawableSize together keeps the render extent and the
+// touch-point mapping (touchesBegan/Moved/Ended read contentsScale) in the same coordinate space. Called
+// from the MAIN lifecycle tick; the render thread owns the renderer, so it does the Resize via _ResizeReq.
 - (void)applyRenderScaleIfChanged {
-    if (!_Ready || _Renderer == nullptr) return;
+    if (!_Ready.load(std::memory_order_acquire)) return;
     const int32_t Raw = CvRenderScale.Get().Raw;
     if (Raw == _AppliedRenderScaleRaw) return;
     const float K = static_cast<float>(Raw) / static_cast<float>(Rps::Fixed::One);
@@ -649,78 +750,96 @@ static void UnblockStdio() {
     Layer.contentsScale = Eff;
     Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Eff,
                                     self.view.bounds.size.height * Eff);
-    if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;  // not laid out yet — retry next frame
-    _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
-                      static_cast<int>(Layer.drawableSize.height));
+    if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;  // not laid out yet — retry next tick
+    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
+    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
+    _ResizeReq.store(true, std::memory_order_release);   // render thread recreates the swapchain
     _AppliedRenderScaleRaw = Raw;
     os_log(OS_LOG_DEFAULT, "OnlyRps: render_scale -> %.3f (drawable %dx%d) #103", K,
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
 }
 #endif
 
-- (void)renderFrame {
-    // #73, measured 2026-07-19: after a DVT kill-existing relaunch the app can run
-    // its render loop with the VIEW IN NO WINDOW (view.window == nil, layer parented
-    // nowhere — HEARTBEAT win=0 host=0) while presents "succeed" into the orphan
-    // layer. On iOS 13+ a window made with initWithFrame relies on legacy adoption
-    // into the implicit UIWindowScene, and this launch path never adopts it. The
-    // condition below is precise (never true in health) and the heal is scene-aware,
-    // so it is always-on, retried until a scene exists to attach to.
-    static uint32_t FramesSinceAttach = 0;
-    if (_Ready && (self.view.window == nil || self.view.window.windowScene == nil)) {
-        if (++FramesSinceAttach >= 120) {  // retry every ~2 s, not every frame
-            FramesSinceAttach = 0;
-            [self reattachForActivation];
+// #183: the RENDER thread. Owns the renderer + _View + _Cam + _DevGesture + _Snap; free-runs the frame
+// loop with FIFO as the single vsync clock (no CADisplayLink). Startup: wait for MAIN to publish the
+// first sized layer, then create + Init the renderer HERE (so all Vulkan is single-threaded). Each
+// iteration is wrapped in its OWN @autoreleasepool — this is a std::thread, not an NSThread, so nothing
+// drains the CAMetalDrawable MoltenVK retains per frame otherwise. Raw-self capture / stop-before-destroy
+// contract identical to simThreadLoop.
+- (void)renderThreadLoop {
+    while (_RenderRunning.load(std::memory_order_acquire) &&
+           !_LayerReady.load(std::memory_order_acquire))
+        std::this_thread::sleep_for(std::chrono::milliseconds(4));
+    if (!_RenderRunning.load(std::memory_order_acquire)) return;
+    @autoreleasepool {
+        void* Layer = _LayerPtr.load(std::memory_order_acquire);
+        _Renderer = Lur::Render::VulkanRenderer::Create();
+        const bool Ok = _Renderer && _Renderer->Init(Layer);
+        _Ready.store(Ok, std::memory_order_release);
+        os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d) [render thread] #183",
+               Ok ? "ok" : "failed", _DrawW.load(std::memory_order_relaxed),
+               _DrawH.load(std::memory_order_relaxed));
+        if (Ok) _View.CreateResources(_Renderer);
+    }
+    double PrevTime = 0.0;
+    while (_RenderRunning.load(std::memory_order_acquire)) {
+        // ---- Pause / reattach handshake. MAIN parks us (background OR #73 reattach) via _RenderPauseReq;
+        // we ack at this SAFE point (no drawable held, renderer idle) and spin until released. On release,
+        // a pending _ReinitReq means MAIN rebuilt the layer -> do the Vulkan Shutdown/Init HERE (renderer
+        // stays single-threaded), then signal _ReinitDone so MAIN can release the retiring view. ----
+        if (_RenderPauseReq.load(std::memory_order_acquire)) {
+            _RenderPausedAck.store(true, std::memory_order_release);
+            while (_RenderPauseReq.load(std::memory_order_acquire) &&
+                   _RenderRunning.load(std::memory_order_acquire))
+                std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            _RenderPausedAck.store(false, std::memory_order_release);
+            if (!_RenderRunning.load(std::memory_order_acquire)) break;
+            if (_ReinitReq.exchange(false, std::memory_order_acq_rel)) {
+                @autoreleasepool {
+                    _Ready.store(false, std::memory_order_release);
+                    _Renderer->Shutdown();  // full teardown (device, surface, everything) of the old layer
+                    void* Layer = _LayerPtr.load(std::memory_order_acquire);
+                    const bool Ok = _Renderer->Init(Layer);
+                    _Ready.store(Ok, std::memory_order_release);
+                    if (Ok) _View.CreateResources(_Renderer);
+                    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: re-init %{public}s (drawable %dx%d) [render thread]",
+                           Ok ? "ok" : "FAILED", _DrawW.load(std::memory_order_relaxed),
+                           _DrawH.load(std::memory_order_relaxed));
+                }
+                _ReinitDone.store(true, std::memory_order_release);  // MAIN releases _RetiringView
+                PrevTime = 0.0;
+            }
+            continue;
         }
-    } else {
-        FramesSinceAttach = 0;
+        if (!_Ready.load(std::memory_order_acquire)) {  // init failed / mid-reinit — idle, don't spin hot
+            std::this_thread::sleep_for(std::chrono::milliseconds(4));
+            continue;
+        }
+        @autoreleasepool { [self renderOneFrame:&PrevTime]; }
     }
-    if (_BecameActive) {
-        _BecameActive = false;
-        if (_Ready && _InitWhileInactive) [self reattachForActivation];
-    }
-    if (!_Ready) return;
+}
+
+// One free-running render iteration. RENDER thread only; reads drawable size + insets from the atomics
+// MAIN publishes (never the layer directly), and touches _View/_Cam/_DevGesture/_Snap/_Renderer freely
+// because it is their sole owner.
+- (void)renderOneFrame:(double*)PrevTimePtr {
     const double Now = CACurrentMediaTime();
-    const uint64_t ElapsedNs = _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
-    _PrevFrameTime = Now;
+    const uint64_t ElapsedNs = *PrevTimePtr > 0.0 ? static_cast<uint64_t>((Now - *PrevTimePtr) * 1e9) : 0;
+    *PrevTimePtr = Now;
+
+    // #103 render_scale (or a rotation/layout): MAIN resized the layer + published the new drawable size;
+    // recreate the swapchain here, where we own the renderer.
+    if (_ResizeReq.exchange(false, std::memory_order_acq_rel))
+        _Renderer->Resize(_DrawW.load(std::memory_order_relaxed), _DrawH.load(std::memory_order_relaxed));
+
+    // Drain the touch queue and replay the exact hit-test/input logic (was in the UIKit handlers pre-#183)
+    // at the TOP of the frame, so a placement/tap carries ≤1 frame of added latency.
+    [self drainTouches];
 
 #if LUR_AGENT
-    // #103 A/B AUTOPILOT: iOS has no touch injection and no on-device cvars.cfg, so the console-driven
-    // render_scale sweep can't be done by hand headlessly. Cycle it here instead — one agent run then
-    // yields a labelled fps/TRACE sample per scale (applyRenderScaleIfChanged logs "render_scale -> X"
-    // on each step; bucket the TRACE/HEARTBEAT lines that follow until the next such line). LUR_AGENT,
-    // not LUR_INTERNAL: auto-forcing render state is acting for the player, so it is absent from any
-    // build handed over. The manual CVar (below) stays the human's tool in a Development build.
-    {
-        static const char* const kScaleSweep[] = {"1", "0.7", "0.5"};
-        static int      SweepIdx     = 0;
-        static uint64_t SweepAccumNs = 0;
-        SweepAccumNs += ElapsedNs;
-        if (SweepAccumNs > 12'000'000'000ull) {  // 12 s/scale — ~6 TRACE windows to average over
-            SweepAccumNs = 0;
-            SweepIdx = (SweepIdx + 1) % 3;
-            CvRenderScale.SetFromString(kScaleSweep[SweepIdx]);  // applyRenderScaleIfChanged picks it up
-        }
-    }
-#endif
-#if !LUR_SHIPPING
-    [self applyRenderScaleIfChanged];  // #103: pick up a rps.dev.render_scale edit before we acquire
-#endif
-    // #103: split the per-frame cost into GPU-WAIT vs CPU work, so the TRACE line can say whether the
-    // iPhone's ~40 fps FIFO is fillrate/GPU-bound (gpu.wait dominates) or MoltenVK-encoding-bound
-    // (render.view dominates). Mirrors Android's wait-early: pull the fence+acquire idle out front so
-    // render.view below measures ONLY command recording + submit + present, not the vsync stall. On
-    // iOS input is event-driven (touchesMoved), not sampled here, so waiting early costs no input
-    // freshness — it only isolates the measurement (and BeginFrame then finds the image already
-    // acquired and skips its lazy wait, so GPU behaviour is unchanged).
-    if (_Renderer != nullptr) { LUR_TRACE_SCOPE("gpu.wait"); _Renderer->WaitForFrame(); }
-    LUR_TRACE_SCOPE("frame.render");  // whole-frame CPU cost from here to return (nests render.view)
-#if LUR_AGENT
-    // Agent `gesture`: the recognizer lives here on the MAIN thread (it owns the touch stream), so a
-    // sim-thread `gesture` command hands the request across via the atomic. Feed the SHARED recognizer
-    // a synthetic two-finger triple-tap — three taps, each inside the hold + chain windows, exactly as
-    // a finger pair would — proving the recognizer and its wiring to SetDevOverlayOpen without touch
-    // injection (which iOS lacks entirely). Mirrors the Android glue thread.
+    // Agent `gesture`: feed the SHARED recognizer a synthetic two-finger triple-tap. Now on the RENDER
+    // thread (it owns _DevGesture); the sim thread hands the request across via the atomic. Mirrors the
+    // Android glue thread; unchanged effect, just relocated with the rest of the input state.
     if (_AgentGestureRequest.exchange(false, std::memory_order_acquire)) {
         const uint64_t T0 = NowNs();
         bool Opened = false;
@@ -736,12 +855,18 @@ static void UnblockStdio() {
     }
 #endif
 
-    // ---- Reflect the sim thread's published view-state into the HUD. The heavy lifting — session
-    // pump, solo/linked auto-switch, the sim ticks, and scoring — is on the sim thread now
-    // (simThreadLoop); renderFrame only applies the atomics it published and renders. ----
+    // #103: split GPU-WAIT vs CPU work for the TRACE line. The vsync fence+acquire idle now happens on THIS
+    // thread — so frame N+1's CPU work (below) overlaps frame N's drawable wait, which is the whole fix for
+    // the 40fps beat. render.view then measures only command recording + submit + present.
+    { LUR_TRACE_SCOPE("gpu.wait"); _Renderer->WaitForFrame(); }
+    LUR_TRACE_SCOPE("frame.render");  // whole-frame CPU cost from here to return (nests render.view)
+
+    // ---- Reflect the sim thread's published view-state into the HUD. The heavy lifting — session pump,
+    // solo/linked auto-switch, the sim ticks, and scoring — is on the sim thread; this loop only applies
+    // the atomics it published and renders. ----
     // #2: the Linked-opponent ROW + "opponent link established" blink appear when a real PEER connects.
-    // Fire once on the rising edge. GetPeerGuid is set once at handshake, so reading it here on main
-    // (after the acquire load establishes happens-before) is safe even though Session is sim-owned.
+    // Fire once on the rising edge. GetPeerGuid is set once at handshake, so reading it here on the render
+    // thread (after the acquire load establishes happens-before) is safe even though Session is sim-owned.
     if (!_ViewLinkedApplied && _PeerLinkedAtomic.load(std::memory_order_acquire)) {
         _View.SetLinked(true, _Session.GetPeerGuid());   // label the row with the peer's id (#178)
         _View.NotifyPeerLinked();                        // blink the bar
@@ -749,8 +874,8 @@ static void UnblockStdio() {
     }
     // Every frame, not just the link edge: a mismatch is discovered when the peer's fingerprint ARRIVES
     // (which can be after link-up) and clears on reinstall. BuildMismatch() is a monotonic bool the sim
-    // thread sets; reading it from main is the same benign cross-thread read Android's glue does
-    // (RpsMain.cpp SetBuildMismatch), and the setter early-outs when unchanged.
+    // thread sets; reading it cross-thread is the same benign read Android's glue does (SetBuildMismatch),
+    // and the setter early-outs when unchanged.
     _View.SetBuildMismatch(_Lp.BuildMismatch());
     // The sim switched us to the peer -> point the selector at that row (gated on the row existing, so
     // the flag is never consumed before SetLinked ran).
@@ -773,56 +898,24 @@ static void UnblockStdio() {
     const uint32_t Pub = _PublishedTick.load(std::memory_order_acquire);
     if (Pub != _LastConsumedTick && _Mailbox.Consume(_Snap)) {
         _LastConsumedTick = Pub;
-        // RE-ANCHOR interpolation to the RENDER clock. The fixed-timestep tween ramps alpha 0->1 over
-        // one 100 ms tick; anchoring that ramp to the sim thread's own PublishNs was choppy, because
-        // that timestamp carries the sim thread's ~2 ms-poll + heavy-tick jitter, and sampling it at
-        // this GPU-bound ~40 fps render cadence (#103, ~4 frames/tick) ALIASES the per-tick start alpha
-        // (0.05, 0.20, 0.10 ...) into visible judder. Stamping "first seen" with render-thread time
-        // here makes every tick start at alpha~0 on the frame it lands, so the ramp is smooth and
-        // render-locked — exactly what the pre-#69 single-threaded path did (it set _TickLandedNs on
-        // the render thread). Visual only: PublishNs never crosses the determinism boundary.
+        // RE-ANCHOR interpolation to the RENDER clock. The fixed-timestep tween ramps alpha 0->1 over one
+        // 100 ms tick; anchoring that ramp to the sim thread's own PublishNs was choppy (that timestamp
+        // carries the sim thread's ~2 ms-poll + heavy-tick jitter). Stamping "first seen" with render-thread
+        // time here makes every tick start at alpha~0 on the frame it lands, so the ramp is smooth and
+        // render-locked. Visual only: PublishNs never crosses the determinism boundary.
         _Snap.PublishNs = NowNs();
     }
 
-#if LUR_INTERNAL
-    // Always-on render-health heartbeat (#73) — NOT gated on the link (a past diagnosis was blinded
-    // because every periodic line needed a started match). MAIN-thread only: it reads window / renderer
-    // / scene state. The lockstep/convergence DIAG line AND the #69 TRACE line now live on the SIM
-    // thread (simThreadLoop), where the sim state and the ble.toApply drain actually are — which is the
-    // whole point of the split: the drain no longer rides this vsync-locked frame.
-    static uint64_t BeatAccumNs = 0;
-    BeatAccumNs += ElapsedNs;
-    if (BeatAccumNs > 2'000'000'000ull) {
-        BeatAccumNs = 0;
-        // win/key/scene/host: hunting an in-process signal for the never-composited state (#73). scene:
-        // UISceneActivationState (0=fg-active). host: root layer parented into the window's layer tree.
-        UIWindow* Win = self.view.window;
-        const bool LinkedLive = _MatchLive.load(std::memory_order_relaxed) &&
-                                !_SoloActiveAtomic.load(std::memory_order_relaxed);
-        os_log(OS_LOG_DEFAULT,
-               "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld "
-               "host=%d scenes=%lu",
-               _Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
-               UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
-               LinkedLive ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
-               (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
-               self.view.layer.superlayer != nil ? 1 : 0,
-               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
-    }
-#endif
-
-    CAMetalLayer* Layer = [self metalLayer];
-    const float W = static_cast<float>(Layer.drawableSize.width);
-    const float H = static_cast<float>(Layer.drawableSize.height);
+    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
+    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
     const uint64_t Stamp = NowNs();
     const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
     const float VisibleH = H / Ppu(W);
     const float FieldMax = WorldHeightF() - VisibleH > 0.0f ? WorldHeightF() - VisibleH : 0.0f;
     // OS safe areas (#85 feedback): notch/status bar above the HUD, home indicator below the plates.
-    // Points -> pixels via the layer scale.
-    const CGFloat SaScale = [self metalLayer].contentsScale;
-    const UIEdgeInsets Sa = self.view.safeAreaInsets;
-    _View.SetInsets(static_cast<float>(Sa.top * SaScale), static_cast<float>(Sa.bottom * SaScale));
+    // MAIN reads self.view.safeAreaInsets (main-only) and publishes them in px; we consume the atomics.
+    _View.SetInsets(static_cast<float>(_InsetTopPx.load(std::memory_order_relaxed)),
+                    static_cast<float>(_InsetBotPx.load(std::memory_order_relaxed)));
     const float MaxCam = FieldMax + _View.TopHudWorldUnits(W);
     const float MinCam = -_View.BottomHudWorldUnits(W);
     if (!_CamInit) { _Cam.Y = MinCam; _CamInit = true; }
@@ -846,10 +939,96 @@ static void UnblockStdio() {
         _View.Render(_Renderer, _Snap, _Snap.AlphaAt(Stamp), _Cam.Y, W, H, MyTeam == 1,
                      static_cast<float>(ElapsedNs) / 1.0e9f);
     }
-    // main -> sim: the presented-frame count for the LOCKSTEP diag + heartbeat (the sim thread can't
-    // touch the renderer).
-    _PresentedFrames.store(_Renderer != nullptr ? _Renderer->PresentedFrames() : 0u,
-                           std::memory_order_relaxed);
+    // render -> sim/main: the presented-frame count for the LOCKSTEP diag + the MAIN heartbeat (neither of
+    // those threads may touch the renderer).
+    _PresentedFrames.store(_Renderer->PresentedFrames(), std::memory_order_relaxed);
+}
+
+// Drain the MAIN->RENDER touch queue and replay the hit-test logic. swap-on-drain under the lock keeps the
+// critical section tiny (the actual replay runs unlocked). RENDER thread.
+- (void)drainTouches {
+    std::vector<TouchEvent> Batch;
+    {
+        std::lock_guard<std::mutex> Lk(_TouchMx);
+        _TouchQ.swap(Batch);
+    }
+    for (const TouchEvent& E : Batch) {
+        switch (E.Phase) {
+            case TouchEvent::Began: [self replayTouchBegan:E]; break;
+            case TouchEvent::Moved: [self replayTouchMoved:E]; break;
+            case TouchEvent::Ended: [self replayTouchEnded:E]; break;
+        }
+    }
+}
+
+// #183: the MAIN-thread housekeeping tick (0.5 s). Everything that reads UIKit — window/scene/appState —
+// lives HERE, off the render thread: the #73 heal (became-active + persistent orphan), the render-health
+// heartbeat, the render_scale A/B apply + its LUR_AGENT autopilot, and releasing the retiring view once the
+// render thread finished its Shutdown/Init. No rendering happens on main anymore.
+- (void)lifecycleTick {
+    // #73 became-active reattach: the renderer was inited while inactive, so its layer is bound to a
+    // window-server surface that is never composited. Rebuild against the live window server.
+    if (_BecameActive) {
+        _BecameActive = false;
+        if (_Ready.load(std::memory_order_acquire) && _InitWhileInactive) [self reattachForActivation];
+    }
+    // #73 persistent orphan: after a DVT relaunch the view can sit in no window / no scene while we think
+    // we are ready (presents "succeed" into the orphan layer; screen black). Heal, retried ~2 s.
+    static int OrphanTicks = 0;
+    if (_Ready.load(std::memory_order_acquire) &&
+        (self.view.window == nil || self.view.window.windowScene == nil)) {
+        if (++OrphanTicks >= 4) { OrphanTicks = 0; [self reattachForActivation]; }  // ~2 s at 0.5 s/tick
+    } else {
+        OrphanTicks = 0;
+    }
+    // Release the old view/layer once the render thread finished Shutdown/Init on it — on MAIN, so the
+    // UIView deallocs on the main thread.
+    if (_ReinitDone.exchange(false, std::memory_order_acq_rel)) _RetiringView = nil;
+
+#if LUR_AGENT
+    // #103 A/B AUTOPILOT: iOS has no touch injection and no on-device cvars.cfg, so the render_scale sweep
+    // can't be driven by hand headlessly. Cycle it here — one agent run yields a labelled fps/TRACE sample
+    // per scale (applyRenderScaleIfChanged logs "render_scale -> X"; bucket the TRACE/HEARTBEAT lines that
+    // follow until the next such line). LUR_AGENT, not LUR_INTERNAL: auto-forcing render state acts for the
+    // player, so it is absent from any handed-over build.
+    {
+        static const char* const kScaleSweep[] = {"1", "0.7", "0.5"};
+        static int SweepIdx   = 0;
+        static int SweepTicks = 0;
+        if (++SweepTicks >= 24) {  // ~12 s at 0.5 s/tick — ~6 TRACE windows to average over
+            SweepTicks = 0;
+            SweepIdx = (SweepIdx + 1) % 3;
+            CvRenderScale.SetFromString(kScaleSweep[SweepIdx]);  // applyRenderScaleIfChanged picks it up
+        }
+    }
+#endif
+#if !LUR_SHIPPING
+    [self applyRenderScaleIfChanged];  // #103: pick up a rps.dev.render_scale edit
+#endif
+
+#if LUR_INTERNAL
+    // Always-on render-health heartbeat (#73) — NOT gated on the link. Reads window/scene/appState (main);
+    // the presented count comes from the atomic the render thread publishes (main no longer touches the
+    // renderer). The lockstep DIAG + #69 TRACE lines live on the sim thread.
+    static int BeatTicks = 0;
+    if (++BeatTicks >= 4) {  // ~2 s
+        BeatTicks = 0;
+        // win/key/scene/host: hunting an in-process signal for the never-composited state (#73). scene:
+        // UISceneActivationState (0=fg-active). host: root layer parented into the window's layer tree.
+        UIWindow* Win = self.view.window;
+        const bool LinkedLive = _MatchLive.load(std::memory_order_relaxed) &&
+                                !_SoloActiveAtomic.load(std::memory_order_relaxed);
+        os_log(OS_LOG_DEFAULT,
+               "OnlyRps: HEARTBEAT presented=%u appActive=%d linked=%d win=%d key=%d scene=%ld "
+               "host=%d scenes=%lu",
+               _PresentedFrames.load(std::memory_order_relaxed),
+               UIApplication.sharedApplication.applicationState == UIApplicationStateActive ? 1 : 0,
+               LinkedLive ? 1 : 0, Win != nil ? 1 : 0, Win.isKeyWindow ? 1 : 0,
+               (long)(Win.windowScene != nil ? Win.windowScene.activationState : -99),
+               self.view.layer.superlayer != nil ? 1 : 0,
+               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+    }
+#endif
 }
 
 // #69: the SIM/NET thread. Owns Session + Lp + the solo sim; pumps BLE, ticks the sim ~500 Hz, and
@@ -1196,51 +1375,71 @@ static void UnblockStdio() {
     if (_SoloActiveAtomic.load(std::memory_order_acquire)) _SoloIn.Push(E);
     else if (_MatchLive.load(std::memory_order_acquire)) _Lp.QueueLocalEvent(E);
 }
-- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready) return;
-    CAMetalLayer* Layer = [self metalLayer];
-    const CGFloat S = Layer.contentsScale;
+// #183: the UIKit touch handlers are now THIN — they package the raw touch (point in DRAWABLE px, pointer
+// count, timestamp) and push it to the render thread's queue. All hit-testing (which reads _View/_Cam/
+// _Snap/_DevGesture — render-owned now) happens in the replay* methods below, drained once per render frame.
+// The timestamp is captured HERE at the real touch time so the console gesture's hold/chain windows stay
+// correct even though the replay runs up to one frame later.
+- (void)pushTouch:(TouchEvent::EPhase)Phase touches:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
+    if (!_Ready.load(std::memory_order_acquire)) return;
+    const CGFloat S = [self metalLayer].contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
-    const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
+    TouchEvent E;
+    E.Phase = static_cast<uint8_t>(Phase);
+    E.X = static_cast<float>(P.x * S);
+    E.Y = static_cast<float>(P.y * S);
+    E.PointerCount = static_cast<int>(event.allTouches.count);
+    E.Ns = NowNs();
+    std::lock_guard<std::mutex> Lk(_TouchMx);
+    _TouchQ.push_back(E);
+}
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    [self pushTouch:TouchEvent::Began touches:touches event:event];
+}
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    [self pushTouch:TouchEvent::Moved touches:touches event:event];
+}
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    [self pushTouch:TouchEvent::Ended touches:touches event:event];
+}
+
+// ---- RENDER-thread replay of the exact hit-test logic (was inline in the UIKit handlers pre-#183). Reads
+// the published drawable size (_DrawW/_DrawH), not the layer, and touches _View/_Cam/_DevGesture/_Snap
+// freely as their owner. Behaviour is verbatim — only the thread and the coordinate source changed. ----
+- (void)replayTouchBegan:(const TouchEvent&)E {
+    const float X = E.X, Y = E.Y;
     _DownX = X; _DownY = Y;
 #if !LUR_SHIPPING
-    // #151: the console. It was never wired here at all — the two-finger triple-tap that opens it on
-    // Android did nothing on the iPhone, so on-device tuning was Android-only and the iPhone half of a
-    // two-phone playtest was un-tunable (playtest 2026-07-25). The recognizer is the SHARED one
-    // (Lur::Input::ConsoleGesture), not a third hand-written copy: the existing copies had already
-    // drifted three ways, which is how this one came to be missing.
-    _DevGesture.PointersDown(static_cast<int>(event.allTouches.count), NowNs());
-    // While the console is open it OWNS the pointer — a drag anywhere scrolls the cvar list and a
-    // still release is a DevTap. Swallowing the gesture is the point: the panel sits over a LIVE
-    // match, so a scroll must not leak through and pan the camera or start a building drag.
+    // #151: the SHARED console recognizer (Lur::Input::ConsoleGesture). Pointer count + timestamp came
+    // from the UIKit handler; feed them straight in.
+    _DevGesture.PointersDown(E.PointerCount, E.Ns);
+    // While the console is open it OWNS the pointer — a drag scrolls the cvar list and a still release is a
+    // DevTap. Swallowing the gesture is the point: the panel sits over a LIVE match.
     if (_View.DevOverlayOpen()) { _DevGesture.DragBegin(Y); return; }
 #endif
-    const float W = static_cast<float>(Layer.drawableSize.width);
+    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
     const float Off = [self ghostOffPxForWidth:W];
     const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);   // sim thread publishes it
     const bool Live = _MatchLive.load(std::memory_order_acquire);          // solo OR peer match live
     const int Plate = Live ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
     if (Plate >= 0) {
         _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // sets the ghost type; seed at the offset spot
-        const float H = static_cast<float>(Layer.drawableSize.height);
+        const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
         const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
         // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
         _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
     } else {
         // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on release
-        // (touchesEnded), so a press that turns into a camera pan queues nothing.
+        // (replayTouchEnded), so a press that turns into a camera pan queues nothing.
         _View.PressProductionButton(X, Y);
         _Cam.Begin(Y);
     }
 }
-- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready) return;
-    CAMetalLayer* Layer = [self metalLayer];
-    const CGFloat S = Layer.contentsScale;
-    const CGPoint P = [touches.anyObject locationInView:self.view];
-    const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
-    const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+- (void)replayTouchMoved:(const TouchEvent&)E {
+    const float X = E.X, Y = E.Y;
+    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
+    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
 #if !LUR_SHIPPING
     if (_View.DevOverlayOpen()) { _View.DevScroll(_DevGesture.DragMove(Y)); return; }  // #151
 #endif
@@ -1255,13 +1454,10 @@ static void UnblockStdio() {
         _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
     }
 }
-- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready) return;
-    CAMetalLayer* Layer = [self metalLayer];
-    const CGFloat S = Layer.contentsScale;
-    const CGPoint P = [touches.anyObject locationInView:self.view];
-    const float X = static_cast<float>(P.x * S), Y = static_cast<float>(P.y * S);
-    const float W = static_cast<float>(Layer.drawableSize.width), H = static_cast<float>(Layer.drawableSize.height);
+- (void)replayTouchEnded:(const TouchEvent&)E {
+    const float X = E.X, Y = E.Y;
+    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
+    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
 #if !LUR_SHIPPING
     // #151: the console owns the gesture while it is open — a still release is a tap it hit-tests
     // (rows, numpad, the top-left X that closes it), anything else was a scroll already applied.
@@ -1286,11 +1482,10 @@ static void UnblockStdio() {
     }
     _Cam.End();
 #if !LUR_SHIPPING
-    // #151: two-finger triple-tap OPENS the console, with the same windows Android uses because it is
-    // the same recognizer. `event.allTouches` is empty by the time the last touch ends, so the count
-    // was captured in touchesBegan — the candidate is armed there and merely resolved here.
+    // #151: two-finger triple-tap OPENS the console, with the same windows Android uses because it is the
+    // same recognizer. The lift timestamp is E.Ns — the real touch time captured in the UIKit handler.
     const bool WasTwoFinger = _DevGesture.TwoFingerActive();
-    if (_DevGesture.LiftAndShouldOpen(NowNs())) {
+    if (_DevGesture.LiftAndShouldOpen(E.Ns)) {
         _View.SetDevOverlayOpen(true);
         os_log(OS_LOG_DEFAULT, "OnlyRps: dev console opened (two-finger triple-tap, #151)");
         return;
