@@ -21,6 +21,7 @@
 #include <cstdlib>   // setenv: MoltenVK log level, before any vkCreateInstance
 #include <ctime>     // the flight recorder's per-match filename stamp
 #include <mutex>     // #183: guards the main->render touch-event queue
+#include <pthread.h> // #183: the render thread runs on a pthread (not std::thread) for a 4MB stack
 #include <string>
 #include <thread>    // #69/#183: the sim/net thread and now the render thread, both off the UIKit main thread
 #include <vector>    // #183: the touch-event queue backing store
@@ -127,7 +128,17 @@ LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), R
 @end
 
 @interface RpsViewController : UIViewController
+// #183: declared so the C pthread trampoline below can message it (the render thread runs on a raw
+// pthread, not std::thread, to get a 4MB stack — see the ivar note).
+- (void)renderThreadLoop;
 @end
+
+// #183: pthread entry trampoline — re-enters the ObjC render loop. Ctx is the VC passed raw at
+// pthread_create; the VC outlives the thread (-dealloc joins it before destroying its C++ ivars).
+static void* RpsRenderThreadTrampoline(void* Ctx) {
+    @autoreleasepool { [(__bridge RpsViewController*)Ctx renderThreadLoop]; }
+    return nullptr;
+}
 
 // #69: iOS mirrors Android's #91 split — a dedicated SIM thread owns Session + Lp + the solo sim
 // (pumps BLE, ticks the lockstep/solo sim ~500 Hz, publishes snapshots). #183 then took the render
@@ -243,7 +254,13 @@ LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), R
     //      Init/Shutdown are handed to the render thread (via _ReinitReq) so the renderer is single-threaded
     //      even across a #73 rebuild. The pause/ack pair parks the render thread at a safe point for BOTH a
     //      background transition (a free-running loop must not vend drawables off-screen) and a reattach. ----
-    std::thread          _RenderThread;
+    // #183: a raw pthread, NOT std::thread — the render call chain (GameView::Render -> Dropdown::Draw ->
+    // Text) needs ~1MB of stack, which it got for free while it ran on the MAIN thread. A std::thread gets
+    // the OS default secondary-thread stack (512KB on iOS) with NO way to enlarge it, and the chain
+    // overflowed the guard page on launch (SIGBUS in ___chkstk_darwin). pthread_attr_setstacksize gives it
+    // a generous 4MB. The sim thread stays std::thread — its path is shallow.
+    pthread_t            _RenderThread;
+    bool                 _RenderThreadStarted;
     std::atomic<bool>    _RenderRunning;   // main -> render: keep looping (cleared + joined on teardown)
     std::atomic<bool>    _Ready;           // render -> main: renderer inited (main's touch gate + lifecycle read it)
     std::atomic<bool>    _LayerReady;      // main -> render: the first CAMetalLayer is published; Init may run
@@ -419,7 +436,16 @@ static void UnblockStdio() {
     // first sized layer (viewDidLayoutSubviews) before creating the renderer. Same raw-self capture /
     // stop-before-destroy contract as the sim thread. ----
     _RenderRunning.store(true, std::memory_order_relaxed);
-    _RenderThread = std::thread([self] { [self renderThreadLoop]; });
+    // pthread (not std::thread) so we can hand it a 4MB stack — see the ivar note. The trampoline just
+    // re-enters the ObjC loop; self is passed raw (VC outlives the thread, which -dealloc joins first).
+    pthread_attr_t RenderAttr;
+    pthread_attr_init(&RenderAttr);
+    pthread_attr_setstacksize(&RenderAttr, 4u * 1024u * 1024u);   // 4MB, page-aligned
+    _RenderThreadStarted =
+        (pthread_create(&_RenderThread, &RenderAttr, &RpsRenderThreadTrampoline, (__bridge void*)self) == 0);
+    pthread_attr_destroy(&RenderAttr);
+    if (!_RenderThreadStarted)
+        os_log_error(OS_LOG_DEFAULT, "OnlyRps: render thread create FAILED #183");
 
     // #183: MAIN-thread housekeeping tick (no rendering) — the #73 heal, the became-active reattach, the
     // render-health heartbeat and the render_scale A/B. Replaces the per-frame lifecycle work the
@@ -435,7 +461,7 @@ static void UnblockStdio() {
     // tear down. Clear the pause flag too, so a parked thread wakes to observe !running and exits its loop.
     _RenderRunning.store(false, std::memory_order_release);
     _RenderPauseReq.store(false, std::memory_order_release);
-    if (_RenderThread.joinable()) _RenderThread.join();
+    if (_RenderThreadStarted) { pthread_join(_RenderThread, nullptr); _RenderThreadStarted = false; }
     _SimRunning.store(false, std::memory_order_release);  // stop the loop, then wait it out
     if (_SimThread.joinable()) _SimThread.join();
 }
@@ -763,9 +789,9 @@ static void UnblockStdio() {
 // #183: the RENDER thread. Owns the renderer + _View + _Cam + _DevGesture + _Snap; free-runs the frame
 // loop with FIFO as the single vsync clock (no CADisplayLink). Startup: wait for MAIN to publish the
 // first sized layer, then create + Init the renderer HERE (so all Vulkan is single-threaded). Each
-// iteration is wrapped in its OWN @autoreleasepool — this is a std::thread, not an NSThread, so nothing
-// drains the CAMetalDrawable MoltenVK retains per frame otherwise. Raw-self capture / stop-before-destroy
-// contract identical to simThreadLoop.
+// iteration is wrapped in its OWN @autoreleasepool — this is a raw pthread (#183: for a 4MB stack), not
+// an NSThread, so nothing drains the CAMetalDrawable MoltenVK retains per frame otherwise. Raw-self
+// capture / stop-before-destroy contract identical to simThreadLoop.
 - (void)renderThreadLoop {
     while (_RenderRunning.load(std::memory_order_acquire) &&
            !_LayerReady.load(std::memory_order_acquire))
