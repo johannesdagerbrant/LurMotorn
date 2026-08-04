@@ -444,6 +444,16 @@ private:
     float SmoothErrY[MaxUnits] = {};
     float LastSnapPosX[MaxUnits] = {};   // previous snapshot's Pos per slot (world), for the chain test
     float LastSnapPosY[MaxUnits] = {};
+    // Velocity-consistency clamp for the extrapolation (immediacy pass follow-up). Extrapolating a
+    // unit's raw Pos-Prev overshoots at velocity DISCONTINUITIES: a cart that hard-stops at a mine or
+    // REVERSES toward camp keeps going in the shader's prediction, then snaps back — the "carts
+    // overshoot weirdly" report. So extrapolate only the part of the velocity that PERSISTED from last
+    // tick: on a sign flip (reversal) use 0; otherwise the smaller magnitude (softens deceleration).
+    // PrevVel is last snapshot's velocity; ExtrapVel is the clamped value the draw loop uses.
+    float PrevVelX[MaxUnits] = {};
+    float PrevVelY[MaxUnits] = {};
+    float ExtrapVelX[MaxUnits] = {};
+    float ExtrapVelY[MaxUnits] = {};
     uint8_t LastSnapType[MaxUnits] = {};   // slot-identity guard: a reused slot must not "smooth" a jump
     uint8_t LastSnapTeam[MaxUnits] = {};
     bool  LastSnapAlive[MaxUnits] = {};
@@ -463,7 +473,9 @@ private:
     // Buildings have zero velocity, so they never move — only real motion is extrapolated. The cost is
     // a small overshoot on sharp direction changes (bounded by one tick of a slow RTS unit's travel);
     // dial it back toward 0 if that reads badly. Tune on device.
-    static constexpr float RenderLeadTicks = 1.0f;
+    static constexpr float RenderLeadTicks = 0.5f;  // half a tick of lead (was 1.0): keeps most of the
+                                                    // perceptual immediacy on slow units while halving
+                                                    // the residual stop-overshoot. Tune on device.
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;

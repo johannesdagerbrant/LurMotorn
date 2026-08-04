@@ -980,6 +980,21 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 SmoothErrX[I] = 0.0f;  // new/replaced unit, or a jump too big to be a correction -> snap
                 SmoothErrY[I] = 0.0f;
             }
+            // Velocity-consistency clamp for the extrapolation: only extrapolate the part of this
+            // tick's velocity that PERSISTED from last tick. A sign flip (reversal) -> 0 (don't shoot
+            // past a turn); otherwise the smaller magnitude (softens deceleration). Steady motion is
+            // unchanged (this≈last -> full), so smooth flocking still leads; rigid carts stop turning
+            // inside-out. Recomputed once per published snapshot.
+            const float ThisVx = SameUnit ? FW(Snap.PosX[I]) - FW(Snap.PrevX[I]) : 0.0f;
+            const float ThisVy = SameUnit ? FW(Snap.PosY[I]) - FW(Snap.PrevY[I]) : 0.0f;
+            auto Persisted = [](float Th, float La) -> float {
+                if (Th * La <= 0.0f) return 0.0f;                          // reversed / either zero -> none
+                return (std::fabs(Th) < std::fabs(La)) ? Th : La;          // same sign -> smaller magnitude
+            };
+            ExtrapVelX[I] = Persisted(ThisVx, PrevVelX[I]);
+            ExtrapVelY[I] = Persisted(ThisVy, PrevVelY[I]);
+            PrevVelX[I] = ThisVx;
+            PrevVelY[I] = ThisVy;
             LastSnapPosX[I] = FW(Snap.PosX[I]);
             LastSnapPosY[I] = FW(Snap.PosY[I]);
             LastSnapType[I] = Snap.Type[I];
@@ -1027,8 +1042,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         //     (velocity 0), so only real motion is extrapolated.
         const float PrevWx = FW(Snap.PrevX[I]), PrevWy = FW(Snap.PrevY[I]);
         const float PosWx = FW(Snap.PosX[I]),   PosWy = FW(Snap.PosY[I]);
-        const float Ex = SmoothErrX[I] + (PosWx - PrevWx) * RenderLeadTicks;
-        const float Ey = SmoothErrY[I] + (PosWy - PrevWy) * RenderLeadTicks;
+        // Lead by the velocity-CONSISTENCY-clamped velocity (not raw Pos-Prev), so a stop/reversal
+        // doesn't shoot the ghost past and snap back.
+        const float Ex = SmoothErrX[I] + ExtrapVelX[I] * RenderLeadTicks;
+        const float Ey = SmoothErrY[I] + ExtrapVelY[I] * RenderLeadTicks;
         D.PrevX = SX(PrevWx + Ex); D.PrevY = SY(PrevWy + Ey);
         D.CurX = SX(PosWx + Ex);   D.CurY = SY(PosWy + Ey);
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
