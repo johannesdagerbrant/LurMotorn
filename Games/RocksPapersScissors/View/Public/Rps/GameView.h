@@ -449,6 +449,11 @@ private:
     bool  LastSnapAlive[MaxUnits] = {};
     uint64_t LastSmoothPublishNs = 0;    // absorb the discontinuity once per PUBLISHED snapshot
     static constexpr float CorrectionHalflifeSec = 0.07f;  // ~4 frames @60 Hz; tune on device (Phase 5)
+    // Max discontinuity (world units) still treated as a smoothable rollback correction. Real
+    // corrections are ~1 unit (≈1 resim tick of a slow unit, measured); a bigger jump is a SLOT REUSE
+    // (a recycled slot's new unit) and must SNAP, not ease in from the dead unit's spot — otherwise a
+    // respawn "flies in from the far corner". Well above any real correction, well below a cross-map jump.
+    static constexpr float MaxSmoothWorld = 8.0f;
     // ---- Render EXTRAPOLATION lead (Docs/Journal/2026-08-03, immediacy pass) ----
     // The view interpolates Prev->Pos over one sim step, so it structurally shows the tick it is
     // HEADING TO only at alpha=1 — i.e. it lags the sim by ~1 tick (~100 ms at 10 Hz). Shift both

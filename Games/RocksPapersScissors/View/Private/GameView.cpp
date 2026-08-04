@@ -964,13 +964,20 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             const bool Alive = Snap.IsAlive(I);
             const bool SameUnit = Alive && LastSnapAlive[I] && LastSnapType[I] == Snap.Type[I] &&
                                   LastSnapTeam[I] == Snap.Team[I];
-            if (SameUnit) {
-                // Discontinuity = where we last had this unit vs where this snapshot says it begins.
-                // Add it to the error so the DISPLAYED position doesn't jump; the decay eases it out.
-                SmoothErrX[I] += LastSnapPosX[I] - FW(Snap.PrevX[I]);
-                SmoothErrY[I] += LastSnapPosY[I] - FW(Snap.PrevY[I]);
+            // Discontinuity = where we last had this unit vs where this snapshot says it begins.
+            const float Dx = SameUnit ? LastSnapPosX[I] - FW(Snap.PrevX[I]) : 0.0f;
+            const float Dy = SameUnit ? LastSnapPosY[I] - FW(Snap.PrevY[I]) : 0.0f;
+            // Only SMOOTH a plausible rollback correction. A real one is at most a couple of ticks of
+            // slow-unit movement (~1 world unit; measured ~1 resim tick/rollback), so a jump bigger than
+            // MaxSmoothWorld is NOT a correction — it is a SLOT REUSE (a dead unit's slot taken by a new
+            // same-Type/Team unit somewhere else, e.g. an attacker that died at the far end respawning at
+            // your base). Absorbing that would ease the new unit in FROM the dead one's position — the
+            // "flying in from the far corner" bug. So snap it: reset the error, don't smooth.
+            if (SameUnit && Dx * Dx + Dy * Dy <= MaxSmoothWorld * MaxSmoothWorld) {
+                SmoothErrX[I] += Dx;  // add to the error so the DISPLAYED position doesn't jump; decay eases it
+                SmoothErrY[I] += Dy;
             } else {
-                SmoothErrX[I] = 0.0f;  // new/replaced unit in this slot: nothing to reconcile
+                SmoothErrX[I] = 0.0f;  // new/replaced unit, or a jump too big to be a correction -> snap
                 SmoothErrY[I] = 0.0f;
             }
             LastSnapPosX[I] = FW(Snap.PosX[I]);

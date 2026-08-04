@@ -419,7 +419,16 @@ constexpr uint32_t RollbackHorizon = 16;    // 1.6 s at TickRateHz = 10
 // sequence are unchanged — only its wall-clock timing moves earlier — so determinism and the
 // one-frame-per-tick invariant hold; the peer just receives it sooner (and rolls back less). Keep this
 // SMALL: it is how far the sim may lead wall time, i.e. the peer's extra rollback-exposure ceiling.
-constexpr uint32_t InputLeadTicks = 1;      // ≤100 ms of lead; 0 disables send-on-tap
+// DISABLED (set to 0) after two-phone testing 2026-08-04: producing a tick EARLY borrows from the
+// wall clock and then SKIPS production at the next boundary to pay it back — and a skipped tick is a
+// ~100 ms window with no new sim state, i.e. a render FREEZE. With queue-on-press firing an input on
+// every button press-down, that fired constantly and read as motion JITTER. The ~50 ms of local
+// input latency it saved was not worth the hitches. Kept as a tunable (and the produce-ahead code
+// stays behind it) so the wire-only variant — send the frame early WITHOUT the local early tick,
+// which avoids the payback freeze — can be revisited for goal B if wanted. 0 = plain wall-clock
+// production (input still registers on press-down via queue-on-press; it just waits for the boundary).
+constexpr uint32_t InputLeadTicks = 0;
+
 // LockstepPeer::Execute drains at most this many ticks per call, so a catch-up burst
 // (post-background / thermal / -O0) can't monopolize the loop and starve input -> ANR
 // (#90; forensics 2026-07-19). Backlog drains over subsequent calls, never discarded.

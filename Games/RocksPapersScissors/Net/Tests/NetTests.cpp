@@ -544,18 +544,26 @@ static void TestSendOnTapProducesBeforeWallTick() {
     const uint32_t HeadBefore = A.ExecTick();
     Qa.Q.clear();  // ignore prior traffic; measure only what the tap produces
 
-    // Tap, then tick a SUB-tick slice (10 ms << 100 ms): no wall tick elapses, but send-on-tap must
-    // still produce + send the frame this call.
+    // Tap, then tick a SUB-tick slice (10 ms << 100 ms): no wall tick elapses.
     A.QueueLocalEvent(InputEvent::Queue(0, 2, 1));
     A.Tick(OneTickNs / 10);
     int Inputs = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++Inputs;
-    CHECK(Inputs == 1);                        // it hit the wire immediately, not at the 100 ms boundary
-    CHECK(A.ExecTick() == HeadBefore + 1);     // and executed locally now (the head advanced one tick)
-
-    // No runaway: further sub-tick calls with nothing pending must NOT produce ahead again — the lead
-    // is capped at InputLeadTicks (=1 here), paid back at the next real boundary.
-    A.Tick(OneTickNs / 10); A.Tick(OneTickNs / 10);
-    CHECK(A.ExecTick() == HeadBefore + 1);
+    if (InputLeadTicks > 0) {
+        // send-on-tap ENABLED: the frame is produced + sent this call, ahead of the boundary, and the
+        // head advances one tick — capped at InputLeadTicks (further sub-tick calls don't run further).
+        CHECK(Inputs == 1);
+        CHECK(A.ExecTick() == HeadBefore + 1);
+        A.Tick(OneTickNs / 10); A.Tick(OneTickNs / 10);
+        CHECK(A.ExecTick() == HeadBefore + 1);
+    } else {
+        // send-on-tap DISABLED (current default): a sub-tick call produces nothing; the input waits for
+        // the wall-tick boundary — the plain wall-clock cadence that keeps rendering smooth.
+        CHECK(Inputs == 0);
+        CHECK(A.ExecTick() == HeadBefore);
+        A.Tick(OneTickNs);  // a full tick now produces + sends it
+        int After = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++After;
+        CHECK(After >= 1);
+    }
 
     // Deliver + settle: the peer got it, the sims agree, and the event actually took.
     Deliver(Qa, B);
