@@ -132,6 +132,53 @@ static void Deliver(Outbox& From, LockstepPeer& To) {
 }
 static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
 
+// Drive both peers to the SAME head so raw head-state hashes are comparable. Under rollback the two
+// run on independent wall clocks and their speculative heads can sit a tick apart (most visibly after
+// a staggered recovery reseed) even though their CONFIRMED timelines already agree — lockstep gave
+// equal heads for free, rollback needs this. Ticks whichever peer is behind (speculating the idle
+// peer forward) until the heads meet, delivering both ways each step.
+static void SettleUntilEqual(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
+    for (int I = 0; I < 64 && A.ExecTick() != B.ExecTick(); ++I) {
+        if (A.ExecTick() <= B.ExecTick()) A.Tick(OneTickNs);
+        if (B.ExecTick() <= A.ExecTick()) B.Tick(OneTickNs);
+        Deliver(Qa, B);
+        Deliver(Qb, A);
+    }
+}
+
+// A link that holds each datagram for `Lag` steps before releasing it — models a peer whose frames
+// arrive `Lag` ticks late. This is the harness that separates rollback from lockstep: under lag,
+// lockstep STALLS at the ceiling (it cannot run a tick until the peer's real input is in hand), while
+// rollback speculates across the gap (predicting the peer idle) and rolls back only when a delivered
+// frame contradicts the guess. Absorb() takes a peer's outbox; Release() delivers everything now due.
+struct LaggyLink {
+    explicit LaggyLink(int LagSteps) : Lag(LagSteps) {}
+    int Lag;
+    int Clock = 0;
+    struct Item { int ReleaseAt; Lur::Net::EMsgType Type; std::vector<uint8_t> Data; };
+    std::vector<Item> Q;
+    void Absorb(Outbox& From) {
+        for (auto& M : From.Q) Q.push_back({Clock + Lag, M.first, M.second});
+        From.Q.clear();
+    }
+    void Release(LockstepPeer& To) {
+        std::vector<Item> Keep;
+        for (auto& It : Q) {
+            if (It.ReleaseAt <= Clock) To.OnMessage(It.Type, It.Data.data(), It.Data.size());
+            else Keep.push_back(std::move(It));
+        }
+        Q.swap(Keep);
+    }
+    void Tick() { ++Clock; }
+    bool Empty() const { return Q.empty(); }
+    // Deliver every still-held frame at once, ignoring the lag — used to drain the in-flight tail
+    // before a no-lag settle so both peers reach a common CONFIRMED frontier to compare.
+    void Flush(LockstepPeer& To) {
+        for (auto& It : Q) To.OnMessage(It.Type, It.Data.data(), It.Data.size());
+        Q.clear();
+    }
+};
+
 // #139: drive both peers through the pre-match placement handshake — each places its mining camp
 // (its "ready"), the camps are exchanged, and the match starts from tick 0 with both camps in.
 // Tests that don't otherwise place a camp call this so the clock actually starts.
@@ -337,10 +384,10 @@ static void TestConfirmedTickTracksBothTimelines() {
     LockstepPeer A, B;
     A.Init(0xC0F1, 0, Enqueue, &Qa);
     B.Init(0xC0F1, 1, Enqueue, &Qb);
-    // Fresh match: ticks 0..Delay-1 are the by-convention empty pre-seed on BOTH timelines, so they
-    // are already confirmed; nothing beyond is. Hence the confirmed frontier is exactly Delay-1.
-    CHECK(A.ConfirmedTick() == static_cast<int64_t>(InputDelayTicks) - 1);
-    CHECK(B.ConfirmedTick() == static_cast<int64_t>(InputDelayTicks) - 1);
+    // Fresh match under rollback: both input timelines start EMPTY (no delay pre-seed), so nothing is
+    // confirmed yet — the frontier is -1. (Tick 0's camps are seeded only once both peers ready.)
+    CHECK(A.ConfirmedTick() == -1);
+    CHECK(B.ConfirmedTick() == -1);
 
     PlaceCampsAndStart(A, B, Qa, Qb);
     CHECK(A.MatchStarted() && B.MatchStarted());
@@ -367,6 +414,119 @@ static void TestConfirmedTickTracksBothTimelines() {
     }
     CHECK(A.ConfirmedTick() > 100);                    // it genuinely advanced with the match
     CHECK(A.ConfirmedTick() == B.ConfirmedTick());     // both peers agree on the confirmed frontier
+}
+
+// ================================================================================================
+// Rollback Phase 2 BEHAVIOUR (the responsiveness experiment). These are the test-first spec for the
+// execution-model replacement: local input applies at the head with NO scheduling delay, execution
+// speculates the peer forward under lag instead of stalling, a delivered frame that contradicts the
+// prediction rolls back and both peers re-converge bit-identically, and runaway speculation is capped
+// at the rollback horizon. They FAIL against the old W+Delay lockstep and pass once Phase 2 lands.
+// ================================================================================================
+
+// ---- The headline: a local action executes at the tick it was issued, not InputDelayTicks later. ----
+static void TestRollbackLocalInputHasNoSchedulingDelay() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x0011, 0, Enqueue, &Qa);
+    B.Init(0x0011, 1, Enqueue, &Qb);
+    A.SetRecording(true);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    for (int I = 0; I < 6; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+
+    const uint32_t IssueHead = A.ExecTick();  // the tick the local action will apply AT under rollback
+    A.QueueLocalEvent(InputEvent::Queue(0, 2, 1));  // queue one unit at team 0's own camp (slot 2)
+    A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+
+    int FoundTick = -1;
+    const std::vector<std::vector<InputEvent>>& Rec = A.RecordedEvents();
+    for (std::size_t T = 0; T < Rec.size(); ++T)
+        for (const InputEvent& E : Rec[T])
+            if (E.Kind == EventQueueUnits && E.Team == 0 && E.X == 2) FoundTick = static_cast<int>(T);
+    CHECK(FoundTick >= 0);                              // it executed…
+    CHECK(FoundTick == static_cast<int>(IssueHead));   // …AT the head it was issued on — zero delay
+}
+
+// ---- Under peer lag, the local head keeps pace with the wall clock (speculates) instead of stalling. ----
+static void TestRollbackAdvancesUnderPeerLag() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x1A66, 0, Enqueue, &Qa);
+    B.Init(0x1A66, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    LaggyLink AtoB(3), BtoA(3);  // 3-tick one-way lag each direction; neither peer issues input
+    const int Steps = 40;
+    for (int I = 0; I < Steps; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        AtoB.Absorb(Qa); BtoA.Absorb(Qb);
+        AtoB.Release(B); BtoA.Release(A);
+        AtoB.Tick(); BtoA.Tick();
+    }
+    // Rollback keeps A's head near its wall clock despite B's frames lagging 3 ticks — lockstep would
+    // sit ~3 behind. (Started with WallTicks 1 at tick 0, so the head is ~Steps.)
+    CHECK(A.ExecTick() >= static_cast<uint32_t>(Steps) - 2);
+    CHECK(static_cast<int64_t>(A.ExecTick()) - A.ConfirmedTick() >= 1);  // there is live speculation
+    CHECK(A.Rollbacks() == 0);  // both idle -> the "peer idle" prediction was right every tick
+
+    AtoB.Flush(B); BtoA.Flush(A);  // deliver the in-flight tail, then settle with no lag
+    for (int I = 0; I < 8; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // confirmed state converges
+}
+
+// ---- A delivered frame that contradicts the "peer idle" prediction rolls back and re-converges. ----
+static void TestRollbackCorrectsMispredictionAndConverges() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x0155, 0, Enqueue, &Qa);
+    B.Init(0x0155, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+
+    LaggyLink AtoB(2), BtoA(2);
+    const int Steps = 120;
+    for (int I = 0; I < Steps; ++I) {
+        // B issues real production at irregular ticks — A speculated those ticks as "B idle", so each
+        // one that lands late is a misprediction A must roll back and re-simulate.
+        if (I % 9 == 4) B.QueueLocalEvent(InputEvent::Queue(1, 3, 2));
+        if (I % 13 == 2) A.QueueLocalEvent(InputEvent::Queue(0, 2, 2));
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        AtoB.Absorb(Qa); BtoA.Absorb(Qb);
+        AtoB.Release(B); BtoA.Release(A);
+        AtoB.Tick(); BtoA.Tick();
+    }
+    CHECK(A.Rollbacks() > 0);          // B's late real input really did force corrections on A
+    CHECK(A.ResimTicks() > 0);
+
+    AtoB.Flush(B); BtoA.Flush(A);
+    for (int I = 0; I < 12; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());  // deterministic convergence after rollbacks
+}
+
+// ---- Speculation is capped at the rollback horizon: a silent peer can't make the head run away. ----
+static void TestRollbackSpeculationCappedAtHorizon() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x4021, 0, Enqueue, &Qa);
+    B.Init(0x4021, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 5; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+
+    // B goes silent (nothing delivered either way). A keeps ticking well past the horizon, but must
+    // NOT speculate more than RollbackHorizon ticks beyond the confirmed frontier — and must NOT yet
+    // draw (the #162 ceiling bound is seconds away, far beyond this many ticks).
+    for (int I = 0; I < static_cast<int>(RollbackHorizon) + 25; ++I) {
+        A.Tick(OneTickNs);
+        Qa.Q.clear();  // A's frames go nowhere; B sends nothing back
+    }
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(static_cast<int64_t>(A.ExecTick()) - A.ConfirmedTick() <= static_cast<int64_t>(RollbackHorizon) + 1);
 }
 
 #if LUR_INTERNAL
@@ -1295,15 +1455,16 @@ static void TestLostInputFrameIsDetectedAndLocated() {
     CHECK(A.MatchStarted() && B.MatchStarted());
     CHECK(B.InputGaps() == 0);
 
-    // Five clean produced ticks. The match starts with WallTicks==0 (the starting Tick returns before
-    // producing), so these are peer frames for exec ticks Delay+0 .. Delay+4.
+    // Five clean produced ticks.
     for (int I = 0; I < 5; ++I) {
         A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
     }
     CHECK(B.InputGaps() == 0);   // a clean run must never cry wolf
 
-    // Lose A's next frame — the one for exec tick Delay+5.
-    const uint32_t LostTick = InputDelayTicks + 5;
+    // Lose A's next produced frame. When A is caught up, the next frame it produces is for tick ==
+    // its current head (ProduceAndSend stamps LocalEvents.size() == WallTicks == ExecTick), so capture
+    // that as the tick the gap detector must name.
+    const uint32_t LostTick = A.ExecTick();
     A.Tick(OneTickNs);
     B.Tick(OneTickNs);
     DeliverDroppingNthInput(Qa, B, 0);   // A produces exactly one frame per Tick at this rate
@@ -1573,7 +1734,10 @@ static void TestDesyncRecoversToACommonStateAndKeepsPlaying() {
     CHECK(A.RecoveryAttempts() >= 1);      // the divergence was detected, not absorbed
     CHECK(B.RecoveryAttempts() >= 1);
 
-    // THE POINT: one state again, and the match is still being played.
+    // THE POINT: one state again, and the match is still being played. Settle heads first — the
+    // recovery reseed left the two speculative heads a tick apart (independent wall clocks), though
+    // their confirmed timelines already agree.
+    SettleUntilEqual(A, B, Qa, Qb);
     CHECK(A.GetSim().Result == ResultOngoing);
     CHECK(B.GetSim().Result == ResultOngoing);
     CHECK(!A.Desynced() && !B.Desynced());
@@ -1592,6 +1756,7 @@ static void TestDesyncRecoversToACommonStateAndKeepsPlaying() {
         CHECK(!A.Desynced() && !B.Desynced());
     }
     CHECK(A.ExecTick() > Resumed + 40);
+    SettleUntilEqual(A, B, Qa, Qb);
     CHECK(A.ExecTick() == B.ExecTick());
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
     CHECK(A.RecoveryAttempts() == 1);      // one divergence, one recovery — it did not re-trip
@@ -1684,10 +1849,18 @@ static void TestDesyncRecoveryIsBoundedThenDraws() {
     }
     CHECK(Rounds < 400);                                        // it TERMINATED — no infinite loop
     CHECK(A.RecoveryAttempts() <= LockstepPeer::MaxDesyncRecoveries);
-    // BOTH peers must reach the SAME verdict. Both cross-check the same anchors, so both spend their
-    // budget on the same trip — an asymmetric ending (one drawing, one playing on) would be the
-    // consistency rule broken, and worse than either outcome on its own.
-    CHECK(A.GetSim().Result == ResultDraw);                     // the bounded last resort
+    CHECK(A.GetSim().Result == ResultDraw);                     // A hit the bounded last resort first
+    // BOTH peers must reach the SAME verdict (Draw) — one drawing while the other plays on would break
+    // the consistency rule. Under rollback the two exhaust their budgets a beat apart on independent
+    // clocks (the loop above stopped the instant A drew), so drive B alone to its own terminal draw —
+    // ticking A would start its post-match restart. With A drawn and silent, B starves past the
+    // rollback horizon and the #162 ceiling bound turns that into B's draw. Same verdict, reached
+    // independently, which is exactly the consistency the rule demands.
+    uint64_t BHeld = 0;
+    while (B.GetSim().Result == ResultOngoing && BHeld < 3 * LockstepPeer::CeilingStallTimeoutNs) {
+        B.Tick(OneTickNs);
+        BHeld += OneTickNs;
+    }
     CHECK(B.GetSim().Result == ResultDraw);
     // And the draw still recovers the SESSION, which is what e6d6abf bought and must not be lost:
     // the post-match hold expires, a fresh match begins, and the latch clears.
@@ -1829,31 +2002,37 @@ static void TestDesyncIsNeverTerminal() {
     CHECK(D.GetSim().Result == ResultOngoing);
 }
 
-// ---- #90: Execute caps ticks per call so a catch-up burst can't starve input (ANR) ----
+// ---- #90: the speculate step caps ticks per call so a catch-up burst can't starve input (ANR) ----
+// Under rollback the head is bounded by the LOCAL wall clock (we never speculate past our own produced
+// ticks), so piling peer input on A while A doesn't tick advances nothing — the ceiling is A's own
+// WallTicks. The cap then bites on the one big local advance that follows.
 static void TestLockstepExecuteCapBounded() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
     A.Init(0x2468, 0, Enqueue, &Qa);
     B.Init(0x2468, 1, Enqueue, &Qb);
-    PlaceCampsAndStart(A, B, Qa, Qb);  // #139: match started; both still at WallTicks 0
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 3; ++I) {  // settle so the head has caught up to A's own wall clock
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Head0 = A.ExecTick();  // head == A's WallTicks now (both idle, caught up)
 
-    // Pile up a big peer-input backlog on A WITHOUT letting it execute: A never ticks,
-    // so WallTicks=0 keeps the ceiling shut while PeerEvents accumulates.
+    // Pile up a big peer-input backlog on A WITHOUT letting it advance its own clock: A never ticks,
+    // so its WallTicks stays put and the head cannot run past it however many peer frames arrive.
     const int N = 40;
-    for (int I = 0; I < N; ++I) B.Tick(OneTickNs);  // B produces N input frames (empty batches suffice)
+    for (int I = 0; I < N; ++I) B.Tick(OneTickNs);  // B produces N frames (empty batches suffice)
     Deliver(Qb, A);
-    CHECK(A.ExecTick() == 0);
+    CHECK(A.ExecTick() == Head0);  // peer input alone does not move the head — the local clock gates it
 
-    // One big local advance opens the ceiling to N at once (production caps at 64, so
-    // WallTicks jumps to N in a single Tick). WITHOUT the cap Execute would drain all N
-    // here — the ANR. WITH it, at most MaxExecTicksPerService this call.
+    // One big local advance jumps WallTicks by N at once (production caps at 64). WITHOUT the per-call
+    // cap the speculate step would drain all N here — the ANR. WITH it, at most MaxExecTicksPerService.
     A.Tick(static_cast<uint64_t>(N) * OneTickNs);
-    CHECK(A.ExecTick() <= MaxExecTicksPerService);  // the per-call cap held
-    CHECK(A.ExecTick() > 0);                         // but it made progress
+    CHECK(A.ExecTick() <= Head0 + MaxExecTicksPerService);  // the per-call cap held
+    CHECK(A.ExecTick() > Head0);                            // but it made progress
 
     // Backlog drains over subsequent calls; nothing is discarded.
     for (int I = 0; I < 100; ++I) A.Tick(OneTickNs);
-    CHECK(A.ExecTick() >= static_cast<uint32_t>(N));  // drained past the whole backlog
+    CHECK(A.ExecTick() >= Head0 + static_cast<uint32_t>(N));  // drained past the whole backlog
     CHECK(!A.Desynced());
 }
 
@@ -1902,7 +2081,9 @@ static void TestLockstepDetectsDivergence() {
     // Corrupt A's state (simulate a lost input / a determinism bug on one peer).
     const_cast<Sim&>(A.GetSim()).Teams[0].Gold += 999;
 
-    for (int I = 0; I < 15 && A.RecoveryAttempts() == 0; ++I) {  // run to the next anchor
+    // Run past the anchor. Under rollback, detection is no longer simultaneous — the confirmed frontier
+    // crosses the anchor tick a tick apart on the two peers — so wait for BOTH to see it, not just A.
+    for (int I = 0; I < 20 && (A.RecoveryAttempts() == 0 || B.RecoveryAttempts() == 0); ++I) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -1916,13 +2097,17 @@ static void TestLockstepDetectsDivergence() {
     CHECK(B.RecoveryAttempts() >= 1);
 }
 
-// ---- Starve one side: the other stalls at the ceiling, then resumes cleanly ----
-static void TestLockstepCeilingStallAndResume() {
+// ---- Rollback rides through a peer blip by SPECULATING (not stalling), then re-converges ----
+// The old lockstep version asserted the starved peer STALLED at the ceiling after only the delay
+// slack. Rollback inverts exactly that: with the peer's frames withheld, the local head keeps
+// advancing on its own wall clock (predicting the peer idle), up to the horizon — that is the
+// responsiveness the refactor exists for. On resume the held backlog arrives and both re-converge.
+static void TestRollbackRidesThroughPeerBlipAndResumes() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
     A.Init(0x99, 0, Enqueue, &Qa);
     B.Init(0x99, 1, Enqueue, &Qb);
-    PlaceCampsAndStart(A, B, Qa, Qb);  // #139: start the match before the blip scenario
+    PlaceCampsAndStart(A, B, Qa, Qb);
 
     for (int I = 0; I < 15; ++I) {  // warm up in sync
         A.Tick(OneTickNs);
@@ -1932,19 +2117,21 @@ static void TestLockstepCeilingStallAndResume() {
     }
     const uint32_t Before = A.ExecTick();
 
-    // Blip: A stops receiving B's messages (Qb held), both keep ticking.
-    for (int I = 0; I < 15; ++I) {
+    // Blip: A stops receiving B's frames (Qb held); both keep ticking. Fewer than the horizon, so A
+    // never hits the speculation cap.
+    const int Blip = static_cast<int>(RollbackHorizon) - 4;
+    for (int I = 0; I < Blip; ++I) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);  // A -> B still flows
     }
-    CHECK(A.Stalled());                              // A is waiting on the peer at the ceiling
-    CHECK(A.ExecTick() <= Before + InputDelayTicks + 1);  // advanced only the delay slack
-    CHECK(B.ExecTick() > A.ExecTick());              // B (which has A's input) pulled ahead
+    CHECK(A.ExecTick() >= Before + static_cast<uint32_t>(Blip) - 1);  // it SPECULATED ahead, not stalled
+    CHECK(A.ConfirmedTick() < static_cast<int64_t>(A.ExecTick()));    // and the head is ahead of confirmed
 
-    // Resume: B's held backlog is delivered in order (reliable transport) — A sprints.
+    // Resume: B's held backlog is delivered in order. Both peers were idle, so the "peer idle"
+    // predictions all held — no rollback needed, just confirmation — and the pair converges.
     Deliver(Qb, A);
-    for (int I = 0; I < 6; ++I) {
+    for (int I = 0; I < 8; ++I) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -2412,6 +2599,11 @@ int main() {
     TestSnapshotRingCapturesLoopbackStates();
     TestPredictPeerBatchIsEmpty();
     TestConfirmedTickTracksBothTimelines();
+    // Rollback Phase 2 behaviour
+    TestRollbackLocalInputHasNoSchedulingDelay();
+    TestRollbackAdvancesUnderPeerLag();
+    TestRollbackCorrectsMispredictionAndConverges();
+    TestRollbackSpeculationCappedAtHorizon();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();
@@ -2449,7 +2641,7 @@ int main() {
     TestLockstepExecuteCapBounded();
     TestLockstepReplayHashIdentical();
     TestLockstepDetectsDivergence();
-    TestLockstepCeilingStallAndResume();
+    TestRollbackRidesThroughPeerBlipAndResumes();
     TestLockstepColdRejoinResync();
     TestResyncStallCannotWedgeSurvivor();
     TestResyncReoffersToBehindPeer();

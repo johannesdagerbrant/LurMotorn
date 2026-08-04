@@ -66,7 +66,14 @@ enum class EMsgType : uint8_t {
 //     A frame dropped inside a link that reports no error was invisible: frames were logged as
 //     `recv msg type=N size=M`, nothing tied one to a tick, and finding a single missing input
 //     needed two flight recordings and a diff.
-inline constexpr uint8_t ProtocolVersion = 8;
+// v9: RPS netcode replaced delay-based lockstep with ROLLBACK (Docs/Journal/2026-08-03). The wire
+//     FRAME is byte-identical to v8 — same per-tick MsgInput batch + 1-byte sequence — but the
+//     EXECUTION SEMANTICS changed: input now applies at the tick it was issued (no +InputDelayTicks)
+//     and each peer speculates the other forward and rolls back on a misprediction. A v8 (lockstep)
+//     peer schedules the same input three ticks later, so a v8<->v9 pair would apply identical input
+//     on different ticks and desync with no wire error to point at. The bump makes the Hello handshake
+//     refuse the mixed pair — belt-and-suspenders alongside the #166 build-fingerprint gate.
+inline constexpr uint8_t ProtocolVersion = 9;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {

@@ -9,6 +9,7 @@
 #include "Lur/Net/Session.h"  // EMsgType (the generic game slots)
 #include "Lur/Sim/Tick.h"
 #include "Rps/Sim.h"
+#include "Rps/SnapshotRing.h"  // rollback snapshot ring + peer predictor
 #include "Rps/Tunables.h"
 
 namespace Rps {
@@ -169,6 +170,14 @@ public:
     // "resyncing" — a recovery that silently rewinds several seconds of play reads as a glitch or as
     // cheating, so the player has to be told something is being repaired.
     bool Recovering() const { return Recovering_; }
+
+    // Rollback diagnostics (Docs/Journal/2026-08-03). Rollbacks() counts how many times a delivered
+    // peer frame contradicted the "peer idle" prediction and forced a restore+re-simulate; ResimTicks()
+    // is the total ticks re-simulated across all of them. These ARE the plan's §"correction frequency"
+    // and worst-case resim-cost measurements — sparse human input should keep both low. Per match
+    // (reset in BeginMatch).
+    int Rollbacks() const { return Rollbacks_; }
+    uint32_t ResimTicks() const { return ResimTicks_; }
     // Recoveries attempted THIS match (reset by BeginMatch). Reaching MaxDesyncRecoveries is what
     // finally declares the draw — that is the only place a draw legitimately lives.
     int RecoveryAttempts() const { return RecoveryAttempts_; }
@@ -244,9 +253,7 @@ public:
     // int64_t, not a uint32_t, so "nothing yet" is unambiguous rather than colliding with tick 0).
     // Read-only and behaviour-neutral in Phase 1 — the execution model still gates on the ceiling.
     int64_t ConfirmedTick() const {
-        const uint32_t LocalKnown = static_cast<uint32_t>(LocalEvents.size());  // real entries [0,Known)
-        const uint32_t PeerKnown  = PeerTickNext_;                              // real entries [0,Known)
-        const uint32_t Known = LocalKnown < PeerKnown ? LocalKnown : PeerKnown;
+        const uint32_t Known = ConfirmedFrontier();  // min(local produced, peer received): both real
         return Known == 0 ? -1 : static_cast<int64_t>(Known) - 1;
     }
     // A hash mismatch was seen at an anchor. NOT a terminal state any more: CrossCheck declares the
@@ -344,7 +351,28 @@ public:
 
 private:
     void ProduceAndSend(const std::vector<InputEvent>& Batch);
-    void Execute();
+    // Rollback execution (Docs/Journal/2026-08-03), replacing the old ceiling-gated Execute():
+    //   * Speculate advances the sim toward the wall tick, using real peer input where known and the
+    //     "peer idle" prediction beyond it, snapshotting each tick and capped at the rollback horizon.
+    //   * StepTickRange runs [TheSim.Tick, Target) — at most MaxTicks — snapshotting before each tick.
+    //   * RollbackTo restores the snapshot at Tick and re-speculates to the head (a delivered frame
+    //     contradicted the prediction there).
+    //   * AdvanceConfirmed processes each newly-CONFIRMED tick exactly once — flight recorder, tick
+    //     sink, and the 10-tick anchor — hashing the confirmed state held in the snapshot ring, never a
+    //     speculative state a rollback could still change (which would false-desync the peer).
+    //   * ConfirmedFrontier = the count of ticks both peers have really produced input for
+    //     (= ConfirmedTick + 1) = min(local produced, peer received). The resync/history paths use it
+    //     so they never hand over speculative ticks.
+    void Speculate();
+    void StepTickRange(uint32_t Target, uint32_t MaxTicks);
+    void StepOneTick(uint32_t T);  // combine + apply tick T's batch (shared by speculate/rollback/replay)
+    void RollbackTo(uint32_t Tick);
+    void AdvanceConfirmed();
+    uint32_t ConfirmedFrontier() const {
+        const uint32_t L = static_cast<uint32_t>(LocalEvents.size());
+        const uint32_t P = static_cast<uint32_t>(PeerEvents.size());
+        return L < P ? L : P;
+    }
     void PreMatchTick(uint64_t ElapsedNs);  // #139: hold the clock, exchange the start camp, start on both-ready
     void TryStartMatch();   // #139: both camps in -> seed tick 0 with them + begin the clock
     // #149: everything Init does to build a match, WITHOUT the peer identity (MyTeam/Send/Ctx) or
@@ -394,7 +422,7 @@ private:
     // happened, from the globals before that. Match start, the pre-tick-0 sync apply, and the resync
     // rebuild all route through it; calling Sim::Init directly is what let the peers diverge.
     void ResetSim(uint64_t Seed);
-    void EmitAnchor();
+    void EmitAnchor(uint32_t Tick, uint32_t Hash);  // emit ONE anchor for a confirmed tick+hash
     void CrossCheck(uint32_t Tick);
     void RebuildFromHistory(uint32_t Frontier);  // Incoming[0/1] -> fresh sim + timeline at Frontier
     void ReseedFrom(uint32_t Frontier);          // truncate to Frontier + a fresh Delay pre-seed
@@ -458,6 +486,20 @@ private:
     // by any executed tick, so it measures a CONTINUOUS starvation rather than accumulated slowness.
     uint64_t StallNs_ = 0;
     uint32_t LastExecTick_ = 0;
+
+    // Rollback (Docs/Journal/2026-08-03). The snapshot ring restored from on a misprediction, the
+    // count of rollbacks + ticks re-simulated (diagnostics), and the highest CONFIRMED tick anchored
+    // so far (anchors emit only for confirmed state — never a speculative hash that a rollback could
+    // invalidate). Sized RollbackHorizon + 2 so the confirmed frontier's snapshot survives alongside a
+    // full horizon of speculative snapshots to restore from.
+    SnapshotRing SnapRing_{RollbackHorizon + 2};
+    int      Rollbacks_ = 0;
+    uint32_t ResimTicks_ = 0;
+    // A tick can be executed several times (speculatively, then re-simulated on a correction), but it
+    // is RECORDED, SUNK, and ANCHORED exactly once — when it becomes confirmed. LastConfirmed_ tracks
+    // how far that confirmed-side processing has run (re-based by a resync). Kept close behind the
+    // confirmed frontier by calling AdvanceConfirmed promptly, so its ring lookups stay in-window.
+    uint32_t LastConfirmed_ = 0;
 
     bool Recording = false;
     std::vector<std::vector<InputEvent>> RecEvents;  // executed combined batch per tick (while Recording)

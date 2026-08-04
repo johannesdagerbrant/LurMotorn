@@ -51,9 +51,17 @@ CvSnapshot LockstepPeer::MergedCvs() const {
 // the other. Note ResetSim, never Sim::Init: a fresh sim must come from the MERGED cvars (#147).
 void LockstepPeer::BeginMatch(uint64_t Seed) {
     ResetSim(Seed);
-    Delay = InputDelayTicks;
-    LocalEvents.assign(Delay, {});  // ticks 0..Delay-1 are empty by convention on BOTH peers
-    PeerEvents.assign(Delay, {});
+    // Rollback (Docs/Journal/2026-08-03): there is NO input-delay pre-seed. Local input applies at the
+    // head it is produced on — zero scheduling delay is the whole point of the refactor — so the two
+    // timelines start EMPTY, and tick 0 carries only the opening camps (seeded at match start,
+    // TryStartMatch). Delay stays 0 so the resync re-seed adds no slack window either.
+    Delay = 0;
+    LocalEvents.clear();
+    PeerEvents.clear();
+    SnapRing_.Clear();
+    Rollbacks_ = 0;
+    ResimTicks_ = 0;
+    LastConfirmed_ = 0;
     WallTicks = 0;
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     Desync = false;
@@ -75,7 +83,7 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     LastGapTick_ = 0;
     PreMatchStalled_ = false;
     PreMatchWaitNs_ = 0;
-    PeerTickNext_ = Delay;  // both peers pre-seed ticks 0..Delay-1, so the first produced frame is Delay
+    PeerTickNext_ = 1;  // tick 0 is the opening camp (MsgCamp, not counted); first MsgInput frame is tick 1
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
     AwaitingNs = 0;
@@ -153,7 +161,7 @@ void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
     // flight-recorder format (one codec, three uses), and a sequence number is meaningful only on the
     // live wire. Putting it here keeps the other two formats untouched.
     const uint32_t ForTick = static_cast<uint32_t>(LocalEvents.size());
-    LocalEvents.push_back(Batch);  // lands at exec tick Delay + WallTicks
+    LocalEvents.push_back(Batch);  // rollback: lands at exec tick == the head (WallTicks), no delay
     Lur::Serialization::BitWriter W;
     W.WriteBits(ForTick & 0xFFu, 8);
     EncodeEventBatch(W, Batch.data(), static_cast<int>(Batch.size()));  // one framed batch per tick
@@ -261,7 +269,7 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
         ProduceAndSend(Batch);
         ++WallTicks;
     }
-    Execute();
+    Speculate();
 
     // #162: bound the ceiling stall — the one hold here that had no timeout, which is how a load
     // collapse became terminal (both phones dead, in different matches, nothing reconciling them).
@@ -367,9 +375,9 @@ void LockstepPeer::SendLocalCamp() {
 }
 
 // Both camps in hand -> make them tick 0's input on BOTH peers and start the clock. LocalEvents[0]
-// = our camp, PeerEvents[0] = the peer's; Execute combines team0-first, so both peers apply the
-// identical [team0 camp, team1 camp] at tick 0 and diverge from an identical state. The Delay-1
-// pre-seeded empties after index 0 stay the delay buffer; real input still lands at Delay+.
+// = our camp, PeerEvents[0] = the peer's; StepOneTick combines team0-first, so both peers apply the
+// identical [team0 camp, team1 camp] at tick 0 and diverge from an identical state. Under rollback
+// there is no delay buffer: the first produced input lands at tick 1, executed immediately.
 void LockstepPeer::TryStartMatch() {
     if (MatchStarted_ || !LocalReady_ || !PeerReady_) return;
 #if LUR_INTERNAL
@@ -407,8 +415,15 @@ void LockstepPeer::TryStartMatch() {
         return;
     }
 #endif
-    LocalEvents[0] = {LocalCamp_};
-    PeerEvents[0]  = {PeerCamp_};
+    // Seed tick 0 with both opening camps. Under rollback there is no delay pre-seed, so LocalEvents
+    // starts empty; PeerEvents already carries the peer's camp at index 0 (seeded when its MsgCamp set
+    // PeerReady_) and may hold produced frames it sent ahead of us across a restart skew — seed index 0
+    // without discarding those. WallTicks = 1: tick 0 (the camps) has been produced, and Speculate runs
+    // it on the next call.
+    LocalEvents.assign(1, {LocalCamp_});
+    if (PeerEvents.empty()) PeerEvents.assign(1, {PeerCamp_});
+    else                    PeerEvents[0] = {PeerCamp_};
+    WallTicks = 1;
     MatchStarted_ = true;
 #if LUR_INTERNAL
     // #180: announce the edge HERE, which is the only place that is both late enough (the merged CVar
@@ -421,53 +436,113 @@ void LockstepPeer::TryStartMatch() {
 #endif
 }
 
-void LockstepPeer::Execute() {
-    // Ceiling: wallclock pace, gated by BOTH input timelines (min of the three).
-    auto Ceiling = [this]() -> uint32_t {
-        uint32_t C = WallTicks;
-        if (LocalEvents.size() < C) C = static_cast<uint32_t>(LocalEvents.size());
-        if (PeerEvents.size() < C)  C = static_cast<uint32_t>(PeerEvents.size());
-        return C;
-    };
-    // Cap ticks per call (#90): a catch-up burst drains over subsequent calls instead
-    // of monopolizing this one and starving input -> ANR. Nothing is discarded — the
-    // ceiling/masks persist. Scheduling never changes results (design §3 sprint law),
-    // so the capped drain lands on the exact same state as the old uncapped loop.
-    const uint32_t Backlog = Ceiling() > TheSim.Tick ? Ceiling() - TheSim.Tick : 0;
-    const bool     Burst   = Backlog > AnchorBurstThreshold;
+// ---- Rollback execution (Docs/Journal/2026-08-03), replacing the ceiling-gated lockstep Execute() --
+// The sim SPECULATES forward to the wall tick using real peer input where it has arrived and the
+// "peer idle" prediction beyond it, snapshotting each tick so a later frame that contradicts the guess
+// can roll the sim back and re-simulate. Local input therefore executes at the head it was produced on
+// — the 300 ms scheduling delay is gone. Recording, the tick sink, and anchors fire only for CONFIRMED
+// ticks (AdvanceConfirmed), never for a speculative state a rollback could still change.
+
+// Combine tick T's per-team batches TEAM0-FIRST — the order both peers agree on (each event also
+// carries its Team) — and step the sim once. Beyond the real peer frontier the peer batch IS the
+// prediction (empty), which is PredictPeerBatch's contract expressed inline. Fixed stack scratch.
+void LockstepPeer::StepOneTick(uint32_t T) {
+    static const std::vector<InputEvent> Empty;
+    InputEvent Combined[2 * MaxEventsPerTick];
+    int NC = 0;
+    const std::vector<InputEvent>& L = LocalEvents[T];
+    const std::vector<InputEvent>& P = (T < PeerEvents.size()) ? PeerEvents[T] : Empty;
+    const std::vector<InputEvent>& First  = MyTeam == 0 ? L : P;   // team 0's batch
+    const std::vector<InputEvent>& Second = MyTeam == 0 ? P : L;   // team 1's batch
+    for (const InputEvent& E : First)  if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
+    for (const InputEvent& E : Second) if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
+#if LUR_INTERNAL
+    // Land any gameplay-CVar overrides stamped for tick T. Idempotent on a re-sim (the resolved value
+    // is re-applied to Cv, which is captured by the snapshot), and NOT erased for exactly that reason —
+    // a rollback across the apply tick must be able to re-apply it.
+    ApplyCvarsForTick(T);
+#endif
+    TheSim.StepEvents(Combined, NC);  // TheSim.Tick: T -> T+1
+}
+
+// Run ticks [TheSim.Tick, Target), at most MaxTicks, snapshotting the state BEFORE each so a rollback
+// can restore exactly there. Then process anything newly confirmed. The MaxTicks cap keeps a catch-up
+// burst from monopolizing the call and starving input (#90); the backlog drains over later calls.
+void LockstepPeer::StepTickRange(uint32_t Target, uint32_t MaxTicks) {
     uint32_t Ran = 0;
-    while (!Desync && TheSim.Tick < Ceiling() && Ran < MaxExecTicksPerService) {
-        const uint32_t T = TheSim.Tick;
-        // Combine the tick's per-team batches in a TEAM0-FIRST order both peers agree on
-        // (each event also carries its Team), so StepEvents applies the identical sequence on
-        // both sides — the determinism precondition. Fixed stack scratch, no per-tick heap.
+    while (TheSim.Tick < Target && Ran < MaxTicks) {
+        SnapRing_.Save(TheSim.Tick, TheSim);
+        StepOneTick(TheSim.Tick);
+        ++Ran;
+    }
+    AdvanceConfirmed();
+}
+
+void LockstepPeer::Speculate() {
+    if (Desync) return;  // a decided/failed match doesn't advance
+    // Never speculate more than the rollback horizon past the confirmed frontier: a peer far behind
+    // must not drive the head (and the ring) away without bound. Beyond it we HOLD and wait — #162's
+    // ceiling-stall bound (in Tick) is the backstop if the wait never ends.
+    const uint32_t Cap = ConfirmedFrontier() + RollbackHorizon;
+    const uint32_t Target = WallTicks < Cap ? WallTicks : Cap;
+    StepTickRange(Target, MaxExecTicksPerService);
+}
+
+// A delivered peer frame for tick T contradicted the "peer idle" prediction we already speculated
+// with. Restore the snapshot at T and re-simulate to the head in one go (the head must not visibly
+// regress). The corrected PeerEvents[T] is already in place; ticks still beyond the real frontier keep
+// the prediction.
+void LockstepPeer::RollbackTo(uint32_t Tick) {
+    const Sim* Snap = SnapRing_.Get(Tick);
+    if (Snap == nullptr) {
+        // A correction older than the horizon — impossible while the horizon cap holds (a frame below
+        // the confirmed frontier is a duplicate, above it is within the horizon), but if it ever
+        // happens, recover the match rather than silently corrupt state.
+        BeginRecovery("rollback target evicted from the snapshot ring");
+        return;
+    }
+    const uint32_t Head = TheSim.Tick;
+    TheSim = *Snap;                       // restore state at Tick (TheSim.Tick == Tick)
+    ++Rollbacks_;
+    if (Head > Tick) ResimTicks_ += Head - Tick;
+    // Re-sim at least back to where we were, and on to the (possibly grown) head, uncapped within the
+    // horizon so the head is whole again this call rather than crawling back over several.
+    const uint32_t Cap = ConfirmedFrontier() + RollbackHorizon;
+    uint32_t Target = WallTicks < Cap ? WallTicks : Cap;
+    if (Target < Head) Target = Head;
+    StepTickRange(Target, RollbackHorizon + 2);
+}
+
+// Process every tick that has become CONFIRMED (both peers' real input known) exactly once: flight
+// recorder, tick sink, and the 10-tick anchor. Kept close behind the confirmed frontier by being
+// called after every speculate/rollback and every delivered frame, so its snapshot-ring lookups
+// (the confirmed post-state, needed for the sink hash and the anchor) stay inside the ring window.
+void LockstepPeer::AdvanceConfirmed() {
+    const uint32_t Confirmed = ConfirmedFrontier();
+    while (LastConfirmed_ < Confirmed) {
+        const uint32_t T = LastConfirmed_;
+        // Rebuild the confirmed combined batch (both sides real here) in the same team0-first order.
         InputEvent Combined[2 * MaxEventsPerTick];
         int NC = 0;
         const std::vector<InputEvent>& L = LocalEvents[T];
         const std::vector<InputEvent>& P = PeerEvents[T];
-        const std::vector<InputEvent>& First  = MyTeam == 0 ? L : P;  // team 0's batch
-        const std::vector<InputEvent>& Second = MyTeam == 0 ? P : L;  // team 1's batch
+        const std::vector<InputEvent>& First  = MyTeam == 0 ? L : P;
+        const std::vector<InputEvent>& Second = MyTeam == 0 ? P : L;
         for (const InputEvent& E : First)  if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
         for (const InputEvent& E : Second) if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
-#if LUR_INTERNAL
-        ApplyCvarsForTick(T);  // #112: land any gameplay-CVar overrides stamped for tick T
-#endif
-        TheSim.StepEvents(Combined, NC);
         if (Recording) RecEvents.emplace_back(Combined, Combined + NC);
+        // The confirmed state AFTER tick T = the snapshot at T+1 (Tick == T+1), still in the ring
+        // because prompt processing keeps T+1 within [confirmed, head] ⊂ the window.
+        const Sim* Post = SnapRing_.Get(T + 1);
+        const uint64_t FullHash = Post != nullptr ? Post->StateHash() : TheSim.StateHash();
 #if LUR_INTERNAL
-        // #159: hand the executed tick to whoever is recording it. T is the tick these events were
-        // applied ON (TheSim.Tick has already advanced past it), matching MatchRecord's convention.
-        // The hash is computed here rather than by the sink so the sink never has to reach back into
-        // this object mid-Execute — and only when someone is actually listening, so a match with no
-        // recorder attached pays a null check.
-        if (Sink_ != nullptr) Sink_(SinkCtx_, T, Combined, NC, TheSim.StateHash());
+        if (Sink_ != nullptr) Sink_(SinkCtx_, T, Combined, NC, FullHash);
 #endif
-        // Normal cadence: anchor every 10th tick. During a burst, suppress these and
-        // emit a single anchor at the frontier below (avoids flooding the GATT queue).
-        if (!Burst && TheSim.Tick % 10 == 0) EmitAnchor();
-        ++Ran;
+        // Anchor every 10th tick, on CONFIRMED state. "Anchor for tick V" = the state at Tick == V (the
+        // post-state of tick V-1), matching the old Execute convention — here V = T+1.
+        if ((T + 1) % 10 == 0) EmitAnchor(T + 1, static_cast<uint32_t>(FullHash));
+        ++LastConfirmed_;
     }
-    if (Burst && Ran > 0) EmitAnchor();  // one anchor at the reached frontier
 }
 
 #if LUR_INTERNAL
@@ -486,14 +561,17 @@ void LockstepPeer::ApplyCvarsForTick(uint32_t T) {
     const auto It = PendingCvars.find(T);
     if (It == PendingCvars.end()) return;
     for (const PendingCvar& P : It->second) ApplyCvOverride(TheSim.Cv, P.Id, P.Raw);
-    PendingCvars.erase(It);
+    // Rollback: do NOT erase. A re-simulation across tick T must re-apply the override (ApplyCvOverride
+    // is idempotent — it sets Cv[id] to the resolved value), so the entry has to survive. It is dropped
+    // wholesale by BeginMatch/ReseedFrom when the timeline it is keyed to is discarded.
 }
 
 void LockstepPeer::SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_t EditWallClockMs) {
-    // Stamp at the same horizon as a produced input (WallTicks + Delay): a few ticks ahead,
-    // so it lands before either peer simulates that tick. Store locally AND send, so both
-    // peers apply the identical override at the identical exec tick.
-    const uint32_t ApplyTick = WallTicks + Delay;
+    // Stamp a full rollback horizon ahead of the head, so the override reaches BOTH peers and is stored
+    // before either one's speculation reaches that tick — then both apply the identical value at the
+    // identical absolute tick with no rollback needed (the input-delay slack this used to borrow, Delay,
+    // is 0 under rollback). ~1.6 s of lead is imperceptible for a live balance tweak.
+    const uint32_t ApplyTick = WallTicks + RollbackHorizon;
     StorePendingCvar(ApplyTick, GameplayId, RawValue, EditWallClockMs);
     MergeCvar(GameplayId, RawValue, EditWallClockMs);  // keep the current-override set current
     Lur::Serialization::BitWriter W;
@@ -574,16 +652,16 @@ void LockstepPeer::SendFingerprint() {
 }
 #endif  // LUR_INTERNAL
 
-void LockstepPeer::EmitAnchor() {
-    const uint32_t T = TheSim.Tick;
-    const uint32_t H = static_cast<uint32_t>(TheSim.StateHash());
-    MyHash[T] = H;
+// Emit an anchor for a CONFIRMED tick (state at Tick == Tick, hash truncated to 32 bits). Both peers
+// anchor the same confirmed state, so a mismatch is a real divergence — never a speculative artefact.
+void LockstepPeer::EmitAnchor(uint32_t Tick, uint32_t Hash) {
+    MyHash[Tick] = Hash;
     Lur::Serialization::BitWriter W;
-    Lur::Serialization::WriteVarUint(W, T);
-    W.WriteBits(H, 32);
+    Lur::Serialization::WriteVarUint(W, Tick);
+    W.WriteBits(Hash, 32);
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgAnchor, B.data(), B.size());
-    CrossCheck(T);  // peer's anchor for T may already be in hand
+    CrossCheck(Tick);  // peer's anchor for Tick may already be in hand
 }
 
 // ---- #161: recovery ----------------------------------------------------------------------------
@@ -666,7 +744,7 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
 // we no longer expect — which is the same misalignment the recovery exists to repair.
 void LockstepPeer::OfferHistoryToLoser() {
     SendResyncOffer();
-    ReseedFrom(TheSim.Tick);
+    ReseedFrom(ConfirmedFrontier());  // re-base to the same confirmed frontier we just published
 }
 
 void LockstepPeer::FinishRecovery() {
@@ -800,15 +878,24 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         }
         if (!MatchStarted_) {
             // Pre-match, a produced frame can only be from a peer that has ALREADY started (it
-            // restarted before us). Buffer it — it lands at PeerEvents[Delay]+ once we start — so
-            // nothing is dropped across the restart skew. Its camp arrived earlier on MsgCamp; the
-            // transport is reliable and ordered, so a produced tick can never overtake it.
+            // restarted before us). Buffer it — it lands at PeerEvents[1]+ (index 0 is the camp,
+            // seeded when its MsgCamp set PeerReady_) — so nothing is dropped across the restart skew.
+            // Its camp arrived earlier on MsgCamp; the transport is reliable and ordered, so a produced
+            // tick can never overtake it.
             PeerEvents.emplace_back(Buf, Buf + Cnt);
             return;
         }
         if (!Awaiting) {
-            PeerEvents.emplace_back(Buf, Buf + Cnt);  // live wire: each Input frame = next peer exec tick
-            Execute();                                // peer input may unblock the ceiling
+            // Rollback: this real frame fills tick T = PeerEvents.size() (contiguous — a gap would have
+            // returned above via recovery). If we already speculated tick T predicting the peer idle and
+            // the real input is NON-empty, the prediction was wrong — restore the snapshot at T and
+            // re-simulate. An empty real frame matches the prediction exactly, so nothing is redone; we
+            // just speculate forward, which also advances the confirmed frontier that this frame grew.
+            const uint32_t T = static_cast<uint32_t>(PeerEvents.size());
+            const bool NonEmpty = Cnt > 0;
+            PeerEvents.emplace_back(Buf, Buf + Cnt);  // real input now known for tick T
+            if (NonEmpty && T < TheSim.Tick) RollbackTo(T);
+            else                             Speculate();
         }
     } else if (Type == MsgCamp) {
         // #139/#149/#160: the peer's opening camp, and its 500 ms re-sends. NEVER buffered as a tick
@@ -820,6 +907,12 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         if (!PeerReady_) {
             PeerCamp_ = Buf[0];
             PeerReady_ = true;
+            // Rollback: seed the peer's camp as tick 0 NOW, before any of its produced frames (tick 1+)
+            // can buffer. Reliable ordered transport guarantees the camp precedes them, so without this
+            // a pre-match produced frame (peer restarted ahead of us) would emplace_back into an empty
+            // PeerEvents at index 0 — where the camp belongs — and skew the whole stream.
+            if (PeerEvents.empty()) PeerEvents.assign(1, {PeerCamp_});
+            else                    PeerEvents[0] = {PeerCamp_};
             TryStartMatch();  // both camps in hand -> tick 0 carries them on both peers
             return;
         }
@@ -906,9 +999,9 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             StorePendingCvar(ApplyTick, Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
             MergeCvar(Id, Raw, (static_cast<uint64_t>(Hi) << 32) | Lo);
         }
-        // No Execute() kick: overrides don't gate the ceiling (only inputs do); the override
-        // lands when tick ApplyTick runs. Reliable+ordered transport + the Delay horizon put
-        // it in hand before either peer reaches that tick.
+        // No Speculate() kick: overrides don't gate execution (only inputs do); the override lands
+        // when tick ApplyTick is (re-)stepped. Reliable+ordered transport + the RollbackHorizon
+        // lookahead (SetGameplayCvar) put it in hand before either peer's head reaches that tick.
     }
     else if (Type == MsgCvarSync) {
         ++CvarSyncsSeen_;   // #169: "never heard from the peer" is the failure — see TryStartMatch
@@ -966,7 +1059,11 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
 // it (Session::Tick delivers datagrams BEFORE the main reaches its "session ready -> Lp.Init"
 // branch), and then nobody would ever hand it the history again.
 void LockstepPeer::SendResyncOffer() {
-    const uint32_t F = TheSim.Tick;  // our executed frontier
+    // Rollback: hand over the CONFIRMED frontier, never the speculative head — ticks beyond it hold
+    // predicted (possibly-wrong) peer input, and shipping those as "history" would replay a guess as
+    // fact. Both LocalEvents[T] and PeerEvents[T] are real for T < ConfirmedFrontier, so the loop below
+    // is also in-bounds (PeerEvents holds only real frames now).
+    const uint32_t F = ConfirmedFrontier();
     // Reconstruct the executed COMBINED history (team0-first per tick, the Execute order) so a
     // rejoiner replays it through a fresh sim and both split it back per team.
     std::vector<std::vector<InputEvent>> Hist;
@@ -1035,7 +1132,7 @@ void LockstepPeer::BeginResync() {
     // handler compares and never clears), so this cannot blank a real mismatch.
     SendFingerprint();
 #endif
-    ReseedFrom(TheSim.Tick);  // re-base our own timeline (drops in-flight beyond F); sim already at F
+    ReseedFrom(ConfirmedFrontier());  // re-base to the confirmed frontier (ReseedFrom rolls the sim back to it)
     IncomingHistory.clear();
     Awaiting = true;    // cleared when we process the peer's marker (or by the stall timeout)
     AwaitingNs = 0;
@@ -1060,7 +1157,7 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
         LocalEvents.push_back(std::move(Loc));
         PeerEvents.push_back(std::move(Peer));
     }
-    ReseedFrom(Frontier);  // sim now at Frontier; append the fresh Delay slack
+    ReseedFrom(Frontier);  // sim now at Frontier (ReseedFrom's rollback guard is a no-op here)
     IncomingHistory.clear();
     // #139: a cold rejoin resumes an already-running match (the camps are in the replayed
     // history at tick 0), so the ready gate is already satisfied — don't hold the clock.
@@ -1069,12 +1166,18 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
 }
 
 void LockstepPeer::ReseedFrom(uint32_t Frontier) {
-    LocalEvents.resize(Frontier);  // drop anything in-flight beyond the frontier
-    PeerEvents.resize(Frontier);
-    for (uint32_t I = 0; I < Delay; ++I) {  // fresh empty delay slack, both sides agree
-        LocalEvents.push_back({});
-        PeerEvents.push_back({});
+    // Rollback: the sim may be at its speculative head (> Frontier) when we re-base — roll it back to
+    // the confirmed frontier's snapshot so state and timeline agree again. RebuildFromHistory has
+    // already replayed the sim to exactly Frontier, so the guard skips the (now-cleared) ring there.
+    if (TheSim.Tick != Frontier) {
+        const Sim* At = SnapRing_.Get(Frontier);
+        if (At != nullptr) TheSim = *At;
+        else Lur::Log::Error("RPS: resync frontier %u has no snapshot — rollback ring underflow", Frontier);
     }
+    SnapRing_.Clear();           // snapshots key to the pre-resync timeline; none survive the re-base
+    LastConfirmed_ = Frontier;   // ticks < Frontier were already recorded/anchored before the outage
+    LocalEvents.resize(Frontier);  // drop anything in-flight beyond the frontier (no delay slack: Delay=0)
+    PeerEvents.resize(Frontier);
     WallTicks = Frontier;
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
@@ -1082,8 +1185,11 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     // #163: both peers re-base their timelines to the same frontier here, so the sequence expectation
     // must move with it. Without this every frame after a resync would read as a gap — the detector
     // would then cry wolf on the ONE path where frames are legitimately dropped, which is precisely
-    // how a diagnostic earns its way into being ignored.
-    PeerTickNext_ = Frontier + Delay;
+    // how a diagnostic earns its way into being ignored. The first PRODUCED peer frame after a
+    // timeline [0, Frontier) is for tick Frontier — except a re-base all the way to 0 (a pre-match
+    // BeginResync) still owes tick 1 first, since tick 0 is the camp on MsgCamp and never a counted
+    // MsgInput frame. So the expectation floors at 1, matching BeginMatch.
+    PeerTickNext_ = Frontier < 1 ? 1u : Frontier;
 }
 
 }  // namespace Rps
