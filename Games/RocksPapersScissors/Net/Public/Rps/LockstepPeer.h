@@ -453,7 +453,12 @@ private:
     // for ticks 0..Delay-1, the by-convention empty delay window on both peers).
     std::vector<std::vector<InputEvent>> LocalEvents;
     std::vector<std::vector<InputEvent>> PeerEvents;
-    uint32_t WallTicks = 0;           // local wall ticks elapsed = the execution target
+    uint32_t WallTicks = 0;           // ticks PRODUCED so far (may briefly lead the wall clock — see below)
+    // Send-on-tap: ticks the WALL CLOCK has actually elapsed. WallTicks normally equals this, but the
+    // send-on-tap path may produce up to InputLeadTicks ahead of it (WallTicks > WallClockTicks_) to get
+    // a waiting tap onto the wire without waiting for the boundary; the next boundary pays that back by
+    // producing nothing, so the average production rate stays TickRateHz.
+    uint32_t WallClockTicks_ = 0;
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;

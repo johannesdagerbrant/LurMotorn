@@ -63,6 +63,7 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     ResimTicks_ = 0;
     LastConfirmed_ = 0;
     WallTicks = 0;
+    WallClockTicks_ = 0;
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     Desync = false;
     MyHash.clear();
@@ -256,18 +257,39 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // begin advancing from WallTicks==0 on their NEXT Tick — symmetric, no start-skew (one peer
     // readies during its own Tick, the other during a delivered message).
     if (!MatchStarted_) { PreMatchTick(ElapsedNs); return; }
-    const uint32_t N = Clock.AdvancePreserving(ElapsedNs, 64);
-    for (uint32_t I = 0; I < N; ++I) {
-        // All events queued since the last produced tick fold into the FIRST new tick's batch
-        // (mirrors the old mask's accumulate-then-consume); later ticks in this burst are empty.
-        // If N==0 the pending events persist for the next Tick (never dropped).
+    WallClockTicks_ += Clock.AdvancePreserving(ElapsedNs, 64);
+    // Catch produced ticks up to the wall clock. Events queued since the last produced tick fold into
+    // the FIRST tick produced this call (accumulate-then-consume, as the old mask did); later ticks in
+    // a burst are empty. If a prior call already produced AHEAD (send-on-tap below), WallTicks may
+    // already meet WallClockTicks_ and this loop produces nothing — paying the borrowed tick back.
+    bool Drained = false;
+    while (WallTicks < WallClockTicks_) {
         std::vector<InputEvent> Batch;
-        if (I == 0) {
+        if (!Drained) {
             std::lock_guard<std::mutex> Lock(EventQueueMutex_);
             Batch.swap(PendingLocalEvents);
+            Drained = true;
         }
         ProduceAndSend(Batch);
         ++WallTicks;
+    }
+    // Send-on-tap: the sim thread calls this every ~2 ms but a wall tick only elapses every 100 ms, so
+    // waiting for the boundary to produce a waiting tap costs up to a full tick on BOTH the local head
+    // and the peer's arrival. If input is pending and we have not already run InputLeadTicks ahead of
+    // the wall clock, produce it NOW. Only the tick's wall-clock timing moves earlier — its number,
+    // content and wire sequence are unchanged, so determinism and the one-frame-per-tick invariant hold
+    // (and the peer receives it sooner, so it rolls back LESS). The while-loop above pays it back at the
+    // next boundary, bounding the lead — and thus the peer's extra rollback exposure — to InputLeadTicks.
+    if (!Drained && WallTicks < WallClockTicks_ + InputLeadTicks) {
+        std::vector<InputEvent> Batch;
+        {
+            std::lock_guard<std::mutex> Lock(EventQueueMutex_);
+            if (!PendingLocalEvents.empty()) Batch.swap(PendingLocalEvents);
+        }
+        if (!Batch.empty()) {
+            ProduceAndSend(Batch);
+            ++WallTicks;
+        }
     }
     Speculate();
 
@@ -1187,6 +1209,7 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     LocalEvents.resize(Frontier);  // drop anything in-flight beyond the frontier (no delay slack: Delay=0)
     PeerEvents.resize(Frontier);
     WallTicks = Frontier;
+    WallClockTicks_ = Frontier;  // re-base the wall-clock counter with the timeline (no borrowed lead)
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();

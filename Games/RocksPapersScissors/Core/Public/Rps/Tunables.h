@@ -411,6 +411,15 @@ constexpr int32_t InputDelayTicks = 3;      // press at T executes at T+3 (desig
 // against real BLE jitter (plan §risks: "rollback horizon vs BLE jitter"). Phase 1 scaffolding only;
 // the execution model still schedules at W+InputDelayTicks until Phase 2 replaces it.
 constexpr uint32_t RollbackHorizon = 16;    // 1.6 s at TickRateHz = 10
+// Send-on-tap (immediacy pass, Docs/Journal/2026-08-03): the sim thread calls Tick() every ~2 ms but
+// a wall tick only elapses every 100 ms, and local input is only produced+sent when one does — so a
+// tap waits up to a full tick before it hits the wire OR the local head. When input is waiting,
+// LockstepPeer produces its tick immediately, up to InputLeadTicks AHEAD of the wall clock (paid back
+// at the next boundary, so the average rate stays TickRateHz). The tick's NUMBER, CONTENT and wire
+// sequence are unchanged — only its wall-clock timing moves earlier — so determinism and the
+// one-frame-per-tick invariant hold; the peer just receives it sooner (and rolls back less). Keep this
+// SMALL: it is how far the sim may lead wall time, i.e. the peer's extra rollback-exposure ceiling.
+constexpr uint32_t InputLeadTicks = 1;      // ≤100 ms of lead; 0 disables send-on-tap
 // LockstepPeer::Execute drains at most this many ticks per call, so a catch-up burst
 // (post-background / thermal / -O0) can't monopolize the loop and starve input -> ANR
 // (#90; forensics 2026-07-19). Backlog drains over subsequent calls, never discarded.

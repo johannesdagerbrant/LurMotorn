@@ -529,6 +529,43 @@ static void TestRollbackSpeculationCappedAtHorizon() {
     CHECK(static_cast<int64_t>(A.ExecTick()) - A.ConfirmedTick() <= static_cast<int64_t>(RollbackHorizon) + 1);
 }
 
+// ---- Send-on-tap: a waiting input is produced + sent WITHOUT waiting for the wall-tick boundary ----
+// The sim thread calls Tick() every ~2 ms but a wall tick elapses only every 100 ms. This drives Tick()
+// with SUB-TICK elapsed times (no wall tick), and asserts a queued input still goes out immediately —
+// the latency win — while never running more than InputLeadTicks ahead of the wall clock, and staying
+// deterministic.
+static void TestSendOnTapProducesBeforeWallTick() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x5EAD, 0, Enqueue, &Qa);
+    B.Init(0x5EAD, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    const uint32_t HeadBefore = A.ExecTick();
+    Qa.Q.clear();  // ignore prior traffic; measure only what the tap produces
+
+    // Tap, then tick a SUB-tick slice (10 ms << 100 ms): no wall tick elapses, but send-on-tap must
+    // still produce + send the frame this call.
+    A.QueueLocalEvent(InputEvent::Queue(0, 2, 1));
+    A.Tick(OneTickNs / 10);
+    int Inputs = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++Inputs;
+    CHECK(Inputs == 1);                        // it hit the wire immediately, not at the 100 ms boundary
+    CHECK(A.ExecTick() == HeadBefore + 1);     // and executed locally now (the head advanced one tick)
+
+    // No runaway: further sub-tick calls with nothing pending must NOT produce ahead again — the lead
+    // is capped at InputLeadTicks (=1 here), paid back at the next real boundary.
+    A.Tick(OneTickNs / 10); A.Tick(OneTickNs / 10);
+    CHECK(A.ExecTick() == HeadBefore + 1);
+
+    // Deliver + settle: the peer got it, the sims agree, and the event actually took.
+    Deliver(Qa, B);
+    for (int I = 0; I < 6; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
+    SettleUntilEqual(A, B, Qa, Qb);
+    CHECK(!A.Desynced() && !B.Desynced());
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
 #if LUR_INTERNAL
 // ---- #112: a gameplay-CVar override on ONE peer syncs to the other, applies at the same
 // stamped tick, and keeps both bit-identical — AND actually changes the match. ----
@@ -2604,6 +2641,7 @@ int main() {
     TestRollbackAdvancesUnderPeerLag();
     TestRollbackCorrectsMispredictionAndConverges();
     TestRollbackSpeculationCappedAtHorizon();
+    TestSendOnTapProducesBeforeWallTick();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();
