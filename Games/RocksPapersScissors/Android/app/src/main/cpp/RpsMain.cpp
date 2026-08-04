@@ -758,7 +758,8 @@ void android_main(android_app* App) {
                     // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
                     // to the player (and in the log) exactly like a frozen app.
                     LOGI("%s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
-                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d",
+                         "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d "
+                         "rollbk=%d resim=%u spec=%lld",
                          SoloDiag ? "SOLO" : "LOCKSTEP",
                          SoloDiag ? DS.Tick : State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
                          (!SoloDiag && State.Lp.Desynced()) ? 1 : 0,
@@ -778,7 +779,16 @@ void android_main(android_app* App) {
                          // #182: hard radio restarts fired this half-open episode (capped at
                          // MaxRadioRestarts). On real hardware this is the ONLY proof the escalation ran
                          // — the wedge isn't host-reproducible, so a climbing restarts= is the test.
-                         SoloDiag ? 0 : State.Session.RadioRestartsAttempted());
+                         SoloDiag ? 0 : State.Session.RadioRestartsAttempted(),
+                         // Rollback (Docs/Journal/2026-08-03): how often a delivered peer frame
+                         // contradicted the prediction and forced a rewind+resim, the total ticks
+                         // re-simulated, and how far the head is speculating past the confirmed frontier
+                         // (the correction-exposure window). The plan's §correction-frequency + resim-cost.
+                         SoloDiag ? 0 : State.Lp.Rollbacks(),
+                         SoloDiag ? 0u : State.Lp.ResimTicks(),
+                         SoloDiag ? 0LL
+                                  : static_cast<long long>(static_cast<int64_t>(State.Lp.ExecTick()) -
+                                                           State.Lp.ConfirmedTick()));
                     // #159: the linked recording's periodic census. It carries the economy snapshot
                     // AND it is what FLUSHES the file — without it the whole capture sits in the
                     // stdio buffer until End, so a killed app or a match that never resolves leaves

@@ -1103,7 +1103,7 @@ static void UnblockStdio() {
                 const uint8_t Me = _LinkedTeam.load(std::memory_order_relaxed);
                 os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d "
                        "presented=%u hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d "
-                       "halfopen=%d restarts=%d",
+                       "halfopen=%d restarts=%d rollbk=%d resim=%u spec=%lld",
                        SoloDiag ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
                        (!SoloDiag && _Lp.Desynced()) ? 1 : 0, _Lp.BuildMismatch() ? 1 : 0,
                        _PresentedFrames.load(std::memory_order_relaxed),
@@ -1113,7 +1113,12 @@ static void UnblockStdio() {
                        SoloDiag ? 0 : _Lp.InputGaps(), SoloDiag ? 0u : _Lp.LastInputGapTick(),
                        (!SoloDiag && _Lp.PreMatchStalled()) ? 1 : 0,
                        (!SoloDiag && _Session.IsLinkHalfOpen()) ? 1 : 0,
-                       SoloDiag ? 0 : _Session.RadioRestartsAttempted());
+                       SoloDiag ? 0 : _Session.RadioRestartsAttempted(),
+                       // Rollback (Docs/Journal/2026-08-03): rewind+resim frequency, ticks re-simulated,
+                       // and the head's speculation depth past the confirmed frontier — §correction-cost.
+                       SoloDiag ? 0 : _Lp.Rollbacks(), SoloDiag ? 0u : _Lp.ResimTicks(),
+                       SoloDiag ? 0LL : static_cast<long long>(static_cast<int64_t>(_Lp.ExecTick()) -
+                                                               _Lp.ConfirmedTick()));
                 // #69: the perf TRACE line. ble.toApply — datagram-in-EventInbox to drained/applied —
                 // is now serviced on THIS ~500 Hz thread, so it should read ~1-2 ms instead of the old
                 // ~5-6 ms render-gate. FormatLineAndReset drains what the netcode recorded this window.
