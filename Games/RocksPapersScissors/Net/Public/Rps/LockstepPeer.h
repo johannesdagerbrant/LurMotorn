@@ -2,6 +2,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -350,7 +351,7 @@ public:
     const std::vector<std::vector<InputEvent>>& RecordedEvents() const { return RecEvents; }
 
 private:
-    void ProduceAndSend(const std::vector<InputEvent>& Batch);
+    void SendInputFrame(uint32_t Tick, const std::vector<InputEvent>& Batch);  // #163-stamped wire send
     // Rollback execution (Docs/Journal/2026-08-03), replacing the old ceiling-gated Execute():
     //   * Speculate advances the sim toward the wall tick, using real peer input where known and the
     //     "peer idle" prediction beyond it, snapshotting each tick and capped at the rollback horizon.
@@ -455,10 +456,16 @@ private:
     std::vector<std::vector<InputEvent>> PeerEvents;
     uint32_t WallTicks = 0;           // ticks PRODUCED so far (may briefly lead the wall clock — see below)
     // Send-on-tap: ticks the WALL CLOCK has actually elapsed. WallTicks normally equals this, but the
-    // send-on-tap path may produce up to InputLeadTicks ahead of it (WallTicks > WallClockTicks_) to get
-    // a waiting tap onto the wire without waiting for the boundary; the next boundary pays that back by
-    // producing nothing, so the average production rate stays TickRateHz.
+    // wire-only send-early SENDS a frame ahead of it (see NextSendTick_/SentBatches_) but never
+    // produces/executes ahead — WallTicks only ever catches up TO WallClockTicks_, never leads it.
     uint32_t WallClockTicks_ = 0;
+    // Wire-only send-early. A pending input's frame is SENT immediately (up to SendLeadTicks ahead of
+    // the wall clock) so the peer gets it sooner, but the batch is parked here — sent, not yet locally
+    // produced/executed — and only moved into LocalEvents (and simulated) when its wall tick arrives, so
+    // the local head stays on the 10 Hz grid (no render hitch). NextSendTick_ is the next tick number to
+    // send; SentBatches_ holds the batches for ticks [WallTicks, NextSendTick_) awaiting local production.
+    uint32_t NextSendTick_ = 0;
+    std::deque<std::vector<InputEvent>> SentBatches_;
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;

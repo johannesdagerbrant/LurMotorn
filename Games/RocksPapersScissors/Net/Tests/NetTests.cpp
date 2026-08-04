@@ -529,12 +529,12 @@ static void TestRollbackSpeculationCappedAtHorizon() {
     CHECK(static_cast<int64_t>(A.ExecTick()) - A.ConfirmedTick() <= static_cast<int64_t>(RollbackHorizon) + 1);
 }
 
-// ---- Send-on-tap: a waiting input is produced + sent WITHOUT waiting for the wall-tick boundary ----
-// The sim thread calls Tick() every ~2 ms but a wall tick elapses only every 100 ms. This drives Tick()
-// with SUB-TICK elapsed times (no wall tick), and asserts a queued input still goes out immediately —
-// the latency win — while never running more than InputLeadTicks ahead of the wall clock, and staying
-// deterministic.
-static void TestSendOnTapProducesBeforeWallTick() {
+// ---- Wire-only send-early: a waiting input's FRAME is sent before the wall-tick boundary, but the
+// local head is NOT advanced early (that would hitch the render — the reverted produce-ahead variant).
+// The sim thread services every ~2 ms while a wall tick is 100 ms; this drives Tick() with SUB-TICK
+// slices and asserts the frame goes out immediately (peer gets it sooner) while ExecTick holds until a
+// real wall tick, and the pair stays deterministic. ----
+static void TestWireSendEarlyDoesNotAdvanceHead() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
     A.Init(0x5EAD, 0, Enqueue, &Qa);
@@ -542,30 +542,33 @@ static void TestSendOnTapProducesBeforeWallTick() {
     PlaceCampsAndStart(A, B, Qa, Qb);
     for (int I = 0; I < 3; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
     const uint32_t HeadBefore = A.ExecTick();
-    Qa.Q.clear();  // ignore prior traffic; measure only what the tap produces
+    Qa.Q.clear();  // ignore prior traffic; measure only what the tap sends
 
     // Tap, then tick a SUB-tick slice (10 ms << 100 ms): no wall tick elapses.
     A.QueueLocalEvent(InputEvent::Queue(0, 2, 1));
     A.Tick(OneTickNs / 10);
     int Inputs = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++Inputs;
-    if (InputLeadTicks > 0) {
-        // send-on-tap ENABLED: the frame is produced + sent this call, ahead of the boundary, and the
-        // head advances one tick — capped at InputLeadTicks (further sub-tick calls don't run further).
+    if (SendLeadTicks > 0) {
+        // ENABLED: the frame hit the wire THIS call (ahead of the 100 ms boundary)...
         CHECK(Inputs == 1);
-        CHECK(A.ExecTick() == HeadBefore + 1);
+        // ...but the local head did NOT advance — the input is not simulated until its wall tick, so
+        // rendering stays on the 10 Hz grid. This is the whole point of the wire-only variant.
+        CHECK(A.ExecTick() == HeadBefore);
+        // And it doesn't run away: more sub-tick calls with nothing pending send nothing more.
         A.Tick(OneTickNs / 10); A.Tick(OneTickNs / 10);
-        CHECK(A.ExecTick() == HeadBefore + 1);
+        int Inputs2 = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++Inputs2;
+        CHECK(Inputs2 == 1);
+        CHECK(A.ExecTick() == HeadBefore);
     } else {
-        // send-on-tap DISABLED (current default): a sub-tick call produces nothing; the input waits for
-        // the wall-tick boundary — the plain wall-clock cadence that keeps rendering smooth.
+        // DISABLED: a sub-tick call sends nothing; the input waits for the wall-tick boundary.
         CHECK(Inputs == 0);
         CHECK(A.ExecTick() == HeadBefore);
-        A.Tick(OneTickNs);  // a full tick now produces + sends it
-        int After = 0; for (auto& M : Qa.Q) if (M.first == MsgInput) ++After;
-        CHECK(After >= 1);
     }
 
-    // Deliver + settle: the peer got it, the sims agree, and the event actually took.
+    // A full wall tick now executes the input locally (head advances) and — either way — the peer has
+    // its frame; settle and confirm determinism.
+    A.Tick(OneTickNs);
+    CHECK(A.ExecTick() == HeadBefore + 1);
     Deliver(Qa, B);
     for (int I = 0; I < 6; ++I) { A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A); }
     SettleUntilEqual(A, B, Qa, Qb);
@@ -2649,7 +2652,7 @@ int main() {
     TestRollbackAdvancesUnderPeerLag();
     TestRollbackCorrectsMispredictionAndConverges();
     TestRollbackSpeculationCappedAtHorizon();
-    TestSendOnTapProducesBeforeWallTick();
+    TestWireSendEarlyDoesNotAdvanceHead();
 #if LUR_INTERNAL
     TestLockstepCvarSyncStaysIdentical();
     TestCvarSyncMatchStartMerge();

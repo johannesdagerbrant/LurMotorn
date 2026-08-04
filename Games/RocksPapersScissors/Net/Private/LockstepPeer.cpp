@@ -64,6 +64,8 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     LastConfirmed_ = 0;
     WallTicks = 0;
     WallClockTicks_ = 0;
+    NextSendTick_ = 0;
+    SentBatches_.clear();
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     Desync = false;
     MyHash.clear();
@@ -151,32 +153,24 @@ void LockstepPeer::QueueLocalEvent(InputEvent E) {
     PendingLocalEvents.push_back(E);
 }
 
-void LockstepPeer::ProduceAndSend(const std::vector<InputEvent>& Batch) {
-    // #163: stamp the frame with the LOW BYTE of the exec tick it is for, BEFORE the batch. The
-    // receiver knows the index it expects (PeerEvents.size()), so a lost frame is named on arrival of
-    // the next one instead of surfacing minutes later as an unexplained divergence — on hardware an
-    // input executed at tick 4528 was simply absent from the other peer's stream, with no transport
-    // complaint, and locating it needed two flight recordings and a diff.
-    //
-    // Deliberately NOT inside EncodeEventBatch: that encoder is also the resync-history and
-    // flight-recorder format (one codec, three uses), and a sequence number is meaningful only on the
-    // live wire. Putting it here keeps the other two formats untouched.
-    const uint32_t ForTick = static_cast<uint32_t>(LocalEvents.size());
-    LocalEvents.push_back(Batch);  // rollback: lands at exec tick == the head (WallTicks), no delay
+// Send ONE per-tick input frame on the wire (no local-timeline side effect — LocalEvents is grown
+// separately, when the tick is produced on-grid). #163: stamp the frame with the LOW BYTE of the exec
+// tick it is for, BEFORE the batch, so a lost frame is named on arrival of the next one (the receiver
+// knows the tick it expects). Not inside EncodeEventBatch: that codec is shared with the resync-history
+// and flight-recorder formats, where a wire sequence has no meaning.
+void LockstepPeer::SendInputFrame(uint32_t Tick, const std::vector<InputEvent>& Batch) {
     Lur::Serialization::BitWriter W;
-    W.WriteBits(ForTick & 0xFFu, 8);
+    W.WriteBits(Tick & 0xFFu, 8);
     EncodeEventBatch(W, Batch.data(), static_cast<int>(Batch.size()));  // one framed batch per tick
     const std::vector<uint8_t>& B = W.Finish();
 #if LUR_AGENT
-    // Assistant-only fault injection: swallow this frame. The local timeline is UNTOUCHED (the batch is
-    // already in LocalEvents above), so this reproduces exactly the #163 shape — the sender's state is
-    // correct and complete, the receiver is missing one produced tick, and no transport error is
-    // raised anywhere. Placed after the encode so the frame is fully built and only the handoff is
-    // skipped; a drop that also skipped the encode would not exercise the same code.
+    // Assistant-only fault injection: swallow this frame. The batch is still parked/produced locally, so
+    // this reproduces exactly the #163 shape — the sender's timeline is correct and complete, the
+    // receiver is missing one produced tick, and no transport error is raised anywhere.
     if (AgentDropTx_ > 0) {
         --AgentDropTx_;
         Lur::Log::Error("RPS/agent: DROPPING produced frame for tick %u (%d more to drop) — simulating "
-                        "the #163 half-open link", ForTick, AgentDropTx_);
+                        "the #163 half-open link", Tick, AgentDropTx_);
         return;
     }
 #endif
@@ -258,38 +252,41 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // readies during its own Tick, the other during a delivered message).
     if (!MatchStarted_) { PreMatchTick(ElapsedNs); return; }
     WallClockTicks_ += Clock.AdvancePreserving(ElapsedNs, 64);
-    // Catch produced ticks up to the wall clock. Events queued since the last produced tick fold into
-    // the FIRST tick produced this call (accumulate-then-consume, as the old mask did); later ticks in
-    // a burst are empty. If a prior call already produced AHEAD (send-on-tap below), WallTicks may
-    // already meet WallClockTicks_ and this loop produces nothing — paying the borrowed tick back.
-    bool Drained = false;
-    while (WallTicks < WallClockTicks_) {
-        std::vector<InputEvent> Batch;
-        if (!Drained) {
-            std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-            Batch.swap(PendingLocalEvents);
-            Drained = true;
-        }
-        ProduceAndSend(Batch);
-        ++WallTicks;
-    }
-    // Send-on-tap: the sim thread calls this every ~2 ms but a wall tick only elapses every 100 ms, so
-    // waiting for the boundary to produce a waiting tap costs up to a full tick on BOTH the local head
-    // and the peer's arrival. If input is pending and we have not already run InputLeadTicks ahead of
-    // the wall clock, produce it NOW. Only the tick's wall-clock timing moves earlier — its number,
-    // content and wire sequence are unchanged, so determinism and the one-frame-per-tick invariant hold
-    // (and the peer receives it sooner, so it rolls back LESS). The while-loop above pays it back at the
-    // next boundary, bounding the lead — and thus the peer's extra rollback exposure — to InputLeadTicks.
-    if (!Drained && WallTicks < WallClockTicks_ + InputLeadTicks) {
+    // 1. SEAL + SEND pending input as its own tick. This fires the instant input is waiting — up to
+    // SendLeadTicks ahead of the wall clock (wire-only send-early, goal B) — AND on the boundary itself
+    // (when NextSendTick_ falls behind the wall clock), which is the plain on-grid send. All local
+    // input flows through here. The batch is PARKED in SentBatches_ (sent, not yet executed) and drained
+    // into LocalEvents only in step 3, so the local head never advances early. Drain ALL pending into
+    // this one tick (accumulate-then-consume, as the mask did); a burst of taps in one service = one
+    // frame, no dup.
+    {
         std::vector<InputEvent> Batch;
         {
             std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-            if (!PendingLocalEvents.empty()) Batch.swap(PendingLocalEvents);
+            if (!PendingLocalEvents.empty() && NextSendTick_ < WallClockTicks_ + SendLeadTicks)
+                Batch.swap(PendingLocalEvents);
         }
         if (!Batch.empty()) {
-            ProduceAndSend(Batch);
-            ++WallTicks;
+            SendInputFrame(NextSendTick_, Batch);
+            SentBatches_.push_back(std::move(Batch));
+            ++NextSendTick_;
         }
+    }
+    // 2. Fill EMPTY ticks up to the wall clock so the peer's per-tick sequence stays contiguous — a gap
+    // would trip the #163 detector. Empty ticks carry no input, so they are only ever sent on-grid.
+    while (NextSendTick_ < WallClockTicks_) {
+        SendInputFrame(NextSendTick_, {});
+        SentBatches_.emplace_back();
+        ++NextSendTick_;
+    }
+    // 3. PRODUCE (execute) locally up to the wall clock, consuming the sent batches in tick order.
+    // Strictly on-grid: the head advances one tick per elapsed wall tick, NEVER early — so a frame
+    // sent ahead in step 1 is not simulated until its wall tick arrives here. LocalEvents.size() stays
+    // == WallTicks, the invariant every other path relies on.
+    while (WallTicks < WallClockTicks_ && !SentBatches_.empty()) {
+        LocalEvents.push_back(std::move(SentBatches_.front()));
+        SentBatches_.pop_front();
+        ++WallTicks;
     }
     Speculate();
 
@@ -447,7 +444,9 @@ void LockstepPeer::TryStartMatch() {
     LocalEvents.assign(1, {LocalCamp_});
     if (PeerEvents.empty()) PeerEvents.assign(1, {PeerCamp_});
     else                    PeerEvents[0] = {PeerCamp_};
-    WallTicks = 1;
+    WallTicks = 1;         // tick 0 (the camp) is produced
+    WallClockTicks_ = 1;   // aligned with WallTicks so tick 1 produces on the first post-start wall tick
+    NextSendTick_ = 1;     // tick 0 travelled on MsgCamp; the first MsgInput frame is tick 1
     MatchStarted_ = true;
 #if LUR_INTERNAL
     // #180: announce the edge HERE, which is the only place that is both late enough (the merged CVar
@@ -1209,7 +1208,9 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     LocalEvents.resize(Frontier);  // drop anything in-flight beyond the frontier (no delay slack: Delay=0)
     PeerEvents.resize(Frontier);
     WallTicks = Frontier;
-    WallClockTicks_ = Frontier;  // re-base the wall-clock counter with the timeline (no borrowed lead)
+    WallClockTicks_ = Frontier;  // re-base the wall-clock counter with the timeline
+    NextSendTick_ = Frontier;    // next frame to send is tick Frontier
+    SentBatches_.clear();        // drop anything sent-but-not-produced (consistency over completeness)
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();
