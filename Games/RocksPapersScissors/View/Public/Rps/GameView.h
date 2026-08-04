@@ -433,6 +433,22 @@ private:
     // its heading on noise. Persists across frames; 0 = upright until the unit first moves.
     float LastFaceX[MaxUnits] = {};
     float LastFaceY[MaxUnits] = {};
+    // ---- Rollback correction smoothing (Docs/Journal/2026-08-03, Phase 3) ----
+    // When the linked sim rolls back and re-simulates, a unit's position can JUMP between published
+    // snapshots: the interpolation endpoints stop chaining (in normal play snapshot N's Pos equals
+    // snapshot N+1's Prev, because the sim sets Prev=Pos each step). We absorb that discontinuity into
+    // a per-slot visual-error offset (world units) and decay it to zero over a few render frames, so a
+    // correction reads as fast motion rather than a teleport. This is the piece that transfers to the
+    // physics game. Cost is nil when nothing rolls back — the discontinuity is then exactly zero.
+    float SmoothErrX[MaxUnits] = {};
+    float SmoothErrY[MaxUnits] = {};
+    float LastSnapPosX[MaxUnits] = {};   // previous snapshot's Pos per slot (world), for the chain test
+    float LastSnapPosY[MaxUnits] = {};
+    uint8_t LastSnapType[MaxUnits] = {};   // slot-identity guard: a reused slot must not "smooth" a jump
+    uint8_t LastSnapTeam[MaxUnits] = {};
+    bool  LastSnapAlive[MaxUnits] = {};
+    uint64_t LastSmoothPublishNs = 0;    // absorb the discontinuity once per PUBLISHED snapshot
+    static constexpr float CorrectionHalflifeSec = 0.07f;  // ~4 frames @60 Hz; tune on device (Phase 5)
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;

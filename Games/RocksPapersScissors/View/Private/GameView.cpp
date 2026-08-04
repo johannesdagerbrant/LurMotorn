@@ -951,6 +951,43 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     int32_t Workers = 0, Soldiers = 0;  // viewer-team split for the population counter
     const float BldgPx = FW(Snap.Cv.BuildingFootprint) * 2.3f * P;  // #139/#140: a bit bigger than the
                                                                  //   footprint so the slim buttons fit inside
+
+    // ---- Rollback correction smoothing (Phase 3) ----
+    // Once per PUBLISHED snapshot, absorb any per-slot chain discontinuity into the visual-error
+    // offset; every frame, decay that offset toward zero. In normal play snapshot N's Pos equals
+    // snapshot N+1's Prev (the sim sets Prev=Pos each step), so the discontinuity is exactly zero and
+    // this is a no-op — the offset only becomes non-zero when a rollback rewrote the timeline under a
+    // unit. Applied to BOTH interpolation endpoints below, so the whole [Prev,Pos] segment slides.
+    const bool NewSnap = Snap.PublishNs != LastSmoothPublishNs;
+    for (int32_t I = 0; I < Snap.Count; ++I) {
+        if (NewSnap) {
+            const bool Alive = Snap.IsAlive(I);
+            const bool SameUnit = Alive && LastSnapAlive[I] && LastSnapType[I] == Snap.Type[I] &&
+                                  LastSnapTeam[I] == Snap.Team[I];
+            if (SameUnit) {
+                // Discontinuity = where we last had this unit vs where this snapshot says it begins.
+                // Add it to the error so the DISPLAYED position doesn't jump; the decay eases it out.
+                SmoothErrX[I] += LastSnapPosX[I] - FW(Snap.PrevX[I]);
+                SmoothErrY[I] += LastSnapPosY[I] - FW(Snap.PrevY[I]);
+            } else {
+                SmoothErrX[I] = 0.0f;  // new/replaced unit in this slot: nothing to reconcile
+                SmoothErrY[I] = 0.0f;
+            }
+            LastSnapPosX[I] = FW(Snap.PosX[I]);
+            LastSnapPosY[I] = FW(Snap.PosY[I]);
+            LastSnapType[I] = Snap.Type[I];
+            LastSnapTeam[I] = Snap.Team[I];
+            LastSnapAlive[I] = Alive;
+        }
+        // Exponential decay by real render time — frame-rate independent. Snap tiny residues to 0.
+        const float Decay = std::pow(0.5f, DtSec / CorrectionHalflifeSec);
+        SmoothErrX[I] *= Decay;
+        SmoothErrY[I] *= Decay;
+        if (std::fabs(SmoothErrX[I]) < 0.001f) SmoothErrX[I] = 0.0f;
+        if (std::fabs(SmoothErrY[I]) < 0.001f) SmoothErrY[I] = 0.0f;
+    }
+    if (NewSnap) LastSmoothPublishNs = Snap.PublishNs;
+
     // TWO passes — every building first, then every unit — so units always render ON TOP of
     // buildings. This is a single instanced draw with no depth buffer, so the order instances sit in
     // the buffer IS the layer order; slots are allocated as things are placed/spawned, so a building
@@ -974,8 +1011,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color C = Home ? TeamTintBldg[Tm]
                              : (Bldg ? TeamTypeTintBldg[Tm][Ty] : TeamTypeTint[Tm][Ty]);
         Lur::Render::InstanceData& D = Instances[N++];
-        D.PrevX = SX(FW(Snap.PrevX[I])); D.PrevY = SY(FW(Snap.PrevY[I]));
-        D.CurX = SX(FW(Snap.PosX[I]));   D.CurY = SY(FW(Snap.PosY[I]));
+        // Rollback correction smoothing (Phase 3): shift both endpoints by the decaying per-slot
+        // visual error, so a resim'd jump eases in over a few frames instead of popping. Zero in
+        // normal play (SmoothErr stays 0 while the snapshot chain is unbroken).
+        const float Ex = SmoothErrX[I], Ey = SmoothErrY[I];
+        D.PrevX = SX(FW(Snap.PrevX[I]) + Ex); D.PrevY = SY(FW(Snap.PrevY[I]) + Ey);
+        D.CurX = SX(FW(Snap.PosX[I]) + Ex);   D.CurY = SY(FW(Snap.PosY[I]) + Ey);
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
         // The HOME BASE wears the (distinct) camp/fortress glyph, bigger; a miner BUILDING wears the
         // mine-camp glyph; other buildings their (bigger) type glyph; units their type glyph.
