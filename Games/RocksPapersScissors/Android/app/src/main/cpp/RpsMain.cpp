@@ -416,9 +416,18 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 // Finger point AND snapped point: the ghost sticks to the finger, the snap eases in.
                 S->View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
             } else {
-                // #107: a press on an x1/x5 button lights up NOW (the enqueue still commits on
-                // release, below, so a press that turns into a pan queues nothing).
-                S->View.PressProductionButton(X, Y);
+                // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for
+                // immediacy — the queue fires the instant you touch the button instead of waiting out
+                // the press. A hit on an x1/x5 button enqueues NOW (and lights up); a miss just primes a
+                // pan. Cam.Begin runs regardless, so a drag that happens to start on a button still
+                // scrolls — harmless, the unit is already queued. (This deliberately drops the old
+                // "a press that turns into a pan queues nothing" guard: a button press IS a queue.)
+                int32_t Slot = -1;
+                const int Cnt = Live ? S->View.OnProductionButton(X, Y, Slot) : 0;
+                if (Cnt > 0) {
+                    RouteLocalEvent(S, Rps::InputEvent::Queue(MyTeam, Slot, Cnt));
+                    S->View.PressProductionButton(X, Y);  // visual flash on the pressed button
+                }
                 S->Cam.Begin(Y);
             }
             return 1;
@@ -474,12 +483,8 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                     S->SoloAiTier.store(Tier, std::memory_order_release);
                 } else if (S->View.TakePeerPick()) {     // #2: linked-opponent row -> switch to the peer match
                     S->SwitchToLinked.store(true, std::memory_order_release);
-                } else if (Live && Hit == -1) {
-                    // Not the HUD/selector -> maybe a per-building x1/x5 queue button (#140).
-                    int32_t Slot = -1;
-                    const int Cnt = S->View.OnProductionButton(X, Y, Slot);
-                    if (Cnt > 0) RouteLocalEvent(S, Rps::InputEvent::Queue(MyTeam, Slot, Cnt));
                 }
+                // (Per-building x1/x5 queue buttons now fire on ACTION_DOWN — see above — not here.)
             }
             S->DevGesture.Cancel();   // the gesture is over either way
             return 1;

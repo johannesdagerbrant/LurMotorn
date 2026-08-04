@@ -209,6 +209,10 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
                 float Wx = 0, Wy = 0;
                 P.View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy));
             } else {
+                // Units queue on PRESS-DOWN, not release (feedback 2026-08-04) — mirror of the phone mains.
+                int32_t Slot = -1;
+                const int Cnt = P.View.OnProductionButton(T.XPx, T.YPx, Slot);
+                if (Cnt > 0) P.Lp.QueueLocalEvent(Rps::InputEvent::Queue(P.Team, Slot, Cnt));
                 P.Cam.Begin(T.YPx);
             }
         } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
@@ -235,12 +239,8 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
                 P.View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
             } else {
                 P.Cam.End();
-                if (T.Phase == Lur::Input::ETouchPhase::Ended && P.View.OnTap(T.XPx, T.YPx) == -1) {
-                    // Not the HUD/selector -> maybe a per-building x1/x5 button (#140).
-                    int32_t Slot = -1;
-                    const int Cnt = P.View.OnProductionButton(T.XPx, T.YPx, Slot);
-                    if (Cnt > 0) P.Lp.QueueLocalEvent(Rps::InputEvent::Queue(P.Team, Slot, Cnt));
-                }
+                // Selector/plate taps still resolve on release; the x1/x5 queue now fires on Began.
+                if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);
             }
         }
     }
@@ -1200,9 +1200,15 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                     // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
                     View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
                 } else {
-                    // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on
-                    // release (below), so a press that turns into a camera pan queues nothing.
-                    View.PressProductionButton(T.XPx, T.YPx);
+                    // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for
+                    // immediacy — mirror of the phone mains. A hit on an x1/x5 button enqueues NOW (and
+                    // lights up); a miss just primes a pan.
+                    int32_t Slot = -1;
+                    const int Cnt = View.OnProductionButton(T.XPx, T.YPx, Slot);
+                    if (Cnt > 0) {
+                        Human.Push(Rps::InputEvent::Queue(0, Slot, Cnt));
+                        View.PressProductionButton(T.XPx, T.YPx);  // visual flash on the pressed button
+                    }
                     Cam.Begin(T.YPx);
                 }
             } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
@@ -1228,12 +1234,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                     View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
                 } else {
                     Cam.End();
-                    if (T.Phase == Lur::Input::ETouchPhase::Ended && View.OnTap(T.XPx, T.YPx) == -1) {
-                        // Not the HUD/selector -> maybe a per-building x1/x5 button (#140).
-                        int32_t Slot = -1;
-                        const int Cnt = View.OnProductionButton(T.XPx, T.YPx, Slot);
-                        if (Cnt > 0) Human.Push(Rps::InputEvent::Queue(0, Slot, Cnt));
-                    }
+                    // Selector/plate taps still resolve on release; the x1/x5 queue now fires on Began.
+                    if (T.Phase == Lur::Input::ETouchPhase::Ended) View.OnTap(T.XPx, T.YPx);
                 }
             }
         }

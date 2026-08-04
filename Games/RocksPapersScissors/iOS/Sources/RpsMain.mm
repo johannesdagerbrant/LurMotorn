@@ -1461,9 +1461,17 @@ static void UnblockStdio() {
         // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
         _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
     } else {
-        // #107: a press on an x1/x5 button lights up NOW; the enqueue still commits on release
-        // (replayTouchEnded), so a press that turns into a camera pan queues nothing.
-        _View.PressProductionButton(X, Y);
+        // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for immediacy —
+        // the queue fires the instant you touch the button. A hit on an x1/x5 button enqueues NOW (and
+        // lights up); a miss just primes a pan. Cam.Begin runs regardless, so a drag that starts on a
+        // button still scrolls (harmless — already queued). Drops the old "a press that turns into a
+        // pan queues nothing" guard: a button press IS a queue. (Mirror of the Android main.)
+        int32_t Slot = -1;
+        const int Cnt = Live ? _View.OnProductionButton(X, Y, Slot) : 0;
+        if (Cnt > 0) {
+            [self placeLocal:Rps::InputEvent::Queue(MyTeam, Slot, Cnt)];
+            _View.PressProductionButton(X, Y);  // visual flash on the pressed button
+        }
         _Cam.Begin(Y);
     }
 }
@@ -1534,13 +1542,8 @@ static void UnblockStdio() {
             _SoloAiTier.store(Tier, std::memory_order_release);          // (re)start solo at this tier (#2)
         } else if (_View.TakePeerPick()) {
             _SwitchToLinkedAtomic.store(true, std::memory_order_release);  // switch to the linked peer (#2)
-        } else if (_MatchLive.load(std::memory_order_acquire) && Hit == -1) {
-            int32_t Slot = -1;
-            const int Cnt = _View.OnProductionButton(X, Y, Slot);
-            if (Cnt > 0)
-                [self placeLocal:Rps::InputEvent::Queue(_LinkedTeam.load(std::memory_order_relaxed),
-                                                        Slot, Cnt)];
         }
+        // (Per-building x1/x5 queue buttons now fire on touch-DOWN — see replayTouchBegan — not here.)
     }
 }
 @end
