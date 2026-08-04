@@ -980,21 +980,6 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
                 SmoothErrX[I] = 0.0f;  // new/replaced unit, or a jump too big to be a correction -> snap
                 SmoothErrY[I] = 0.0f;
             }
-            // Velocity-consistency clamp for the extrapolation: only extrapolate the part of this
-            // tick's velocity that PERSISTED from last tick. A sign flip (reversal) -> 0 (don't shoot
-            // past a turn); otherwise the smaller magnitude (softens deceleration). Steady motion is
-            // unchanged (this≈last -> full), so smooth flocking still leads; rigid carts stop turning
-            // inside-out. Recomputed once per published snapshot.
-            const float ThisVx = SameUnit ? FW(Snap.PosX[I]) - FW(Snap.PrevX[I]) : 0.0f;
-            const float ThisVy = SameUnit ? FW(Snap.PosY[I]) - FW(Snap.PrevY[I]) : 0.0f;
-            auto Persisted = [](float Th, float La) -> float {
-                if (Th * La <= 0.0f) return 0.0f;                          // reversed / either zero -> none
-                return (std::fabs(Th) < std::fabs(La)) ? Th : La;          // same sign -> smaller magnitude
-            };
-            ExtrapVelX[I] = Persisted(ThisVx, PrevVelX[I]);
-            ExtrapVelY[I] = Persisted(ThisVy, PrevVelY[I]);
-            PrevVelX[I] = ThisVx;
-            PrevVelY[I] = ThisVy;
             LastSnapPosX[I] = FW(Snap.PosX[I]);
             LastSnapPosY[I] = FW(Snap.PosY[I]);
             LastSnapType[I] = Snap.Type[I];
@@ -1033,21 +1018,14 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color C = Home ? TeamTintBldg[Tm]
                              : (Bldg ? TeamTypeTintBldg[Tm][Ty] : TeamTypeTint[Tm][Ty]);
         Lur::Render::InstanceData& D = Instances[N++];
-        // Endpoint shift = correction offset + extrapolation lead, both in world units, added to BOTH
-        // interpolation endpoints:
-        //   * Phase 3 correction smoothing: SmoothErr eases a resim'd jump over a few frames (0 in
-        //     normal play, while the snapshot chain is unbroken).
-        //   * Immediacy: RenderLeadTicks * velocity slides the [Prev,Pos] segment forward so mix()
-        //     shows the predicted-NOW position rather than lagging one tick behind. Zero for buildings
-        //     (velocity 0), so only real motion is extrapolated.
-        const float PrevWx = FW(Snap.PrevX[I]), PrevWy = FW(Snap.PrevY[I]);
-        const float PosWx = FW(Snap.PosX[I]),   PosWy = FW(Snap.PosY[I]);
-        // Lead by the velocity-CONSISTENCY-clamped velocity (not raw Pos-Prev), so a stop/reversal
-        // doesn't shoot the ghost past and snap back.
-        const float Ex = SmoothErrX[I] + ExtrapVelX[I] * RenderLeadTicks;
-        const float Ey = SmoothErrY[I] + ExtrapVelY[I] * RenderLeadTicks;
-        D.PrevX = SX(PrevWx + Ex); D.PrevY = SY(PrevWy + Ey);
-        D.CurX = SX(PosWx + Ex);   D.CurY = SY(PosWy + Ey);
+        // Plain interpolation of the sim's Verlet-integrated positions (the shader does
+        // mix(Prev,Pos,alpha)) — smooth by construction, NO render-side motion prediction. The only
+        // shift is the rollback correction offset, which is exactly 0 in normal play (the snapshot
+        // chain Pos_N == Prev_{N+1} holds) and non-zero only for the few render frames after a real
+        // rollback, easing that jump instead of popping it.
+        const float Ex = SmoothErrX[I], Ey = SmoothErrY[I];
+        D.PrevX = SX(FW(Snap.PrevX[I]) + Ex); D.PrevY = SY(FW(Snap.PrevY[I]) + Ey);
+        D.CurX = SX(FW(Snap.PosX[I]) + Ex);   D.CurY = SY(FW(Snap.PosY[I]) + Ey);
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
         // The HOME BASE wears the (distinct) camp/fortress glyph, bigger; a miner BUILDING wears the
         // mine-camp glyph; other buildings their (bigger) type glyph; units their type glyph.
