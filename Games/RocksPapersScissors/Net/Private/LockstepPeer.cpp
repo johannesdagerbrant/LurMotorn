@@ -271,17 +271,19 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     }
     Speculate();
 
-    // #162: bound the ceiling stall — the one hold here that had no timeout, which is how a load
-    // collapse became terminal (both phones dead, in different matches, nothing reconciling them).
-    // Measured as CONTINUOUS starvation: any executed tick re-arms it, so ordinary lockstep waiting
-    // and a phone that briefly falls behind cost nothing. Only counted while we are live; the resync
-    // and recovery holds have their own, much tighter, bounds.
+    // #162: bound the stall — the one hold here that had no timeout, which is how a load collapse
+    // became terminal (both phones dead, in different matches, nothing reconciling them). Under
+    // rollback this is now the HORIZON-EXCEEDED fallback: the head only sits below WallTicks when the
+    // peer is more than RollbackHorizon ticks behind (Speculate caps at confirmed+horizon), so a peer
+    // that briefly falls behind speculates straight through and costs nothing — only a peer that has
+    // truly stopped pins the head and accrues the bound. Measured as CONTINUOUS starvation: any
+    // advance re-arms it. Only counted while live; the resync and recovery holds have tighter bounds.
     if (TheSim.Tick != LastExecTick_) {
         LastExecTick_ = TheSim.Tick;
         StallNs_ = 0;
         return;
     }
-    if (TheSim.Tick >= WallTicks) return;   // nothing to wait FOR — we are simply up to date
+    if (TheSim.Tick >= WallTicks) return;   // head caught up to our own wall clock — nothing to wait FOR
     StallNs_ += ElapsedNs;
     if (StallNs_ < CeilingStallTimeoutNs) return;
     Lur::Log::Error("RPS: starved at the ceiling for %llums at tick %u — the peer's input is not coming "
@@ -690,8 +692,9 @@ void LockstepPeer::BeginRecovery(const char* Why) {
                        "handing it to the peer (attempt %d/%d, tick %u)",
                        Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
         OfferHistoryToLoser();
-        // Our own state stands, so stop gating execution on it. We will still sit at the ceiling until
-        // the peer resumes producing, which is ordinary lockstep waiting rather than a stall.
+        // Our own state stands (OfferHistoryToLoser re-based us to our confirmed frontier). Clear the
+        // desync gate and resume: we speculate forward again, confirming as the peer's rebuilt frames
+        // arrive — no ceiling to sit at under rollback.
         Desync = false;
         Recovering_ = false;
         return;
@@ -706,9 +709,13 @@ void LockstepPeer::BeginRecovery(const char* Why) {
 }
 
 // #163's gap detector named a frame that never arrived, so WE know we are the incomplete peer while
-// the other has seen nothing wrong. It cannot deduce that, so ask. The gap is caught before the hole's
-// tick executes (the ceiling is gated on PeerEvents.size(), which the missing frame never grew), so
-// this repairs the timeline while both sims are still identical — the divergence never happens.
+// the other has seen nothing wrong. It cannot deduce that, so ask, and rebuild from its input history.
+// Under rollback the hole was already SPECULATED (predicted the peer idle for that tick) rather than
+// stalled on as it was under lockstep — so if the lost frame carried real input the sim has diverged
+// speculatively. That is fine: recovery replays the survivor's history, which is model-independent and
+// converges whenever the cause was lost input (it faithfully reproduces genuine nondeterminism, which
+// is why the attempts are bounded). If the lost frame was empty, the prediction already matched and the
+// rebuild lands on the identical state.
 void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     if (Recovering_ || Awaiting) return;
     if (TheSim.Result != ResultOngoing) return;  // the match is over; the peer's later frames are noise
@@ -827,9 +834,10 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // number that matters, is unanswerable. And keeping it a full tick (not just the wire byte)
         // means the reported tick stays exact after an earlier gap has already shifted the buffer.
         //
-        // Detection lands BEFORE the hole's tick executes — the ceiling is gated on PeerEvents.size(),
-        // which the missing frame never grew — so it is early enough to recover from rather than
-        // diagnose after the fact. Acting on it is #161; this commit only makes it visible.
+        // Under lockstep detection landed before the hole executed (the ceiling gated on
+        // PeerEvents.size()); under rollback the hole was already speculated (peer-idle prediction), so
+        // detection now precedes only the CONFIRMATION of that tick, and recovery (#161) replays the
+        // survivor's history to converge either way — see RequestRecovery.
         // A decided match is exempt: our sim has stopped while the peer may still be producing, so an
         // "expected next tick" no longer means anything and every later frame would read as a gap.
         if (!Awaiting && TheSim.Result == ResultOngoing) {
