@@ -1011,12 +1011,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const Color C = Home ? TeamTintBldg[Tm]
                              : (Bldg ? TeamTypeTintBldg[Tm][Ty] : TeamTypeTint[Tm][Ty]);
         Lur::Render::InstanceData& D = Instances[N++];
-        // Rollback correction smoothing (Phase 3): shift both endpoints by the decaying per-slot
-        // visual error, so a resim'd jump eases in over a few frames instead of popping. Zero in
-        // normal play (SmoothErr stays 0 while the snapshot chain is unbroken).
-        const float Ex = SmoothErrX[I], Ey = SmoothErrY[I];
-        D.PrevX = SX(FW(Snap.PrevX[I]) + Ex); D.PrevY = SY(FW(Snap.PrevY[I]) + Ey);
-        D.CurX = SX(FW(Snap.PosX[I]) + Ex);   D.CurY = SY(FW(Snap.PosY[I]) + Ey);
+        // Endpoint shift = correction offset + extrapolation lead, both in world units, added to BOTH
+        // interpolation endpoints:
+        //   * Phase 3 correction smoothing: SmoothErr eases a resim'd jump over a few frames (0 in
+        //     normal play, while the snapshot chain is unbroken).
+        //   * Immediacy: RenderLeadTicks * velocity slides the [Prev,Pos] segment forward so mix()
+        //     shows the predicted-NOW position rather than lagging one tick behind. Zero for buildings
+        //     (velocity 0), so only real motion is extrapolated.
+        const float PrevWx = FW(Snap.PrevX[I]), PrevWy = FW(Snap.PrevY[I]);
+        const float PosWx = FW(Snap.PosX[I]),   PosWy = FW(Snap.PosY[I]);
+        const float Ex = SmoothErrX[I] + (PosWx - PrevWx) * RenderLeadTicks;
+        const float Ey = SmoothErrY[I] + (PosWy - PrevWy) * RenderLeadTicks;
+        D.PrevX = SX(PrevWx + Ex); D.PrevY = SY(PrevWy + Ey);
+        D.CurX = SX(PosWx + Ex);   D.CurY = SY(PosWy + Ey);
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;
         // The HOME BASE wears the (distinct) camp/fortress glyph, bigger; a miner BUILDING wears the
         // mine-camp glyph; other buildings their (bigger) type glyph; units their type glyph.

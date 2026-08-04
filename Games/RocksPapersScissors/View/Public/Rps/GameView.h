@@ -449,6 +449,16 @@ private:
     bool  LastSnapAlive[MaxUnits] = {};
     uint64_t LastSmoothPublishNs = 0;    // absorb the discontinuity once per PUBLISHED snapshot
     static constexpr float CorrectionHalflifeSec = 0.07f;  // ~4 frames @60 Hz; tune on device (Phase 5)
+    // ---- Render EXTRAPOLATION lead (Docs/Journal/2026-08-03, immediacy pass) ----
+    // The view interpolates Prev->Pos over one sim step, so it structurally shows the tick it is
+    // HEADING TO only at alpha=1 — i.e. it lags the sim by ~1 tick (~100 ms at 10 Hz). Shift both
+    // endpoints forward by Lead ticks of the unit's own velocity (Pos-Prev) so mix() renders the
+    // PREDICTED-NOW position instead: the whole [Prev,Pos] segment slides forward by Lead*velocity.
+    // Lead=0 is the old interpolation exactly; Lead=1 is full extrapolation (~100 ms less felt lag).
+    // Buildings have zero velocity, so they never move — only real motion is extrapolated. The cost is
+    // a small overshoot on sharp direction changes (bounded by one tick of a slow RTS unit's travel);
+    // dial it back toward 0 if that reads badly. Tune on device.
+    static constexpr float RenderLeadTicks = 1.0f;
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;
