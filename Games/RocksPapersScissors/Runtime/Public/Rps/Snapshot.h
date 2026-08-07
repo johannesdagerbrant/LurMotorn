@@ -36,6 +36,11 @@ struct Snapshot {
     int32_t  Queue[MaxUnits];   // #140 per-building units queued (0 for units) — the N in "N/max"
     int32_t  BuildProgress[MaxUnits];  // #140 per-building next-unit progress (ticks) — the progress bar
     uint64_t AliveBits[(MaxUnits + 63) / 64];
+    // Per-slot entity identity (Sim::Serial): unique per creation, never reused. The view's
+    // rollback smoothing needs it to tell "this slot's occupant moved" from "this slot has a new
+    // occupant" — a slot index alone cannot, because a rollback reallocates every spawn made
+    // inside the resim window. Without it a fresh unit eases in from its predecessor's position.
+    uint32_t Serial[MaxUnits] = {};
 
     // Mine positions (constant after Init, carried here so the view needs nothing
     // else) + live reserves (#84: a mine with MineGold <= 0 is gone — don't draw it).
@@ -99,6 +104,7 @@ struct Snapshot {
         std::memcpy(Queue, S.Queue, sizeof(int32_t) * N);                  // #140 per-building queue
         std::memcpy(BuildProgress, S.BuildProgress, sizeof(int32_t) * N);  // #140 per-building progress
         std::memcpy(AliveBits, S.AliveBits, sizeof(uint64_t) * ((N + 63) / 64));
+        std::memcpy(Serial, S.Serial, sizeof(uint32_t) * N);
         std::memcpy(MineX, S.MineX, sizeof(Fixed) * NumMines);
         std::memcpy(MineY, S.MineY, sizeof(Fixed) * NumMines);
         std::memcpy(MineGold, S.MineGold, sizeof(int32_t) * NumMines);

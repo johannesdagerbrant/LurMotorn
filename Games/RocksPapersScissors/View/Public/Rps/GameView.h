@@ -444,8 +444,14 @@ private:
     float SmoothErrY[MaxUnits] = {};
     float LastSnapPosX[MaxUnits] = {};   // previous snapshot's Pos per slot (world), for the chain test
     float LastSnapPosY[MaxUnits] = {};
-    uint8_t LastSnapType[MaxUnits] = {};   // slot-identity guard: a reused slot must not "smooth" a jump
-    uint8_t LastSnapTeam[MaxUnits] = {};
+    // Slot-identity guard: only smooth when the slot still holds THE SAME entity. This is the sim's
+    // per-creation Serial (Sim::Serial), not (type, team) + a distance heuristic — that guess could
+    // not see the case that actually shipped the bug: a rollback re-runs every allocation made in
+    // the resim window, so one extra entity in the corrected timeline slides every later spawn down
+    // one slot, and slot I inherits its neighbour — same team, same type, ~1 world unit away, i.e.
+    // indistinguishable from a real correction. Everything born inside the rollback window then
+    // swung in from its neighbour's spot. 0 = slot empty/never seen.
+    uint32_t LastSnapSerial[MaxUnits] = {};
     bool  LastSnapAlive[MaxUnits] = {};
     uint64_t LastSmoothPublishNs = 0;    // absorb the discontinuity once per PUBLISHED snapshot
     static constexpr float CorrectionHalflifeSec = 0.07f;  // ~4 frames @60 Hz; tune on device (Phase 5)

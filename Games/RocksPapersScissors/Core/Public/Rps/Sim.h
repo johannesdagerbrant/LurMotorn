@@ -82,6 +82,22 @@ struct Sim {
     uint64_t AliveBits[(MaxUnits + 63) / 64] = {};
     int32_t  Count = 0;                   // high-water slot; iterate [0, Count) (deterministic on both peers)
 
+    // ---- Per-slot ENTITY IDENTITY (NOT hashed; part of the rolled-back state) ----
+    // A slot index is NOT an identity: AllocSlot hands out the lowest free slot, so a slot is
+    // recycled the moment its occupant dies, and — the case that actually bit us — a ROLLBACK
+    // re-runs every allocation made inside the resim window, so one extra entity in the corrected
+    // timeline shifts every later spawn down a slot. Serial is bumped once per creation and never
+    // reused, so "is slot I still the same entity as last time I looked?" is an equality test
+    // instead of a guess from (type, team, distance). 0 = never occupied.
+    //   The view is the consumer: it must NOT ease a new entity in from the previous occupant's
+    // position (that is a fly-in, not a correction) — see GameView's rollback smoothing.
+    //   NOT hashed, and it must not be: it is view-side identity, and two peers only agree on it
+    // for CONFIRMED ticks, so hashing it would turn ordinary speculation into a desync alarm. It
+    // does live in the Sim (not the view) because it has to be restored with the state a rollback
+    // rewinds to — a serial that survived the rewind would re-mint under the new timeline.
+    uint32_t Serial[MaxUnits] = {};
+    uint32_t NextSerial = 1;              // 0 is reserved for "never occupied"
+
     // ---- Mine positions (derived at Init; not mutated during ticks) ----
     Fixed MineX[NumMines] = {};
     Fixed MineY[NumMines] = {};
@@ -162,6 +178,18 @@ struct Sim {
     // comes from the same Cv on both peers. InCv is BY VALUE: it may alias this Sim's own Cv,
     // which the value-init at the top of the function wipes.
     void InitWithCvs(uint64_t Seed, CvSnapshot InCv);
+    // Rewind this Sim to a snapshot of an earlier tick (the rollback restore). Everything comes from
+    // the snapshot EXCEPT NextSerial, which must never go backwards: rewinding the counter would
+    // re-mint the discarded timeline's serials along the corrected one, and the very first entity the
+    // resim allocates would inherit the identity of whatever the abandoned timeline put in that slot
+    // — which is precisely the confusion Serial exists to prevent. Serial[] itself IS the snapshot's,
+    // so entities that survived the rewind keep the identity they had. Use this, never a bare
+    // assignment, wherever a Sim is restored from the snapshot ring.
+    void RestoreFrom(const Sim& Snap) {
+        const uint32_t KeepSerial = NextSerial;
+        *this = Snap;
+        if (KeepSerial > NextSerial) NextSerial = KeepSerial;
+    }
     // One 10 Hz tick driven by the tick's INPUT EVENT batch (both teams interleaved, applied in
     // array order — deterministic on both peers) — spec §6's 8 phases, in order. The 4-bit press
     // mask + Step(mask0,mask1) it replaced is gone (#145): production is now spatial (buildings).

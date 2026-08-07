@@ -102,6 +102,68 @@ static void TestDeterminism() {
     CHECK(A.AliveCount(0) > 0 && A.AliveCount(1) > 0);
 }
 
+// ---- Per-slot entity identity (Sim::Serial). A slot index is NOT an identity: AllocSlot hands out
+// the lowest free slot, so deaths recycle it and a ROLLBACK re-runs every allocation made inside the
+// resim window (one extra entity in the corrected timeline slides every later spawn down a slot). The
+// view smooths a rollback correction only for a slot that still holds THE SAME entity, and without a
+// real identity it eased each new spawn in from its predecessor's position — a swinging arc on
+// everything freshly built. The law it needs: a serial identifies one entity for the life of the
+// process and is NEVER reused, across recycling, rollback rewinds, or a match restart. ----
+static void TestSlotSerialNeverReused() {
+    constexpr int Ticks = 400;
+    static Sim S;
+    S.Init(0xA11CE);   FundForArmyScript(S);
+
+    // Highest serial ever OBSERVED alive. A slot whose serial changed must show a serial above this —
+    // i.e. freshly minted — never one that has been in circulation before.
+    uint32_t HighWater = 0;
+    static uint32_t Seen[MaxUnits];  // per-slot: the last serial seen there (kept across the slot's death)
+    for (int32_t K = 0; K < MaxUnits; ++K) Seen[K] = 0;
+    bool FreshOnly = true, NonZero = true, NoDuplicates = true;
+    int32_t Recycled = 0;            // slots that changed hands at least once — the case under test
+
+    for (int I = 0; I < Ticks && FreshOnly && NonZero && NoDuplicates; ++I) {
+        ArmyStep(S, static_cast<uint32_t>(I));
+        for (int32_t K = 0; K < S.Count; ++K) {
+            if (!S.IsAlive(K)) continue;
+            const uint32_t Sr = S.Serial[K];
+            if (Sr == 0) { NonZero = false; break; }              // every live entity is identified
+            if (Sr != Seen[K]) {                                  // this slot changed hands
+                if (Sr <= HighWater) { FreshOnly = false; break; }  // ...to a RECYCLED identity: the bug
+                if (Seen[K] != 0) ++Recycled;                       // ...and it had held someone before
+                HighWater = Sr;
+                Seen[K] = Sr;
+            }
+        }
+        // No two live entities may share an identity in the same tick.
+        for (int32_t A = 0; A < S.Count && NoDuplicates; ++A) {
+            if (!S.IsAlive(A)) continue;
+            for (int32_t B = A + 1; B < S.Count; ++B)
+                if (S.IsAlive(B) && S.Serial[A] == S.Serial[B]) { NoDuplicates = false; break; }
+        }
+    }
+    CHECK(NonZero);
+    CHECK(FreshOnly);
+    CHECK(NoDuplicates);
+    CHECK(Recycled > 0);   // the run must actually exercise slot reuse, or the law is vacuous
+
+    // A ROLLBACK rewinds the state but must NOT rewind the identity counter: re-simulating a corrected
+    // timeline re-runs the allocations, and a rewound counter would hand the discarded timeline's
+    // serials back out — the collision the view cannot see through (it compares serials, and equal
+    // means "same entity, smooth the correction"). Restore an old snapshot, spawn again, and the new
+    // entity must carry an identity no one has held.
+    static Sim Rewound;
+    Rewound = S;                      // the "snapshot" (a plain copy — what the ring stores)
+    const uint32_t HeadSerial = S.NextSerial;
+    for (int I = 0; I < 20; ++I) ArmyStep(S, static_cast<uint32_t>(I));  // speculate on past the snapshot
+    CHECK(S.NextSerial > HeadSerial);  // the discarded timeline minted identities...
+    S.RestoreFrom(Rewound);            // ...and the rewind must not hand them out again
+    const uint32_t AfterRestore = S.NextSerial;
+    CHECK(AfterRestore > HeadSerial);          // counter kept the speculative head's position
+    CHECK(S.Tick == Rewound.Tick);             // ...while the STATE really did rewind
+    CHECK(S.StateHash() == Rewound.StateHash());  // Serial is not hashed: identity rides outside state
+}
+
 // A fresh sim replaying the same stream must reach the same final hash — the
 // replay law (State = Replay(Inputs, Seed)) that resync + the recorder depend on.
 static void TestReplayReproducibility() {
@@ -1083,6 +1145,7 @@ int main() {
     TestMinersDoNotPayForAFlockGather();   // #162
 #endif
     TestMinerPathIgnoresNeighbours();      // #162 (the invariant the optimisation rests on)
+    TestSlotSerialNeverReused();           // per-slot entity identity (the view's rollback-smoothing guard)
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
     TestCartPriorityOverMirror();

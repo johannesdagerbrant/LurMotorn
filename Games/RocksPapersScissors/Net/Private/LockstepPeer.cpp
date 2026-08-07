@@ -525,7 +525,7 @@ void LockstepPeer::RollbackTo(uint32_t Tick) {
         return;
     }
     const uint32_t Head = TheSim.Tick;
-    TheSim = *Snap;                       // restore state at Tick (TheSim.Tick == Tick)
+    TheSim.RestoreFrom(*Snap);            // restore state at Tick (TheSim.Tick == Tick); identity doesn't rewind
     ++Rollbacks_;
     if (Head > Tick) ResimTicks_ += Head - Tick;
     // Re-sim at least back to where we were, and on to the (possibly grown) head, uncapped within the
@@ -1200,7 +1200,7 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     // already replayed the sim to exactly Frontier, so the guard skips the (now-cleared) ring there.
     if (TheSim.Tick != Frontier) {
         const Sim* At = SnapRing_.Get(Frontier);
-        if (At != nullptr) TheSim = *At;
+        if (At != nullptr) TheSim.RestoreFrom(*At);   // identity doesn't rewind — see Sim::RestoreFrom
         else Lur::Log::Error("RPS: resync frontier %u has no snapshot — rollback ring underflow", Frontier);
     }
     SnapRing_.Clear();           // snapshots key to the pre-resync timeline; none survive the re-base

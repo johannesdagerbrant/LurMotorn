@@ -175,6 +175,7 @@ int32_t SpawnUnitAt(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
     S.Kind[I] = KindUnit;         // #131: reset — this slot may be a recycled dead-building slot
     S.Queue[I] = 0;
     S.BuildProgress[I] = 0;
+    S.Serial[I] = S.NextSerial++;  // fresh identity: this slot is NOT its previous occupant
     SetAlive(S, I);
     if (I + 1 > S.Count) S.Count = I + 1;
     return I;
@@ -1099,6 +1100,7 @@ void ApplyPlace(Sim& S, uint8_t Team, uint8_t Type, Fixed X, Fixed Y) {
     S.Kind[I] = KindBuilding;  S.Queue[I] = 0;  S.BuildProgress[I] = 0;
     S.Target[I] = -1;  S.Cooldown[I] = 0;   // Cooldown = the #132 per-building spawn-ring counter
     S.WorkerState[I] = WorkToMine;  S.Carry[I] = 0;  S.WorkerTimer[I] = 0;
+    S.Serial[I] = S.NextSerial++;  // fresh identity: this slot is NOT its previous occupant
     SetAlive(S, I);
     if (I + 1 > S.Count) S.Count = I + 1;
 }
@@ -1138,6 +1140,7 @@ void SpawnHomeBase(Sim& S, uint8_t Team) {
     S.Kind[I] = KindHomeBase;
     S.Target[I] = -1;  S.Cooldown[I] = 0;  S.Queue[I] = 0;  S.BuildProgress[I] = 0;
     S.WorkerState[I] = WorkToMine;  S.Carry[I] = 0;  S.WorkerTimer[I] = 0;
+    S.Serial[I] = S.NextSerial++;  // fresh identity: this slot is NOT its previous occupant
     SetAlive(S, I);
     if (I + 1 > S.Count) S.Count = I + 1;
 }
@@ -1225,7 +1228,14 @@ void Sim::Init(uint64_t InSeed) {
 // built here, so re-running this with a different Cv rebuilds them all. Nothing in here may read
 // the global CVars (that is Init's job above), or the peer sync could not converge it.
 void Sim::InitWithCvs(uint64_t InSeed, CvSnapshot InCv) {
+    // Entity identity outlives the MATCH, not just the tick: the view keeps its per-slot LastSnapSerial
+    // across a restart (it has no match-start hook, and slots above the new Count aren't even visited
+    // until the field grows back into them), so restarting the counter at 1 would let a fresh entity
+    // inherit the identity of the previous match's occupant of that slot. Carry it forward — Serial is
+    // not hashed, so nothing about determinism or the wire depends on where it starts.
+    const uint32_t KeepSerial = NextSerial;
     *this = Sim{};  // value-init: zeroes every array/field (Init-time, not the hot path)
+    NextSerial = KeepSerial;
     Seed = InSeed;
     Cv = InCv;
     DeriveUnits();  // #122: fill Units[] from the just-latched Cv before anything spawns
@@ -1305,6 +1315,7 @@ void Sim::StressFill(int32_t PerTeam, uint8_t FillType) {
             Kind[I] = KindUnit;         // #131: reset recycled slot
             Queue[I] = 0;
             BuildProgress[I] = 0;
+            Serial[I] = NextSerial++;   // fresh identity (see Sim::Serial)
             SetAlive(*this, I);
             if (I + 1 > Count) Count = I + 1;
         }
