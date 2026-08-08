@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "Chess/Board.h"
+#include "Chess/Captures.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/ChessRecord.h"
 #include "Chess/MatchMeta.h"
@@ -163,17 +164,102 @@ static void TestCheckmateConcludesMatch() {
     CHECK(S.MyColor() == EColor::Black);                    // parity flipped: lower now Black
 }
 
-// 150 quiet plies (knight shuffle) trigger the 75-move auto-draw.
-static void TestSeventyFiveMoveDraw() {
+// The knights shuffle back to where they started: the position after 4 plies IS the
+// start position (2nd occurrence) and after 8 plies it is the 3rd — a threefold draw
+// (issue #7), reached long before the 75-move rule could bite.
+static void TestThreefoldRepetitionDraw() {
     ChessMatchState S;
     S.SetIdentity("1111", "9999");
     const Square G1s = 6, F3s = 21, G8 = 62, F6 = 45;
     const Square From[4] = {G1s, G8, F3s, F6};   // Ng1f3, Ng8f6, Nf3g1, Nf6g8, repeat
     const Square To[4]   = {F3s, F6, G1s, G8};
 
+    CHECK(S.RepetitionCount() == 1);             // the start position, seen once
+
+    int Plies = 0;
+    for (int i = 0; i < 20 && S.Record().TotalMatches() == 0; ++i) {
+        Play(S, From[i % 4], To[i % 4]);
+        ++Plies;
+        if (Plies == 4) CHECK(S.RepetitionCount() == 2);   // back at the start position
+    }
+    CHECK(Plies == 8);                                     // third occurrence
+    CHECK(S.LastResult() == EGameResult::DrawRepetition);
+    CHECK(S.Record().Draws == 1);
+    CHECK(S.Record().TotalMatches() == 1);
+    CHECK(S.Record().Moves.empty());             // next match started
+    CHECK(S.RepetitionCount() == 1);             // ...on a fresh history
+}
+
+// A repetition is about the POSITION, not the path: the same squares reached by
+// swapping which knight moves first must still count as the same position.
+static void TestRepetitionIgnoresMoveOrder() {
+    ChessMatchState S;
+    const Square G1s = 6, F3s = 21, B1 = 1, C3 = 18, G8 = 62, F6 = 45, B8 = 57, C6 = 42;
+    Play(S, G1s, F3s); Play(S, G8, F6);
+    Play(S, B1, C3);   Play(S, B8, C6);          // position P, 1st occurrence
+    const int First = S.RepetitionCount();
+    CHECK(First == 1);
+
+    Play(S, F3s, G1s); Play(S, F6, G8);          // undo, but the OTHER pair this time
+    Play(S, G1s, F3s); Play(S, G8, F6);          // back to P by a different route
+    CHECK(S.RepetitionCount() == 2);
+}
+
+// An irreversible move (a pawn push) makes the position unreachable again, so the
+// count starts over rather than accumulating across the whole game.
+static void TestRepetitionResetByIrreversibleMove() {
+    ChessMatchState S;
+    const Square G1s = 6, F3s = 21, G8 = 62, F6 = 45, E2s = 12, E3 = 20;
+    Play(S, G1s, F3s); Play(S, G8, F6);
+    Play(S, F3s, G1s); Play(S, F6, G8);          // start position, 2nd occurrence
+    CHECK(S.RepetitionCount() == 2);
+    Play(S, E2s, E3);                            // pawn move: no going back
+    Play(S, G8, F6); Play(S, G1s, F3s);
+    Play(S, F6, G8); Play(S, F3s, G1s);          // same knights dance, new pawn structure
+    CHECK(S.RepetitionCount() == 2);             // counts the post-e3 position, not the start
+    CHECK(S.Record().TotalMatches() == 0);       // no draw
+}
+
+// 150 quiet plies trigger the 75-move auto-draw. Reaching it is harder than it looks:
+// the obvious knight shuffle now draws by repetition after 8 plies, so the walk has to
+// keep finding FRESH positions. This driver plays, each ply, a move that is
+//   * quiet          — a pawn move or capture would reset the halfmove clock;
+//   * not a check    — otherwise the reply may have no quiet escape and the walk dies;
+//   * least-visited  — so it never stands anywhere a third time,
+// breaking ties on a rotating index so it wanders instead of cycling.
+static void TestSeventyFiveMoveDraw() {
+    ChessMatchState S;
+    S.SetIdentity("1111", "9999");
+
+    std::vector<std::uint64_t> Seen{RepetitionKey(S.CurrentBoard())};
+    auto Times = [&Seen](std::uint64_t K) {
+        return static_cast<int>(std::count(Seen.begin(), Seen.end(), K));
+    };
+
     int Plies = 0;
     for (int i = 0; i < 200 && S.Record().TotalMatches() == 0; ++i) {
-        Play(S, From[i % 4], To[i % 4]);
+        const Board& B = S.CurrentBoard();
+        MoveList L;
+        GenerateLegalMoves(B, L);
+
+        const Move* Cand[MaxMoves];
+        int Count = 0, BestSeen = 99;
+        for (int m = 0; m < L.Count; ++m) {
+            const Move& Mv = L.Moves[m];
+            if (PieceTypeAt(B, B.SideToMove, Mv.From) == EPieceType::Pawn) continue;
+            if (PieceTypeAt(B, Opposite(B.SideToMove), Mv.To) != EPieceType::None) continue;
+            Board After = B;
+            After.MakeMove(Mv);
+            if (IsInCheck(After, After.SideToMove)) continue;
+            const int N = Times(RepetitionKey(After));
+            if (N < BestSeen) { BestSeen = N; Count = 0; }
+            if (N == BestSeen) Cand[Count++] = &Mv;
+        }
+        CHECK(Count > 0 && BestSeen < 2);   // else the walk painted itself into a corner
+        if (Count == 0 || BestSeen >= 2) return;
+
+        S.ApplyMove(*Cand[Plies % Count]);
+        Seen.push_back(RepetitionKey(S.CurrentBoard()));
         ++Plies;
     }
     CHECK(S.LastResult() == EGameResult::DrawFiftyMove);
@@ -181,6 +267,55 @@ static void TestSeventyFiveMoveDraw() {
     CHECK(S.Record().TotalMatches() == 1);
     CHECK(Plies == 150);               // 75 moves by each side
     CHECK(S.Record().Moves.empty());   // next match started
+}
+
+// CollectCaptures derives the capture tray by replaying the record (issue #67): the
+// right pieces, the right colours, in the order they were taken — and nothing at all
+// from a game with no captures.
+static void TestCollectCaptures() {
+    ChessMatchState S;
+    CaptureList C;
+
+    CollectCaptures(S.Record().Moves, C);
+    CHECK(C.Count == 0);                                   // start position: empty tray
+
+    // 1.e4 d5 2.exd5 Qxd5 3.Nc3 Qxa2 4.Rxa2
+    const Square E2s = 12, E4s = 28, D7 = 51, D5 = 35, D8s = 59, B1s = 1, C3s = 18;
+    const Square A2 = 8, A1 = 0;
+    Play(S, E2s, E4s); Play(S, D7, D5);
+    Play(S, E4s, D5);                                      // white pawn takes a black pawn
+    Play(S, D8s, D5);                                      // black queen takes a white pawn
+    Play(S, B1s, C3s);
+    Play(S, D5, A2);                                       // black queen takes a white pawn
+    Play(S, A1, A2);                                       // white rook takes the black queen
+
+    CollectCaptures(S.Record().Moves, C);
+    CHECK(C.Count == 4);
+    CHECK(C.Items[0].Color == EColor::Black && C.Items[0].Type == EPieceType::Pawn);
+    CHECK(C.Items[1].Color == EColor::White && C.Items[1].Type == EPieceType::Pawn);
+    CHECK(C.Items[2].Color == EColor::White && C.Items[2].Type == EPieceType::Pawn);
+    CHECK(C.Items[3].Color == EColor::Black && C.Items[3].Type == EPieceType::Queen);
+}
+
+// En passant is the case a naive "what stands on M.To" reader gets wrong: the taken
+// pawn is beside the destination square, not on it.
+static void TestCollectCapturesEnPassant() {
+    ChessMatchState S;
+    // 1.e4 a6 2.e5 d5 3.exd6 e.p.
+    const Square E2s = 12, E4s = 28, E5s = 36, D6 = 43, A7 = 48, A6 = 40, D7 = 51, D5 = 35;
+    Play(S, E2s, E4s); Play(S, A7, A6);
+    Play(S, E4s, E5s); Play(S, D7, D5);
+
+    MoveList L;
+    GenerateLegalMoves(S.CurrentBoard(), L);
+    const Move* Ep = Find(L, E5s, D6);
+    CHECK(Ep != nullptr && (Ep->Flags & MoveFlagEnPassant) != 0);
+    if (Ep) S.ApplyMove(*Ep);
+
+    CaptureList C;
+    CollectCaptures(S.Record().Moves, C);
+    CHECK(C.Count == 1);
+    CHECK(C.Items[0].Color == EColor::Black && C.Items[0].Type == EPieceType::Pawn);
 }
 
 // EnumerateOpponents lists every stored opponent record, derives whose turn it is
@@ -270,7 +405,12 @@ int main() {
     TestMergeByMoveCount();
     TestMergeMatchesDominate();
     TestCheckmateConcludesMatch();
+    TestThreefoldRepetitionDraw();
+    TestRepetitionIgnoresMoveOrder();
+    TestRepetitionResetByIrreversibleMove();
     TestSeventyFiveMoveDraw();
+    TestCollectCaptures();
+    TestCollectCapturesEnPassant();
     TestEnumerateOpponents();
     TestMatchMeta();
     TestClearIdentityHotSeat();

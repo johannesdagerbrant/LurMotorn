@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "Chess/Board.h"
 #include "Chess/ChessRecord.h"
@@ -26,6 +27,8 @@ namespace Chess {
 // and syncs it. Host-testable.
 class ChessMatchState : public Lur::Save::ISaveState {
 public:
+    ChessMatchState() { RebuildBoard(); }   // seeds the repetition history with the start position
+
     // Establish identity once the peer's GUID is known (link established). Both are
     // the hex device ids from Lur::Save. Colour + the lower/higher anchor derive
     // from their lexicographic order.
@@ -50,6 +53,10 @@ public:
     // a mid-game desync is detected and healed via resync (issue #72). Deterministic.
     std::uint64_t PositionHash() const;
 
+    // How many times the CURRENT position has occurred in this match, counting itself
+    // (so it is >= 1). Three is the draw (issue #7).
+    int RepetitionCount() const;
+
     // The result of the most recently concluded match (Ongoing until the first ends).
     // Set when a terminal move auto-concludes a match; useful for a UI "you won" note.
     EGameResult LastResult() const { return Last; }
@@ -61,14 +68,15 @@ public:
     void SetOnMatchEnd(std::function<void()> H) { OnMatchEnd = std::move(H); }
 
     // Apply a legal move: advance the board and append it to the record. If the move
-    // ends the game (checkmate / stalemate / 75-move auto-draw), auto-conclude the
+    // ends the game (checkmate / stalemate / threefold / 75-move auto-draw), auto-conclude the
     // match: bump the agnostic W/L/D tally and start the next match (board reset,
     // colour recomputed from the new match-count parity). This is DETERMINISTIC from
     // the shared move sequence, so both peers conclude identically and stay in sync.
     void ApplyMove(const Move& M);
 
-    // Replay the record's move list from the start position into the board. Call
-    // after Read / a merge that replaced the record.
+    // Replay the record's move list from the start position into the board, rebuilding
+    // the repetition history alongside it. Call after Read / a merge that replaced the
+    // record — the history is DERIVED from the move list, never persisted or synced.
     void RebuildBoard();
 
     // --- Lur::Save::ISaveState ---
@@ -88,6 +96,10 @@ private:
 
     ChessRecord           Rec;
     Board                 Position = Board::StartPosition();
+    // RepetitionKey of every position this match has stood in, oldest first — the
+    // start position, then one per ply. Derived from Rec.Moves by RebuildBoard, so it
+    // costs nothing on the wire or on disk and can never disagree between peers.
+    std::vector<uint64_t> PosKeys;
     EGameResult           Last = EGameResult::Ongoing;
     std::function<void()> OnMatchEnd;
     std::string           LocalGuid;

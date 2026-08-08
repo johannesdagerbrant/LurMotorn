@@ -27,8 +27,10 @@ enum ECastleRight : uint8_t {
     CastleAll = CastleWhiteKing | CastleWhiteQueen | CastleBlackKing | CastleBlackQueen,
 };
 
+// Appended to, never reordered: these ordinals show up in device logs.
 enum class EGameResult : uint8_t {
     Ongoing, Checkmate, Stalemate, DrawFiftyMove, DrawInsufficientMaterial,
+    DrawRepetition,   // the same position occurred three times (issue #7)
 };
 
 // Bitboard board state. One uint64_t per (color, piece type): bit S set means a
@@ -75,8 +77,19 @@ bool IsInCheck(const Board& B, EColor Side);
 // the exact, documented ordering, and MoveCodec.h for how it is used.
 void GenerateLegalMoves(const Board& B, MoveList& Out);
 
-// Result for the side to move. Note: threefold repetition is NOT detected here —
-// it needs game history and is the session layer's concern.
+// The board's REPETITION IDENTITY: two positions repeat when their pieces, side to
+// move, castling rights and en-passant target all agree. The clocks are deliberately
+// excluded — a repetition is about the position, not how long it took to reach it.
+//
+// Deterministic (a plain FNV-1a over those fields), so both phones derive the same
+// key from the same move list. ChessMatchState keeps one key per position played and
+// draws on the third occurrence (issue #7); Result() below cannot, because a single
+// board carries no history.
+uint64_t RepetitionKey(const Board& B);
+
+// Result for the side to move, from THIS POSITION ALONE. Note: threefold repetition
+// is NOT detected here — it needs game history, so it lives one layer up in
+// ChessMatchState (see RepetitionKey).
 EGameResult Result(const Board& B);
 
 } // namespace Chess

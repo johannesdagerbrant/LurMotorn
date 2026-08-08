@@ -20,6 +20,20 @@ static void Place(Board& B, EColor C, EPieceType Pt, Square S) {
     B.Pieces[static_cast<int>(C)][static_cast<int>(Pt)] |= Bit(S);
 }
 
+uint64_t RepetitionKey(const Board& B) {
+    // FNV-1a over the fields that define WHICH position this is. The field order here
+    // is also the prefix of ChessMatchState::PositionHash (which mixes the halfmove
+    // clock in on top), so the two stay derived from one definition.
+    uint64_t H = 14695981039346656037ull;
+    auto Mix = [&H](uint64_t V) { H = (H ^ V) * 1099511628211ull; };
+    for (int C = 0; C < 2; ++C)
+        for (int T = 0; T < 6; ++T) Mix(B.Pieces[C][T]);
+    Mix(static_cast<uint64_t>(B.SideToMove));
+    Mix(static_cast<uint64_t>(B.Castling));
+    Mix(static_cast<uint64_t>(B.EnPassant));
+    return H;
+}
+
 EPieceType PieceTypeAt(const Board& B, EColor Side, Square S) {
     const uint64_t M = Bit(S);
     for (int Pt = 0; Pt < 6; ++Pt) {
