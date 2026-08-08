@@ -62,6 +62,29 @@ void CellTopLeft(const BoardLayout& L, Square S, bool Flip, float& X, float& Y) 
     Y = L.OriginY + (7 - Rank) * L.Square;  // rank 0 at the bottom row (of this view)
 }
 
+// What a move sounds like, classified from the position it is played IN (issue #78).
+//
+// It must be called BEFORE the move is applied, for two reasons. A capture is only
+// visible pre-move — afterwards the destination square holds the capturing piece and the
+// victim is gone. And a mating move auto-concludes the match, which RESETS the board, so
+// asking the state about it afterwards would inspect a fresh start position.
+//
+// Check and mate need the position AFTER the move, so it is made on a throwaway copy: one
+// board copy plus one move generation, on the move path only (never per frame).
+EMoveSound ClassifyMove(const Board& Before, const Move& M) {
+    const bool Captures = (M.Flags & MoveFlagEnPassant) != 0 ||
+                          PieceTypeAt(Before, Opposite(Before.SideToMove), M.To) != EPieceType::None;
+
+    Board After = Before;
+    After.MakeMove(M);
+    if (IsInCheck(After, After.SideToMove)) {
+        MoveList Escapes;
+        GenerateLegalMoves(After, Escapes);
+        return Escapes.Count == 0 ? EMoveSound::Checkmate : EMoveSound::Check;
+    }
+    return Captures ? EMoveSound::Capture : EMoveSound::Move;
+}
+
 // Map a screen point to a chess square, or NoSquare if outside the board. Flip is
 // the same board orientation used by CellTopLeft, so touch matches what is drawn.
 Square SquareAt(const BoardLayout& L, float X, float Y, bool Flip) {
@@ -341,8 +364,9 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
         return;
     }
     if (State->HasIdentity() && State->SideToMove() == State->MyColor()) return;  // not the peer's turn
+    const EMoveSound Sound = ClassifyMove(State->CurrentBoard(), Mv);
     State->ApplyMove(Mv);
-    StampMove();
+    StampMove(Sound);
     Selected = NoSquare;
 }
 
@@ -393,8 +417,9 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
                 const std::vector<uint8_t>& Bytes = W.Finish();
                 Net->SendMove(Bytes.data(), Bytes.size());
             }
+            const EMoveSound Sound = ClassifyMove(B, *Chosen);
             State->ApplyMove(*Chosen);
-            StampMove();
+            StampMove(Sound);
             Selected = NoSquare;
             return;
         }
@@ -408,15 +433,18 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
 namespace {
 // Commit an already-chosen legal move over the SAME wire path OnTap uses: ship the
 // index (encoded off the pre-move legal list) BEFORE applying, so both boards advance
-// in lockstep. Factored so PlayMove and AutoPlay share one identical path.
-void CommitMove(Lur::Net::Session* Net, ChessMatchState* State, const Move& Chosen, const MoveList& Legal) {
+// in lockstep. Factored so PlayMove and AutoPlay share one identical path. Returns the
+// move's sound category, classified while the pre-move board is still standing.
+EMoveSound CommitMove(Lur::Net::Session* Net, ChessMatchState* State, const Move& Chosen, const MoveList& Legal) {
     if (Net != nullptr) {
         Lur::Serialization::BitWriter W;
         EncodeMove(Chosen, Legal, W);
         const std::vector<uint8_t>& Bytes = W.Finish();
         Net->SendMove(Bytes.data(), Bytes.size());
     }
+    const EMoveSound Sound = ClassifyMove(State->CurrentBoard(), Chosen);
     State->ApplyMove(Chosen);
+    return Sound;
 }
 }  // namespace
 
@@ -432,8 +460,7 @@ bool BoardView::PlayMove(Square From, Square To) {
         else { Chosen = &M; }
     }
     if (Chosen == nullptr) return false;
-    CommitMove(Net, State, *Chosen, Legal);
-    StampMove();
+    StampMove(CommitMove(Net, State, *Chosen, Legal));
     Selected = NoSquare;
     return true;
 }
@@ -444,8 +471,7 @@ bool BoardView::AutoPlayRandomLegalMove(uint32_t& RngState) {
     if (Legal.Count <= 0) return false;                       // no move (game would have concluded)
     RngState = RngState * 1664525u + 1013904223u;             // Numerical-Recipes LCG
     const int Idx = static_cast<int>((RngState >> 8) % static_cast<uint32_t>(Legal.Count));
-    CommitMove(Net, State, Legal.Moves[Idx], Legal);
-    StampMove();
+    StampMove(CommitMove(Net, State, Legal.Moves[Idx], Legal));
     Selected = NoSquare;
     return true;
 }
@@ -459,9 +485,9 @@ void BoardView::AttachPersistence(Lur::Save::Store* Store, Lur::Save::SyncManage
     ItemsDirty = true;
 }
 
-void BoardView::StampMove() {
-    // A move just landed on the board: click it now (wait-free enqueue on the app side).
-    if (MovePlayed) MovePlayed();
+void BoardView::StampMove(EMoveSound Sound) {
+    // A move just landed on the board: sound it now (wait-free enqueue on the app side).
+    if (MovePlayed) MovePlayed(Sound);
     // Stamp the last-move time against the active opponent and persist its record, so
     // an offline move survives and syncs on the next link. Same-device (empty) has no
     // opponent record to keep.

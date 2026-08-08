@@ -13,6 +13,7 @@
 #include "Chess/Captures.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/Types.h"
+#include "Chess/View/MoveSound.h"
 
 namespace Lur::Net { class Session; }
 
@@ -69,10 +70,11 @@ public:
     void SetLogger(std::function<void(const char*)> Logger) { Log = std::move(Logger); }
 
     // Optional hook fired right after a move is applied to the board (any path: local tap,
-    // peer move, or dev autoplay). The app wires it to the SFX mixer so a move clicks the
-    // instant it lands — kept as a bare callback so the view has no audio dependency. The
+    // peer move, or dev autoplay), carrying WHAT KIND of move it was so the app can pick a
+    // sound (issue #78). Kept as a bare callback taking a plain enum, so the view still has
+    // no audio dependency — it classifies, the app decides what that sounds like. The
     // trigger is wait-free on the app side (Mixer::Play just enqueues). No-op if unset.
-    void SetMovePlayed(std::function<void()> Hook) { MovePlayed = std::move(Hook); }
+    void SetMovePlayed(std::function<void(EMoveSound)> Hook) { MovePlayed = std::move(Hook); }
 
     // Optional draw hook invoked at the very end of the GUI layer, inside the frame
     // (after all game GUI, before EndFrame) — the seam an app uses to composite an
@@ -96,9 +98,11 @@ private:
 
     // Rebuild the selector's item list from the store + live link state.
     void RebuildItems();
-    // Record the last move's wall-clock time + persist the record for the active
-    // opponent (so offline moves survive and sync on the next link).
-    void StampMove();
+    // A move just landed, on any path: fire the sound hook with its category, then record
+    // the last-move wall-clock time + persist the record for the active opponent (so
+    // offline moves survive and sync on the next link). `Sound` must be classified BEFORE
+    // the move was applied — see ClassifyMove in the .cpp.
+    void StampMove(EMoveSound Sound);
     // Switch the active match to an opponent GUID (hard-load its record) or, for an
     // empty GUID, to a fresh "same device" local game. Persists the outgoing game.
     void SwitchActive(const std::string& Guid);
@@ -134,7 +138,7 @@ private:
     int                       LastLink = -1;       // last ELinkState, to detect changes
     std::function<void(const char*)> Log;          // optional "OnlyChess" log sink
     std::function<void()>            PostGuiHook;  // optional overlay draw (issue #54)
-    std::function<void()>            MovePlayed;   // optional SFX trigger on move (audio)
+    std::function<void(EMoveSound)>  MovePlayed;   // optional SFX trigger on move (audio)
 
     Lur::Render::MeshHandle     QuadMesh = 0;
     Lur::Render::MaterialHandle LightSquare = 0;

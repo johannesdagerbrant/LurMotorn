@@ -59,15 +59,17 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                 LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
                 if (State->Ready) State->View.CreateResources(State->Renderer);
 
-                // Bring up audio: load the cooked SFX into the mixer, wire a move to a
-                // click, then open the low-latency stream. Order matters — Sfx.Load (which
-                // calls Mixer::Add) must finish before the device thread starts pulling.
+                // Bring up audio: load the cooked SFX into the mixer, wire each move to the
+                // sound for its KIND (move / capture / check / checkmate — the view
+                // classifies, SfxLibrary picks the clip and its variation), then open the
+                // low-latency stream. Order matters — Sfx.Load (which calls Mixer::Add) must
+                // finish before the device thread starts pulling.
                 if (State->Audio == nullptr) {
                     State->Mixer.Init(Lur::Audio::Mixer::DefaultRate);
                     State->Sfx.Load(State->Mixer);
                     AppState* St = State;
                     State->View.SetMovePlayed(
-                        [St] { St->Sfx.Play(St->Mixer, Chess::ESfx::Move); });
+                        [St](Chess::EMoveSound S) { St->Sfx.Play(St->Mixer, S); });
                     State->Audio = Lur::Audio::CreateAudioDevice();
                     const bool AudioOk = State->Audio && State->Audio->Start(MixThunk, &State->Mixer);
                     LOGI("Audio init: %s", AudioOk ? "ok" : "failed");

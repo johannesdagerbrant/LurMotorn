@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstdio>
+#include <limits>
+#include <utility>
 #include <vector>
 
 #include "Lur/Audio/Mixer.h"
@@ -153,6 +155,107 @@ static void TestMixerResamplesOnAdd() {
     CHECK(Buf[255] == 0);
 }
 
+// A ramp, so every frame is distinguishable and an interpolation error shows up as a
+// wrong VALUE rather than as silence.
+static Sound MakeRamp(uint32_t frames, int16_t step, uint32_t rate) {
+    Sound s;
+    s.Rate = rate;
+    s.Pcm.resize(frames);
+    for (uint32_t i = 0; i < frames; ++i) s.Pcm[i] = static_cast<int16_t>(i * step);
+    return s;
+}
+
+// Pitch 1.0 must be BIT-EXACT. The interpolated read replaced a plain step-by-one loop, so
+// the default path has to reproduce the PCM verbatim — at unit step the fraction is exactly
+// zero and no rounding may creep in.
+static void TestMixerUnitPitchIsExact() {
+    Mixer M;
+    M.Init(48000);
+    const SoundId A = M.Add(MakeRamp(8, 1000, 48000));
+    M.Play(A);
+    int16_t Buf[8] = {0};
+    M.Render(Buf, 8);
+    for (int i = 0; i < 8; ++i) CHECK(Buf[i] == static_cast<int16_t>(i * 1000));
+}
+
+// Pitch 2.0 reads every other sample (and finishes in half the frames); 0.5 reads each
+// sample twice with the midpoint interpolated between them.
+static void TestMixerPitchResamples() {
+    Mixer M;
+    M.Init(48000);
+    const SoundId A = M.Add(MakeRamp(8, 1000, 48000));
+
+    M.Play(A, 1.0f, 2.0f);
+    int16_t Up[8] = {0};
+    M.Render(Up, 8);
+    CHECK(Up[0] == 0 && Up[1] == 2000 && Up[2] == 4000 && Up[3] == 6000);
+    CHECK(Up[4] == 0);                       // 8 frames consumed in 4 -> retired early
+
+    M.Play(A, 1.0f, 0.5f);
+    int16_t Down[8] = {0};
+    M.Render(Down, 8);
+    CHECK(Down[0] == 0 && Down[2] == 1000 && Down[4] == 2000 && Down[6] == 3000);
+    CHECK(Down[1] == 500 && Down[3] == 1500);   // interpolated midpoints, not held samples
+}
+
+// The end of a clip must HOLD its last sample, never wrap round to the first: with a
+// fractional position sitting on the final frame, reading P[0] as the neighbour would
+// splice a click onto the end of every pitched voice.
+static void TestMixerPitchDoesNotWrapPastEnd() {
+    Mixer M;
+    M.Init(48000);
+    Sound S;
+    S.Rate = 48000;
+    S.Pcm = {0, 30000};                      // a big step from last frame back to the first
+    const SoundId A = M.Add(std::move(S));
+
+    M.Play(A, 1.0f, 0.5f);                   // lands on frame 1 with fraction 0.5
+    int16_t Buf[8] = {0};
+    M.Render(Buf, 8);
+    CHECK(Buf[0] == 0 && Buf[1] == 15000);   // 0 -> 30000 midpoint
+    CHECK(Buf[2] == 30000);                  // frame 1 held, NOT interpolated toward P[0]
+    CHECK(Buf[3] == 30000);
+    CHECK(Buf[4] == 0);                      // then retired
+}
+
+// Pitch is clamped on the game thread, so a nonsense value from a caller can never reach
+// the audio thread. Zero/negative would stall a voice forever; NaN would convert to garbage.
+static void TestMixerPitchClamped() {
+    // A fresh mixer per case: a clamped-slow voice runs for hundreds of frames, so reusing
+    // one would leave it sounding underneath the next case's buffer.
+    auto Play1 = [](float Pitch, int16_t* Out, uint32_t Frames) {
+        Mixer M;
+        M.Init(48000);
+        M.Play(M.Add(MakeRamp(64, 500, 48000)), 1.0f, Pitch);
+        M.Render(Out, Frames);
+    };
+
+    int16_t Slow[8] = {0};
+    Play1(0.0f, Slow, 8);                    // clamps up to MinPitch -> still advances
+    CHECK(Slow[7] != 0);                     // a stalled voice would sit on frame 0 forever
+    CHECK(Slow[4] == 500);                   // 0.25 frames/frame: sample 1 by frame 4
+
+    int16_t Fast[8] = {0};
+    Play1(1000.0f, Fast, 8);                 // clamps down to MaxPitch -> 4 frames per frame
+    CHECK(Fast[1] == 2000);                  // 4 * 500, not a wild jump past the clip
+
+    int16_t Safe[8] = {0};
+    Play1(std::numeric_limits<float>::quiet_NaN(), Safe, 8);   // must not hang or go silent
+    CHECK(Safe[7] != 0);
+}
+
+// Gain and pitch are independent knobs — varying one must not move the other.
+static void TestMixerGainAndPitchIndependent() {
+    Mixer M;
+    M.Init(48000);
+    const SoundId A = M.Add(MakeRamp(8, 1000, 48000));
+    M.Play(A, 0.5f, 2.0f);
+    int16_t Buf[8] = {0};
+    M.Render(Buf, 8);
+    CHECK(Buf[1] == 1000);                   // frame 2 (pitch) at half level (gain)
+    CHECK(Buf[2] == 2000);
+}
+
 int main() {
     TestCodecRoundTrip();
     TestCodecRejectsGarbage();
@@ -160,6 +263,11 @@ int main() {
     TestMixerClips();
     TestMixerPlayFloodIsSafe();
     TestMixerResamplesOnAdd();
+    TestMixerUnitPitchIsExact();
+    TestMixerPitchResamples();
+    TestMixerPitchDoesNotWrapPastEnd();
+    TestMixerPitchClamped();
+    TestMixerGainAndPitchIndependent();
 
     if (GFailures == 0) {
         std::printf("All audio tests passed.\n");

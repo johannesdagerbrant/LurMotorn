@@ -263,15 +263,17 @@ static void UnblockStdio() {
                                                        selector:@selector(renderFrame)];
             [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
 
-            // Bring up audio once the view is live: load the cooked SFX into the mixer,
-            // click on every move, then open the RemoteIO stream. Sfx.Load must finish
-            // before the audio thread starts pulling (Mixer::Add is not thread-safe).
+            // Bring up audio once the view is live: load the cooked SFX into the mixer, wire
+            // each move to the sound for its KIND (move / capture / check / checkmate — the
+            // view classifies, SfxLibrary picks the clip and its variation), then open the
+            // RemoteIO stream. Sfx.Load must finish before the audio thread starts pulling
+            // (Mixer::Add is not thread-safe).
             if (_Audio == nullptr) {
                 _Mixer.Init(Lur::Audio::Mixer::DefaultRate);
                 _Sfx.Load(_Mixer);
                 Chess::SfxLibrary* Sfx = &_Sfx;
                 Lur::Audio::Mixer* Mixer = &_Mixer;
-                _View.SetMovePlayed([Sfx, Mixer] { Sfx->Play(*Mixer, Chess::ESfx::Move); });
+                _View.SetMovePlayed([Sfx, Mixer](Chess::EMoveSound S) { Sfx->Play(*Mixer, S); });
                 _Audio = Lur::Audio::CreateAudioDevice();
                 const bool AudioOk = _Audio && _Audio->Start(MixThunk, &_Mixer);
                 os_log(OS_LOG_DEFAULT, "OnlyChess: Audio init: %{public}s", AudioOk ? "ok" : "failed");

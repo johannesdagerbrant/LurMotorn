@@ -18,6 +18,8 @@ instruments (Windows dev machine / CI).
 |---|---|
 | `BleDevRig/` | The Windows↔Android BLE dev rig: a VS-free WinRT (C#) BLE central that speaks the LurMotorn GATT protocol to an unmodified Android app, so the desktop can be a real second peer for developing/debugging/optimizing the Bluetooth networking (issue #58). |
 | `ImageConvert/` | Content sanitizer: normalises any source image into a cook-acceptable PNG — a **2-channel** grayscale+alpha PNG (for an R8G8 cook; shade channel selectable: luma or a single R/G/B) or a **4-channel** RGBA PNG (for an R8G8B8A8 cook). Chess pieces are one preset. |
+| `AudioSplit/` | Content sanitizer: splits one long WAV of many discrete hits into one **tight** 16-bit mono WAV per sound, cut on silence with a near-zero attack (the audio cook's canonical input). |
+| `AudioSynth/` | Content *author*: derives a big, resounding **stinger** (chess checkmate) from an impact clip already in the content set — layered octave-down body + struck low chord + Schroeder reverb. Deterministic, so the committed WAV is reproducible from committed content. |
 
 Conventions:
 - One subfolder per tool, PascalCase, with its own `README.md`.
