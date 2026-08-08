@@ -7,9 +7,18 @@ using System.Threading;
 using Windows.Devices.Bluetooth.Advertisement;
 
 class BleScan {
-    static readonly Guid LurService = new Guid("4C55524D-4F54-4F52-4E00-5472616E7370");
+    // Per-game (BleProtocol.h): chess = ...7370, RPS = ...7371. Overridable via argv[0],
+    // matching BleRadio — and needed by #83's acceptance test, whose first step is "note both
+    // phones' addresses while they are still advertising" so a later run can be PINNED to one
+    // of them mid-match (a linked phone advertises no more, so it cannot be found by scanning).
+    static Guid LurService = new Guid("4C55524D-4F54-4F52-4E00-5472616E7370");
 
-    static void Main() {
+    static void Main(string[] args) {
+        Guid svc;
+        if (args != null && args.Length >= 1 && Guid.TryParse(args[0], out svc)) {
+            LurService = svc;
+            Console.WriteLine("service UUID overridden -> " + LurService);
+        }
         var seen = new HashSet<ulong>();
         var w = new BluetoothLEAdvertisementWatcher();
         w.ScanningMode = BluetoothLEScanningMode.Active;

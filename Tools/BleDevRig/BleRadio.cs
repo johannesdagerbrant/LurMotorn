@@ -39,6 +39,33 @@ class BleRadio {
     static readonly Guid DevIdChar = new Guid("4C55524D-4F54-4F52-4E02-4E6F6E636500");
     static readonly Guid DataChar  = new Guid("4C55524D-4F54-4F52-4E01-446174616772");
 
+    // Optional argv[1]: connect straight to this BLE address instead of scanning (#83).
+    //
+    // A LINKED phone stops advertising, so a scan can never find one — which makes the
+    // interesting intrusion untestable by scanning alone: you can only ever reach a phone
+    // that has no partner yet, and then you have merely become its partner. The threat this
+    // pins down is the one #83 names as hole 3: a device that saw the advertisement BEFORE
+    // the pair formed keeps the handle and can connect later with no fresh advertising. So
+    // scan once while the apps are unlinked, note the addresses, then come back with one of
+    // them pinned while the two are mid-match. Also lets you choose WHICH phone to intrude
+    // on, which matters because the central-role and peripheral-role holes are different code.
+    static ulong PinnedAddr = 0;
+
+    // Optional argv[2]: seconds to HOLD the connection before writing the CCCD (#83).
+    //
+    // Measured 2026-08-08, and it corrects the threat model in the issue: a linked phone stops
+    // advertising, and a non-advertising peripheral is not connectable — WinRT reports the service
+    // as `Unreachable`. So "scan before the link forms, connect later" does NOT work; keeping the
+    // ADDRESS buys nothing.
+    //
+    // What does work is keeping the CONNECTION. Connect during the handshake window (both phones
+    // are advertising then, by construction — that is how they find each other), hold the ATT link
+    // open without subscribing, and let the pair form. The phone stops advertising, but an
+    // ALREADY-OPEN connection survives that, so the subscribe can land at any later moment — on a
+    // live, mid-match pair. That is the intrusion #83 has to reject, and it is reachable in
+    // practice, which the address-pinning route is not.
+    static int SubscribeDelaySec = 0;
+
     // --- Drive a WinRT async op without `await` (see file header). ---
     static T Wait<T>(IAsyncOperation<T> op) {
         while (op.Status == AsyncStatus.Started) Thread.Sleep(5);
@@ -88,6 +115,18 @@ class BleRadio {
             Service = svc;
             Log("service UUID overridden -> " + Service);
         }
+        ulong pin;
+        if (args != null && args.Length >= 2 &&
+            ulong.TryParse(args[1], System.Globalization.NumberStyles.HexNumber, null, out pin)) {
+            PinnedAddr = pin;   // all-zero = "no pin", so the delay can be given without an address
+            if (pin != 0)
+                Log(string.Format("peer address PINNED -> {0:X12} (no scan)", pin));
+        }
+        int delay;
+        if (args != null && args.Length >= 3 && int.TryParse(args[2], out delay) && delay > 0) {
+            SubscribeDelaySec = delay;
+            Log("subscribe DELAYED by " + delay + "s — hold the connection, subscribe onto a live pair");
+        }
         g_out = Console.OpenStandardOutput();
         Log("central radio starting (scan -> connect -> relay); Ctrl-C to stop");
 
@@ -113,13 +152,19 @@ class BleRadio {
 
     // Scan until the phone is seen advertising our service; returns its BLE address.
     static ulong ScanForPeer() {
+        if (PinnedAddr != 0) return PinnedAddr;   // #83: reach a phone that stopped advertising
         ulong addr = 0;
         var found = new ManualResetEventSlim(false);
         var w = new BluetoothLEAdvertisementWatcher { ScanningMode = BluetoothLEScanningMode.Active };
         w.Received += (s, e) => {
-            if (found.IsSet) return;
             foreach (var g in e.Advertisement.ServiceUuids)
-                if (g == Service) { addr = e.BluetoothAddress; found.Set(); return; }
+                if (g == Service) {
+                    // Log EVERY advertiser, not just the first: with two phones up there are two,
+                    // and their addresses are what a later pinned run needs.
+                    Log(string.Format("advertiser {0:X12} rssi={1}", e.BluetoothAddress, e.RawSignalStrengthInDBm));
+                    if (found.IsSet) return;
+                    addr = e.BluetoothAddress; found.Set(); return;
+                }
         };
         w.Start();
         Log("scanning for LurMotorn service...");
@@ -183,6 +228,13 @@ class BleRadio {
             Log(string.Format("RX notify {0}B (total {1} pkt / {2}B)", b.Length, g_rxCount, g_rxBytes));
             SendFrame('D', b);          // datagram in -> host
         };
+        if (SubscribeDelaySec > 0) {
+            // Hold the ATT connection open, unsubscribed, while the two phones find each other and
+            // link. They stop advertising; this connection is unaffected, which is the whole point.
+            Log("holding the connection for " + SubscribeDelaySec + "s before subscribing (#83)...");
+            Thread.Sleep(SubscribeDelaySec * 1000);
+            Log("subscribing NOW — the pair should be linked and mid-match");
+        }
         var cccd = Wait(data.WriteClientCharacteristicConfigurationDescriptorAsync(
             GattClientCharacteristicConfigurationDescriptorValue.Notify));
         if (cccd != GattCommunicationStatus.Success) {

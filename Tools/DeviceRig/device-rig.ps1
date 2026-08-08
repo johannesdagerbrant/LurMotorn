@@ -73,6 +73,7 @@ if ($Game -eq 'rps') {
         RecPairGlob    = 'rps-vs-*.rec'                      # ...of which THESE are two-peer captures
         RecDiffExe     = 'build-desktop\Games\RocksPapersScissors\Desktop\onlyrps_desktop.exe'
         RecDiffArg     = '--recdiff'
+        AndroidApk     = 'Games\RocksPapersScissors\Android\app\build\outputs\apk\debug\app-debug.apk'
     }
 } else {
     $App = @{
@@ -86,6 +87,7 @@ if ($Game -eq 'rps') {
         RoleMarker     = 'role'                               # iOS: Documents/<marker> dev BLE role override
         ClearMarker    = 'clearsave'                          # iOS: Documents/<marker> one-shot history wipe
         RecGlob        = $null                                # chess has no flight recorder (pullrec no-ops)
+        AndroidApk     = 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk'
     }
 }
 
@@ -765,6 +767,26 @@ function Uninstall-Android {
     Say "android: uninstalling $($App.AndroidPackage)"
     & $adb uninstall $App.AndroidPackage 2>$null | Out-Host
 }
+# The APK path is PER-GAME ($App.AndroidApk), like every other app-specific value.
+#
+# It was hardcoded to the Chess tree in both call sites, so `-Game rps -Action install` installed
+# the CHESS apk — a different package id, so adb reported Success and the RPS app on the phone was
+# never touched. The phone then kept whatever RPS build it already had, and the only symptom was
+# the build-fingerprint gate refusing to start a match ("different build" on both screens, #112)
+# while a fresh APK sat unread on disk. Cost a full test cycle on 2026-08-08.
+#
+# Verifying the file exists first is the other half: `adb install` on a missing path fails in a way
+# that scrolls past, and a silently-not-installed build is exactly the failure above.
+function Install-Android {
+    $Apk = Join-Path $root $App.AndroidApk
+    if (-not (Test-Path $Apk)) {
+        Warn "android: no APK at $Apk - build it first (gradlew assembleDebug); NOT installing"
+        return $false
+    }
+    Say "android: installing $($App.AndroidPackage) <- $($App.AndroidApk)"
+    & $adb install -r $Apk | Out-Host
+    return $true
+}
 function Shot-Ios($path) {
     # 20s, not the 45s dvt default (#179). This is the call that actually stalls: with the app
     # foregrounded, `dvt proclist` answers in seconds while `dvt screenshot` never returns at
@@ -913,7 +935,7 @@ switch ($Action) {
         if ($doAndroid) { Ensure-Android; ClearHistory-Android }
         if ($doIos)     { Ensure-Ios;     ClearHistory-Ios }
     }
-    'install'   { if ($doIos) { [void](Install-Ios) }; if ($doAndroid) { Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') } }
+    'install'   { if ($doIos) { [void](Install-Ios) }; if ($doAndroid) { Ensure-Android; Install-Android } }
     'uninstall' { if ($doIos) { Uninstall-Ios }; if ($doAndroid) { Ensure-Android; Uninstall-Android } }
     'arm'     { if ($doAndroid) { Ensure-Android; Arm-Android }; if ($doIos) { Ensure-Ios; Arm-Ios } }
     'disarm'  { if ($doAndroid) { Ensure-Android; Disarm-Android }; if ($doIos) { Ensure-Ios; Disarm-Ios } }
@@ -962,8 +984,8 @@ switch ($Action) {
                 Say 'ios: ipa unchanged -> skipping install (daemon keeps signature fresh)'
             }
         }
-        if ($doAndroid -and (Test-Path (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk'))) {
-            Ensure-Android; & $adb install -r (Join-Path $root 'Games\Chess\Android\app\build\outputs\apk\debug\app-debug.apk') | Out-Null
+        if ($doAndroid -and (Test-Path (Join-Path $root $App.AndroidApk))) {
+            Ensure-Android; Install-Android | Out-Null
         }
         for ($i = 1; $i -le $Iterations; $i++) {
             Say "=== cycle iteration $i / $Iterations ==="
