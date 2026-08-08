@@ -14,7 +14,7 @@ name: macOS CI
 on:
   push:
   pull_request:
-  # MANUAL ONLY, and deliberately so: `agent` builds the RPS .ipa with -DLUR_AGENT=ON, which compiles
+  # MANUAL ONLY, and deliberately so: `agent` builds the RPS and Chess .ipas with -DLUR_AGENT=ON, which compiles
   # in assistant-only REMOTE CONTROL (injected input, forced state). CLAUDE.md's rule is that such a
   # build must never reach a player, so it can only be produced by asking for it by hand — never as a
   # by-product of a push, where the artifact sits next to the ordinary one and could be sideloaded by
@@ -22,7 +22,7 @@ on:
   workflow_dispatch:
     inputs:
       agent:
-        description: "Also build an RPS .ipa with LUR_AGENT=ON (remote control; never give to a player)"
+        description: "Also build the RPS and Chess .ipas with LUR_AGENT=ON (remote control; never give to a player)"
         type: boolean
         default: false
 
@@ -269,4 +269,68 @@ jobs:
         with:
           name: OnlyRps-AGENT-unsigned-ipa
           path: OnlyRps-AGENT-unsigned.ipa
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # CHESS .ipa WITH ASSISTANT REMOTE CONTROL (-DLUR_AGENT=ON) — issue #195.
+  #
+  # Same rule and same reason as the RPS agent job above. Chess's autoplayer is armed by a
+  # rig-pushed Documents/autoplay marker and its effect is injected input, so it is LUR_AGENT and
+  # therefore ABSENT from the ordinary .ipa the ios-ipa job publishes. Without this job the iPhone
+  # half of a two-phone chess soak cannot be driven at all — iOS offers no touch injection.
+  #
+  # Whoever uses it: install it, run the scenarios, then reinstall the ORDINARY .ipa and delete
+  # Documents/autoplay. "Inert by default" is not the same as "not there".
+  ios-ipa-chess-agent:
+    name: Chess iOS .ipa — AGENT build (manual, never for a player)
+    if: github.event_name == 'workflow_dispatch' && inputs.agent
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
+      - name: Configure (device, unsigned, LUR_AGENT=ON)
+        run: |
+          cmake -S Games/Chess/iOS -B Games/Chess/iOS/build-agent -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DLUR_AGENT=ON \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+
+      - name: Build (device, unsigned)
+        run: |
+          xcodebuild -project Games/Chess/iOS/build-agent/OnlyChess.xcodeproj \
+            -scheme OnlyChess -configuration Debug \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      - name: Package unsigned .ipa
+        run: |
+          APP=$(find Games/Chess/iOS/build-agent -name 'OnlyChess.app' -type d | head -1)
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry OnlyChess-AGENT-unsigned.ipa Payload
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OnlyChess-AGENT-unsigned-ipa
+          path: OnlyChess-AGENT-unsigned.ipa
           if-no-files-found: error
