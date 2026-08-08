@@ -509,24 +509,39 @@ static void UnblockStdio() {
     return 0;
 }
 
+// #187: the move is committed HERE, on the press. It used to wait for touchesEnded, which
+// spent the whole input.downToUp span — 140 ms measured on the Galaxy, the largest single
+// cost in the chain by an order of magnitude — doing nothing at all.
+//
+// It also removes the ability to change your mind mid-press, and that is deliberate:
+// chess's own TOUCH-MOVE RULE says that once you touch a piece you must move it. This makes
+// the app MORE faithful to over-the-board play, not less. (There is no drag gesture here
+// either, so in practice nothing is lost.)
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
-    _TouchDownNs = [self stampTouch:touches.anyObject];
+    UITouch* Touch = touches.anyObject;
+    _TouchDownNs = [self stampTouch:Touch];
+    [self dispatchTap:Touch];
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
     UITouch* Touch = touches.anyObject;
     (void)[self stampTouch:Touch];
-    // The dead time this epic exists to reclaim (#187): how long the finger sat on the
-    // glass before we did anything with it. Committing on UP spends all of it.
+    // The move already went out on the press (#187). All that is left here is closing the
+    // measurement of the dead time we no longer spend.
     if (_TouchDownNs != 0) {
         LUR_TRACE_LATENCY("input.downToUp", _TouchDownNs);
         _TouchDownNs = 0;
     }
-    const CGPoint P = [Touch locationInView:self.view];
+}
+
+// Map a UITouch into drawable pixels and hand it to the board. Points -> pixels via the
+// layer's contentsScale, which is the space BoardView lays out in.
+- (void)dispatchTap:(UITouch*)touch {
+    const CGPoint P = [touch locationInView:self.view];
     CAMetalLayer* Layer = [self metalLayer];
-    const CGFloat Scale = Layer.contentsScale;  // points -> pixels (drawable space)
+    const CGFloat Scale = Layer.contentsScale;
     _View.OnTap(static_cast<float>(P.x * Scale), static_cast<float>(P.y * Scale),
                 static_cast<float>(Layer.drawableSize.width),
                 static_cast<float>(Layer.drawableSize.height));

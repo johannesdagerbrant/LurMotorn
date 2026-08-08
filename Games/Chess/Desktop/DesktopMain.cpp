@@ -137,7 +137,10 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
         std::memcpy(Blob + 1, &T.XPx, 4);
         std::memcpy(Blob + 5, &T.YPx, 4);
         G.Recorder.Record(Lur::Core::EFlightEvent::Input, TimeNs, Blob, sizeof(Blob));
-        if (T.Phase == Lur::Input::ETouchPhase::Ended && W > 0 && H > 0)
+        // #187: commit on press, matching both phones. The desktop is the fast iteration
+        // loop for chess, so it must agree with the devices about WHEN a move happens —
+        // otherwise the interaction being tuned here is not the one that ships.
+        if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0)
             G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
     }
     if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
