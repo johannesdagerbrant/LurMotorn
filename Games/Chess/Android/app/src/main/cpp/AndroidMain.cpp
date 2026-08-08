@@ -10,8 +10,8 @@
 #include <cstdio>
 #include <string>
 #include <vector>
-#if LUR_INTERNAL
-#include <sys/system_properties.h>  // read debug.onlychess.autoplay (dev soak/autoplay)
+#if LUR_AGENT
+#include <sys/system_properties.h>  // read debug.lur.autoplay (agent-driven soak, #195)
 #endif
 
 #include "Chess/Board.h"
@@ -214,15 +214,24 @@ void android_main(android_app* App) {
     LOGI("Net session started (device id %zuB)", DeviceId.size());
 
 #if LUR_INTERNAL
-    // Dev-only autoplayer (issue #57/#58): when debug.onlychess.autoplay=1, play a
-    // random legal move the SAME frame it becomes our turn — so a reply ships the frame
-    // the opponent's move was received. Gated by a runtime prop so an ordinary dev
-    // build still plays by hand; compiled out entirely of a SHIPPING build.
+    uint64_t TraceAccumNs = 0;   // #192: latency report — OBSERVATION, so it stays INTERNAL
+#endif
+// AUTOPLAY IS REMOTE CONTROL, SO IT IS LUR_AGENT, NOT LUR_INTERNAL (issue #195).
+// CLAUDE.md draws the line at who is driving: an assistant-driven hook is #if LUR_AGENT and
+// is ABSENT from every ordinary build, because *the build a player plays IS Development* —
+// which is exactly where LUR_INTERNAL is on. This is armed by a system property and its
+// effect is injected input on a device a human is holding; leaving it LUR_INTERNAL shipped a
+// hook that could silently take over and play someone's game. That is not hypothetical: the
+// same shape bit us on 2026-07-25, when a stale setprop left a LUR_INTERNAL hook armed and it
+// fought the player's own gesture.
+//
+// Plays a random legal move the SAME frame it becomes our turn, so a reply ships the frame
+// the opponent's move was received (issue #57/#58).
+#if LUR_AGENT
     bool AutoEnabled = false;
     uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(DeviceId.size());
     uint64_t Frame = 0, PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
     uint64_t ReportAccumNs = 0;
-    uint64_t TraceAccumNs = 0;   // #192: latency report, deliberately NOT gated on autoplay
     // Net-ms RTT: our move leaves -> the peer's same-frame reply arrives. Measured on
     // this device's clock alone (no cross-device sync): stamp when we send, close when
     // the reply lands. Includes 2x transit + <=1 peer frame + <=1 our frame.
@@ -236,12 +245,12 @@ void android_main(android_app* App) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
 
-#if LUR_INTERNAL
+#if LUR_AGENT
         const bool     WasMyTurn = State.Match.IsMyTurn();
         const uint32_t MatchesBefore = State.Match.Record().TotalMatches();
 #endif
         State.Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
-#if LUR_INTERNAL
+#if LUR_AGENT
         {
             const bool     NowMyTurn = State.Match.IsMyTurn();
             const uint32_t MatchesAfter = State.Match.Record().TotalMatches();
@@ -295,18 +304,19 @@ void android_main(android_app* App) {
                      State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
             }
             ++Frame;
-
-            // #192: the latency report. NOT gated on autoplay or on the link — the whole
-            // point is to read it while a HUMAN taps, which is exactly when autoplay is off.
-            // (Same lesson as the #73 heartbeat: a periodic line that needs a live match is
-            // blind precisely when you need it.)
-            TraceAccumNs += ElapsedNs;
-            if (TraceAccumNs > 2'000'000'000ull) {
-                TraceAccumNs = 0;
-                char TraceLine[512];
-                if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
-                    LOGI("TRACE %s", TraceLine);
-            }
+        }
+#endif
+#if LUR_INTERNAL
+        // #192: the latency report. Deliberately OUTSIDE the agent block above — the whole
+        // point is to read it while a HUMAN taps, which is exactly when no agent is driving.
+        // (Same lesson as the #73 heartbeat: a periodic line that needs a live match is blind
+        // precisely when you need it.)
+        TraceAccumNs += ElapsedNs;
+        if (TraceAccumNs > 2'000'000'000ull) {
+            TraceAccumNs = 0;
+            char TraceLine[512];
+            if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+                LOGI("TRACE %s", TraceLine);
         }
 #endif
         int Events = 0;

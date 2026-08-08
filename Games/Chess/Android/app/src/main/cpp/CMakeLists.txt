@@ -59,7 +59,11 @@ target_compile_definitions(onlychess PRIVATE
     LUR_SLOW=${LUR_SLOW}
     # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
     # Shipping. Without this the touch->present latency lines expand to nothing.
-    LUR_TRACE=${LUR_TRACE})
+    LUR_TRACE=${LUR_TRACE}
+    # Assistant-only remote control (#195). Off unless the build was explicitly configured
+    # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none
+    # of it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
+    LUR_AGENT=${LUR_AGENT_ON})
 
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlychess PROPERTIES

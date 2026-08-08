@@ -73,7 +73,11 @@ target_compile_definitions(OnlyChess PRIVATE
     LUR_SLOW=${LUR_SLOW}
     # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
     # Shipping. Without this the touch->present latency lines expand to nothing.
-    LUR_TRACE=${LUR_TRACE})
+    LUR_TRACE=${LUR_TRACE}
+    # Assistant-only remote control (#195) — see the Android CMakeLists. The agent .ipa comes
+    # from a MANUAL-DISPATCH CI job only (`gh workflow run "macOS CI" -f agent=true`), never
+    # an ordinary push, or it would sit next to the player artifact.
+    LUR_AGENT=${LUR_AGENT_ON})
 
 target_link_libraries(OnlyChess PRIVATE
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)

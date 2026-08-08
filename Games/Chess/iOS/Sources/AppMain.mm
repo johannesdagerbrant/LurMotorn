@@ -78,13 +78,24 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     bool _InitWhileInactive;
     bool _BecameActive;
 #if LUR_INTERNAL
-    // Dev-only autoplayer (issue #57/#58/#69), armed by a marker file so the normal
-    // .ipa stays untouched. Same-frame instrumentation mirrors AndroidMain.
+    uint64_t _TraceAccumNs;   // #192: latency report — OBSERVATION, so it stays INTERNAL
+#endif
+// AUTOPLAY IS REMOTE CONTROL, SO IT IS LUR_AGENT, NOT LUR_INTERNAL (issue #195).
+// CLAUDE.md draws the line at who is driving: an assistant-driven hook is #if LUR_AGENT and
+// is ABSENT from every ordinary build, because *the build a player plays IS Development* —
+// which is exactly where LUR_INTERNAL is on. This is armed by a system property and its
+// effect is injected input on a device a human is holding; leaving it LUR_INTERNAL shipped a
+// hook that could silently take over and play someone's game. That is not hypothetical: the
+// same shape bit us on 2026-07-25, when a stale setprop left a LUR_INTERNAL hook armed and it
+// fought the player's own gesture.
+//
+// Armed by a Documents/autoplay marker the dev rig pushes; same-frame instrumentation
+// mirrors AndroidMain (issue #57/#58/#69).
+#if LUR_AGENT
     bool _AutoEnabled;
     uint32_t _Rng;
     uint64_t _Frame, _PeerReplies, _SameFrame, _NewGameOpens, _DelayedReplies;
     uint64_t _AutoCheckAccumNs, _ReportAccumNs;
-    uint64_t _TraceAccumNs;   // #192: latency report, deliberately NOT gated on autoplay
     // Net-ms RTT (mirrors AndroidMain): our move leaves -> the peer's reply arrives,
     // measured on this device's clock alone (2x transit + <=1 frame each side).
     uint64_t _ClockNs, _MoveSentNs, _RttCount, _RttSumMs, _RttMinMs, _RttMaxMs;
@@ -234,7 +245,7 @@ static void UnblockStdio() {
         os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
     });
     _Session.Start(_Transport, _DeviceId);
-#if LUR_INTERNAL
+#if LUR_AGENT
     _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_DeviceId.size());  // per-device autoplay seed
     _RttMinMs = ~0ull;                                           // other RTT ivars zero-init
 #endif
@@ -333,11 +344,13 @@ static void UnblockStdio() {
                self.view.layer.superlayer != nil ? 1 : 0,
                (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
     }
+#endif
+#if LUR_AGENT
     const bool WasMyTurn = _Match.IsMyTurn();
     const uint32_t MatchesBefore = _Match.Record().TotalMatches();
 #endif
     _Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness (applies peer move)
-#if LUR_INTERNAL
+#if LUR_AGENT
     {
         // Arm on first sight of Documents/autoplay (pushed via pymobiledevice3), then
         // play a random legal move the SAME frame it becomes our turn. All tallying is

@@ -28,6 +28,15 @@ android {
                 val lurConfig = (project.findProperty("lurConfig") as String?) ?: "Development"
                 arguments += "-DANDROID_STL=c++_static"
                 arguments += "-DLUR_CONFIG=$lurConfig"
+                // LUR_AGENT (CLAUDE.md, #195): assistant-only remote control — the autoplay
+                // hook's system property and its injected input, so an assistant can drive a
+                // two-phone scenario without a human tapping. OFF unless asked for with
+                // -PlurAgent=ON, absent from every ordinary build including Development, and
+                // force-zeroed in Shipping by EngineFlags. A build made with this on must not
+                // be handed to a player: rebuild without it (the code is then ABSENT, not
+                // idle) and clear the channel — `adb shell setprop debug.lur.autoplay ""`.
+                val lurAgent = (project.findProperty("lurAgent") as String?) ?: "OFF"
+                arguments += "-DLUR_AGENT=$lurAgent"
             }
         }
     }
