@@ -155,7 +155,12 @@ static void UnblockStdio() {
     NSArray<NSString*>* Dirs =
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
-#if LUR_INTERNAL
+// RIG-PUSHED FORCED STATE, SO LUR_AGENT (issue #196). This one is DESTRUCTIVE: a marker left
+// in a player's container silently deletes their saved games and stats at startup. At
+// LUR_INTERNAL it shipped in every ordinary build, because *the build a player plays IS
+// Development*. The 2026-07-25 stale-setprop incident was merely annoying; this loses data by
+// the same "left behind by accident" mechanism.
+#if LUR_AGENT
     // Dev clear-history (rig-pushed Documents/clearsave): wipe opponent records,
     // their meta sidecars, and the cached peer-id BEFORE the store opens — a fresh
     // pairing state for role/matrix tests. The device-id is KEPT (stable identity).

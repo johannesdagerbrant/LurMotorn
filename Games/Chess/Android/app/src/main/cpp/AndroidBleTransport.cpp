@@ -9,8 +9,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#if LUR_INTERNAL
-#include <sys/system_properties.h>   // dev role override via debug.lur.role
+#if LUR_AGENT
+#include <sys/system_properties.h>   // agent role override via debug.lur.role (#196)
 #endif
 
 #include "Lur/Save/DeviceId.h"
@@ -120,7 +120,10 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
 extern "C" JNIEXPORT jint JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
                                                       jbyteArray LocalId, jbyteArray PeerId) {
-#if LUR_INTERNAL
+// FORCED STATE OVER A SYSTEM PROPERTY, SO LUR_AGENT (issue #196) — the same channel shape as
+// the autoplay hook #195 moved, and note it is re-read on EVERY role decision rather than once
+// at startup, so a stale property keeps applying for the life of the install.
+#if LUR_AGENT
     // Dev role override (issue: test BOTH role configs on one device pair). Read the
     // prop on every decision so `adb shell setprop debug.lur.role central|peripheral`
     // takes effect on the next (re)launch/discovery without a reinstall; empty = auto.

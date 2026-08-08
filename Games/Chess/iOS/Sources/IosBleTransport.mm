@@ -164,7 +164,9 @@ static void SaveIosPeerId(const std::string& Id) {
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
 
-#if LUR_INTERNAL
+// RIG-PUSHED FORCED STATE, SO LUR_AGENT (issue #196) — it overrides the GUID tie-break that
+// #17 made stable, on a channel a player's device should not be listening to at all.
+#if LUR_AGENT
         // Dev role override (rig-pushed Documents/role = "central"|"peripheral"):
         // pins DecideBleRole so the rig can test BOTH role configs on one device
         // pair. Read once at driver startup — push the marker BEFORE launching.
