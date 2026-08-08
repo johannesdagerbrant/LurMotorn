@@ -40,6 +40,17 @@ class OnlyChessActivity : NativeActivity() {
         }
     }
 
+    /**
+     * Hand the radio back (#194). An advertiser/scanner registration we leave behind is what
+     * the NEXT launch collides with (ALREADY_STARTED), and a discovery that never links
+     * leaves the app looking alive but invisible and deaf. A force-stop cannot run this — but
+     * a force-stop is not what we do to players, and a normal exit now leaves nothing.
+     */
+    override fun onDestroy() {
+        if (::ble.isInitialized) ble.stop()
+        super.onDestroy()
+    }
+
     companion object {
         private const val REQUEST_BLE = 7
     }

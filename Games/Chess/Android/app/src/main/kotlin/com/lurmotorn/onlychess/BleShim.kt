@@ -133,6 +133,18 @@ class BleShim(private val context: Context) {
     private var sendInFlight = false
     private var sendWatchdogTok = 0
 
+    // Discovery state (#194). Without this, start/stop are not idempotent and every caller
+    // (startDiscovery, the #79 watchdog, the post-connect "ensure findable" path) can
+    // double-start - which the stack rejects with ALREADY_STARTED, and which churns the
+    // scan/advertise registration hard enough to hit Android's scan-frequency quota and the
+    // advertiser-slot limit. Those DO wedge the radio for real.
+    private var advertising = false
+    private var scanning = false
+    private var advRetries = 0
+    private var scanRetries = 0
+    private var advFailLogged = false      // rate-limit: the retry loop must not bury the log
+    private var scanFailLogged = false
+
     @Volatile private var started = false
     @Volatile private var linked = false
     @Volatile private var connecting = false   // an outgoing central attempt is mid-flight
@@ -297,12 +309,17 @@ class BleShim(private val context: Context) {
         Log.i(TAG, "discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)")
         decidedPeripheral = false
         connecting = false
+        // #194: idempotent now. Before, this pair fired every 8 s against an already-running
+        // advertise+scan and earned ALREADY_STARTED on both, every time - the churn behind
+        // the wedged radio. It now starts only what is actually stopped, which also makes it
+        // the long-cadence retry for a start that keeps failing.
         startAdvertising()
         startScanning()
         armDiscoveryWatchdog()  // keep watching until a link forms
     }
 
     private fun startAdvertising() {
+        if (advertising) return          // #194: idempotent - asking twice earns ALREADY_STARTED
         val adv = adapter?.bluetoothLeAdvertiser ?: run { Log.e(TAG, "no BLE advertiser"); return }
         advertiser = adv
         val settings = AdvertiseSettings.Builder()
@@ -317,12 +334,14 @@ class BleShim(private val context: Context) {
             .build()
         try {
             adv.startAdvertising(settings, data, advertiseCallback)
+            advertising = true           // cleared again by onStartFailure
         } catch (e: SecurityException) {
             Log.e(TAG, "startAdvertising: missing BLE permission", e)
         }
     }
 
     private fun startScanning() {
+        if (scanning) return             // #194: idempotent - see startAdvertising
         val sc = adapter?.bluetoothLeScanner ?: run { Log.e(TAG, "no BLE scanner"); return }
         scanner = sc
         val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
@@ -331,6 +350,7 @@ class BleShim(private val context: Context) {
             .build()
         try {
             sc.startScan(listOf(filter), settings, scanCallback)
+            scanning = true              // cleared again by onScanFailed
             Log.i(TAG, "BLE up: serving + advertising + scanning for LurMotorn peers")
         } catch (e: SecurityException) {
             Log.e(TAG, "startScan: missing BLE permission", e)
@@ -338,11 +358,79 @@ class BleShim(private val context: Context) {
     }
 
     private fun stopAdvertising() {
+        advertising = false
+        advRetries = 0
+        advFailLogged = false
+        handler.removeCallbacks(advRetry)
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
     }
 
     private fun stopScanning() {
+        scanning = false
+        scanRetries = 0
+        scanFailLogged = false
+        handler.removeCallbacks(scanRetry)
         try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
+    }
+
+    // #194: a failed start used to be permanent - one Log.e and the process stayed
+    // invisible/deaf for the rest of its life. Retry on a capped backoff while we are still
+    // trying to link, so a transient failure heals in about a second instead of needing a
+    // human to toggle Bluetooth. The fast retries are capped and then handed back to the 8 s
+    // discovery watchdog (#79), which keeps trying for as long as we are unlinked - so there
+    // is no give-up state, just a slower cadence.
+    private val advRetry = Runnable { if (started && !linked) startAdvertising() }
+    private val scanRetry = Runnable { if (started && !linked) startScanning() }
+
+    private fun retryDelayMs(attempt: Int): Long = 400L shl minOf(attempt, 3)   // 0.4 - 3.2 s
+
+    private fun onAdvertiseStartFailed(errorCode: Int) {
+        advertising = false
+        // ALREADY_STARTED means SOMETHING holds the registration - either our own double
+        // start (now prevented) or one a previous process left that the system has not reaped
+        // yet. Clearing our side first is what lets the retry actually succeed.
+        if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED) {
+            try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
+        }
+        if (!advFailLogged) {
+            advFailLogged = true
+            Log.e(TAG, "advertise failed: $errorCode - retrying (repeats quiet until one succeeds)")
+        }
+        if (advRetries < 5 && started && !linked) {
+            handler.postDelayed(advRetry, retryDelayMs(advRetries++))
+        }
+    }
+
+    private fun onScanStartFailed(errorCode: Int) {
+        scanning = false
+        if (errorCode == ScanCallback.SCAN_FAILED_ALREADY_STARTED) {
+            try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
+        }
+        if (!scanFailLogged) {
+            scanFailLogged = true
+            Log.e(TAG, "scan failed: $errorCode - retrying (repeats quiet until one succeeds)")
+        }
+        if (scanRetries < 5 && started && !linked) {
+            handler.postDelayed(scanRetry, retryDelayMs(scanRetries++))
+        }
+    }
+
+    /** Release the radio (#194). A registration left behind is what the NEXT launch collides
+     *  with, so a clean exit has to hand it back. A force-stop cannot run this - but a
+     *  force-stop is not what we do to players. */
+    fun stop() {
+        handler.post {
+            if (!started) return@post
+            started = false
+            watchdogHandler.removeCallbacks(discoveryWatchdog)
+            stopScanning()
+            stopAdvertising()
+            try { gattClient?.close() } catch (_: SecurityException) {}
+            gattClient = null
+            try { gattServer?.close() } catch (_: SecurityException) {}
+            gattServer = null
+            Log.i(TAG, "BLE stopped - advertiser/scanner/GATT released")
+        }
     }
 
     /** The canonical link is up — stop discovery so the radio settles. */
@@ -372,18 +460,25 @@ class BleShim(private val context: Context) {
     }
 
     private val advertiseCallback = object : AdvertiseCallback() {
-        override fun onStartFailure(errorCode: Int) { Log.e(TAG, "advertise failed: $errorCode") }
+        override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
+            advertising = true
+            advRetries = 0
+            advFailLogged = false        // a later failure is news again
+        }
+        override fun onStartFailure(errorCode: Int) { onAdvertiseStartFailed(errorCode) }
     }
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
+            scanRetries = 0
+            scanFailLogged = false       // the scanner is demonstrably alive
             if (linked || connecting || decidedPeripheral) return
             connecting = true
             Log.i(TAG, "scan: found a LurMotorn peer, connecting as central")
             connectAsCentral(result.device)
         }
 
-        override fun onScanFailed(errorCode: Int) { Log.e(TAG, "scan failed: $errorCode") }
+        override fun onScanFailed(errorCode: Int) { onScanStartFailed(errorCode) }
     }
 
     // --- GATT server (every device runs one; the peripheral's is the live link) ---
