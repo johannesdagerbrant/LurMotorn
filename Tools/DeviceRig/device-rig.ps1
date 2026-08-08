@@ -286,7 +286,15 @@ function Arm-Ios {
     Pmd apps push $App.IosBundleId $marker "Documents/$($App.AutoplayMarker)" 2>&1 | Out-Null
     Say 'ios: marker pushed (app arms within ~1s if running)'
 }
-function Disarm-Ios { Warn 'ios: to disarm, relaunch the app without the marker (a running app stays armed for the session).' }
+function Disarm-Ios {
+    # REMOVE the marker, do not just advise a relaunch. This used to print a warning and
+    # nothing else, so `disarm` left the iPhone armed forever and the next launch re-armed
+    # itself from the leftover file — precisely the "inert by default is not the same as not
+    # there" hazard the handover rule in CLAUDE.md exists for.
+    Say "ios: disarm autoplay (rm Documents/$($App.AutoplayMarker))"
+    try { Pmd apps rm $App.IosBundleId "Documents/$($App.AutoplayMarker)" 2>&1 | Out-Null } catch {}
+    Warn 'ios: a RUNNING app stays armed for its session - relaunch to drop it.'
+}
 # Pin/clear the dev BLE role override marker. Read at app STARTUP — apply before launch.
 function Role-Ios {
     Say "ios: BLE role override = $IosRole"
