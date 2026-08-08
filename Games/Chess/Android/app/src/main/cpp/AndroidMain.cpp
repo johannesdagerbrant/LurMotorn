@@ -22,6 +22,7 @@
 #include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
+#include "Lur/Trace/Trace.h"   // touch->present latency (#192)
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
@@ -39,6 +40,8 @@ struct AppState {
     Lur::Net::Session Session;
     Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
     Lur::Save::SyncManager* Sync = nullptr;  // for persist-on-background (set in android_main)
+    uint64_t PendingTouchNs = 0;             // oldest touch sample not yet presented (#192)
+    uint64_t TouchDownNs = 0;                // press time of the gesture in progress (#192)
     Lur::Audio::Mixer Mixer;                 // wait-free SFX mixer (audio thread reads it)
     Chess::SfxLibrary Sfx;                   // cooked move sounds, loaded into Mixer
     Lur::Audio::IAudioDevice* Audio = nullptr;  // AAudio output stream
@@ -104,8 +107,31 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     auto* State = static_cast<AppState*>(App->userData);
     if (State == nullptr || !State->Ready || App->window == nullptr) return 0;
     if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
-    if ((AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK) != AMOTION_EVENT_ACTION_UP)
-        return 0;
+
+    // #192 (ported from RPS #185): how long the OS took to hand us this sample. Everything
+    // before this point is digitiser + input dispatch — a floor we do not control — so
+    // measuring it separately is what says how much of the move latency is ours to fix.
+    // AMotionEvent_getEventTime and Lur::Trace::NowNs are both CLOCK_MONOTONIC ns.
+    const uint64_t EventNs = static_cast<uint64_t>(AMotionEvent_getEventTime(Event));
+    LUR_TRACE_LATENCY("input.dispatch", EventNs);
+    // Keep the OLDEST unpresented sample: several samples can arrive between two frames,
+    // and overwriting would measure the last one to squeak in before the present —
+    // flattering, and not what the finger saw.
+    if (State->PendingTouchNs == 0) State->PendingTouchNs = EventNs;
+
+    // The dead time this epic exists to reclaim (#187): how long the finger sits on the
+    // glass before we do anything with it. Committing on UP spends all of it. A synthetic
+    // `adb shell input tap` sends DOWN and UP together and reads ~0 here, so this number is
+    // only meaningful under a REAL finger — which is the point: it is the human's gesture,
+    // not the machine's, that we are paying for.
+    const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
+    if (Action == AMOTION_EVENT_ACTION_DOWN) State->TouchDownNs = EventNs;
+    if (Action == AMOTION_EVENT_ACTION_UP && State->TouchDownNs != 0) {
+        LUR_TRACE_LATENCY("input.downToUp", State->TouchDownNs);
+        State->TouchDownNs = 0;
+    }
+
+    if (Action != AMOTION_EVENT_ACTION_UP) return 0;
     State->View.OnTap(AMotionEvent_getX(Event, 0), AMotionEvent_getY(Event, 0),
                       static_cast<float>(ANativeWindow_getWidth(App->window)),
                       static_cast<float>(ANativeWindow_getHeight(App->window)));
@@ -180,6 +206,7 @@ void android_main(android_app* App) {
     uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(DeviceId.size());
     uint64_t Frame = 0, PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
     uint64_t ReportAccumNs = 0;
+    uint64_t TraceAccumNs = 0;   // #192: latency report, deliberately NOT gated on autoplay
     // Net-ms RTT: our move leaves -> the peer's same-frame reply arrives. Measured on
     // this device's clock alone (no cross-device sync): stamp when we send, close when
     // the reply lands. Includes 2x transit + <=1 peer frame + <=1 our frame.
@@ -252,6 +279,18 @@ void android_main(android_app* App) {
                      State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
             }
             ++Frame;
+
+            // #192: the latency report. NOT gated on autoplay or on the link — the whole
+            // point is to read it while a HUMAN taps, which is exactly when autoplay is off.
+            // (Same lesson as the #73 heartbeat: a periodic line that needs a live match is
+            // blind precisely when you need it.)
+            TraceAccumNs += ElapsedNs;
+            if (TraceAccumNs > 2'000'000'000ull) {
+                TraceAccumNs = 0;
+                char TraceLine[512];
+                if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+                    LOGI("TRACE %s", TraceLine);
+            }
         }
 #endif
         int Events = 0;
@@ -268,6 +307,15 @@ void android_main(android_app* App) {
             State.View.Render(State.Renderer,
                               static_cast<float>(ANativeWindow_getWidth(App->window)),
                               static_cast<float>(ANativeWindow_getHeight(App->window)));
+            // #192: touch sample -> this frame handed to the presentation engine. Bounds OUR
+            // share of move latency: OS dispatch + the wait for this loop iteration + tap
+            // handling + record + submit, stopping at vkQueuePresentKHR returning. It does
+            // NOT include the compositor holding the image until scan-out, so real photons
+            // are up to one more refresh later — a constant, so before/after stays honest.
+            if (State.PendingTouchNs != 0) {
+                LUR_TRACE_LATENCY("input.toPresent", State.PendingTouchNs);
+                State.PendingTouchNs = 0;
+            }
         }
     }
 

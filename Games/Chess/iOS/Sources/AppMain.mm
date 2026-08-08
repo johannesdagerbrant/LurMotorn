@@ -28,6 +28,7 @@
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
+#include "Lur/Trace/Trace.h"   // touch->present latency (#192)
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
 
@@ -67,6 +68,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     Lur::Audio::IAudioDevice* _Audio;        // RemoteIO output stream
     CADisplayLink* _DisplayLink;
     double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
+    uint64_t _PendingTouchNs;  // oldest touch sample not yet presented (#192)
+    uint64_t _TouchDownNs;     // press time of the gesture in progress (#192)
     bool _Ready;
     // #73: a DVT launch can initialise the renderer while the app is NOT active — the
     // layer created in that state is never composited (presents "succeed", screen
@@ -81,6 +84,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     uint32_t _Rng;
     uint64_t _Frame, _PeerReplies, _SameFrame, _NewGameOpens, _DelayedReplies;
     uint64_t _AutoCheckAccumNs, _ReportAccumNs;
+    uint64_t _TraceAccumNs;   // #192: latency report, deliberately NOT gated on autoplay
     // Net-ms RTT (mirrors AndroidMain): our move leaves -> the peer's reply arrives,
     // measured on this device's clock alone (2x transit + <=1 frame each side).
     uint64_t _ClockNs, _MoveSentNs, _RttCount, _RttSumMs, _RttMinMs, _RttMaxMs;
@@ -391,6 +395,23 @@ static void UnblockStdio() {
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));
+    // #192: touch sample -> frame handed to the presentation engine. See the Android note
+    // for what this does and does not include.
+    if (_PendingTouchNs != 0) {
+        LUR_TRACE_LATENCY("input.toPresent", _PendingTouchNs);
+        _PendingTouchNs = 0;
+    }
+#if LUR_INTERNAL
+    // #192: the latency report, NOT gated on autoplay or the link — it exists to be read
+    // while a HUMAN taps, which is exactly when the autoplay diag above is silent.
+    _TraceAccumNs += ElapsedNs;
+    if (_TraceAccumNs > 2000000000ull) {
+        _TraceAccumNs = 0;
+        char TraceLine[512];
+        if (Lur::Trace::FormatLineAndReset(TraceLine, sizeof(TraceLine)) > 0)
+            os_log(OS_LOG_DEFAULT, "OnlyChess: TRACE %{public}s", TraceLine);
+    }
+#endif
 }
 
 // Backgrounded: persist the in-progress match so it survives a close.
@@ -470,9 +491,39 @@ static void UnblockStdio() {
     if (_Ready) _View.CreateResources(_Renderer);
 }
 
+// #192: stamp a touch sample for the latency traces. UITouch.timestamp is seconds on the
+// same monotonic base as CACurrentMediaTime, which on Apple platforms is also what
+// steady_clock (and so Lur::Trace::NowNs) reads — so the two are directly comparable.
+- (uint64_t)stampTouch:(UITouch*)touch {
+    const uint64_t EventNs = static_cast<uint64_t>(touch.timestamp * 1.0e9);
+    const uint64_t Now = Lur::Trace::NowNs();
+    // Guard the subtraction rather than trusting the two clocks to agree: if a future OS
+    // changes UITouch's base, a bogus huge sample would poison the aggregate silently.
+    if (EventNs != 0 && EventNs <= Now && Now - EventNs < 1'000'000'000ull) {
+        LUR_TRACE_LATENCY("input.dispatch", EventNs);
+        // Oldest unpresented sample wins — see the Android note; overwriting would measure
+        // the last sample to squeak in before the present rather than what the finger saw.
+        if (_PendingTouchNs == 0) _PendingTouchNs = EventNs;
+        return EventNs;
+    }
+    return 0;
+}
+
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    if (!_Ready) return;
+    _TouchDownNs = [self stampTouch:touches.anyObject];
+}
+
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_Ready) return;
     UITouch* Touch = touches.anyObject;
+    (void)[self stampTouch:Touch];
+    // The dead time this epic exists to reclaim (#187): how long the finger sat on the
+    // glass before we did anything with it. Committing on UP spends all of it.
+    if (_TouchDownNs != 0) {
+        LUR_TRACE_LATENCY("input.downToUp", _TouchDownNs);
+        _TouchDownNs = 0;
+    }
     const CGPoint P = [Touch locationInView:self.view];
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat Scale = Layer.contentsScale;  // points -> pixels (drawable space)

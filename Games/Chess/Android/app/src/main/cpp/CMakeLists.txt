@@ -40,6 +40,7 @@ target_link_libraries(onlychess
     lur::sim
     lur::math
     lur::audio  # wait-free SFX mixer + LSF1 codec (AndroidAudioDevice.cpp is its backend)
+    lur::trace  # named CPU scopes (#101) — AndroidMain emits the aggregated TRACE line (#192)
     android   # NativeActivity / ANativeWindow
     log       # __android_log_print
     aaudio    # low-latency audio output (NDK, API 26+)
@@ -55,7 +56,10 @@ target_compile_definitions(onlychess PRIVATE
     LUR_SHIPPING=${LUR_SHIPPING}
     LUR_INTERNAL=${LUR_INTERNAL}
     LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW})
+    LUR_SLOW=${LUR_SLOW}
+    # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
+    # Shipping. Without this the touch->present latency lines expand to nothing.
+    LUR_TRACE=${LUR_TRACE})
 
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlychess PROPERTIES

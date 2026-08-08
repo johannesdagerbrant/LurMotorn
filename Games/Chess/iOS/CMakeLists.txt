@@ -70,7 +70,10 @@ target_compile_definitions(OnlyChess PRIVATE
     LUR_SHIPPING=${LUR_SHIPPING}
     LUR_INTERNAL=${LUR_INTERNAL}
     LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW})
+    LUR_SLOW=${LUR_SLOW}
+    # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
+    # Shipping. Without this the touch->present latency lines expand to nothing.
+    LUR_TRACE=${LUR_TRACE})
 
 target_link_libraries(OnlyChess PRIVATE
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
@@ -81,7 +84,8 @@ target_link_libraries(OnlyChess PRIVATE
     lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math
-    lur::audio) # wait-free SFX mixer + LSF1 codec (IosAudioDevice.mm is its RemoteIO backend)
+    lur::audio  # wait-free SFX mixer + LSF1 codec (IosAudioDevice.mm is its RemoteIO backend)
+    lur::trace) # named CPU scopes (#101) + the touch->present latency (#192)
 
 # The .mm sources are Objective-C++ and use ARC. CMake's Xcode generator does NOT
 # enable ARC by default, so turn it on explicitly for this target.
