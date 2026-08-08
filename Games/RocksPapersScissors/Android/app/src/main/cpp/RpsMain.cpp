@@ -137,6 +137,8 @@ struct AppState {
     // A14's lag is on. It is CLOCK_MONOTONIC, the same clock Lur::Trace::NowNs reads, so the
     // subtraction is meaningful (do not swap either end for a wall clock).
     uint64_t PendingTouchNs = 0;                  // glue only
+
+    Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
     float DownX = 0.0f, DownY = 0.0f;
     // #151: the console gesture — two-finger triple-tap to open, drag-to-scroll while open — is now
