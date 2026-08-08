@@ -96,6 +96,21 @@ LUR_CVAR(CvGhostInvalidColor, "rps.view.ghost_invalid_color",
          (Lur::Render::Color{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f}),
          ::Lur::Core::CVarFlagNone,
          "Colour of the blinking ghost shown when a building cannot be placed there");
+// #103 A/B: skip the two FULL-SCREEN backdrop layers, so their cost can be measured rather than
+// assumed. The issue blames them for `render.view` sitting at a whole 60 Hz refresh on the A14 —
+// but that number is flat regardless of unit count, which is equally the signature of a vsync wait
+// parked inside the scope, and that exact signature fooled the iOS investigation three times over
+// (acquire -> submit -> begin-frame, #183). `gpu.wait` covers WaitForFrame here and reads ~0.16 ms,
+// so the wait is not obviously parked — but "not obviously" is not a measurement.
+//
+// Turning the layers OFF and re-reading `rv.world` settles it in one run: a large drop means fill is
+// genuinely the cost and the merge/bake lever is worth building; an unchanged ~16 ms means the frame
+// is paced, not filled, and merging passes would have bought nothing. Dev-only, default ON.
+LUR_CVAR(CvDrawField, "rps.view.draw_field", true, ::Lur::Core::CVarFlagNone,
+         "DEV A/B (#103): draw the full-screen field gradient");
+LUR_CVAR(CvDrawGrid, "rps.view.draw_grid", true, ::Lur::Core::CVarFlagNone,
+         "DEV A/B (#103): draw the world grid lines");
+
 struct GradStop { float P; Color C; };
 // Field gradient — SCREENSPACE vertical: night-blue enemy horizon (top) through
 // dark earth to the warm umber home ground (bottom). Both players see the same
@@ -826,23 +841,26 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     PulseBtnActive_ = false;   // set below if a +1 button is pulsing this frame
 
     // Field backdrop: the locked SCREENSPACE gradient — spans the viewport, never scrolls.
-    Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
+    if (CvDrawField.Get())
+        Renderer->DrawMesh(FieldGradMesh, WhiteMat, Mat4::Scale({WidthPx, HeightPx, 1.0f}));
 
     // World grid. The LINES are world-anchored (they scroll and X never scrolls, so
     // vertical lines are screen-static); the COLOUR is sampled from the grid gradient
     // in screen space (prototype rule), so the palette holds still under the scroll.
-    for (float Wx = 0.0f; Wx <= FW(WorldWidth) + 0.01f; Wx += GridStepWu) {
-        const Mat4 M = Mat4::Translation({SX(Wx) - 0.5f, 0.0f, 0.0f}) *
-                       Mat4::Scale({1.0f, HeightPx, 1.0f});
-        Renderer->DrawMesh(VLineMesh, WhiteMat, M);
-    }
-    for (float Wy = 0.0f; Wy <= WHf + 0.01f; Wy += GridStepWu) {
-        const float Y = SY(Wy);
-        if (Y < -1.0f || Y > HeightPx + 1.0f) continue;
-        int Li = static_cast<int>(Y / HeightPx * (GridShades - 1) + 0.5f);
-        if (Li < 0) Li = 0;
-        if (Li >= GridShades) Li = GridShades - 1;
-        Blit(GridLut[Li], WidthPx * 0.5f, Y, WidthPx, 1.0f);
+    if (CvDrawGrid.Get()) {
+        for (float Wx = 0.0f; Wx <= FW(WorldWidth) + 0.01f; Wx += GridStepWu) {
+            const Mat4 M = Mat4::Translation({SX(Wx) - 0.5f, 0.0f, 0.0f}) *
+                           Mat4::Scale({1.0f, HeightPx, 1.0f});
+            Renderer->DrawMesh(VLineMesh, WhiteMat, M);
+        }
+        for (float Wy = 0.0f; Wy <= WHf + 0.01f; Wy += GridStepWu) {
+            const float Y = SY(Wy);
+            if (Y < -1.0f || Y > HeightPx + 1.0f) continue;
+            int Li = static_cast<int>(Y / HeightPx * (GridShades - 1) + 0.5f);
+            if (Li < 0) Li = 0;
+            if (Li >= GridShades) Li = GridShades - 1;
+            Blit(GridLut[Li], WidthPx * 0.5f, Y, WidthPx, 1.0f);
+        }
     }
 
     // Draw a glyph-atlas quad (tinted silhouette) centred at (Cx, Cy).
