@@ -172,7 +172,7 @@ public:
         }
         DestroySwapchain();   // also destroys the per-image RenderFinished semaphores
         if (Device != VK_NULL_HANDLE) {
-            for (uint32_t i = 0; i < FramesInFlight; ++i) {
+            for (uint32_t i = 0; i < MaxFramesInFlight; ++i) {
                 if (ImageAvailable[i] != VK_NULL_HANDLE) vkDestroySemaphore(Device, ImageAvailable[i], nullptr);
                 if (InFlight[i] != VK_NULL_HANDLE)       vkDestroyFence(Device, InFlight[i], nullptr);
             }
@@ -712,7 +712,7 @@ private:
         VkCommandBufferAllocateInfo Alloc{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         Alloc.commandPool = CommandPool;
         Alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        Alloc.commandBufferCount = FramesInFlight;
+        Alloc.commandBufferCount = MaxFramesInFlight;
         VK_CHECK(vkAllocateCommandBuffers(Device, &Alloc, CommandBuffers));
         return CommandPool != VK_NULL_HANDLE && CommandBuffers[0] != VK_NULL_HANDLE;
     }
@@ -723,7 +723,7 @@ private:
         VkSemaphoreCreateInfo SemInfo{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         VkFenceCreateInfo FenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
         FenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;   // first WaitForFrame per slot must not block
-        for (uint32_t i = 0; i < FramesInFlight; ++i) {
+        for (uint32_t i = 0; i < MaxFramesInFlight; ++i) {
             VK_CHECK(vkCreateSemaphore(Device, &SemInfo, nullptr, &ImageAvailable[i]));
             VK_CHECK(vkCreateFence(Device, &FenceInfo, nullptr, &InFlight[i]));
         }
@@ -1429,12 +1429,36 @@ private:
     // iPhone, es.submit), because the CPU could never run ahead of the display. With N=2, frame N
     // waits only on frame N-2's fence, so the CPU records N+1 while the display still holds N and the
     // drawable is already free at submit. Per-frame-slot: command buffer, acquire semaphore, fence.
-    static constexpr uint32_t FramesInFlight = 2;
+    // #185 — DEPTH IS A LATENCY DIAL, and it points the opposite way from what the comment above
+    // assumed. Measured on the Galaxy A14 (touch->present, `input.toPresent`, 2026-08-08):
+    //
+    //                        N=2        N=1
+    //   input.toPresent    31.9 ms   15.6 ms     <- HALVED
+    //   rv.world           14.97 ms   0.26 ms    <- the "render cost" was never render cost
+    //   gpu.wait            0.09 ms  14.78 ms
+    //   frame total        16.41 ms  16.41 ms    <- 60 fps either way
+    //
+    // With N=2 the fence at the top is already signalled, so WaitForFrame returns instantly, we
+    // sample input, and THEN the driver blocks for a whole refresh inside command recording — the
+    // touch we just read is a full frame stale before it is ever submitted. That also explains why
+    // #103 read `rv.world` as 15 ms of fill: it was backpressure wearing render's clothes. Real work
+    // is 1.6 ms.
+    //
+    // With N=1 the wait lands where the loop was designed to put it (WAIT-EARLY, SAMPLE-LATE): the
+    // frame blocks at the top, input is polled after it, and recording follows immediately. Same
+    // throughput, one refresh less latency.
+    //
+    // So N=1 is the default, and N is RUNTIME rather than constexpr — the tradeoff is per-device
+    // (a device whose GPU work genuinely exceeds the budget wants the pipelining back), and #185's
+    // whole lesson is that the answer must be measurable on the device rather than argued.
+    // Arrays stay sized by the MAX so the depth can change without touching allocation.
+    static constexpr uint32_t MaxFramesInFlight = 2;
+    uint32_t        FramesInFlight = 1;
     VkCommandPool   CommandPool = VK_NULL_HANDLE;
-    VkCommandBuffer CommandBuffers[FramesInFlight] = {};   // one per in-flight slot
+    VkCommandBuffer CommandBuffers[MaxFramesInFlight] = {};  // one per in-flight slot
     VkCommandBuffer CommandBuffer = VK_NULL_HANDLE;        // == CommandBuffers[CurrentFrame]; the draw path uses this
-    VkSemaphore     ImageAvailable[FramesInFlight] = {};   // acquire signals this (per slot)
-    VkFence         InFlight[FramesInFlight] = {};          // submit signals this (per slot)
+    VkSemaphore     ImageAvailable[MaxFramesInFlight] = {};  // acquire signals this (per slot)
+    VkFence         InFlight[MaxFramesInFlight] = {};        // submit signals this (per slot)
     uint32_t        CurrentFrame = 0;                       // 0..FramesInFlight-1, advances each EndFrame
     // Per swapchain IMAGE, not per slot: a present-wait semaphore reused across slots trips the WSI
     // reuse rule, but an image is re-acquired only after its present completes, so keying on ImageIndex
