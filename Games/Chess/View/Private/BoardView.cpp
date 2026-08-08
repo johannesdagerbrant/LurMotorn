@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "Chess/Captures.h"
 #include "Chess/MatchMeta.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/OpponentRegistry.h"
@@ -119,6 +120,19 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     Selector.CreateResources(Renderer, &UiFont);
 }
 
+void BoardView::RefreshCaptures() {
+    if (State == nullptr) { Caps.Count = 0; return; }
+    // Ply count alone would miss a switch to another opponent's game that happens to
+    // stand at the same length; the position hash alone would miss a transposition
+    // reached by a different capture order. Together they pin the tray to the board.
+    const std::size_t   Plies = State->Record().Moves.size();
+    const std::uint64_t Hash  = State->PositionHash();
+    if (Plies == CapsPlies && Hash == CapsHash) return;
+    CollectCaptures(State->Record().Moves, Caps);
+    CapsPlies = Plies;
+    CapsHash  = Hash;
+}
+
 bool BoardView::FlipBoard() const {
     return State != nullptr && State->HasIdentity() && State->MyColor() == EColor::Black;
 }
@@ -147,6 +161,18 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     auto CellModel = [](float X, float Y, float Size) {
         return Mat4::Translation({X, Y, 0.0f}) * Mat4::Scale({Size, Size, 1.0f});
     };
+
+    // Capture trays (issue #67) sit in the margins the board leaves. Whether they fit
+    // is decided here, before anything is drawn, because the bottom tray displaces the
+    // score line below it. A near-square window has no margins to spare and simply
+    // gets no trays — the phones and the 9:20 desktop window have room to burn.
+    const float TrayH   = Sq * 0.50f;
+    const float TrayGap = Sq * 0.07f;
+    const float TopRoom = L.OriginY;
+    const float BotRoom = HeightPx - (L.OriginY + Sq * 8.0f);
+    const float TrayBox = TrayH + TrayGap * 2.0f;
+    const bool  ShowTopTray = TopRoom >= TrayBox;
+    const bool  ShowBotTray = BotRoom >= TrayBox + Sq * 1.2f;   // ...and still fit the score line
 
     Renderer->BeginFrame(MakeOrthoCamera(WidthPx, HeightPx));
 
@@ -199,6 +225,31 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
             float X, Y; CellTopLeft(L, Mv.To, Flip, X, Y);
             Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X + DotOff, Y + DotOff, Dot));
         }
+
+        // Capture trays. The ONE thing that decides both rows is which colour sits at
+        // the near (bottom) edge of the screen — so they follow FlipBoard() for free
+        // and stay correct when Black's view is rotated 180°.
+        //   below the board = what the near player has taken (the far colour);
+        //   above the board = the near player's own men, taken by the far player.
+        RefreshCaptures();
+        const EColor NearColor = Flip ? EColor::Black : EColor::White;
+        auto DrawTray = [&](EColor Taken, float RowY) {
+            // Overlap the icons slightly (a real capture tray stacks) and tighten the
+            // step further if all 15 of a colour's men are gone, so a full tray still
+            // spans no more than the board.
+            const float Step = std::min(TrayH * 0.62f, (Sq * 8.0f) / 15.0f);
+            float X = L.OriginX;
+            for (int i = 0; i < Caps.Count; ++i) {
+                if (Caps.Items[i].Color != Taken) continue;
+                const int Idx = static_cast<int>(Caps.Items[i].Type);
+                const MaterialHandle Mat = (Taken == EColor::White) ? PieceLight[Idx]
+                                                                    : PieceDark[Idx];
+                Renderer->DrawMesh(QuadMesh, Mat, CellModel(X, RowY, TrayH));
+                X += Step;
+            }
+        };
+        if (ShowTopTray) DrawTray(NearColor, L.OriginY - TrayGap - TrayH);
+        if (ShowBotTray) DrawTray(Opposite(NearColor), L.OriginY + Sq * 8.0f + TrayGap);
     }
 
     // Everything below is HUD — enter the GUI layer so it composites on top of the
@@ -227,10 +278,11 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
         char Buf[64];
         std::snprintf(Buf, sizeof(Buf), "You %d   Them %d   Draw %d", My, Their, Rec.Draws);
 
-        // A compact score line in a band just below the board. Size is tied to the
-        // square (not the margin — portrait margins are very tall), centred in the band.
+        // A compact score line in a band just below the board — under the capture tray
+        // when there is one. Size is tied to the square (not the margin — portrait
+        // margins are very tall), centred in the band.
         const float Band = Sq * 1.2f;
-        const float BY   = L.OriginY + Sq * 8.0f;
+        const float BY   = L.OriginY + Sq * 8.0f + (ShowBotTray ? TrayBox : 0.0f);
         Text.Draw(Renderer, Buf, L.OriginX, BY, Sq * 8.0f, Band, Sq * 0.34f,
                   Color{0.92f, 0.92f, 0.95f, 1.0f},
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);
@@ -241,8 +293,13 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     if (State != nullptr && State->Record().Moves.empty() &&
         State->LastResult() != EGameResult::Ongoing) {
         const char* Msg = "Draw";
-        if (State->LastResult() == EGameResult::Checkmate)      Msg = "Checkmate";
-        else if (State->LastResult() == EGameResult::Stalemate) Msg = "Stalemate";
+        switch (State->LastResult()) {
+            case EGameResult::Checkmate:      Msg = "Checkmate"; break;
+            case EGameResult::Stalemate:      Msg = "Stalemate"; break;
+            case EGameResult::DrawRepetition: Msg = "Draw by repetition"; break;
+            case EGameResult::DrawFiftyMove:  Msg = "Draw by 75 moves"; break;
+            default: break;   // Ongoing is filtered above; the rest read as a plain "Draw"
+        }
         Text.Draw(Renderer, Msg, L.OriginX, L.OriginY, Sq * 8.0f, Sq * 8.0f, Sq * 0.8f,
                   Color{0.98f, 0.85f, 0.30f, 1.0f},
                   Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle, false);

@@ -6,6 +6,7 @@ add_library(chess_core
     Core/Private/MoveCodec.cpp
     Core/Private/ChessRecord.cpp
     Core/Private/ChessMatchState.cpp
+    Core/Private/Captures.cpp
     Core/Private/OpponentRegistry.cpp
     Core/Private/MatchMeta.cpp)
 

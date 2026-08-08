@@ -10,6 +10,7 @@
 #include "Lur/Text/Font.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
+#include "Chess/Captures.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/Types.h"
 
@@ -102,6 +103,10 @@ private:
     // empty GUID, to a fresh "same device" local game. Persists the outgoing game.
     void SwitchActive(const std::string& Guid);
 
+    // Re-derive the capture trays if the board moved on. Cheap to call every frame:
+    // it replays the move list only when (ply count, position) actually changed.
+    void RefreshCaptures();
+
     // True when the local player views from Black's side (board rotated 180°).
     bool FlipBoard() const;
     // True when a tap may make a move now (our turn on a live link, or hot-seat).
@@ -109,6 +114,13 @@ private:
 
     ChessMatchState* State = nullptr;   // authoritative game state (app-owned)
     Square Selected = NoSquare;
+
+    // Captured pieces in capture order (issue #67), re-derived from the move list only
+    // when the board changes — keyed on (ply count, position hash) so a switch to
+    // another opponent's game with the same ply count still refreshes.
+    CaptureList   Caps;
+    std::size_t   CapsPlies = static_cast<std::size_t>(-1);
+    std::uint64_t CapsHash = 0;
 
     Lur::Net::Session* Net = nullptr;   // null => local hot-seat
 

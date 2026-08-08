@@ -349,6 +349,7 @@ int main(int argc, char** argv) {
                    MaxFrames > 0 ? "headless --frames" : "close either window to quit");
     int Frame = 0;
     bool Linked = false;
+    uint32_t RngA = 0xC0FFEEu, RngB = 0xBEEF01u;   // per-side autoplay seeds (--auto)
     auto PrevTime = std::chrono::steady_clock::now();
     while (A.Win.PumpEvents() && B.Win.PumpEvents()) {
         const auto Now = std::chrono::steady_clock::now();
@@ -358,6 +359,16 @@ int main(int argc, char** argv) {
 
         A.Session.Tick(ElapsedNs);
         B.Session.Tick(ElapsedNs);
+#if LUR_INTERNAL
+        // --auto here too, not just in --ble: without a move driver the two-window window
+        // never leaves the start position, so anything that only appears once pieces have
+        // been taken (the capture trays, #67) could not be looked at on the desktop at all.
+        // Pace it with --loop-ms; the default 8 ms plays a whole game in about two seconds.
+        if (Linked && Auto) {
+            A.View.AutoPlayRandomLegalMove(RngA);
+            B.View.AutoPlayRandomLegalMove(RngB);
+        }
+#endif
         if (!Linked && A.Session.IsReady() && B.Session.IsReady()) {
             Linked = true;
             A.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
@@ -375,7 +386,7 @@ int main(int argc, char** argv) {
             Lur::Log::Info("rendered %d frames headless (linked=%d) - exiting", Frame, Linked ? 1 : 0);
             break;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+        std::this_thread::sleep_for(std::chrono::milliseconds(LoopMs > 0 ? LoopMs : 8));
     }
 
     // Write each session's flight recording — a crash/desync now ships as a file that
