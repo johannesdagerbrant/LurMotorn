@@ -207,7 +207,20 @@ static void SaveIosPeerId(const std::string& Id) {
     // link-establishment record sync, so we must NOT buffer + replay a stale move
     // (which would decode against a since-advanced position and desync).
     if (!_Connected) return;
-    _SendQueue.emplace_back(Data, Data + Size);
+    // A LIVE MOVE JUMPS THE QUEUE (issue #190). Otherwise it is FIFO with no notion of
+    // urgency, so a 1-byte move can sit behind a keepalive or a multi-datagram Sync/resync
+    // payload — exactly when the queue is deepest and exactly when latency is felt, at a
+    // whole connection interval per place in line.
+    //
+    // A move is identified BY ITS LENGTH, needing no new API: the wire format (#15) makes a
+    // live move exactly one byte and pads every framed message to two or more — the same
+    // invariant the RECEIVE path already dispatches on. So this cannot drift away from the
+    // protocol on its own; if it ever did, receiving would break first and far more loudly.
+    //
+    // Reordering is safe: chess is strictly turn-alternating, so there is never more than
+    // one move in flight in one direction and a move can never overtake another move.
+    if (Size == 1) _SendQueue.emplace_front(Data, Data + Size);
+    else           _SendQueue.emplace_back(Data, Data + Size);
     [self pumpSend];
 }
 
