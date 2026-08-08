@@ -85,6 +85,13 @@ public:
     // (local both-sides play).
     const std::string& ActiveOpponentGuid() const { return ActiveOpponent; }
 
+    // The peer picked a piece up (issue #193) — a purely COSMETIC anticipation cue, so our
+    // board can start reacting before their move is even committed. Applied to nothing but
+    // the drawing: it never touches ChessMatchState, the move index, the legal list or
+    // PositionHash, because move ordering IS the wire protocol and a hint that perturbed it
+    // would be a desync with a very long fuse. NoSquare clears it.
+    void SetPeerSelection(Square S) { PeerSelected = S; }
+
     // A peer link came up. Applies the hijack rule (#38) and returns whether we
     // adopted this peer as the active game (the app sends its record iff true):
     //   - active is "same device" (empty) -> adopt the peer (the only auto-switch);
@@ -116,8 +123,14 @@ private:
     // True when a tap may make a move now (our turn on a live link, or hot-seat).
     bool CanMoveNow() const;
 
+    // Tell the peer which square we just picked up, so their board can pre-highlight it
+    // (#193). Framed (>= 2 bytes on the wire), so it can never be confused with a bare
+    // 1-byte move. No-op without a session.
+    void SendSelectionHint(Square S);
+
     ChessMatchState* State = nullptr;   // authoritative game state (app-owned)
     Square Selected = NoSquare;
+    Square PeerSelected = NoSquare;     // the peer's picked-up piece — COSMETIC only (#193)
 
     // Captured pieces in capture order (issue #67), re-derived from the move list only
     // when the board changes — keyed on (ply count, position hash) so a switch to
@@ -144,6 +157,7 @@ private:
     Lur::Render::MaterialHandle LightSquare = 0;
     Lur::Render::MaterialHandle DarkSquare = 0;
     Lur::Render::MaterialHandle Highlight = 0;
+    Lur::Render::MaterialHandle PeerHighlight = 0;   // the peer's anticipated pick-up (#193)
     Lur::Hud::Dropdown          Selector;   // engine widget: the opponent dropdown
     // MSDF text: the all-time W/L/D score line + the between-match result banner (#22).
     Lur::Text::Font             UiFont;

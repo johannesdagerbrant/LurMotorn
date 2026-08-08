@@ -107,6 +107,10 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     LightSquare = Renderer->CreateMaterial(MaterialDesc{0, Color{0.93f, 0.85f, 0.70f, 1.0f}, false});
     DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
     Highlight   = Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
+    // #193: the peer's anticipated pick-up. Deliberately a DIFFERENT hue from our own green
+    // selection — it is a guess about what they are about to do, and must never be mistaken
+    // for something that has actually happened.
+    PeerHighlight = Renderer->CreateMaterial(MaterialDesc{0, Color{0.98f, 0.75f, 0.25f, 0.45f}, false});
 
     // Pack each piece into an R8G8 texture — R = shade (the source art's tones),
     // G = coverage (silhouette alpha) — and upload once. The shader multiplies the
@@ -249,6 +253,24 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
             Renderer->DrawMesh(QuadMesh, Highlight, CellModel(X + DotOff, Y + DotOff, Dot));
         }
 
+        // #193: the peer's anticipated pick-up, drawn under the pieces like our own
+        // selection but in a different hue. Only while it is THEIR turn: on our turn a stale
+        // hint would be pointing at a piece that can no longer move, and GenerateLegalMoves
+        // below would be generating OUR moves, not theirs.
+        if (PeerSelected != NoSquare && State->HasIdentity() && !State->IsMyTurn()) {
+            float X, Y; CellTopLeft(L, PeerSelected, Flip, X, Y);
+            Renderer->DrawMesh(QuadMesh, PeerHighlight, CellModel(X, Y, Sq));
+            MoveList Theirs;
+            GenerateLegalMoves(B, Theirs);   // side to move IS the peer here
+            const float PDot = Sq * 0.22f;
+            const float POff = (Sq - PDot) * 0.5f;
+            for (int i = 0; i < Theirs.Count; ++i) {
+                if (Theirs.Moves[i].From != PeerSelected) continue;
+                float Tx, Ty; CellTopLeft(L, Theirs.Moves[i].To, Flip, Tx, Ty);
+                Renderer->DrawMesh(QuadMesh, PeerHighlight, CellModel(Tx + POff, Ty + POff, PDot));
+            }
+        }
+
         // Capture trays. The ONE thing that decides both rows is which colour sits at
         // the near (bottom) edge of the screen — so they follow FlipBoard() for free
         // and stay correct when Black's view is rotated 180°.
@@ -339,6 +361,19 @@ void BoardView::AttachSession(Lur::Net::Session* Session) {
     // link-time record sync are wired by the app (ChessMatchState + SyncManager).
     // A live move is a bare 1-byte datagram (issue #19), so it uses the move hook.
     Net->SetMoveHandler([this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
+    // #193: the peer's selection hint. Chess aliases the engine's generic Game0 slot, which
+    // it has never sent framed, so a peer on an older build simply ignores the type and
+    // loses only the cue — no ProtocolVersion bump, and a mixed pair still plays. Cosmetic
+    // by construction: it lands in a Square used for drawing and nowhere else.
+    Net->SetHandler(Lur::Net::EMsgType::Game0, [this](const uint8_t* D, std::size_t N) {
+        if (N < 1) return;
+        // Same hijack guard as a move (#38): a hint from a peer we are not currently playing
+        // describes THEIR board, and drawing it on ours would point at an unrelated piece.
+        if (Net != nullptr && !ActiveOpponent.empty() && Net->GetPeerGuid() != ActiveOpponent)
+            return;
+        const Square S = static_cast<Square>(D[0]);
+        SetPeerSelection(S <= NoSquare ? S : NoSquare);   // ignore a nonsense square
+    });
 }
 
 void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
@@ -368,6 +403,7 @@ void BoardView::ApplyRemoteMove(const uint8_t* Data, std::size_t Size) {
     State->ApplyMove(Mv);
     StampMove(Sound);
     Selected = NoSquare;
+    PeerSelected = NoSquare;   // #193: the anticipation is spent — the real move just landed
 }
 
 void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
@@ -426,7 +462,20 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
     }
 
     // Not a move: select one's own piece (only on your turn), otherwise clear.
+    const Square Was = Selected;
     Selected = (Mine != EPieceType::None && MyTurn) ? Sq : NoSquare;
+    // #193: tell the peer the instant we pick a piece up, so their board can start
+    // anticipating BEFORE the move exists. Only on a change — holding a selection must not
+    // dribble datagrams.
+    if (Selected != Was) SendSelectionHint(Selected);
+}
+
+void BoardView::SendSelectionHint(Square S) {
+    if (Net == nullptr) return;
+    // One payload byte: the square, or NoSquare (64) to clear. Framed, so it is >= 2 bytes
+    // on the wire and the `length == 1 -> move` receive rule (#15) stays unambiguous.
+    const uint8_t Payload = static_cast<uint8_t>(S);
+    Net->Send(Lur::Net::EMsgType::Game0, &Payload, 1);
 }
 
 #if LUR_INTERNAL
@@ -505,6 +554,7 @@ void BoardView::SwitchActive(const std::string& Guid) {
 
     if (Sync != nullptr) Sync->Persist();  // save the game we're leaving (under its key)
     Selected = NoSquare;
+    PeerSelected = NoSquare;   // #193: the hint belonged to the game we are leaving
     ActiveOpponent = Guid;
 
     if (Guid.empty()) {
