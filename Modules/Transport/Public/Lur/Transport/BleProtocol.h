@@ -181,7 +181,7 @@ public:
     // renegotiation or a CCCD rewrite does that, and rejecting it would break the real link to defend
     // against a device that isn't there. False for anyone else: do not redirect notifications to them.
     bool AcceptSubscriber(const char* Id) {
-        if (!Valid(Id)) return false;
+        if (Closed_ || !Valid(Id)) return false;
         if (!Bound_) { Store(Id); Bound_ = true; return true; }
         return IsPeer(Id);
     }
@@ -189,23 +189,50 @@ public:
     // May a datagram from this central enter the engine? Unbound (pre-link) traffic is allowed —
     // that is the handshake itself, and refusing it would mean no link could ever form. Once bound,
     // only the peer's bytes pass.
-    bool AcceptData(const char* Id) const { return !Bound_ ? Valid(Id) : IsPeer(Id); }
+    bool AcceptData(const char* Id) const {
+        if (Closed_) return false;
+        return !Bound_ ? Valid(Id) : IsPeer(Id);
+    }
 
     // Is this the bound peer? The test for "may this disconnect/unsubscribe end the link".
     bool IsPeer(const char* Id) const {
-        if (!Bound_ || !Valid(Id)) return false;
+        if (Closed_ || !Bound_ || !Valid(Id)) return false;
         std::size_t K = 0;
         for (; Peer_[K] != '\0' && Id[K] != '\0'; ++K)
             if (Peer_[K] != Id[K]) return false;
         return Peer_[K] == '\0' && Id[K] == '\0';   // equal length too, so no prefix passes
     }
 
-    bool HasPeer() const { return Bound_; }
+    bool HasPeer() const { return Bound_ && !Closed_; }
+
+    // WE LINKED AS CENTRAL, so our own GATT server has no legitimate peer at all — shut it to
+    // everyone.
+    //
+    // This is the half of #83 the first fix missed, and it is not a variation of the hijack: it is the
+    // hijack against the OTHER role. Binding only ever happened on a CCCD subscribe, i.e. on the
+    // PERIPHERAL path. A device that linked as central therefore sat in a live match with its binding
+    // still OPEN and its GATT server still published — and "stopped advertising" is not protection,
+    // because a device that scanned before the link formed keeps the handle. So a third device could
+    // connect to a central-role phone, subscribe, and:
+    //   * bind itself as that phone's "peer" (AcceptSubscriber succeeded — nobody had bound),
+    //   * inject datagrams straight into the lockstep stream (AcceptData then said yes), and
+    //   * END THE MATCH by disconnecting, because IsPeer now named the intruder, so onLinkLost fired
+    //     on a link that was perfectly healthy.
+    // Only the notify path was accidentally safe, because the send picks the client-write branch
+    // whenever we hold a GATT client.
+    //
+    // Closing needs no id matching, which is what makes it right on both platforms: a central's remote
+    // handle lives in a different namespace from the CBCentral/BluetoothDevice its server reports, so
+    // "bind the same peer from the central side" would have to assume those identifiers agree. They
+    // need not. "Serve nobody" is exact, and true: a central receives via notifications on its client,
+    // never through its own server's datagram characteristic.
+    void Close() { Bound_ = false; Peer_[0] = '\0'; Closed_ = true; }
 
     // The link is genuinely gone: open up again. This is what keeps chess's deliberate opponent-switch
     // (#38) working — that flow operates at SESSION level after link loss, so the gate must apply only
-    // WHILE linked. A binding that outlived the link would forbid ever changing opponents.
-    void Clear() { Bound_ = false; Peer_[0] = '\0'; }
+    // WHILE linked. A binding that outlived the link would forbid ever changing opponents. Reopens a
+    // Close()d server too, since the next link may well be one we serve.
+    void Clear() { Bound_ = false; Closed_ = false; Peer_[0] = '\0'; }
 
 private:
     // An id must be non-empty AND representable. Empty means a failed read, not a peer. Over-long
@@ -225,6 +252,7 @@ private:
     }
     char Peer_[MaxIdLen] = {};
     bool Bound_ = false;
+    bool Closed_ = false;   // linked as CENTRAL: our server serves nobody until the link drops
 };
 
 } // namespace Lur::Transport

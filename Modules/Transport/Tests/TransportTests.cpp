@@ -178,6 +178,53 @@ static void TestPeerBindingRejectsAThirdDevice() {
     CHECK(!D.IsPeer(std::string(PeerBinding::MaxIdLen - 2, 'x').c_str()));  // a prefix is not the peer
 }
 
+// ---- #83, the other role: a device that linked as CENTRAL still ran an open GATT server ----
+// The first fix bound the peer on a CCCD subscribe, which only ever happens on the PERIPHERAL path.
+// So half the pair — whichever phone won the role tie-break — played the whole match with its binding
+// UNBOUND and its server still published, and a third device that had scanned before the link formed
+// could walk straight in: subscribe (nobody was bound, so it bound ITSELF), inject datagrams into the
+// lockstep stream, and then end a healthy match simply by disconnecting, because IsPeer now named it.
+//
+// Close() is the answer rather than "bind the peer from the central side too", because a central's
+// remote handle and the CBCentral/BluetoothDevice its own server reports are different namespaces —
+// assuming they agree would be binding on an unguaranteed identity. A central has no legitimate
+// server-side peer at all, so the exact statement is "serve nobody".
+static void TestPeerBindingClosedWhenLinkedAsCentral() {
+    PeerBinding B;
+
+    // Pre-link, the server is open — that is the handshake, and closing it would stop links forming.
+    CHECK(B.AcceptData("AA:BB:CC:DD:EE:01"));
+
+    B.Close();                                    // the role tie-break made us CENTRAL
+    CHECK(!B.HasPeer());
+
+    // Nobody may subscribe: not a stranger, and not even a plausible-looking one. Before this, the
+    // FIRST arrival became the binding, because "unbound" and "serves nobody" were the same state.
+    CHECK(!B.AcceptSubscriber("FF:EE:DD:CC:BB:02"));
+    CHECK(!B.HasPeer());
+    CHECK(!B.AcceptData("FF:EE:DD:CC:BB:02"));
+
+    // ...and crucially nobody is the peer, so no outsider's disconnect can end the live match. This
+    // is the failure that would have read as a random mid-match link drop with nothing in the log.
+    CHECK(!B.IsPeer("FF:EE:DD:CC:BB:02"));
+    CHECK(!B.IsPeer("AA:BB:CC:DD:EE:01"));
+
+    // The link drops: reopen, because the NEXT link may be one we serve as peripheral (the role can
+    // flip — a fresh identity or a different opponent re-runs the tie-break). A Close() that outlived
+    // the link would leave the device permanently unable to be a peripheral, which is worse than the
+    // bug it fixes.
+    B.Clear();
+    CHECK(B.AcceptSubscriber("FF:EE:DD:CC:BB:02"));
+    CHECK(B.HasPeer());
+    CHECK(B.IsPeer("FF:EE:DD:CC:BB:02"));
+
+    // Close() from a BOUND state (we were peripheral, then re-linked as central without an
+    // intervening Clear) must drop the stale peer, not keep serving it.
+    B.Close();
+    CHECK(!B.IsPeer("FF:EE:DD:CC:BB:02"));
+    CHECK(!B.AcceptData("FF:EE:DD:CC:BB:02"));
+}
+
 // One datagram Sent on A is delivered byte-for-byte to B's receiver, both ways.
 static void TestLoopbackRoundtrip() {
     LoopbackTransport A, B;
@@ -365,6 +412,7 @@ int main() {
 #endif
     TestDeviceIdValidation();
     TestPeerBindingRejectsAThirdDevice();   // #83
+    TestPeerBindingClosedWhenLinkedAsCentral();  // #83, the central-role half
     TestLoopbackRoundtrip();
     TestMoveRoundtripsOverTransport();
     TestProtocolConstants();

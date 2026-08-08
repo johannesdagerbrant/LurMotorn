@@ -252,6 +252,12 @@ Java_com_lurmotorn_onlychess_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject 
                                                        jboolean AsPeripheral) {
     // Binder thread: queue the event; the engine thread applies it in Pump().
     LOGI("BLE connected as %s", AsPeripheral ? "peripheral" : "central");
+    // #83: linking as CENTRAL leaves our own GATT server with no legitimate peer, so shut it to
+    // everyone. Binding only ever happened on a CCCD subscribe (the peripheral path), so a
+    // central-role phone used to play the whole match with an OPEN binding and a published server —
+    // and a third device that scanned before the link formed could bind itself, inject datagrams, and
+    // end a healthy match by disconnecting. The peripheral path binds instead, in onDescriptorWrite.
+    if (!AsPeripheral) g_PeerBinding.Close();
     g_Transport.Inbox.PushConnected();
     // The net Session sends the first Hello (central writes first) once it sees the
     // link up — no demo ping needed, and a bare 1-byte ping would now look like a move.

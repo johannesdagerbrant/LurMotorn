@@ -437,6 +437,13 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
 didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
     if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.isNotifying) {
         NSLog(@"OnlyChess BLE: central linked + notifications on");
+        // #83: we are CENTRAL, so our own peripheral manager has no legitimate peer — shut it to
+        // everyone. Binding only ever happened in didSubscribeToCharacteristic (the peripheral path),
+        // which left a central-role phone playing a whole match with an OPEN binding on a service that
+        // is still published; stopping advertising is not protection, since a device that scanned
+        // earlier keeps the handle. Such a device could bind itself, inject datagrams into the
+        // move stream, and end a healthy match just by disconnecting.
+        _Binding.Close();
         [self onLinked];                              // central side: link is live
     }
 }
