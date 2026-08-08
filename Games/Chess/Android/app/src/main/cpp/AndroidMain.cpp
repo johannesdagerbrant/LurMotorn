@@ -60,7 +60,15 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                 State->Renderer = Lur::Render::VulkanRenderer::Create();
                 State->Ready = State->Renderer && State->Renderer->Init(App->window);
                 LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
-                if (State->Ready) State->View.CreateResources(State->Renderer);
+                if (State->Ready) {
+                    State->View.CreateResources(State->Renderer);
+                    // #188: make the frame's idle wait feed the radio. At one frame in
+                    // flight the CPU parks ~15 ms per frame inside vkWaitForFences, and
+                    // that park sits between the loop's two inbox drains (#189) and the
+                    // next iteration — which is exactly where a peer's move was waiting.
+                    State->Renderer->SetIdleWaitCallback(
+                        [](void* U) { static_cast<AppState*>(U)->Session.PumpInbox(); }, State);
+                }
 
                 // Bring up audio: load the cooked SFX into the mixer, wire each move to the
                 // sound for its KIND (move / capture / check / checkmate — the view

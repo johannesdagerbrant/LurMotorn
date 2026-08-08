@@ -180,6 +180,31 @@ public:
     // surfaced in the apps' periodic diag log lines. Default 0 for non-presenting
     // backends.
     virtual uint32_t PresentedFrames() const { return 0; }
+
+    // Work to run WHILE the CPU is blocked waiting on the GPU / the display (issue #188).
+    //
+    // With one frame in flight (#185 — the latency dial) the CPU spends most of a frame
+    // parked in vkWaitForFences / vkAcquireNextImageKHR waiting for the previous image to
+    // come back. That wait sits in the middle of the frame, so a loop that services the
+    // radio only at its top and bottom leaves a whole refresh in which nothing is
+    // serviced — measured on chess as ble.toApply maxing at 15.4 ms, a full frame, even
+    // after the inbox was drained twice per iteration (#189). The two drains are ~1 ms
+    // apart in wall clock; the 15 ms gap is HERE.
+    //
+    // Setting this turns the infinite waits into short polls with the callback in between,
+    // so the dead time becomes useful: chess wires it to Session::PumpInbox, and a peer's
+    // move lands within a poll interval instead of within a frame. Optional — unset, the
+    // waits stay a single blocking call and behaviour is exactly as before.
+    //
+    // Contract: called from the render thread, INSIDE a frame's wait. It must not touch
+    // this renderer (no draw calls, no resize, no shutdown) and it must be short. Mutating
+    // game state IS fine and is the point — the draw calls that follow then read the
+    // fresher state, which is the whole win.
+    //
+    // A plain function pointer, not std::function: this is the render path, and the
+    // allocation diet applies (Review #2 §3.1).
+    using IdleWaitFn = void (*)(void* User);
+    virtual void SetIdleWaitCallback(IdleWaitFn /*Fn*/, void* /*User*/) {}
 };
 
 } // namespace Lur::Render

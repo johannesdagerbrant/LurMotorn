@@ -311,10 +311,33 @@ public:
 
         // Wait for THIS slot's frame from N-FramesInFlight ago (not the immediately previous frame) —
         // that gap is what lets the CPU run ahead of the display.
-        vkWaitForFences(Device, 1, &InFlight[CurrentFrame], VK_TRUE, UINT64_MAX);
+        //
+        // #188: with an idle-wait callback set, poll in short slices and run the callback in
+        // between instead of parking in one infinite wait. At FramesInFlight=1 this wait IS
+        // most of the frame, and it sits between a loop's top and bottom — so it was where a
+        // peer's move went to wait (ble.toApply maxing at a full frame). Now the wait feeds
+        // the radio. Unset, it stays a single blocking call, byte-for-byte the old path.
+        if (IdleWait != nullptr) {
+            while (vkWaitForFences(Device, 1, &InFlight[CurrentFrame], VK_TRUE, IdlePollNs) ==
+                   VK_TIMEOUT)
+                IdleWait(IdleWaitUser);
+        } else {
+            vkWaitForFences(Device, 1, &InFlight[CurrentFrame], VK_TRUE, UINT64_MAX);
+        }
 
-        VkResult Acq = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX,
-                                             ImageAvailable[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
+        // Acquire can block just as long as the fence wait (it is the same "give the image
+        // back" event from the other side), so it gets the same treatment. A VK_TIMEOUT
+        // acquire signals nothing and consumes nothing, so retrying it is legal.
+        VkResult Acq = VK_TIMEOUT;
+        if (IdleWait != nullptr) {
+            while ((Acq = vkAcquireNextImageKHR(Device, Swapchain, IdlePollNs,
+                                                ImageAvailable[CurrentFrame], VK_NULL_HANDLE,
+                                                &ImageIndex)) == VK_TIMEOUT)
+                IdleWait(IdleWaitUser);
+        } else {
+            Acq = vkAcquireNextImageKHR(Device, Swapchain, UINT64_MAX,
+                                        ImageAvailable[CurrentFrame], VK_NULL_HANDLE, &ImageIndex);
+        }
         if (Acq == VK_ERROR_OUT_OF_DATE_KHR) {
             NeedsRecreate = true;
             if (++DeadFrames == 1 || DeadFrames % 60 == 0)
@@ -591,6 +614,13 @@ public:
     }
 
     uint32_t PresentedFrames() const override { return FramesPresented; }
+
+    // #188: see the interface comment. Stored plainly — read only by WaitForFrame, on the
+    // same thread that sets it, so no synchronisation is needed or implied.
+    void SetIdleWaitCallback(IdleWaitFn Fn, void* User) override {
+        IdleWait = Fn;
+        IdleWaitUser = User;
+    }
 
 private:
     // ---- Init steps ----
@@ -1452,6 +1482,12 @@ private:
     // (a device whose GPU work genuinely exceeds the budget wants the pipelining back), and #185's
     // whole lesson is that the answer must be measurable on the device rather than argued.
     // Arrays stay sized by the MAX so the depth can change without touching allocation.
+    // #188: poll slice for the idle-wait callback. 1 ms is far below the ~15 ms wait it
+    // subdivides, and far above the cost of one pump over an empty queue.
+    static constexpr uint64_t IdlePollNs = 1'000'000ull;
+    IdleWaitFn IdleWait = nullptr;
+    void*      IdleWaitUser = nullptr;
+
     static constexpr uint32_t MaxFramesInFlight = 2;
     uint32_t        FramesInFlight = 1;
     VkCommandPool   CommandPool = VK_NULL_HANDLE;

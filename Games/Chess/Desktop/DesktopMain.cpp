@@ -95,6 +95,10 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     G.View.SetLogger([](const char* M) { Lur::Log::Info("View: %s", M); });
     G.View.CreateResources(G.Renderer);
     G.Overlay.CreateResources(G.Renderer);
+    // #188: the frame's idle wait pumps the inbox — see AndroidMain. On the loopback pair
+    // this mostly proves the plumbing; on the BLE rig it is the same win the phones get.
+    G.Renderer->SetIdleWaitCallback(
+        [](void* U) { static_cast<GameInstance*>(U)->Session.PumpInbox(); }, &G);
 
     // Debug overlay drawn inside the frame, on top of the board (F1 toggles it).
     G.View.SetPostGuiHook([&G] {

@@ -263,6 +263,10 @@ static void UnblockStdio() {
                _InitWhileInactive ? 0 : 1);
         if (_Ready) {
             _View.CreateResources(_Renderer);
+            // #188: make the frame's idle wait feed the radio — see the Android note. The
+            // callback runs on this same thread, inside the wait, so nothing is shared.
+            _Renderer->SetIdleWaitCallback(
+                [](void* U) { static_cast<Lur::Net::Session*>(U)->PumpInbox(); }, &_Session);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
                                                        selector:@selector(renderFrame)];
             [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
