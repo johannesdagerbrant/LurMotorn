@@ -127,7 +127,16 @@ struct AppState {
     std::atomic<bool>       AgentGestureRequest{false};
 #endif
 
-    Rps::CameraScroll Cam;                        // glue only
+    // #185 touch->photon instrumentation. The EVENT time of the newest touch not yet reflected on
+    // screen, on the trace clock; 0 = nothing pending. Glue-thread only (input and render are the
+    // same thread here), so a plain field is enough.
+    //
+    // Anchored on AMotionEvent_getEventTime, NOT on when we were handed the event: that is the
+    // input system's own stamp for when the sample happened, so it includes the OS dispatch delay
+    // we would otherwise be blind to — and #185 exists to find out which side of that line the
+    // A14's lag is on. It is CLOCK_MONOTONIC, the same clock Lur::Trace::NowNs reads, so the
+    // subtraction is meaningful (do not swap either end for a wall clock).
+    uint64_t PendingTouchNs = 0;                  // glue only
     bool CamInit = false;
     float DownX = 0.0f, DownY = 0.0f;
     // #151: the console gesture — two-finger triple-tap to open, drag-to-scroll while open — is now
@@ -359,6 +368,17 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     const float Y = AMotionEvent_getY(Event, 0);
     const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
     const size_t Count = AMotionEvent_getPointerCount(Event);
+
+    // #185: how long the OS took to deliver this sample to us. Everything before this point is the
+    // digitiser + input dispatch — a floor we do not control — so measuring it separately is what
+    // says whether the A14's scroll lag is ours to fix at all.
+    const uint64_t EventNs = static_cast<uint64_t>(AMotionEvent_getEventTime(Event));
+    LUR_TRACE_LATENCY("input.dispatch", EventNs);
+    // Keep the OLDEST unpresented sample, not the newest: during a drag the events arrive faster
+    // than we render, and overwriting each time would measure the last one to squeak in before the
+    // frame — flattering, and not what the finger sees. The oldest is the sample whose motion the
+    // upcoming frame first reveals.
+    if (S->PendingTouchNs == 0) S->PendingTouchNs = EventNs;
 
 #if !LUR_SHIPPING
     // #150: while the console is open it OWNS the pointer — a drag ANYWHERE scrolls the cvar list,
@@ -1300,6 +1320,16 @@ void android_main(android_app* App) {
                     static_cast<float>(State.PendingCampY.load(std::memory_order_relaxed)) / FixedOne);
                 State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowNs()), State.Cam.Y, W, H,
                                   State.LinkedTeam.load(std::memory_order_relaxed) == 1, DtSec);
+            }
+            // #185: touch sample -> this frame handed to the presentation engine. Bounds our share
+            // of scroll lag: it spans OS dispatch + the wait + input->camera + record + submit, and
+            // stops at vkQueuePresentKHR returning. It does NOT include the compositor holding the
+            // image until the next scan-out, so real photons are up to one more refresh (~16.6 ms
+            // here) later — a constant, and the same constant on both phones, so the DIFFERENCE
+            // between the two devices is still honest even though the absolute is a lower bound.
+            if (State.PendingTouchNs != 0) {
+                LUR_TRACE_LATENCY("input.toPresent", State.PendingTouchNs);
+                State.PendingTouchNs = 0;
             }
             State.PresentedFrames.store(State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u,
                                         std::memory_order_relaxed);
