@@ -312,6 +312,11 @@ void android_main(android_app* App) {
         }
 
         if (State.Ready) {
+            // #189: one more inbox drain, immediately before we draw. A peer move that
+            // landed after the top-of-loop Tick would otherwise wait for the NEXT
+            // iteration — and this loop is vsync-bound, so that is a whole refresh of
+            // sitting still. Half a frame off every inbound move, on average.
+            State.Session.PumpInbox();
             State.View.Render(State.Renderer,
                               static_cast<float>(ANativeWindow_getWidth(App->window)),
                               static_cast<float>(ANativeWindow_getHeight(App->window)));

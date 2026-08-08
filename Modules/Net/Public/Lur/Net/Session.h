@@ -119,6 +119,22 @@ public:
     // ready except for keepalive/timeout.
     void Tick(uint64_t ElapsedNs);
 
+    // Deliver any datagrams the radio thread has queued, and NOTHING else — no keepalive,
+    // no timeout, no clock (issue #189). Tick() already begins with this; the point of
+    // exposing it separately is to run it a SECOND time, immediately before presenting.
+    //
+    // Why that matters: the loop applies inbound moves at the top and presents at the
+    // bottom, so a datagram landing between those two points waits a whole iteration — and
+    // the loop is vsync-bound, so that is a display refresh (~16 ms, ~25 ms on the iPhone's
+    // 40 Hz beat) of pure sitting-still. Draining again just before the present costs one
+    // pass over an empty queue in the common case and removes half a frame of latency on
+    // average from every move the peer makes.
+    //
+    // Safe to call as often as you like: it carries no elapsed time, so it cannot advance
+    // or double-count the liveness clock. Receiving IS still observed (an inbound datagram
+    // resets the peer-silence timer), which is correct whenever it happens.
+    void PumpInbox();
+
     bool IsReady() const { return Ready; }
 
     // True from the moment the link is (re)established until the peer's link-time Sync

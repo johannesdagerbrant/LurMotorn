@@ -392,6 +392,10 @@ static void UnblockStdio() {
         ++_Frame;
     }
 #endif
+    // #189: one more inbox drain, immediately before we draw. A peer move that landed
+    // after the Tick above would otherwise wait for the next CADisplayLink callback —
+    // and on this device that beat is 40 Hz, so it is ~25 ms of sitting still.
+    _Session.PumpInbox();
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));

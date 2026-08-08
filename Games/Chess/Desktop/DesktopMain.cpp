@@ -143,6 +143,9 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
         if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0)
             G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
     }
+    // #189: drain the inbox once more immediately before drawing, so a peer move that
+    // arrived after this frame's Tick is shown NOW rather than one iteration later.
+    G.Session.PumpInbox();
     if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
 }
 

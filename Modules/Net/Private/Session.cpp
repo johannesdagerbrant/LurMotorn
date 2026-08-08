@@ -26,11 +26,17 @@ void Session::Start(Lur::Transport::ITransport* NewTransport, std::string_view G
     SendHello();  // best-effort; if the link isn't up yet, Tick() resends
 }
 
+void Session::PumpInbox() {
+    // Deliberately ONLY the transport pump — see the header. Anything time-denominated
+    // added here would be double-counted, because Tick calls this too.
+    if (Transport != nullptr) Transport->Pump();
+}
+
 void Session::Tick(uint64_t ElapsedNs) {
     // Drain any radio-thread events onto THIS (engine) thread first, so inbound
     // datagrams + connect/disconnect are processed here, before we read link state
     // below — honouring the "receiver fires on the engine thread" contract (issue #40).
-    if (Transport != nullptr) Transport->Pump();
+    PumpInbox();
 
     const bool Connected = Transport != nullptr && Transport->IsConnected();
 
