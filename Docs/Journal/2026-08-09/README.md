@@ -10,6 +10,10 @@ claim against HEAD before acting on it: paths and symbols drift.
 | File | What it is |
 |---|---|
 | `engine-extraction-plan.md` | The full engine-extraction inventory, decisions and 8-phase plan, produced before starting game #3 (co-op physics puzzles) |
+| `autonomous-run-prompt.md` | The hand-off prompt for executing all eight phases with no human intervention — TDD, both phones, agent-harness verification. Says *how to run it*; the plan says *what and why* |
+
+If a run is in progress or has happened, `RUN-LOG.md` will also be here — that is the agent's
+own progress record, written during execution rather than frozen with this batch.
 
 ## Why this batch exists
 
