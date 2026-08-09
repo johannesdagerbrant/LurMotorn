@@ -171,8 +171,11 @@ static void SaveIosPeerId(const std::string& Id) {
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
         _FruitlessDefers = 0;
 
-#if LUR_INTERNAL
-        // Dev role override (rig-pushed Documents/role = "central"|"peripheral"):
+#if LUR_AGENT
+        // Role override (rig-pushed Documents/role = "central"|"peripheral"), LUR_AGENT and not
+        // LUR_INTERNAL — settled in #197. It is forced state from a hidden channel that outlives
+        // the app, and Development is the build a player plays.
+        // Rig-pushed Documents/role = "central"|"peripheral":
         // pins DecideBleRole so the rig can test BOTH role configs on one device
         // pair. Read once at driver startup — push the marker BEFORE launching.
         {

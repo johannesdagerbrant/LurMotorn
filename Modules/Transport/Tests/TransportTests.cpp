@@ -74,8 +74,10 @@ static void TestRoleBreakerEscapesBothPeripheral() {
     CHECK(DecideBleRoleBreaking(Small, Large, BleMaxPeripheralDefers + 5) == EBleRole::Central);
 }
 
-#if LUR_INTERNAL
-// #146: a DELIBERATE dev pin is never broken — the rig pins Android=Peripheral against its
+#if LUR_AGENT
+// Runs only in the agent tree (`build.ps1 -Agent`), because that is the only build where a pin
+// can exist at all — which is itself the point of #197's resolution.
+// #146: a DELIBERATE pin is never broken — the rig pins Android=Peripheral against its
 // central-only Windows peer, so force-taking Central there would break the rig, not fix it.
 // (A stale pin is meant to be diagnosed from the log via IsBleRolePinned instead.)
 static void TestRoleBreakerRespectsDevPin() {
@@ -356,7 +358,7 @@ int main() {
     TestRoleTieBreakIsOpposite();
     TestRoleTieBreakIsDeterministic();
     TestRoleBreakerEscapesBothPeripheral();
-#if LUR_INTERNAL
+#if LUR_AGENT
     TestRoleBreakerRespectsDevPin();
 #endif
     TestDeviceIdValidation();

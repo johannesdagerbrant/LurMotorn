@@ -9,8 +9,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#if LUR_INTERNAL
-#include <sys/system_properties.h>   // dev role override via debug.lur.role
+#if LUR_AGENT
+#include <sys/system_properties.h>   // role override via debug.lur.role (#196/#197)
 #endif
 
 #include "Lur/Save/DeviceId.h"
@@ -138,8 +138,10 @@ std::string JBytesToString(JNIEnv* Env, jbyteArray Arr) {
     Env->GetByteArrayRegion(Arr, 0, Len, reinterpret_cast<jbyte*>(S.data()));
     return S;
 }
-#if LUR_INTERNAL
-// Re-read the dev role pin on EVERY decision, so `adb shell setprop debug.lur.role
+#if LUR_AGENT
+// FORCED STATE OVER A SYSTEM PROPERTY, SO LUR_AGENT — settled in #197. This was LUR_INTERNAL,
+// which meant it shipped in every Development build, i.e. every build someone actually plays.
+// Re-read the role pin on EVERY decision, so `adb shell setprop debug.lur.role
 // central|peripheral` takes effect on the next (re)launch/discovery without a reinstall;
 // empty = auto. Returns whether a pin is now in force, so the caller can say so out loud —
 // the prop survives until reboot, and a stale one from an earlier rig run is the first thing
@@ -166,7 +168,7 @@ extern "C" JNIEXPORT jint JNICALL
 Java_com_lurmotorn_onlyrps_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
                                                       jbyteArray LocalId, jbyteArray PeerId,
                                                       jint Defers) {
-#if LUR_INTERNAL
+#if LUR_AGENT
     RefreshRolePin();
 #endif
     const std::string Local = JBytesToString(Env, LocalId);

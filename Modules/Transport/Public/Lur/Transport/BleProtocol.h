@@ -83,33 +83,41 @@ inline constexpr std::string_view BleAdvertisedName = "LurMotorn";
 // for two devices (a 128-bit-space collision is negligible). Comparison is a plain
 // lexicographic compare of the hex, which for fixed-width hex equals a numeric
 // compare of the underlying 128-bit value.
-#if LUR_INTERNAL
-// Dev-only role override (compiled out of Shipping): pin THIS device's role regardless
-// of the GUID tie-break, so the rig can exercise BOTH role configurations on the same
-// device pair — the tie-break is deterministic, so e.g. Android-as-peripheral would
-// otherwise never run against a given peer. Set complementary values on the two phones
-// (one Central, one Peripheral) or they will never link (two centrals: nobody
-// advertises). Sourced per-platform: Android `debug.lur.role` prop, iOS a
-// `Documents/role` marker — both read at transport startup.
+#if LUR_AGENT
+// Role override: pin THIS device's role regardless of the GUID tie-break, so a rig can
+// exercise BOTH role configurations on the same device pair — the tie-break is deterministic,
+// so e.g. Android-as-peripheral would otherwise never run against a given peer. Set
+// complementary values on the two phones (one Central, one Peripheral) or they will never link
+// (two centrals: nobody advertises). Sourced per-platform: Android `debug.lur.role` prop, iOS a
+// `Documents/role` marker.
+//
+// LUR_AGENT, NOT LUR_INTERNAL (#196, and the contradiction #197 was filed to settle). This is
+// FORCED STATE arriving from outside the process over a hidden channel — the definition of
+// remote control — and the build a player actually plays IS Development, where LUR_INTERNAL is
+// on. Gating it there shipped a rig-controllable radio override in every build someone plays,
+// and the channels outlive the app (an Android system property survives until reboot, the iOS
+// marker until deleted), so a stale pin from an old rig session keeps applying. The two games
+// answered this question oppositely; this is the answer.
 inline int GBleRoleOverride = -1;  // -1 none, else static_cast<int>(EBleRole)
 inline void SetBleRoleOverride(EBleRole Role) { GBleRoleOverride = static_cast<int>(Role); }
 inline void ClearBleRoleOverride() { GBleRoleOverride = -1; }
 #endif
 
 inline EBleRole DecideBleRole(std::string_view LocalId, std::string_view PeerId) {
-#if LUR_INTERNAL
+#if LUR_AGENT
     if (GBleRoleOverride >= 0) return static_cast<EBleRole>(GBleRoleOverride);
 #endif
     return LocalId < PeerId ? EBleRole::Peripheral : EBleRole::Central;
 }
 
-// Is a dev pin currently forcing this device's role? (Always false in Shipping — there is no
-// pin.) Callers use this to leave a deliberately pinned configuration alone, and to LOG that
+// Is a pin currently forcing this device's role? (Always false in a build that is not an agent
+// build — there is no pin, and no way to set one.) Callers use this to leave a deliberately
+// pinned configuration alone, and to LOG that
 // the pin is why a role looks wrong: the pin outlives the app (an Android system prop survives
 // until reboot; the iOS marker until deleted), so a stale one from an earlier rig session is a
 // prime suspect whenever the roles come out wrong — and silence made that undiagnosable (#146).
 inline bool IsBleRolePinned() {
-#if LUR_INTERNAL
+#if LUR_AGENT
     return GBleRoleOverride >= 0;
 #else
     return false;
