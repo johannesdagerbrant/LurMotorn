@@ -205,12 +205,12 @@ hand-maintained Xcode project to fight.
 
 | # | Phase | Contents | Issues |
 |---|---|---|---|
-| **0** | Sweep & clean | Delete `Pairing`, `LinkStatusBar`, `FontRegistry`, `Math` 3D half, `ClockSync`. Resolve `Core/Hash.h`. Fix leakage: `"OnlyChess"`, default UUID, `SendMove`, stale seam comments | #47, #44 |
+| **0** | Sweep & clean | Delete `Pairing`, `LinkStatusBar`, `FontRegistry`, `Math` 3D half, `ClockSync`. Resolve `Core/Hash.h`. Fix leakage: `"OnlyChess"`, default UUID, `SendMove`, stale seam comments | **#200**, #47, #44 |
 | **1** | Platform layer move | `git mv` backends into `Modules/{Transport,Render,Audio}/Platform/*`; dynamic JNI `RegisterNatives`; log tag + service UUID as parameters; Vulkan seams 4→2 | #42 |
 | **2** | BLE unification ⚠️ | `IBleRadio` + `BleLinkController` + `FakeBleRadio`; move send queue/retry/watchdog/role escalation/reconnect out of Kotlin+ObjC++; **reconcile the 12+ one-sided fixes**; resolve the `LUR_AGENT`/`LUR_INTERNAL` contradiction | **#197** |
 | **3** | `Modules/App` | Entry points; step-override table; thread topology as config; save-dir discovery; `std::filesystem` → ~60 LOC; `-fno-exceptions`; agent channel; input pipeline + multi-touch + recognizers | #43 |
 | **4** | Netcode + wire | `RollbackCoordinator` + `SnapshotRing<Sim>`; rollback/lockstep as modes; wire-version split; RPS onto the coordinator; chess evaluated on lockstep | #8, #44 |
-| **5** | Promotions | Tier 1 + accepted Tier 2; unified recorder **with its dump tool in the same change**; per-opponent persistence; console → `DevGui`; selector plumbing; mutable material tints (retiring the alpha-step LUT) | #82, #66, #49 |
+| **5** | Promotions | Tier 1 + accepted Tier 2; unified recorder **with its dump tool in the same change**; per-opponent persistence; console → `DevGui`; selector plumbing; mutable material tints (retiring the alpha-step LUT) | **#201**, #82, #66 |
 | **6** | Build scaffolding | `lur_add_game`; multi-config generator expressions so `LUR_CONFIG` drives optimization on Xcode; one CI matrix; one desktop build script; `scripts/new-game.ps1` | **#198**, tail of #89 |
 | **7** | Docs + ratchet | `Docs/NewGame.md` (carrying *"the engine must not name a game"*), `Modules/*/README.md`, `Games/Chess/README.md`, refresh stale `Chess/iOS/README.md`; establish the promotion-pass ritual | #45 |
 
@@ -300,6 +300,29 @@ rots first.
 - **#67** capture trays — derived by replaying the record, nothing persisted, `Flip` honoured.
 - **#78** chess audio — all four `EMoveSound` events with the documented precedence, 3-variant
   no-repeat picking for frequent events, single-clip alerts for rare ones.
+
+## Where the per-phase detail lives
+
+The table above is sequence and shape only. **Work items, hazards and acceptance criteria live in
+the issues**, per the repo's rule that issues own everything living — a task list frozen in a
+journal snapshot would rot the day implementation starts.
+
+| Phase | Detail |
+|---|---|
+| 0 | **#200** (+ #47, #44) |
+| 1 | #42 |
+| 2 | **#197** |
+| 3 | #43 |
+| 4 | #8 (+ #44) |
+| 5 | **#201** (+ #82, #66) |
+| 6 | **#198** |
+| 7 | #45 |
+
+One hazard found while writing those up, recorded here because it is easy to hit and hard to
+diagnose: **deleting `EMsgType::ClockPing`/`ClockPong` in Phase 0 renumbers every later slot** — a
+silent wire break with no version guard, since Phase 0 does not touch versioning. It is deferred to
+Phase 4, where the engine `ProtocolVersion` resets anyway and the break is already accounted for.
+Deleting `ClockSync.h` itself is safe at any time; only the enum *values* carry the hazard.
 
 ## Provenance
 
