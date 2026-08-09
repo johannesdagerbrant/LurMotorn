@@ -1,7 +1,10 @@
 # Build output
 /build/
 /build-desktop/
-/build-agent/      # host build configured with -DLUR_AGENT=ON (compile-checks the gated paths)
+# host build configured with -DLUR_AGENT=ON (compile-checks the gated paths)
+/build-agent/
+# ad-hoc optimized host build dir
+/build-opt/
 **/build/
 **/build-agent/
 **/.cxx/
@@ -67,3 +70,12 @@ Tools/DeviceRig/.logs/
 __pycache__/
 *.pyc
 rps-cvars.cfg
+
+# Local MoltenVK checkout (the one sanctioned runtime dependency; fetched, not vendored)
+/MoltenVK/
+/MoltenVK
+
+# Scratch: screenshots pulled off a device, and stray tool temp files. These have been
+# swept into a commit by a wide `git add` before — the ignore is the guard.
+scratch_*.png
+*.tmp
