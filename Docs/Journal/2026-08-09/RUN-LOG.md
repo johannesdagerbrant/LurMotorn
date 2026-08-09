@@ -229,3 +229,49 @@ Every "BLE is unstable" symptom in this run came from the lock screen. With the 
 the very first attempt linked in ~2 s and ran 12 chess matches and ~2,000 RPS ticks without a
 single half-open, stall, or radio restart. `halfopen=0 restarts=0` in the RPS line above is the
 same counter that had climbed to its cap all evening.
+
+## Phase 2 — BLE unification (#197)  [IN PROGRESS]
+
+- [x] **The `LUR_AGENT` / `LUR_INTERNAL` contradiction is resolved — LUR_AGENT.** The shared
+      `BleProtocol.h` agreed with RPS (`LUR_INTERNAL`), so RPS shipped a rig-controllable radio
+      role override in every build someone plays — Development IS the build a player plays. It is
+      forced state from a hidden channel that OUTLIVES the app (an Android property until reboot,
+      the iOS marker until deleted), and a pin also suppresses the #146 deadlock breaker. Chess
+      needed no change; it was already right. — verified: host (both trees), android (both
+      variants)
+- [x] **`build.ps1 -Agent`** — an opt-in second tree configured `-DLUR_AGENT=ON`. Nothing on the
+      host compiled the gated paths before, so a change that broke them surfaced only when someone
+      built a harness `.ipa`. `TestRoleBreakerRespectsDevPin` moved behind `LUR_AGENT` and runs
+      there — the only build where a pin can exist, which is the point of the resolution.
+- [x] **`IBleRadio`** — the dumb driver seam (`Write`, returning whether the radio took it).
+- [x] **`BleSendQueue` + 10 host tests against a fake radio** — the ~60 lines of hand-rolled
+      netcode from `BleShim.kt`. Timing is tick-driven ns rather than a platform timer, so the
+      watchdog is host-exercisable; fixed capacity, refusing when full rather than evicting the
+      oldest (ordered stream), with refusals counted. — verified: host (both trees), android ×2,
+      desktop ×2, ios CI run 31336149645
+- [ ] `BleLinkController`: retry/backoff, discovery watchdog, role escalation, reconnect scheduling
+- [ ] Collapse the 6 backends to 3 dumb drivers under `Modules/Transport/Platform/*`
+      (this is also the deferred half of #42, incl. dynamic JNI `RegisterNatives`)
+- [ ] Reconcile every one-sided fix as a decision, not a merge
+- [ ] Two-phone soak (`droptx`, `killown`, `svc bluetooth disable/enable`)
+
+### A real bug, found the moment the logic became testable
+
+`TestLateCompletionAfterWatchdogDoesNotDoublePump` failed on the first implementation, and the
+same hole exists in the Kotlin it replaces. Once the watchdog abandons a datagram and issues the
+next, *"something is outstanding"* is true again — so the platform's **unlabelled** completion
+callback for the ABANDONED datagram is indistinguishable from the new one's. Acting on it
+releases a further datagram while the replacement is still in flight: two outstanding operations,
+which is exactly the state the queue exists to prevent and which a BLE stack answers by silently
+dropping one. The Kotlin's `sendWatchdogTok` guards its *timer*, not its *callback*, so it does
+not close this.
+
+Fix: count the completions we are owed but no longer want and swallow exactly that many — and
+clear that debt on link loss, or the next link's first real completion is eaten as a ghost and
+the fresh queue stalls for a full watchdog period, right when the peers are resyncing.
+
+This is #197's own thesis demonstrated in one afternoon: the logic drifted *because* no test
+could reach it, and the first thing a test found was a live bug.
+
+`Modules/Transport` is a compiled library now (was INTERFACE). All four app builds, both desktop
+builds and iOS CI re-verified after that change.
