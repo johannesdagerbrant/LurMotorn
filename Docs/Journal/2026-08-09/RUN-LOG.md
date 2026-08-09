@@ -122,3 +122,52 @@ match-progress deadline; noted for the Phase 6 tooling pass.
 `-DLUR_AGENT` so the harness code is absent rather than idle; `debug.lur.{autoplay,agent.cmd,role}`
 cleared; `Documents/autoplay` deleted; `svc power stayon` and the lock-screen setting I had changed
 both restored.
+
+## Phase 1 — Platform layer move (#42)  [PARTIAL — render + audio done, transport deferred]
+
+- [x] **Vulkan surface seam** → `Modules/Render/Platform/{Android,Ios}/VulkanSurface.{cpp,mm}`.
+      Four app copies collapse to two engine files; after name normalization they were
+      byte-identical, differing only in the log tag. The Windows branch of `Modules/Render` had
+      been doing this correctly all along — Android and iOS now match it, and the games supply no
+      render code at all. — verified: host, android(both games), ios(CI both games)
+- [x] **Log tag parameterized** — `LUR_LOG_TAG`, set by each app tree before it adds the engine
+      root, consumed via `Lur/Core/LogTag.h`. Required, no default (`#error`), same discipline as
+      `LUR_BLE_SERVICE_UUID`. The desktop tree leaves it empty deliberately: its seam logs through
+      `Lur::Log` and never includes the header. — verified: android + ios builds
+- [x] **Audio device seam** → `Modules/Audio/Platform/{Android,Ios}/AudioDevice.{cpp,mm}`.
+      Moved BEFORE RPS gets sound (#81), so this prevents a duplication rather than fixing one.
+      No null device added for host/desktop — nothing calls `CreateAudioDevice` there, so it stays
+      undefined and a build wanting sound without a backend fails to LINK. — verified: host,
+      android, ios(CI)
+- [ ] **BLE transport move + dynamic JNI registration — DEFERRED, see below**
+- [ ] `CLAUDE.md` architecture table refresh — belongs with the transport move
+
+Gate so far: build.ps1 PASS (25/25) | android PASS (both games) | ios CI PASS (run 31333080944,
+both games) | desktop PASS | two-phone still blocked (Phase 0 blocker, unchanged)
+
+### Why the BLE move is deferred rather than attempted
+
+Measured at HEAD, after normalizing the game names away, the six backends are **650 diff lines
+apart** over ~3,300 lines:
+
+| File | Chess | RPS | Normalized diff |
+|---|---:|---:|---:|
+| `BleShim.kt` | 740 | 760 | 299 |
+| `AndroidBleTransport.cpp` | 286 | 324 | 221 |
+| `IosBleTransport.mm` | 575 | 636 | 131 |
+
+Collapsing six copies to three means **choosing**, hunk by hunk, between two divergent versions of
+the most battle-hardened code in the repo (#83/#146/#163/#182/#190/#194) — the plan's own words.
+Right now that merge could be verified by neither of the two things that would catch a mistake:
+
+1. **No host test reaches it.** `FakeBleRadio` is Phase 2's deliverable; today the decision logic
+   lives in Kotlin and ObjC++ where `build.ps1` cannot see it. That is the whole finding behind
+   #197.
+2. **No two-phone verification is available** — the Phase 0 blocker (the Galaxy needs one human
+   swipe).
+
+Landing a blind 650-line merge into the path whose failure mode is *"two phones silently never
+link, with no error to point at"* is precisely the risk the plan flags. It waits for either a host
+fake or a working device pair; both are close (Phase 2 builds the fake). Everything in Phase 1 that
+does NOT depend on that — the render and audio seams, 4 → 2 files and 2 → 2, plus the log-tag
+parameter they both needed — is landed and verified on all three toolchains.
