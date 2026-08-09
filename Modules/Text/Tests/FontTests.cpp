@@ -4,7 +4,6 @@
 //  - the runtime Font (lookup, advances, '?' fallback);
 //  - greedy word-wrap layout (single line, wrap, hard newline, char-break, alignment,
 //    overflow flags) and MeasureText;
-//  - the FontRegistry (register / find / idempotence / validity).
 // No framework: each CHECK records a failure; the process exits non-zero if any failed.
 // Mirrors save_tests / net_tests.
 #include <cstdio>
@@ -12,7 +11,6 @@
 
 #include "Lur/Text/BuiltinFonts.h"
 #include "Lur/Text/Font.h"
-#include "Lur/Text/FontRegistry.h"
 #include "Lur/Text/TextLayout.h"
 
 using namespace Lur::Text;
@@ -181,28 +179,9 @@ static void CheckLayout() {
     }
 }
 
-static void CheckRegistry() {
-    FontRegistry Reg;
-    CHECK(Reg.Count() == 0);
-    CHECK(Reg.Find("Inter") == 0);
-
-    const FontHandle H = Reg.Register("Inter", InterFont());
-    CHECK(H != 0);
-    CHECK(Reg.Count() == 1);
-    CHECK(Reg.IsValid(H));
-    CHECK(!Reg.IsValid(0));
-    CHECK(!Reg.IsValid(H + 1));
-    CHECK(Reg.Find("Inter") == H);
-    CHECK(Reg.Get(H).IsValid());
-    CHECK(Reg.Get(H).Advance('A') > 0.0f);
-
-    // Idempotent: re-registering the same name returns the same handle, no new slot.
-    const FontHandle H2 = Reg.Register("Inter", InterFont());
-    CHECK(H2 == H);
-    CHECK(Reg.Count() == 1);
-}
-
-// Multi-font seam (#28): the DSEG7 clock font cooks + registers alongside the UI font.
+// Multi-font seam (#28): the DSEG7 clock font cooks alongside the UI font. Both games
+// hold bare Font values, so "two fonts coexist" is a statement about the cooked assets
+// and the runtime Font, not about any registry.
 static void CheckMultiFont() {
     // DSEG7 is a 7-segment display face: digits present, not full ASCII.
     Font Dseg(Dseg7Font());
@@ -212,25 +191,17 @@ static void CheckMultiFont() {
     for (uint32_t C = '0'; C <= '9'; ++C) CHECK(Dseg.Find(C) != nullptr);
     CHECK(Dseg.Advance('8') > 0.0f);
 
-    // Two distinct fonts coexist in one registry (distinct handles), the intended
-    // multi-font model for e.g. a UI font + a clock font.
-    FontRegistry Reg;
-    const FontHandle Ui   = Reg.Register("Inter", InterFont());
-    const FontHandle Clock = Reg.Register("Dseg7", Dseg7Font());
-    CHECK(Ui != 0 && Clock != 0);
-    CHECK(Ui != Clock);
-    CHECK(Reg.Count() == 2);
-    CHECK(Reg.Find("Inter") == Ui);
-    CHECK(Reg.Find("Dseg7") == Clock);
-    CHECK(&Reg.Get(Ui).Cooked()   == &InterFont());
-    CHECK(&Reg.Get(Clock).Cooked() == &Dseg7Font());
+    Font Ui(InterFont());
+    CHECK(Ui.IsValid());
+    CHECK(&Ui.Cooked()   == &InterFont());
+    CHECK(&Dseg.Cooked() == &Dseg7Font());
+    CHECK(Ui.Cooked().GlyphCount != Dseg.Cooked().GlyphCount);   // genuinely two faces
 }
 
 int main() {
     CheckCookedAsset();
     CheckFontRuntime();
     CheckLayout();
-    CheckRegistry();
     CheckMultiFont();
 
     if (GFailures == 0) {

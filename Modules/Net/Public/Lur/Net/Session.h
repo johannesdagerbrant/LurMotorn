@@ -13,8 +13,12 @@ namespace Lur::Net {
 // goal while letting one transport channel carry handshake, moves, and keepalive.
 enum class EMsgType : uint8_t {
     Hello       = 0,  // version + nonce, exchanged on connect (see Session::Start)
-    ClockPing   = 1,  // clock-sync probe (see ClockSync.h)
-    ClockPong   = 2,  // clock-sync reply
+    // 1..2 are RETIRED clock-sync slots. Nothing sends or handles them; they are kept
+    // occupied because removing an enumerator RENUMBERS every later slot, which is a
+    // silent wire break with no version guard. They are reclaimed in the phase that
+    // resets ProtocolVersion, where the break is already paid for.
+    Retired1    = 1,
+    Retired2    = 2,
     // 3..5 are GENERIC game-defined framed-message slots — the engine names no game
     // concept (a chess move, a resign, an RTS input) in its own enum; each game aliases
     // these to its own message kinds (issue #44). Chess formerly put Move=3 / Resign=4 /
@@ -83,6 +87,21 @@ enum class ELinkState : uint8_t {
     Disconnected,     // the link came up once and then dropped
     VersionMismatch,  // peer speaks a different ProtocolVersion
 };
+
+// Short, stable label for a link state. Lives HERE, with the enum, because naming a
+// value is the owner's job: the debug overlay used to carry this switch, which forced
+// a presentation module to include the net session just to print a word. Callers pass
+// the result straight to a text field, so the strings are lowercase and terse.
+inline const char* LinkStateName(ELinkState S) {
+    switch (S) {
+        case ELinkState::Searching:       return "searching";
+        case ELinkState::Handshaking:     return "handshaking";
+        case ELinkState::Linked:          return "linked";
+        case ELinkState::Disconnected:    return "disconnected";
+        case ELinkState::VersionMismatch: return "ver-mismatch";
+    }
+    return "?";
+}
 
 // The symmetric peer-to-peer session that sits between ITransport (raw datagrams)
 // and the game (typed messages). It owns two things:

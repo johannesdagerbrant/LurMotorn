@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "Lur/Net/Session.h"
@@ -743,7 +744,30 @@ static void TestKeepaliveHashHealsLostMoveDesync() {
     CHECK(!SA.IsAwaitingResync() && !SB.IsAwaitingResync());
 }
 
+// Every ELinkState has a NAME, and the names are distinct. Naming the enum is Net's job,
+// not the HUD's: the debug overlay used to include Session.h purely to run this switch,
+// which is what coupled presentation to the net session type (lur_hud -> lur_net). Walk
+// EVERY slot — a slot added without a name would otherwise ship as "?" and read as a bug
+// in the link, not in the label.
+static void TestLinkStateNames() {
+    const ELinkState All[] = {ELinkState::Searching, ELinkState::Handshaking,
+                              ELinkState::Linked,    ELinkState::Disconnected,
+                              ELinkState::VersionMismatch};
+    for (ELinkState S : All) {
+        const char* Name = LinkStateName(S);
+        CHECK(Name != nullptr);
+        CHECK(Name[0] != 0);
+        CHECK(std::strcmp(Name, "?") != 0);      // no slot falls through to the default
+    }
+    for (std::size_t i = 0; i < sizeof(All) / sizeof(All[0]); ++i)
+        for (std::size_t j = i + 1; j < sizeof(All) / sizeof(All[0]); ++j)
+            CHECK(std::strcmp(LinkStateName(All[i]), LinkStateName(All[j])) != 0);
+
+    CHECK(std::strcmp(LinkStateName(ELinkState::Linked), "linked") == 0);
+}
+
 int main() {
+    TestLinkStateNames();
     TestHandshakeExchangesGuids();
     TestHandshakeResendsUntilConnected();
     TestMessageFramingStripsType();

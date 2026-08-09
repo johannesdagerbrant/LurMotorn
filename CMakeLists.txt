@@ -31,7 +31,6 @@ add_subdirectory(Modules/Trace)  # named CPU scopes (Insights-style), issue #101
 
 # --- Header-only interface modules (contracts; backends live in the app builds) ---
 add_subdirectory(Modules/Transport)
-add_subdirectory(Modules/Pairing)
 add_subdirectory(Modules/Net)
 add_subdirectory(Modules/Render)
 add_subdirectory(Modules/Input)

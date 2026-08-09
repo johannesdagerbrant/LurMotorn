@@ -2,7 +2,6 @@
 #include <cstdint>
 
 #include "Lur/Hud/TextField.h"
-#include "Lur/Net/Session.h"
 #include "Lur/Render/Renderer.h"
 #include "Lur/Text/Font.h"
 
@@ -13,12 +12,15 @@ namespace Lur::Hud {
 // GUI layer. "If you can't see it, you can't fix it": this replaces logcat squinting for
 // ~80% of on-device questions. Engine-level and game-agnostic; desktop + phones alike.
 struct DebugStats {
-    float                FrameMs = 0.0f;
-    Lur::Net::ELinkState Link = Lur::Net::ELinkState::Searching;
-    uint64_t             NsSinceRecv = 0;
-    uint32_t             Sent = 0;
-    uint32_t             Recv = 0;
-    const char*          PeerShort = "";  // short peer id, or "" when unlinked
+    float       FrameMs = 0.0f;
+    // Already-resolved link label (e.g. Lur::Net::LinkStateName(Session.GetLinkState())).
+    // A string, not the net enum: the HUD draws engine state, it does not interpret it —
+    // taking the enum here is what made a presentation module link the net session.
+    const char* Link = "";
+    uint64_t    NsSinceRecv = 0;
+    uint32_t    Sent = 0;
+    uint32_t    Recv = 0;
+    const char* PeerShort = "";  // short peer id, or "" when unlinked
 };
 
 class DebugOverlay {

@@ -164,6 +164,27 @@ static void TestSlotSerialNeverReused() {
     CHECK(S.StateHash() == Rewound.StateHash());  // Serial is not hashed: identity rides outside state
 }
 
+// StateHash is a PINNED VALUE, not just a self-consistent one. Determinism tests above
+// only prove two runs in the SAME build agree; this proves the hash the peer compares in
+// every keepalive, and the `h` lines in every flight recording, are the same numbers they
+// were before. It is the guard that lets the hash implementation be refactored (e.g. onto
+// the engine's Lur::Core::Fnv1a64 instead of a private copy of FNV-1a) without silently
+// re-baselining every recorded match and every desync comparison.
+//
+// If this fails: something changed the hashed state, its ORDER, or the mix function. That
+// is a build-locked wire change — both phones must ship together — so re-pin deliberately,
+// never reflexively.
+static void TestStateHashGoldenValues() {
+    constexpr uint64_t Seed = 0xFEEDBEEFu;
+    static Sim S;
+    S.Init(Seed);
+    CHECK(S.StateHash() == 0xba5b7041cc851843ull);   // fresh sim, tick 0
+
+    FundForArmyScript(S);
+    for (int I = 0; I < 300; ++I) ArmyStep(S, static_cast<uint32_t>(I));
+    CHECK(S.StateHash() == 0xec58aac6d9f3d598ull);   // after the 300-tick army script
+}
+
 // A fresh sim replaying the same stream must reach the same final hash — the
 // replay law (State = Replay(Inputs, Seed)) that resync + the recorder depend on.
 static void TestReplayReproducibility() {
@@ -1133,6 +1154,7 @@ static void TestStressTickBudget() {
 
 int main() {
     TestDeterminism();
+    TestStateHashGoldenValues();
     TestReplayReproducibility();
     TestCVarOverrideDeterminism();
 #if !LUR_SHIPPING

@@ -56,33 +56,6 @@ struct Mat4 {
         R.M[14] = Near / (Near - Far);
         return R;
     }
-
-    // Right-handed perspective projection into Vulkan clip space (depth 0..1).
-    static Mat4 Perspective(float FovYRadians, float Aspect, float Near, float Far) {
-        const float F = 1.0f / std::tan(FovYRadians * 0.5f);
-        Mat4 R;
-        for (float& E : R.M) E = 0.0f;
-        R.M[0]  = F / Aspect;
-        R.M[5]  = F;
-        R.M[10] = Far / (Near - Far);
-        R.M[11] = -1.0f;
-        R.M[14] = (Near * Far) / (Near - Far);
-        return R;
-    }
-
-    static Mat4 LookAt(Vec3 Eye, Vec3 Target, Vec3 Up) {
-        const Vec3 Fwd    = Normalize(Target - Eye);
-        const Vec3 Right  = Normalize(Cross(Fwd, Up));
-        const Vec3 TrueUp = Cross(Right, Fwd);
-        Mat4 R;
-        R.M[0] = Right.X;  R.M[4] = Right.Y;  R.M[8]  = Right.Z;
-        R.M[1] = TrueUp.X; R.M[5] = TrueUp.Y; R.M[9]  = TrueUp.Z;
-        R.M[2] = -Fwd.X;   R.M[6] = -Fwd.Y;   R.M[10] = -Fwd.Z;
-        R.M[12] = -Dot(Right, Eye);
-        R.M[13] = -Dot(TrueUp, Eye);
-        R.M[14] = Dot(Fwd, Eye);
-        return R;
-    }
 };
 
 } // namespace Lur::Math

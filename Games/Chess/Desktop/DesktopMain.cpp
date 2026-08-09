@@ -109,7 +109,7 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
         const std::string Short = Peer.empty() ? std::string() : Peer.substr(0, 8);
         Lur::Hud::DebugStats S;
         S.FrameMs = G.FrameMs;
-        S.Link = G.Session.GetLinkState();
+        S.Link = Lur::Net::LinkStateName(G.Session.GetLinkState());
         S.NsSinceRecv = G.Session.GetNsSinceRecv();
         S.Sent = G.Session.GetDatagramsSent();
         S.Recv = G.Session.GetDatagramsReceived();

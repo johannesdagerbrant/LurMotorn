@@ -6,19 +6,6 @@
 
 namespace Lur::Hud {
 
-namespace {
-const char* LinkStr(Lur::Net::ELinkState S) {
-    switch (S) {
-        case Lur::Net::ELinkState::Searching:       return "searching";
-        case Lur::Net::ELinkState::Handshaking:     return "handshaking";
-        case Lur::Net::ELinkState::Linked:          return "linked";
-        case Lur::Net::ELinkState::Disconnected:    return "disconnected";
-        case Lur::Net::ELinkState::VersionMismatch: return "ver-mismatch";
-    }
-    return "?";
-}
-}  // namespace
-
 void DebugOverlay::CreateResources(Lur::Render::IRenderer* Renderer) {
     Font.Init(Lur::Text::InterFont());
     Font.UploadAtlas(*Renderer);
@@ -33,7 +20,8 @@ void DebugOverlay::Draw(Lur::Render::IRenderer* Renderer, float WidthPx, float H
 
     char Lines[5][64];
     std::snprintf(Lines[0], sizeof(Lines[0]), "frame %.1f ms", Stats.FrameMs);
-    std::snprintf(Lines[1], sizeof(Lines[1]), "link  %s", LinkStr(Stats.Link));
+    std::snprintf(Lines[1], sizeof(Lines[1]), "link  %s",
+                  (Stats.Link != nullptr && Stats.Link[0] != 0) ? Stats.Link : "-");
     std::snprintf(Lines[2], sizeof(Lines[2]), "rx    %llu ms ago",
                   static_cast<unsigned long long>(Stats.NsSinceRecv / 1000000ull));
     std::snprintf(Lines[3], sizeof(Lines[3]), "tx %u  rx %u", Stats.Sent, Stats.Recv);

@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include "Lur/Core/Assert.h"
+#include "Lur/Core/Hash.h"   // StateHash mixes with the engine FNV-1a, not a private copy
 #include "Lur/Core/Log.h"      // #157: the starter-row seal is a WARNING, not an abort
 #include "Lur/Sim/Random.h"
 #include "Rps/Placement.h"     // #157: the one shared placement predicate (Sim + Snapshot)
@@ -1348,10 +1349,14 @@ uint64_t Sim::StateHash() const {
     // excluded (within-tick scratch). Build-LOCKED, not a wire change: the mask/event
     // codec is untouched, so ProtocolVersion is unchanged — a mixed-build session just
     // trips the anchor-hash alarm within a second (both peers must run the same build).
+    // The mix is the ENGINE's Fnv1a64, chained: each field folds into the running hash by
+    // passing it as the next seed. This used to be a private copy of the same loop, with the
+    // same constants — one hash function, two implementations, and the one that mattered was
+    // the copy. Values are bit-identical (TestStateHashGoldenValues pins them), so nothing on
+    // the wire or in a recording moves.
     uint64_t H = 1469598103934665603ull;
     auto Mix = [&](const void* P, size_t N) {
-        const uint8_t* B = static_cast<const uint8_t*>(P);
-        for (size_t K = 0; K < N; ++K) { H ^= B[K]; H *= 1099511628211ull; }
+        H = Lur::Core::Fnv1a64(static_cast<const uint8_t*>(P), N, H);
     };
     const size_t N = static_cast<size_t>(Count);
     Mix(PosX, sizeof(Fixed) * N);

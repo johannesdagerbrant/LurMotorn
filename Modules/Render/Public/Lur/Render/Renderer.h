@@ -74,9 +74,9 @@ struct MaterialDesc {
     float         InkHi = 0.0f;
 };
 
-// View + projection. Projection is Mat4::Ortho() for 2D and Mat4::Perspective()
-// for 3D — at this layer, that is the only difference between a flat board and a
-// 3D scene.
+// View + projection. Projection is Mat4::Ortho() for 2D; a 3D projection is whatever
+// the caller supplies — at this layer, the projection matrix is the only difference
+// between a flat scene and a perspective one.
 struct Camera {
     Math::Mat4 View;
     Math::Mat4 Projection;
