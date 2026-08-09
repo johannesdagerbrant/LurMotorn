@@ -70,12 +70,13 @@ concluding the Galaxy is off the network.
 - [x] RPS Android `assembleDebug` — BUILD SUCCESSFUL
 - [x] chess desktop + RPS desktop — both green
 - [x] iOS via CI — run 31329545375, all four jobs green (both games' `.ipa`s built)
-- [ ] **Both games play a real match phone-to-phone — BLOCKED, see below**
+- [x] **Both games play a real match phone-to-phone — PASSED once the phone was unlocked** (see
+      "Two-phone gate — RESOLVED" at the end of this file)
 - [x] Acceptance grep clean except ONE deliberate, documented exception marked in the source:
       the `ProtocolVersion` changelog names which game earned each version. Kept because it is
       why a number exists, not an API shape; it leaves with the engine/per-game version split.
 
-Gate: build.ps1 PASS | android PASS | desktop PASS | ios PASS | two-phone **BLOCKED**
+Gate: build.ps1 PASS | android PASS | desktop PASS | ios PASS | two-phone PASS
 
 ### BLOCKED — the two-phone match needs a human to unlock the Galaxy
 
@@ -104,8 +105,8 @@ radio restarts. On the next wake the app drained the whole backlog in one tick (
 **What is NOT yet proven on device:** a chess MOVE crossing, now that it is framed on `Game1`
 rather than a bare 1-byte datagram. Covered on the host by `chess_session_tests` through the real
 `Session` + `LoopbackTransport` composition, and it uses byte-identical machinery to the framed
-`Sync` that DID cross the radio — but that is inference, not observation. **Deferred, retry at the
-Phase 1 gate.**
+`Sync` that DID cross the radio — but that was inference, not observation. **Since RESOLVED — see
+the end of this file.**
 
 **Second finding, cost ~1h:** chess autoplay is `#if LUR_AGENT` in BOTH mains
 (`AndroidMain.cpp` and `AppMain.mm`), so the ordinary CI `.ipa` and an ordinary Gradle APK contain
@@ -171,3 +172,60 @@ link, with no error to point at"* is precisely the risk the plan flags. It waits
 fake or a working device pair; both are close (Phase 2 builds the fake). Everything in Phase 1 that
 does NOT depend on that — the render and audio seams, 4 → 2 files and 2 → 2, plus the log-tag
 parameter they both needed — is landed and verified on all three toolchains.
+
+## Two-phone gate — RESOLVED (2026-08-09, after one human swipe)
+
+The Galaxy was unlocked by hand; everything after that was headless. Both games were built from
+the SAME commit with `-DLUR_AGENT=ON` (Android `-PlurAgent=ON`, iOS via
+`gh workflow run "macOS CI" -f agent=true`, run 31334916743), driven, then replaced with clean
+builds. **Both gates PASS.**
+
+### Chess — 12 matches phone-to-phone
+
+```
+android  AUTOPLAY game=11 sameFrame=468/469 opens=1 delayed=0 ply=353 gate=0
+         rtt(n=469 avg=50ms min=27ms max=67ms)
+android  Net: MATCH END result=3 WLD(lo/hi/dr)=1/0/11 total=12
+ios      AUTOPLAY game=9  sameFrame=2271/2275 opens=3 delayed=1 ply=164 gate=0
+         rtt(n=2274 avg=58ms min=31ms max=218ms)
+ios      Net: MATCH END result=5 WLD=0/0/9 total=9
+```
+
+**This is the verification that was outstanding: the chess move now travels FRAMED on `Game1`
+(Phase 0 deleted the bare-1-byte rule and bumped `ProtocolVersion` to 10), and it crosses real
+BLE correctly.** ~100% same-frame replies, plies past 400 in a single game, and **zero**
+`desync` / `requesting resync` / `keepalive state mismatch` / `send DROPPED` lines on either peer.
+
+### RPS — a live linked match driven by the agent harness
+
+```
+LOCKSTEP tick=1960 you=0 foe=0 desync=0 badbuild=0 hash=ba74dd1f gold=350 frontier=40
+         started=1 gaps=0 stall=0 halfopen=0 restarts=0
+```
+
+Pre-flight all clean on both peers: `badbuild=0`, matching pre-match `gold=750 hash=54a3c3ab`,
+`gaps=0`. Sequence: `1 linked` → `2 place 17 220 0` (Android, team 1) / `2 place 17 20 0` (iOS,
+team 0) → `3 queue 0 3 0`. Android logged `AGENT place type=0 at (17,220) team=1` and gold fell
+750 → 350 on both peers, i.e. each placed its own camp.
+
+**Why `desync=0` is the proof that input crossed BOTH ways**, and not merely that each phone
+placed locally: `LockstepPeer::CrossCheck` compares MY state hash at a tick against the PEER's
+hash for the SAME tick, received over the wire, and the hash covers both teams' buildings. Two
+sims that disagreed about whether the other's camp existed would diverge at the next anchor and
+trip `Desync` within a second. It stayed 0 for ~2,000 ticks.
+
+Honest caveat: `you=0 foe=0` (army counts) never moved — `3 queue 0 3 0` bought nothing, so slot 0
+is not a producing building or 350 gold did not cover it. That is a harness-usage detail, not a
+failure; the placement path and the hash agreement are what the gate needs. Getting units moving
+would make the same point more visibly and is worth doing next time.
+
+### Close-out (done)
+Both games rebuilt WITHOUT `-DLUR_AGENT` and installed on both phones, so the harness code is
+absent rather than idle. `debug.lur.{agent.cmd,autoplay,role}` cleared; every marker under
+`Documents/` deleted on both bundles (both listings now empty); `svc power stayon` restored.
+
+### The operational lesson, restated
+Every "BLE is unstable" symptom in this run came from the lock screen. With the phone unlocked,
+the very first attempt linked in ~2 s and ran 12 chess matches and ~2,000 RPS ticks without a
+single half-open, stall, or radio restart. `halfopen=0 restarts=0` in the RPS line above is the
+same counter that had climbed to its cap all evening.
