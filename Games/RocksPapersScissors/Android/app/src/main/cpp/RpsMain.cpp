@@ -332,7 +332,7 @@ void HandleCmd(android_app* App, int32_t Cmd) {
     switch (Cmd) {
         case APP_CMD_INIT_WINDOW:
             if (App->window != nullptr) {
-                S->Renderer = Lur::Render::VulkanRenderer::Create();
+                S->Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
                 S->Ready = S->Renderer && S->Renderer->Init(App->window);
                 LOGI("Renderer init: %s", S->Ready ? "ok" : "failed");
                 if (S->Ready) {

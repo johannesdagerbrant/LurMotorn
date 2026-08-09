@@ -22,15 +22,21 @@ namespace Lur::Transport {
 // what it carries changed from a random session nonce to the persistent device id,
 // see below — so the UUID is kept to avoid churning the wire identity.)
 
-// GATT service the peripheral exposes and the central scans for. This is PER-GAME:
-// chess and the RTS ride the SAME engine transport, so if they advertised the same
-// service UUID they would cross-link (a chess phone connecting an RTS phone, and vice
-// versa). An app gives its game a distinct identity by defining LUR_BLE_SERVICE_UUID at
-// build time; the default is chess's original value, so chess's wire identity is
-// unchanged. Only the SERVICE UUID needs to differ — it is the advertise/scan
-// discriminator; the datagram/device-id characteristics live inside the matched service.
+// GATT service the peripheral exposes and the central scans for. This is PER-GAME: every
+// game rides the SAME engine transport, so two games advertising one service UUID would
+// cross-link (a chess phone connecting an RTS phone, and vice versa). Only the SERVICE
+// UUID needs to differ — it is the advertise/scan discriminator; the datagram/device-id
+// characteristics live inside the matched service.
+//
+// REQUIRED, with no default. There used to be one, and it was chess's value, so a game
+// that never defined the macro did not get "no identity" — it got CHESS's identity, and
+// nothing said so at build time. That is the wrong failure: two games silently sharing a
+// discriminator is invisible until two phones link the wrong app on a table somewhere. A
+// missing definition is now a compile error instead, which is the one failure mode that
+// cannot ship. (Chess had been living on that default; it now states its value, unchanged.)
 #ifndef LUR_BLE_SERVICE_UUID
-#define LUR_BLE_SERVICE_UUID "4C55524D-4F54-4F52-4E00-5472616E7370"
+#error "LUR_BLE_SERVICE_UUID is not defined. Each game must define its own BLE service UUID \
+(a per-app target_compile_definitions) — inheriting another game's would cross-link the two."
 #endif
 inline constexpr std::string_view BleServiceUuid = LUR_BLE_SERVICE_UUID;
 

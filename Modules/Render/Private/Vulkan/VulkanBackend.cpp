@@ -119,6 +119,11 @@ struct Material {
 
 class VulkanRendererImpl : public IRenderer {
 public:
+    // AppName must outlive the renderer. Every call site passes a string literal, which is
+    // the intended usage — this is the app's name, not per-session data.
+    explicit VulkanRendererImpl(const char* Name)
+        : AppName(Name != nullptr && Name[0] != 0 ? Name : "LurMotorn") {}
+
     bool Init(void* NativeWindow) override {
         Window = NativeWindow;
         if (Window == nullptr) {
@@ -627,7 +632,7 @@ private:
 
     bool CreateInstance() {
         VkApplicationInfo App{VK_STRUCTURE_TYPE_APPLICATION_INFO};
-        App.pApplicationName = "OnlyChess";
+        App.pApplicationName = AppName;   // supplied by the app; the engine names no game
         App.apiVersion = VK_API_VERSION_1_0;
 
         // Which instance extensions does this Vulkan implementation actually expose?
@@ -1517,6 +1522,7 @@ private:
     // silent AND terminal (a failed recreate left Swapchain null with no retry path)
     // — the app ran on, black, with an empty log. These counters make the state loud
     // and drive the self-heal in BeginFrame.
+    const char* AppName = "LurMotorn";  // reported to the driver in VkApplicationInfo
     uint32_t FramesPresented = 0;   // vkQueuePresentKHR successes since Init
     uint32_t DeadFrames = 0;        // consecutive BeginFrames with no usable swapchain
     uint32_t RecreateCount = 0;     // swapchain recreates since Init
@@ -1525,6 +1531,6 @@ private:
 
 } // namespace
 
-IRenderer* VulkanRenderer::Create() { return new VulkanRendererImpl(); }
+IRenderer* VulkanRenderer::Create(const char* AppName) { return new VulkanRendererImpl(AppName); }
 
 } // namespace Lur::Render

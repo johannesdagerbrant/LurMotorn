@@ -74,7 +74,7 @@ constexpr int kWinH = 800;
 
 bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
     if (!G.Win.Create(Title, kWinW, kWinH, X, 30)) return false;
-    G.Renderer = Lur::Render::VulkanRenderer::Create();
+    G.Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
     if (G.Renderer == nullptr || !G.Renderer->Init(G.Win.NativeHandle())) return false;
 
     G.Store    = std::make_unique<Lur::Save::Store>(SaveDir);

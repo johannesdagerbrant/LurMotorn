@@ -77,7 +77,12 @@ target_compile_definitions(OnlyChess PRIVATE
     # Assistant-only remote control (#195) — see the Android CMakeLists. The agent .ipa comes
     # from a MANUAL-DISPATCH CI job only (`gh workflow run "macOS CI" -f agent=true`), never
     # an ordinary push, or it would sit next to the player artifact.
-    LUR_AGENT=${LUR_AGENT_ON})
+    LUR_AGENT=${LUR_AGENT_ON}
+    # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
+    # phone from cross-linking an RTS phone. Was inherited from a default in
+    # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
+    # unchanged, so chess's wire identity is untouched.
+    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7370\"")
 
 target_link_libraries(OnlyChess PRIVATE
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)

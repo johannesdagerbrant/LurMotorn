@@ -799,7 +799,7 @@ static void UnblockStdio() {
     if (!_RenderRunning.load(std::memory_order_acquire)) return;
     @autoreleasepool {
         void* Layer = _LayerPtr.load(std::memory_order_acquire);
-        _Renderer = Lur::Render::VulkanRenderer::Create();
+        _Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
         const bool Ok = _Renderer && _Renderer->Init(Layer);
         _Ready.store(Ok, std::memory_order_release);
         os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d) [render thread] #183",

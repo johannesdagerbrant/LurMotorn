@@ -63,7 +63,12 @@ target_compile_definitions(onlychess PRIVATE
     # Assistant-only remote control (#195). Off unless the build was explicitly configured
     # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none
     # of it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
-    LUR_AGENT=${LUR_AGENT_ON})
+    LUR_AGENT=${LUR_AGENT_ON}
+    # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
+    # phone from cross-linking an RTS phone. Was inherited from a default in
+    # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
+    # unchanged, so chess's wire identity is untouched.
+    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7370\"")
 
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlychess PROPERTIES

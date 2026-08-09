@@ -267,7 +267,7 @@ static void UnblockStdio() {
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
 
     if (!_Ready) {
-        _Renderer = Lur::Render::VulkanRenderer::Create();
+        _Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
         _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
         // #73 precondition check: a renderer initialised while the app is NOT active
         // ends up presenting into a layer the window server never composites.

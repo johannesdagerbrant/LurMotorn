@@ -124,7 +124,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 
 bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
     if (!P.Win.Create(Title, kWinW, kWinH, X, 60)) return false;
-    P.Renderer = Lur::Render::VulkanRenderer::Create();
+    P.Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
     if (P.Renderer == nullptr || !P.Renderer->Init(P.Win.NativeHandle())) return false;
     P.View.CreateResources(P.Renderer);
     P.Guid = Guid;
@@ -1081,7 +1081,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                    FlockDemo ? " (flockdemo)" : "", NoCombat ? " (combat off)" : "");
     Lur::Platform::Window Win;
     if (!Win.Create("RocksPapersScissors - solo", kWinW, kWinH, 200, 60)) return 1;
-    Lur::Render::IRenderer* Renderer = Lur::Render::VulkanRenderer::Create();
+    Lur::Render::IRenderer* Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
     if (Renderer == nullptr || !Renderer->Init(Win.NativeHandle())) return 1;
     Rps::GameView View;
     View.CreateResources(Renderer);

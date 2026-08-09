@@ -57,7 +57,7 @@ void HandleCmd(android_app* App, int32_t Cmd) {
     switch (Cmd) {
         case APP_CMD_INIT_WINDOW:
             if (App->window != nullptr) {
-                State->Renderer = Lur::Render::VulkanRenderer::Create();
+                State->Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
                 State->Ready = State->Renderer && State->Renderer->Init(App->window);
                 LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
                 if (State->Ready) {
