@@ -15,6 +15,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Shared engine + RPS core from the repo root (this file is 3 dirs up, like chess/iOS).
 get_filename_component(LUR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 set(LUR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# The app's log tag, consumed by the engine's per-platform logging seams (LogTag.h #errors
+# without it). Must be set BEFORE the engine root is added, since it becomes a compile
+# definition for every target in the tree.
+set(LUR_LOG_TAG "OnlyRps" CACHE STRING "" FORCE)
 add_subdirectory(${LUR_ROOT} ${CMAKE_BINARY_DIR}/lurmotorn)
 
 # --- MoltenVK: Vulkan-on-Metal, the ONE sanctioned third-party dependency. ---
@@ -34,7 +38,6 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 # Vulkan/BLE seams are copied from chess (package-renamed).
 add_executable(OnlyRps MACOSX_BUNDLE
     Sources/RpsMain.mm
-    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm)
 
 target_include_directories(OnlyRps PRIVATE ${MVK_INCLUDE})
@@ -74,7 +77,6 @@ target_link_libraries(OnlyRps PRIVATE
 # The .mm sources are Objective-C++ with ARC (CMake's Xcode generator doesn't default it on).
 set_source_files_properties(
     Sources/RpsMain.mm
-    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 

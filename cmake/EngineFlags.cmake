@@ -114,6 +114,21 @@ set(LUR_SLOW     ${_lur_slow}     CACHE INTERNAL "derived from LUR_CONFIG")
 set(LUR_TRACE    ${_lur_trace}    CACHE INTERNAL "derived from LUR_CONFIG (issue #101)")
 set(LUR_AGENT_ON ${_lur_agent}    CACHE INTERNAL "assistant-only instrumentation (opt-in, never for a player)")
 
+# The APP's log tag — the string `logcat -s <tag>` filters on and the prefix an iOS syslog
+# capture greps for. It belongs to the app, so the engine's per-platform logging seams take it
+# as a build parameter rather than knowing it. Set by an app tree BEFORE add_subdirectory of the
+# engine root (-DLUR_LOG_TAG=OnlyChess, or a plain set() in the app's CMakeLists).
+#
+# Empty by default here, NOT a fallback string: Lur/Core/LogTag.h #errors when the macro is
+# absent, so a device app that forgets it fails to build instead of filing its logs under
+# another app's name. The host and desktop trees never include that header — the desktop seam
+# logs through Lur::Log, which needs no tag — so leaving it empty there is correct, not lax.
+set(LUR_LOG_TAG "" CACHE STRING "App log tag for the per-platform logging seams (device builds)")
+if(LUR_LOG_TAG)
+    add_compile_definitions(LUR_LOG_TAG="${LUR_LOG_TAG}")
+    message(STATUS "LurMotorn log tag: ${LUR_LOG_TAG}")
+endif()
+
 # Apply to this scope + every target added under it (all engine modules + chess,
 # and the Desktop app — all root subdirs added after this include).
 add_compile_definitions(

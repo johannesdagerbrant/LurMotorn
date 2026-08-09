@@ -29,6 +29,10 @@ get_filename_component(LUR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../.." ABSOLUTE)
 
 # Build the engine/game libraries only — not the host unit-test executables.
 set(LUR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# The app's log tag, consumed by the engine's per-platform logging seams (LogTag.h #errors
+# without it). Must be set BEFORE the engine root is added, since it becomes a compile
+# definition for every target in the tree.
+set(LUR_LOG_TAG "OnlyChess" CACHE STRING "" FORCE)
 add_subdirectory(${LUR_ROOT} ${CMAKE_BINARY_DIR}/lurmotorn)
 
 # --- MoltenVK: Vulkan-on-Metal, the ONE sanctioned third-party dependency. ---
@@ -52,11 +56,10 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 
 # The app bundle. Sources:
 #   AppMain.mm          — UIKit shim: Metal-backed view drives the shared BoardView.
-#   IosVulkanSurface.mm — iOS implementation of the Vulkan platform seam (MoltenVK).
+#   (the iOS Vulkan platform seam now ships with lur::render, one copy per platform)
 #   IosBleTransport.mm  — the CoreBluetooth backend of Lur::Transport::ITransport.
 add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
-    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm
     Sources/IosAudioDevice.mm)
 
@@ -100,7 +103,6 @@ target_link_libraries(OnlyChess PRIVATE
 # enable ARC by default, so turn it on explicitly for this target.
 set_source_files_properties(
     Sources/AppMain.mm
-    Sources/IosVulkanSurface.mm
     Sources/IosBleTransport.mm
     Sources/IosAudioDevice.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")

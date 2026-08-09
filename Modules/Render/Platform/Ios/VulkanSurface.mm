@@ -1,6 +1,6 @@
-// iOS implementation of the Vulkan platform seam (Lur::Render::Vk), via MoltenVK.
-// The shared backend in Modules/Render calls these; this is the only iOS-specific
-// Vulkan code. (The Android counterpart is AndroidVulkanSurface.cpp.)
+// iOS implementation of the Vulkan platform seam (Lur::Render::Vk), via MoltenVK. The shared
+// backend in Modules/Render calls these; this is the only iOS-specific Vulkan code. One copy per
+// PLATFORM, not per game — see the Android sibling.
 #import <Foundation/Foundation.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <os/log.h>
@@ -11,6 +11,7 @@
 #define VK_USE_PLATFORM_METAL_EXT
 #include <vulkan/vulkan.h>
 
+#include "Lur/Core/LogTag.h"
 #include "Lur/Render/Vulkan/PlatformSurface.h"
 
 namespace Lur::Render::Vk {
@@ -40,14 +41,13 @@ void PlatformDrawableSize(void* NativeHandle, uint32_t* Width, uint32_t* Height)
     *Height = static_cast<uint32_t>(Size.height);
 }
 
-// Every backend log line streams to the dev host over syslog
-// (scripts/ios-syslog.bat) — the logcat analog. The "OnlyRps:" tag is the
-// filter; %{public}s is load-bearing: without it iOS redacts the dynamic string
-// to "<private>" when the device isn't attached to Xcode (i.e. exactly our case).
+// Every backend log line streams to the dev host over syslog — the logcat analog. The app's tag
+// is the filter a capture greps for; %{public}s is load-bearing: without it iOS redacts the
+// dynamic string to "<private>" when the device isn't attached to Xcode (i.e. exactly our case).
 void PlatformLog(bool Error, const char* Message) {
     os_log_with_type(OS_LOG_DEFAULT,
                      Error ? OS_LOG_TYPE_ERROR : OS_LOG_TYPE_DEFAULT,
-                     "OnlyRps: %{public}s", Message);
+                     "%{public}s: %{public}s", Lur::Core::LogTag, Message);
 }
 
 } // namespace Lur::Render::Vk

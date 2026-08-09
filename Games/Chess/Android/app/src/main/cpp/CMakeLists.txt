@@ -11,6 +11,10 @@ get_filename_component(LUR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../.
 
 # Build the engine/game libraries only — not the host unit-test executables.
 set(LUR_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+# The app's log tag, consumed by the engine's per-platform logging seams (LogTag.h #errors
+# without it). Must be set BEFORE the engine root is added, since it becomes a compile
+# definition for every target in the tree.
+set(LUR_LOG_TAG "OnlyChess" CACHE STRING "" FORCE)
 add_subdirectory(${LUR_ROOT} ${CMAKE_BINARY_DIR}/lurmotorn)
 
 # android_native_app_glue ships with the NDK (first-party, not a third-party lib).
@@ -20,12 +24,11 @@ target_include_directories(native_app_glue PUBLIC
     ${ANDROID_NDK}/sources/android/native_app_glue)
 
 # The app's native library. NativeActivity loads this (android.app.lib_name=onlychess).
-# The shared Vulkan backend lives in lur::render; this app provides only the thin
-# Android surface seam (AndroidVulkanSurface.cpp). Shaders are cooked to SPIR-V
-# offline (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
+# The Vulkan backend AND its Android surface seam both live in lur::render now — the app
+# supplies no render code at all, only its log tag. Shaders are cooked to SPIR-V offline
+# (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
 add_library(onlychess SHARED
     AndroidMain.cpp
-    AndroidVulkanSurface.cpp
     AndroidBleTransport.cpp
     AndroidAudioDevice.cpp)
 

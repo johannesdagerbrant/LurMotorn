@@ -10,11 +10,20 @@
 # renderer isn't unit-tested, so we stay header-only there — only device builds
 # compile the backend.
 if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    add_library(lur_render STATIC Private/Vulkan/VulkanBackend.cpp)
+    # The per-OS surface seam ships WITH the module, one copy per platform — the pattern the
+    # Windows branch below has always followed. It used to be copy-pasted into every app, where
+    # the four copies differed by exactly one string (the log tag, now LUR_LOG_TAG).
+    if(ANDROID)
+        set(_lur_render_platform Platform/Android/VulkanSurface.cpp)
+    else()
+        set(_lur_render_platform Platform/Ios/VulkanSurface.mm)
+    endif()
+    add_library(lur_render STATIC Private/Vulkan/VulkanBackend.cpp ${_lur_render_platform})
     target_include_directories(lur_render PUBLIC Public)
     target_compile_features(lur_render PUBLIC cxx_std_20)
     # lur::trace for the EndFrame submit/present sub-scopes (#103; no-op in Shipping).
-    target_link_libraries(lur_render PUBLIC lur_math lur::trace)
+    # lur::core for Lur/Core/LogTag.h, which the surface seam logs through.
+    target_link_libraries(lur_render PUBLIC lur_math lur::trace PRIVATE lur::core)
 elseif(LUR_DESKTOP AND WIN32)
     # Workbench (roadmap Phase 0.5): the SAME shared backend compiled on the desktop
     # against the installed Vulkan SDK, plus the Win32 surface seam. This is the fast

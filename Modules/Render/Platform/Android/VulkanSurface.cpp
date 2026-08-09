@@ -1,6 +1,7 @@
-// Android implementation of the Vulkan platform seam (Lur::Render::Vk). The
-// shared backend in Modules/Render calls these; this is the only Android-specific
-// Vulkan code. (The iOS counterpart is IosVulkanSurface.mm, via MoltenVK.)
+// Android implementation of the Vulkan platform seam (Lur::Render::Vk). The shared backend
+// in Modules/Render calls these; this is the only Android-specific Vulkan code. One copy per
+// PLATFORM, not per game: this file and its iOS sibling used to be duplicated into every app,
+// where the four copies differed by exactly one string — the log tag, now a build parameter.
 #include <android/log.h>
 #include <android/native_window.h>
 
@@ -10,6 +11,7 @@
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
 
+#include "Lur/Core/LogTag.h"
 #include "Lur/Render/Vulkan/PlatformSurface.h"
 
 namespace Lur::Render::Vk {
@@ -35,7 +37,7 @@ void PlatformDrawableSize(void* NativeHandle, uint32_t* Width, uint32_t* Height)
 
 void PlatformLog(bool Error, const char* Message) {
     __android_log_print(Error ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO,
-                        "OnlyRps", "%s", Message);
+                        Lur::Core::LogTag, "%s", Message);
 }
 
 } // namespace Lur::Render::Vk
