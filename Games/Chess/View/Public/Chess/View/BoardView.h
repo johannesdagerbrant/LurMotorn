@@ -39,7 +39,7 @@ public:
 #if LUR_INTERNAL
     // --- Developer-only scripted/bot play (issue #57/#58) — compiled out of a
     // SHIPPING build (LUR_INTERNAL=0). Both go through the SAME wire path a real tap
-    // uses (build the legal list, encode the index, SendMove, then apply locally), so
+    // uses (build the legal list, encode the index, send it framed, then apply locally), so
     // a bot exercises the exact protocol a human does.
 
     // Play a move by squares. A promotion defaults to a queen. Returns true iff a
@@ -53,7 +53,7 @@ public:
     bool AutoPlayRandomLegalMove(uint32_t& RngState);
 #endif
 
-    // Attach a networked session: peer moves arrive as EMsgType::Move and are applied
+    // Attach a networked session: peer moves arrive framed on EMsgType::Game1 and are applied
     // to the state; our own moves are sent on it; the link-state bar reads it. Colour
     // comes from ChessMatchState (GUID order + match parity), NOT the session. Without
     // a session (and before identity is set) the view is a local hot-seat.

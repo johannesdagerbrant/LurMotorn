@@ -74,7 +74,7 @@ static void TestChessMoveAcrossSessions() {
     Chess::Board BoardWhite = Chess::Board::StartPosition();
     Chess::Board BoardBlack = Chess::Board::StartPosition();
 
-    SBlack.SetMoveHandler([&](const uint8_t* D, std::size_t N) {
+    SBlack.SetHandler(EMsgType::Game1, [&](const uint8_t* D, std::size_t N) {
         Chess::MoveList Legal;
         Chess::GenerateLegalMoves(BoardBlack, Legal);
         Lur::Serialization::BitReader R(D, N);
@@ -95,7 +95,7 @@ static void TestChessMoveAcrossSessions() {
     Lur::Serialization::BitWriter W;
     Chess::EncodeMove(*Chosen, Legal, W);
     const std::vector<uint8_t>& Bytes = W.Finish();
-    SWhite.SendMove(Bytes.data(), Bytes.size());  // bare 1-byte index (issue #19)
+    SWhite.Send(EMsgType::Game1, Bytes.data(), Bytes.size());   // framed move index
     BoardWhite.MakeMove(*Chosen);
 
     CHECK(BoardBlack.SideToMove == Chess::EColor::Black);
@@ -301,8 +301,8 @@ static void TestResyncGateEnablesCleanCrossPeerPlay() {
         if (M.SideToMove() == M.MyColor()) return;                      // not the peer's turn
         M.ApplyMove(Mv);
     };
-    SA.SetMoveHandler([&](const uint8_t* D, std::size_t N) { ApplyRemote(MA, SA, D, N); });
-    SB.SetMoveHandler([&](const uint8_t* D, std::size_t N) { ApplyRemote(MB, SB, D, N); });
+    SA.SetHandler(EMsgType::Game1, [&](const uint8_t* D, std::size_t N) { ApplyRemote(MA, SA, D, N); });
+    SB.SetHandler(EMsgType::Game1, [&](const uint8_t* D, std::size_t N) { ApplyRemote(MB, SB, D, N); });
 
     SA.Start(&TA, Guid('a'));
     SB.Start(&TB, Guid('b'));
@@ -317,7 +317,7 @@ static void TestResyncGateEnablesCleanCrossPeerPlay() {
         if (L.Count <= 0) return false;
         Lur::Serialization::BitWriter W; Chess::EncodeMove(L.Moves[0], L, W);
         const std::vector<uint8_t>& B = W.Finish();
-        S.SendMove(B.data(), B.size());   // synchronous loopback -> peer's move handler
+        S.Send(EMsgType::Game1, B.data(), B.size());  // synchronous loopback -> peer's handler
         M.ApplyMove(L.Moves[0]);
         return true;
     };

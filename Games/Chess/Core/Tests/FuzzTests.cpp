@@ -134,7 +134,7 @@ static void TestSessionFrameFuzzNoCrash() {
     FuzzTransport T;
     Lur::Net::Session S;
     S.Start(&T, std::string(32, 'a'));
-    S.SetMoveHandler([](const uint8_t*, std::size_t) {});
+    S.SetHandler(Lur::Net::EMsgType::Game1, [](const uint8_t*, std::size_t) {});
     S.SetHandler(Lur::Net::EMsgType::Sync, [](const uint8_t* D, std::size_t N) {
         Chess::ChessRecord Rec;
         Rec.Read(D, N);  // exercise the sync-decode path on garbage too

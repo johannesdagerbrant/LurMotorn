@@ -278,29 +278,34 @@ static void TestKeepaliveKeepsLinkAlive() {
     CHECK(T.ResetCount == 0);
 }
 
-// A bare 1-byte datagram routes to the move handler; a framed (>=2 byte) message
-// routes to its typed handler and NEVER the move handler (the #19 length rule).
-static void TestMoveFramingDisambiguation() {
+// EVERY datagram is framed: byte 0 is the type, and a 1-byte datagram is that type with
+// an EMPTY payload — not a special case. The session used to carry a chess-shaped rule
+// ("a bare 1-byte datagram is always a move") which swallowed any 1-byte datagram into a
+// move handler before the type was ever read, so a framed message with an empty payload
+// was silently unreachable for every game. Nothing about a MOVE belongs in the engine's
+// dispatch: only chess has a 1-byte move.
+static void TestOneByteDatagramDispatchesByType() {
     LoopbackTransport TA, TB;
     LoopbackTransport::Link(TA, TB);
     Session SA, SB;
     SA.Start(&TA, Guid('a'));
     SB.Start(&TB, Guid('b'));
 
-    int MoveCalls = 0, SyncCalls = 0;
-    std::size_t LastMoveSize = 99;
-    SB.SetMoveHandler([&](const uint8_t*, std::size_t N) { ++MoveCalls; LastMoveSize = N; });
-    SB.SetHandler(EMsgType::Sync, [&](const uint8_t*, std::size_t) { ++SyncCalls; });
+    int Game0Calls = 0, SyncCalls = 0;
+    std::size_t LastSize = 99;
+    SB.SetHandler(EMsgType::Game0, [&](const uint8_t*, std::size_t N) { ++Game0Calls; LastSize = N; });
+    SB.SetHandler(EMsgType::Sync,  [&](const uint8_t*, std::size_t) { ++SyncCalls; });
 
-    const uint8_t Index[1] = {0x05};
-    SA.SendMove(Index, 1);
-    CHECK(MoveCalls == 1 && LastMoveSize == 1);
+    CHECK(SA.Send(EMsgType::Game0, nullptr, 0));   // 1 byte on the wire: just the type
+    CHECK(Game0Calls == 1);
+    CHECK(LastSize == 0);
     CHECK(SyncCalls == 0);
 
-    const uint8_t Payload[2] = {0xAA, 0xBB};       // framed Sync (>= 2 bytes on the wire)
-    SA.Send(EMsgType::Sync, Payload, sizeof(Payload));
+    // And a 1-byte payload still lands framed, with the payload intact.
+    const uint8_t One[1] = {0x2A};
+    CHECK(SA.Send(EMsgType::Sync, One, 1));
     CHECK(SyncCalls == 1);
-    CHECK(MoveCalls == 1);                          // framed message did NOT hit the move handler
+    CHECK(Game0Calls == 1);
 }
 
 // The other half of the fix: a payload beyond the datagram bound must fail LOUDLY —
@@ -431,7 +436,7 @@ int main() {
     TestMessageFramingStripsType();
     TestEveryGameSlotDispatches();
     TestVersionMismatchRefused();
-    TestMoveFramingDisambiguation();
+    TestOneByteDatagramDispatchesByType();
     TestKeepaliveTimeoutResetsLink();
     TestHalfOpenLinkIsDetectedAndBacksOff();   // #163
     TestHalfOpenEscalatesToRadioRestartThenStops();  // #182

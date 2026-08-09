@@ -359,12 +359,13 @@ void BoardView::AttachSession(Lur::Net::Session* Session) {
     Net = Session;
     // The view only needs peer moves + the link state. Identity/colour and the
     // link-time record sync are wired by the app (ChessMatchState + SyncManager).
-    // A live move is a bare 1-byte datagram (issue #19), so it uses the move hook.
-    Net->SetMoveHandler([this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
-    // #193: the peer's selection hint. Chess aliases the engine's generic Game0 slot, which
-    // it has never sent framed, so a peer on an older build simply ignores the type and
-    // loses only the cue — no ProtocolVersion bump, and a mixed pair still plays. Cosmetic
-    // by construction: it lands in a Square used for drawing and nowhere else.
+    // A live move is FRAMED on chess's Game1 slot, like every other message. It used to
+    // be a bare 1-byte datagram told apart by length (#19) — a chess assumption that had
+    // to live inside the engine's dispatch to work, which is why it is gone (#200).
+    Net->SetHandler(Lur::Net::EMsgType::Game1,
+                    [this](const uint8_t* D, std::size_t N) { ApplyRemoteMove(D, N); });
+    // #193: the peer's selection hint, on chess's Game0 slot. Cosmetic by construction:
+    // it lands in a Square used for drawing and nowhere else.
     Net->SetHandler(Lur::Net::EMsgType::Game0, [this](const uint8_t* D, std::size_t N) {
         if (N < 1) return;
         // Same hijack guard as a move (#38): a hint from a peer we are not currently playing
@@ -444,14 +445,14 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
             }
         }
         if (Chosen != nullptr) {
-            // Ship only the move's index as a bare 1-byte datagram (see MoveCodec)
+            // Ship only the move's index (see MoveCodec), framed on chess's Game1 slot,
             // before applying locally, so both boards advance in lockstep off the same
             // pre-move legal list.
             if (Net != nullptr) {
                 Lur::Serialization::BitWriter W;
                 EncodeMove(*Chosen, Legal, W);
                 const std::vector<uint8_t>& Bytes = W.Finish();
-                Net->SendMove(Bytes.data(), Bytes.size());
+                Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size());
             }
             const EMoveSound Sound = ClassifyMove(B, *Chosen);
             State->ApplyMove(*Chosen);
@@ -472,8 +473,8 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
 
 void BoardView::SendSelectionHint(Square S) {
     if (Net == nullptr) return;
-    // One payload byte: the square, or NoSquare (64) to clear. Framed, so it is >= 2 bytes
-    // on the wire and the `length == 1 -> move` receive rule (#15) stays unambiguous.
+    // One payload byte: the square, or NoSquare (64) to clear. Its own slot, so it can
+    // never be confused with a move however short either payload gets.
     const uint8_t Payload = static_cast<uint8_t>(S);
     Net->Send(Lur::Net::EMsgType::Game0, &Payload, 1);
 }
@@ -489,7 +490,7 @@ EMoveSound CommitMove(Lur::Net::Session* Net, ChessMatchState* State, const Move
         Lur::Serialization::BitWriter W;
         EncodeMove(Chosen, Legal, W);
         const std::vector<uint8_t>& Bytes = W.Finish();
-        Net->SendMove(Bytes.data(), Bytes.size());
+        Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size());
     }
     const EMoveSound Sound = ClassifyMove(State->CurrentBoard(), Chosen);
     State->ApplyMove(Chosen);

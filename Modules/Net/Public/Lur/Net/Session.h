@@ -21,11 +21,8 @@ enum class EMsgType : uint8_t {
     Retired2    = 2,
     // 3..5 are GENERIC game-defined framed-message slots — the engine names no game
     // concept (a chess move, a resign, an RTS input) in its own enum; each game aliases
-    // these to its own message kinds (issue #44). Chess formerly put Move=3 / Resign=4 /
-    // DrawOffer=5 here, but chess moves are now BARE 1-byte datagrams (SendMove) and
-    // resign/draw were never wired, so 3..5 are unused by chess. The RTS aliases them to
-    // Input / Anchor / ResyncChunk (#76). Kept at their original numbers, and chess never
-    // sent them framed, so this rename is NOT a wire change — ProtocolVersion stays 5.
+    // these to its own message kinds (issue #44). Chess uses Game0 for its selection hint
+    // and Game1 for a move; the RTS aliases them to Input / Anchor / ResyncChunk (#76).
     Game0       = 3,
     Game1       = 4,
     Game2       = 5,
@@ -77,7 +74,13 @@ enum class EMsgType : uint8_t {
 //     peer schedules the same input three ticks later, so a v8<->v9 pair would apply identical input
 //     on different ticks and desync with no wire error to point at. The bump makes the Hello handshake
 //     refuse the mixed pair — belt-and-suspenders alongside the #166 build-fingerprint gate.
-inline constexpr uint8_t ProtocolVersion = 9;
+// v10: the "a bare 1-byte datagram is always a move" rule is GONE (#200). It was a chess
+//     assumption sitting in the engine's dispatch — only chess has a 1-byte move — and it
+//     made an empty-payload framed message unreachable for every game, because the length
+//     check ran before the type byte was ever read. Chess moves now travel framed on its
+//     own Game1 slot like every other message. A v9 peer would read a framed move as a
+//     2-byte datagram of an unknown type and drop it, so it must not be allowed to link.
+inline constexpr uint8_t ProtocolVersion = 10;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {
@@ -113,9 +116,9 @@ inline const char* LinkStateName(ELinkState S) {
 //      mechanic only), so there is no "host".
 //
 //   2. MESSAGE FRAMING. Send() prepends the EMsgType byte; inbound datagrams are
-//      dispatched to a per-type handler. The session is game-agnostic — it moves
-//      opaque payload bytes and never names a chess type; the chess layer encodes
-//      a move into those bytes with Chess::MoveCodec.
+//      dispatched to a per-type handler. EVERY datagram is framed, with no exceptions
+//      and no length-based special cases — the session moves opaque payload bytes and
+//      knows nothing about what any game puts in them.
 //
 // Not thread-safe: drive it from one thread. Per the ITransport contract the
 // receiver fires on the engine thread, which is also where Tick()/Send() are called.
@@ -158,11 +161,11 @@ public:
 
     // True from the moment the link is (re)established until the peer's link-time Sync
     // has been received (or a short fallback timeout elapses). While this holds, the
-    // game must NOT make or apply live moves: a bare move index is only meaningful
-    // against a board both peers agree on, and the reconciling Sync hasn't landed yet.
-    // Applying a move before the resync silently decodes it against an unreconciled
-    // board -> permanent divergence -> deadlock (issue #71). The game gates on this in
-    // CanMoveNow() (local moves) and its move handler (inbound moves).
+    // game must NOT issue or apply live input: input that is only meaningful against a
+    // state both peers agree on cannot be interpreted before the reconciling Sync lands.
+    // Applying it early decodes it against an unreconciled state -> permanent divergence
+    // -> deadlock (issue #71). The game gates on this both when producing local input
+    // and when consuming the peer's.
     bool IsAwaitingResync() const { return AwaitingResync; }
 
     // The peer's persistent device id once ready, else empty. The game pairs it with
@@ -202,17 +205,9 @@ public:
     // is not host-testable end to end, so seeing the count climb on the phone is the proof.
     int  RadioRestartsAttempted() const { return RadioRestarts_; }
 
-    // Register the handler for one application message type (framed, >=2 bytes).
+    // Register the handler for one application message type. Every datagram is framed,
+    // so a message with an empty payload is legal and arrives here with Size == 0.
     void SetHandler(EMsgType Type, Handler H);
-
-    // Register the handler for a live move — a bare 1-byte index datagram (no type
-    // tag). Since every framed message is >=2 bytes, a 1-byte datagram is always a
-    // move, so it needs no type (issue #19). The payload is the move's index bits.
-    void SetMoveHandler(Handler H) { MoveHandler = std::move(H); }
-
-    // Send a live move: the raw index byte with NO type prefix, so it arrives as a
-    // 1-byte datagram. A forced move (0-bit index) still sends a single 0 byte.
-    void SendMove(const uint8_t* Data, std::size_t Size);
 
     // Fired once, when the handshake completes and the seat is known.
     void SetReadyHandler(std::function<void()> H) { ReadyHandler = std::move(H); }
@@ -332,7 +327,6 @@ private:
     bool     HavePeerHash       = false;  // have we seen a peer keepalive hash yet?
 
     Handler               Handlers[MaxMsgTypes];
-    Handler                 MoveHandler;        // bare 1-byte live move (issue #19)
     std::function<void()>   ReadyHandler;
     std::function<void()>   ResyncHandler;
     std::function<uint64_t()> StateHashFn;      // rides Keepalive for desync detection (#72)

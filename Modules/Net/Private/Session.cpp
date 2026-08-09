@@ -152,13 +152,6 @@ void Session::SendHello() {
     Logf("hello SENT (ready=%d)", Ready ? 1 : 0);
 }
 
-void Session::SendMove(const uint8_t* Data, std::size_t Size) {
-    if (Transport == nullptr) return;
-    const uint8_t Byte = Size >= 1 ? Data[0] : 0;  // the index byte (0 for a forced move)
-    Transport->Send(&Byte, 1);                      // bare, no type -> a 1-byte datagram
-    ++DatagramsSent;
-}
-
 void Session::SendKeepalive() {
     if (Transport == nullptr || !Transport->IsConnected()) return;
     if (StateHashFn) {
@@ -196,12 +189,8 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     RadioRestarts_ = 0;  // #182: next half-open episode gets a fresh budget of hard restarts
     ++DatagramsReceived;
 
-    // A bare 1-byte datagram is a live move (framed messages are always >=2 bytes).
-    if (Size == 1) {
-        if (MoveHandler) MoveHandler(Data, Size);
-        return;
-    }
-
+    // Every datagram is framed: byte 0 is the type, the rest is the payload. A 1-byte
+    // datagram is therefore a type with an EMPTY payload, dispatched like any other.
     const EMsgType Type = static_cast<EMsgType>(Data[0]);
     const uint8_t* Payload = Data + 1;
     const std::size_t PayloadSize = Size - 1;
