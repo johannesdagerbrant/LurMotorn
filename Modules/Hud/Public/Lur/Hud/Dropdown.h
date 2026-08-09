@@ -16,7 +16,7 @@ namespace Lur::Hud {
 // both sides" entry. None = no marker.
 enum class ELeadStyle : uint8_t { None, Dot, Split };
 
-// One row in the dropdown. Chess-agnostic: the game maps its meaning onto these
+// One row in the dropdown. Game-agnostic: the game maps its meaning onto these
 // generic fields (a labelled row with a coloured status dot + optional ring).
 struct DropdownItem {
     std::string        Label;                 // primary line (e.g. a GUID)

@@ -23,7 +23,7 @@ namespace Lur::Transport {
 // event front door the future shared BleLinkController is built on.
 //
 // Overflow (engine stalled far longer than the radio) drops the OLDEST event and sets
-// a sticky flag rather than blocking the radio thread — at chess/RTS datagram rates it
+// a sticky flag rather than blocking the radio thread — at real datagram rates it
 // should never fire.
 class EventInbox {
 public:

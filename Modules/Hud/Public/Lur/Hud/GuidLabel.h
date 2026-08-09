@@ -4,7 +4,7 @@
 // dropdown row and both games need the identical rendering: two phones showing the same peer
 // must show the same string, or the label is worse than useless.
 //
-// Was an anonymous-namespace helper inside Chess's BoardView. RPS needed it too (its linked-
+// Was an anonymous-namespace helper inside one game. A second game needed it too (its linked-
 // opponent row shows the peer's GUID rather than the generic "Linked opponent"), and
 // Games/* cannot depend on Games/*, so the choice was to copy it or to lift it. Copied
 // formatting drifts — one game gains a separator or a case change and the two stop matching —

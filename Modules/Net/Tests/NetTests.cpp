@@ -1,9 +1,11 @@
-// Dependency-free unit tests for Lur::Net::Session (issue #5): the Hello handshake
-// + deterministic seat assignment, message framing, protocol-version refusal, and
-// — the payoff — a real chess move crossing TWO sessions and landing identically
-// on the far board, i.e. the move codec wired over the session/transport seam that
-// the live BLE link presents. No framework: each CHECK records a failure and the
-// process exits non-zero if any failed, which CTest reports.
+// Dependency-free unit tests for Lur::Net::Session (issue #5): the Hello handshake,
+// message framing, protocol-version refusal, keepalive/timeout, and the half-open link
+// detection + radio-restart escalation. Nothing here needs a game — every assertion holds
+// with no game in the repo at all, which is the point: an engine test binary that needs a
+// game to build is the module wall broken where nobody looks. A game's own integration
+// tests over the session live in that game's suite.
+// No framework: each CHECK records a failure and the process exits non-zero if any
+// failed, which CTest reports.
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -279,11 +281,11 @@ static void TestKeepaliveKeepsLinkAlive() {
 }
 
 // EVERY datagram is framed: byte 0 is the type, and a 1-byte datagram is that type with
-// an EMPTY payload — not a special case. The session used to carry a chess-shaped rule
+// an EMPTY payload — not a special case. The session used to carry a GAME-shaped rule
 // ("a bare 1-byte datagram is always a move") which swallowed any 1-byte datagram into a
 // move handler before the type was ever read, so a framed message with an empty payload
-// was silently unreachable for every game. Nothing about a MOVE belongs in the engine's
-// dispatch: only chess has a 1-byte move.
+// was silently unreachable for every game. Nothing about a move belongs in the engine's
+// dispatch — a 1-byte move is one game's encoding, not a property of datagrams.
 static void TestOneByteDatagramDispatchesByType() {
     LoopbackTransport TA, TB;
     LoopbackTransport::Link(TA, TB);

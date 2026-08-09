@@ -58,7 +58,7 @@ static void TestFixedString() {
     using Lur::Sim::ToString;
 
     Fixed V{};
-    CHECK(FromString("0.7", V) && V.Raw == (7 << 16) / 10);   // matches Rps::F(7,10)
+    CHECK(FromString("0.7", V) && V.Raw == (7 << 16) / 10);   // matches a truncating F(7,10)
     CHECK(ToString(V) == "0.7");                              // shortest decimal, trimmed
     CHECK(FromString("6", V) && V == Fixed::FromInt(6) && ToString(V) == "6");
     CHECK(FromString(" -2.5 ", V) && ToString(V) == "-2.5");  // sign + trim
@@ -76,7 +76,7 @@ static void TestFixedString() {
 
 // CVar<Fixed>: a Sim-typed CVar parses/formats via the Fixed overload through ICVar.
 // Default 0.5 (= One/2, an EXACT Q16.16 value) so ValueString is unambiguous — unlike
-// Rps::F(6,10) which truncates to raw 39321 (0.59999), a real gotcha the codec exposes.
+// an F(6,10) literal, which truncates to raw 39321 (0.59999) — a real gotcha the codec exposes.
 LUR_CVAR(CvTestSpeed, "test.speed", Fixed{Fixed::One / 2}, ::Lur::Core::CVarFlagAffectsGameplay,
          "Test fixture: Fixed gameplay CVar");
 

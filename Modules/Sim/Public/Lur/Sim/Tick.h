@@ -13,7 +13,7 @@ namespace Lur::Sim {
 // the same inputs and the same number of ticks, every device reaches the same
 // state — the precondition for rollback netcode.
 //
-// Chess uses this trivially (it ticks only when a move is made), but the contract
+// A turn-based game uses this trivially (it ticks only when a move is made), but the contract
 // is identical to what a reflex game needs.
 class TickClock {
 public:
@@ -24,7 +24,7 @@ public:
 
     // The most ticks Advance() will return in one call. A long pause (debugger,
     // backgrounded app) would otherwise return thousands of catch-up ticks in a
-    // burst — a stutter for chess, a spiral of death for a reflex game. We cap the
+    // burst — a stutter for a turn-based game, a spiral of death for a reflex game. We cap the
     // burst and DISCARD the backlog beyond it. Both peers clamp identically, so this
     // stays deterministic (it changes the tick COUNT after a stall, never a tick's
     // computation). Sized generously above any real frame hitch.

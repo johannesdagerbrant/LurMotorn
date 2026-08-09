@@ -19,10 +19,9 @@ enum class EMsgType : uint8_t {
     // resets ProtocolVersion, where the break is already paid for.
     Retired1    = 1,
     Retired2    = 2,
-    // 3..5 are GENERIC game-defined framed-message slots — the engine names no game
-    // concept (a chess move, a resign, an RTS input) in its own enum; each game aliases
-    // these to its own message kinds (issue #44). Chess uses Game0 for its selection hint
-    // and Game1 for a move; the RTS aliases them to Input / Anchor / ResyncChunk (#76).
+    // 3..5 are GENERIC game-defined framed-message slots — the engine names no game concept
+    // (a move, a resign, a unit order) in its own enum; each game aliases these to its own
+    // message kinds and documents the mapping on its side (issue #44).
     Game0       = 3,
     Game1       = 4,
     Game2       = 5,
@@ -39,6 +38,15 @@ enum class EMsgType : uint8_t {
 
 // Protocol version negotiated in Hello. Bump on any wire-format change so two
 // app versions refuse to mis-decode each other rather than corrupt a game.
+//
+// NOTE — the one DELIBERATE, documented exception to "Modules/* must not name a game":
+// the changelog below names which game's change earned each version. That is not an API
+// shaped by a game, it is the reason a number exists, and stripping it would leave a
+// version history nobody can audit. It exists because ONE version counter is shared by
+// the engine and every game — 4 of the 10 entries are one game's gameplay-wire changes,
+// which is itself the argument for splitting engine ProtocolVersion from a per-game
+// GameProtocolVersion. When that split lands, these entries move to the game that owns
+// them and this exception goes with them.
 // v2: Hello gained a trailing "ready" byte for a loss-tolerant handshake.
 // v3: Hello carries the persistent device GUID (was a random session nonce), so
 //     each peer learns the other's stable identity for colour + the per-opponent
@@ -219,8 +227,8 @@ public:
     // mid-game desync is detected (see RequestResync / the keepalive state hash).
     void SetResyncHandler(std::function<void()> H) { ResyncHandler = std::move(H); }
 
-    // Optional hook returning a hash of the game's authoritative state (chess: the
-    // board position). If set, it rides every Keepalive; the peer compares it to its
+    // Optional hook returning a hash of the game's authoritative state. If set, it
+    // rides every Keepalive; the peer compares it to its
     // own and, on a mismatch, triggers a resync — so a mid-game divergence (a live
     // move that was lost while the link stayed up) self-heals instead of deadlocking
     // (issue #72). Must be identical on both peers when they agree (game-defined).

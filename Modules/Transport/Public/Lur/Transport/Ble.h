@@ -21,7 +21,8 @@ namespace Lur::Transport {
 
 enum class EBleRole { Peripheral, Central };
 
-// Implemented separately in Games/Chess/Android and Games/Chess/iOS.
+// Defined once per PLATFORM in the app build — a link-time seam, not an interface, because
+// there is one implementation per platform and never two at runtime.
 ITransport* CreateBleTransport(EBleRole Role);
 
 } // namespace Lur::Transport

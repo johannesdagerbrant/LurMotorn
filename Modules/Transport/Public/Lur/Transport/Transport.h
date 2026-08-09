@@ -9,7 +9,7 @@ namespace Lur::Transport {
 //
 // Nothing above this line knows whether the link is BLE, a future WiFi/UDP
 // backend, or an in-process loopback used by tests. That ignorance is the whole
-// point: it's what lets the same chess code run over BLE today and lets a reflex
+// point: it's what lets the same game code run over BLE today and lets a reflex
 // game swap in a lower-latency transport tomorrow without touching game logic.
 //
 // Payloads handed to Send() are already minimal (see Lur::Serialization); the

@@ -10,7 +10,7 @@ namespace Lur::Serialization {
 // Bits are packed into bytes from the most-significant bit downward, giving a
 // deterministic wire layout that BitReader consumes symmetrically. This is the
 // foundation of LurMotorn's "smallest possible payload" goal: an encoder writes
-// exactly as many bits as an event carries — e.g. a chess move as a ~4-6 bit
+// exactly as many bits as an event carries — e.g. an index into a short list as a ~4-6 bit
 // index into the legal-move list — with no per-field byte padding.
 //
 // Usage:

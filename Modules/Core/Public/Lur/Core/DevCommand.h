@@ -2,13 +2,14 @@
 // Lur::Core::DevCommand — named dev/debug functions with args (dev-console spec §2), the
 // sibling of the CVar system: a CVar is a tunable value, a command DOES something
 // (restart a match, wipe save history, spawn units). Registered by engine modules
-// (net.*, save.*) or games (rps.*), enumerated for console completion, dispatched by name.
+// (net.*, save.*) or the game (its own prefix), enumerated for console completion,
+// dispatched by name.
 //
 // ENTIRELY dev-only: unlike CVars (which must survive into shipping as pure constexpr),
 // commands do not exist in a shipping build at all — so a ctor-side-effect registration is
 // fine here (no constexpr-shape contract to protect). The whole header is #if !LUR_SHIPPING.
 //
-// A command that mutates SIM state (rps.restart, rps.spawn) must route through the
+// A command that mutates SIM state (a restart, a spawn) must route through the
 // lockstep tick stream (LockstepPeer) so both peers stay in lockstep — the command handler
 // itself does that via its context; this registry only names + dispatches. A command that
 // touches only local/non-sim state runs immediately.

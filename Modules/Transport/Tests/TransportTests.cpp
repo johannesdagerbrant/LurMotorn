@@ -1,7 +1,7 @@
 // Dependency-free unit tests for the BLE transport contract (Phase A): the role
 // tie-break, the in-process loopback transport, and the EventInbox handoff. No game is
 // linked: an engine test binary that needs a game to build is the module wall broken
-// where nobody looks (the chess move-over-transport test now lives in chess's suite).
+// where nobody looks (the game-side move-over-transport test now lives in that game's suite).
 // move round-tripping through the ITransport seam, which is issue #3's "the move
 // codec round-trips real moves over the live link" proven in software, no radio.
 // No framework: each CHECK records a failure; the process exits non-zero if any
@@ -143,7 +143,7 @@ static void TestPeerBindingRejectsAThirdDevice() {
     // departure as link loss is the hijack in reverse: an outsider could drop a match by leaving.
     CHECK(!B.IsPeer("FF:EE:DD:CC:BB:02"));
 
-    // On real link loss the binding opens up again — this is what keeps chess's deliberate
+    // On real link loss the binding opens up again — this is what keeps a deliberate
     // opponent-switch (#38) working: that flow operates at session level AFTER link loss, so the gate
     // must apply only WHILE linked. A binding that outlived the link would forbid changing opponents.
     B.Clear();

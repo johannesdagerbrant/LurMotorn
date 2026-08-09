@@ -11,7 +11,8 @@
 // recording back through the loopback transport on the desktop and the exact failure
 // re-happens in a debugger, every time.
 //
-// At chess/RTS datagram rates this is bytes/sec — there is no cost argument. The ring
+// At the datagram rates a local two-peer link produces this is bytes/sec — there is no
+// cost argument. The ring
 // bounds memory for a long soak; the wire format is a flat [count][events...] blob.
 namespace Lur::Core {
 

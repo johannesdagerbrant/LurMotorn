@@ -42,7 +42,7 @@ public:
 
     // Move out the key-DOWN edges (virtual-key codes) collected since the last call.
     // Auto-repeat is filtered at the source, so a held key is a single press — what a
-    // discrete game action (e.g. RPS's 1-4 production buttons) wants. Casing-agnostic
+    // discrete game action (a numbered hotkey row) wants. Casing-agnostic
     // raw VKs; the game maps the codes it cares about.
     // Drain queued key-down VKs. Includes OS auto-repeat while a key is held (see the
     // WM_KEYDOWN comment): the dev console is the only consumer and wants the repeats. A

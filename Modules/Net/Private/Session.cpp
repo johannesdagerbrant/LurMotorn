@@ -182,7 +182,7 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     SinceRecvNs = 0;  // any traffic from the peer proves the link is alive
     // #163: real inbound proves the notify path is working, so a half-open verdict — or the count
     // building toward one — is retired HERE and nowhere else: it clears on evidence, not a timer,
-    // the same discipline the RPS diagnostics use so a stale latch can't outlive its fault.
+    // the discipline a latch needs in general: it clears on evidence, so it cannot outlive its fault.
     if (LinkHalfOpen_) Logf("link recovered — inbound traffic resumed after a half-open stall");
     SilentResets_ = 0;
     LinkHalfOpen_ = false;

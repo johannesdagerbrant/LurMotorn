@@ -6,7 +6,7 @@
 //
 //     # LurMotorn dev cvar overrides - safe to hand-edit; delete a line to un-override.
 //     render.debug_bars = true
-//     rps.miner.speed   = 0.7
+//     sim.unit.speed    = 0.7
 //
 // Keyed by the CVar's NAME (its durable identity, C.0.1); stable-sorted on write so
 // diffs stay clean; written temp-file-then-rename for crash safety. Entirely dev-only:

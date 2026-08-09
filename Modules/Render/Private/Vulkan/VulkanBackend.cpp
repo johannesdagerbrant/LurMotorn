@@ -1448,7 +1448,7 @@ private:
     void*          TextIBMapped = nullptr;
     uint32_t       TextVBCursor = 0, TextIBCursor = 0;
 
-    // Descriptor-set budget. Raised from 96 (visual polish): RPS crossed it just by adding one tinted
+    // Descriptor-set budget. Raised from 96 (visual polish): a game crossed it just by adding one tinted
     // material per unit type for BUILDINGS, and the failure mode was a SIGSEGV inside the GPU driver
     // (see AllocateDescriptorSet) rather than anything naming the pool. A set is a handful of bytes,
     // so headroom is nearly free and running out is far more expensive than over-allocating.

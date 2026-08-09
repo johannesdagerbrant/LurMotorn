@@ -17,7 +17,7 @@
 namespace Lur::Sim {
 
 // Parse an optional-sign decimal EXACTLY into raw Q16.16 with round-to-nearest.
-// "0.7" -> round(0.7 * 65536) = 45875, matching Rps::F(7,10)'s truncating build.
+// "0.7" -> round(0.7 * 65536) = 45875, matching a truncating F(7,10) literal build.
 inline bool FromString(const char* S, Fixed& Out) {
     if (!S) return false;
     // Trim ASCII whitespace both ends.

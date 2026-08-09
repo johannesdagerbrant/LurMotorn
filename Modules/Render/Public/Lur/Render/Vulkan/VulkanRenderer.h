@@ -20,7 +20,7 @@ public:
     // AppName is what this process reports to the driver in VkApplicationInfo — it shows up
     // in GPU captures, vendor driver logs and crash reports, so it must be the APP's name.
     // It was hardcoded to a game the engine happens to have shipped first, which meant every
-    // other game's frames arrived at the driver wearing chess's name. Required, not
+    // other game's frames arrived at the driver wearing the first game's name. Required, not
     // defaulted: a default is how it came to be wrong everywhere but the one app that set it.
     static IRenderer* Create(const char* AppName);
     // ... IRenderer overrides implemented in the app builds.

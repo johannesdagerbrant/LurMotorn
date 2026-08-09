@@ -4,7 +4,8 @@
 // Deliberately ANTI-GAME. The console paints over a running match, and if it shared the
 // game's palette a reader could not tell at a glance which pixels are the game and which are
 // the tool. So: flat charcoal panels, no gradients, a single cold cyan accent, and ink that
-// is grey rather than any team colour. RPS's teams are cyan/yellow (#142) — the accent here
+// is grey rather than any team colour. A game will own the saturated end of the palette for
+// its own factions — the accent here
 // is deliberately lighter and desaturated against team cyan so a highlighted row never reads
 // as "team 0 owns this".
 //

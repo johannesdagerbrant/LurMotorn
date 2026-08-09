@@ -5,7 +5,7 @@ namespace Lur::Render {
 
 // Thin 2D helpers over the general renderer: a flat board is just an orthographic
 // camera plus quad meshes. This is the "2D layer on top of a 3D-capable renderer"
-// — chess uses these, while 3D games use Camera/meshes directly.
+// — a 2D game uses these, while a 3D game uses Camera/meshes directly.
 
 // Pixel-space orthographic camera: (0,0) top-left, (Width,Height) bottom-right.
 //

@@ -26,8 +26,8 @@ constexpr SoundId InvalidSound = -1;
 //
 // Each voice reads at its own PITCH (issue #78): its position is fixed-point and it steps
 // by a fractional amount, linearly interpolating between samples. Pitch is the strongest
-// variety knob there is for percussive SFX — it is what stops the hundredth chess move
-// from being audibly the same click as the first. At Pitch == 1.0 the step is exactly one
+// variety knob there is for percussive SFX — it is what stops the hundredth repeat of a
+// frequent event from being audibly the same click as the first. At Pitch == 1.0 the step is exactly one
 // and the fraction is exactly zero, so the interpolation reproduces the PCM bit-for-bit;
 // varying it costs one multiply-add per frame and no allocation, so Render() stays
 // wait-free.

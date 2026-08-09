@@ -62,7 +62,7 @@ enum class ETextureFormat { Rgba8, Rg8 };
 //   * InkLo/Hi — the shade band treated as "ink": shade below the band blends fully
 //                to Outline, above it stays the tinted fill. Disabled (plain
 //                tint×shade) when InkHi <= InkLo, which is the default.
-// Chess uses these to render both piece colours from one mask set: e.g. a dark
+// A game with two-tone artwork renders both colours from one mask set: e.g. a dark
 // outline + gentle gamma for white pieces, a white outline + steep gamma for black.
 struct MaterialDesc {
     TextureHandle BaseColor = 0;   // 0 = flat white
@@ -187,12 +187,12 @@ public:
     // parked in vkWaitForFences / vkAcquireNextImageKHR waiting for the previous image to
     // come back. That wait sits in the middle of the frame, so a loop that services the
     // radio only at its top and bottom leaves a whole refresh in which nothing is
-    // serviced — measured on chess as ble.toApply maxing at 15.4 ms, a full frame, even
+    // serviced — measured at ble.toApply maxing at 15.4 ms, a full frame, even
     // after the inbox was drained twice per iteration (#189). The two drains are ~1 ms
     // apart in wall clock; the 15 ms gap is HERE.
     //
     // Setting this turns the infinite waits into short polls with the callback in between,
-    // so the dead time becomes useful: chess wires it to Session::PumpInbox, and a peer's
+    // so the dead time becomes useful: an app wires it to Session::PumpInbox, and a peer's
     // move lands within a poll interval instead of within a frame. Optional — unset, the
     // waits stay a single blocking call and behaviour is exactly as before.
     //

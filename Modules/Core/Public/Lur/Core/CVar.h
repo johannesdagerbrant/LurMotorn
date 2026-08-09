@@ -3,7 +3,7 @@
 // that "decides everything else" in the dev-tools spec (dev-console-cvar-tech-spec.md
 // §1, §1.1). ONE expression at every call site, all build configs:
 //
-//     x += Rps::CvMinerSpeed.Get();      // or just `Rps::CvMinerSpeed` via operator T
+//     x += CvUnitSpeed.Get();            // or just `CvUnitSpeed` via operator T
 //
 // The two-worlds split lives ENTIRELY inside this class, never at call sites (§0 point 2):
 //
@@ -312,7 +312,7 @@ CVar(const char*, T, A...) -> CVar<T>;
 
 // LUR_CVAR(Var, "name", Default, Flags, "Description") — the ONE way to declare a CVar. The
 // dotted name IS the hierarchy: the console groups cvars into a tree by splitting the name on '.'
-// (so "rps.boid.sep_strength" nests under rps -> boid), which is why there is no separate category.
+// (so "sim.boid.sep_strength" nests under sim -> boid), which is why there is no separate category.
 //   Dev:      inline mutable CVar + a separate registrar static (so the console/panel/
 //             cvars.cfg can find it by name) + a compile-time float-gameplay ban.
 //   Shipping: JUST the constant-initialized value (flags/registrar/description vanish),

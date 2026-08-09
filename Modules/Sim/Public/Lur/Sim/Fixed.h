@@ -10,7 +10,7 @@ namespace Lur::Sim {
 // re-simulates when corrected. That ONLY works if both devices compute bit-for-bit
 // identical results from identical inputs. Floating-point can diverge across CPUs,
 // compilers, and optimization levels; fixed-point integer math is deterministic
-// everywhere. Chess doesn't need this yet, but the platform is built on it.
+// everywhere. A turn-based game may never need it; a reflex game cannot ship without it.
 struct Fixed {
     int32_t Raw = 0;
     static constexpr int FracBits = 16;
@@ -49,7 +49,7 @@ struct Fixed {
     constexpr Fixed operator-() const { return Fixed{-Raw}; }
 };
 
-// Free helpers — grown on demand as the RPS sim's call sites need them (issue
+// Free helpers — grown on demand as real sim call sites need them (issue
 // #75), not speculatively. All pure integer ops on Raw, so determinism-safe.
 constexpr Fixed Abs(Fixed A) { return A.Raw < 0 ? Fixed{-A.Raw} : A; }
 constexpr Fixed Min(Fixed A, Fixed B) { return A.Raw < B.Raw ? A : B; }

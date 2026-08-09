@@ -9,7 +9,7 @@ namespace Lur::Text {
 // re-cook.
 const CookedFont& InterFont();
 
-// DSEG7 Classic (OFL): a 7-segment digital display face for future speed-chess clocks.
+// DSEG7 Classic (OFL): a 7-segment digital display face, for match clocks and counters.
 // Cooked through the same MSDF pipeline (#28) — proves the multi-font seam. Covers the
 // digits/symbols a segmented display has, not full ASCII.
 const CookedFont& Dseg7Font();

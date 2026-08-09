@@ -9,7 +9,7 @@ namespace Lur::Transport {
 // these constants lived separately in Kotlin and Swift they could drift, and two
 // phones would silently never see each other. They are part of the protocol:
 // changing a UUID is a breaking wire change (bump Lur::Net::ProtocolVersion), the
-// same rule that governs the chess move ordering.
+// same rule that governs any ordering a game encodes an index into.
 //
 // The 128-bit UUIDs are ASCII-encoded for memorability — every byte is a printable
 // character, which is perfectly legal (a UUID is just a 128-bit number):
@@ -24,16 +24,17 @@ namespace Lur::Transport {
 
 // GATT service the peripheral exposes and the central scans for. This is PER-GAME: every
 // game rides the SAME engine transport, so two games advertising one service UUID would
-// cross-link (a chess phone connecting an RTS phone, and vice versa). Only the SERVICE
+// cross-link (a phone running one game connecting a phone running another). Only the SERVICE
 // UUID needs to differ — it is the advertise/scan discriminator; the datagram/device-id
 // characteristics live inside the matched service.
 //
-// REQUIRED, with no default. There used to be one, and it was chess's value, so a game
-// that never defined the macro did not get "no identity" — it got CHESS's identity, and
-// nothing said so at build time. That is the wrong failure: two games silently sharing a
+// REQUIRED, with no default. There used to be one, and it was the first game's value, so a
+// game that never defined the macro did not get "no identity" — it inherited another game's,
+// and nothing said so at build time. That is the wrong failure: two games silently sharing a
 // discriminator is invisible until two phones link the wrong app on a table somewhere. A
 // missing definition is now a compile error instead, which is the one failure mode that
-// cannot ship. (Chess had been living on that default; it now states its value, unchanged.)
+// cannot ship. Every existing app states the value it had been inheriting, so no wire
+// identity moved.
 #ifndef LUR_BLE_SERVICE_UUID
 #error "LUR_BLE_SERVICE_UUID is not defined. Each game must define its own BLE service UUID \
 (a per-app target_compile_definitions) — inheriting another game's would cross-link the two."
@@ -149,8 +150,8 @@ inline EBleRole DecideBleRoleBreaking(std::string_view LocalId, std::string_view
 // #83 — PAIRWISE PEER BINDING. A match is strictly 1:1, and a third device in the room must be able
 // to link with SOMEONE ELSE, or wait, but never disturb a live pair.
 //
-// The holes this closes (found 2026-07-19, present in all four transports — chess + RPS × Android +
-// iOS) were all the same shape: the peripheral believed whoever spoke last.
+// The holes this closes (found 2026-07-19, present in every per-platform transport in the repo)
+// were all the same shape: the peripheral believed whoever spoke last.
 //
 //   * MID-MATCH SUBSCRIBER HIJACK. Any CCCD subscription became "the canonical central"
 //     (`connectedCentral = device` on Android, `_Subscriber = central` on iOS — unconditional
@@ -234,7 +235,7 @@ public:
     // never through its own server's datagram characteristic.
     void Close() { Bound_ = false; Peer_[0] = '\0'; Closed_ = true; }
 
-    // The link is genuinely gone: open up again. This is what keeps chess's deliberate opponent-switch
+    // The link is genuinely gone: open up again. This is what keeps a deliberate opponent-switch
     // (#38) working — that flow operates at SESSION level after link loss, so the gate must apply only
     // WHILE linked. A binding that outlived the link would forbid ever changing opponents. Reopens a
     // Close()d server too, since the next link may well be one we serve.
