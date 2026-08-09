@@ -1,6 +1,6 @@
 // iOS audio backend: a RemoteIO Audio Unit output implementing the engine's IAudioDevice.
 // AudioToolbox's RemoteIO is Apple's lowest-latency callback path (the twin of MoltenVK for
-// audio) — a per-OS seam file, like IosBleTransport.mm, that defines CreateAudioDevice().
+// audio) — one copy per PLATFORM, defining CreateAudioDevice(), compiled in only on iOS.
 //
 // The mixer produces MONO 16-bit @ 48 kHz; iOS hardware output is interleaved stereo, so the
 // render callback renders one mono buffer and duplicates it into L/R. An AVAudioSession set

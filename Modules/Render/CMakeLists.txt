@@ -46,4 +46,10 @@ else()
     target_compile_features(lur_render INTERFACE cxx_std_20)
     target_link_libraries(lur_render INTERFACE lur_math)
 endif()
+# The .mm seam is Objective-C++ under ARC (it uses __bridge casts). CMake's Xcode generator
+# does not enable ARC by default, and it used to be switched on by the APP target that
+# compiled this file — so the flag has to move with the file or the bridge casts fail.
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set_source_files_properties(Platform/Ios/VulkanSurface.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
 add_library(lur::render ALIAS lur_render)

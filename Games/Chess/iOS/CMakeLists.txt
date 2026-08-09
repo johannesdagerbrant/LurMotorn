@@ -60,8 +60,7 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 #   IosBleTransport.mm  — the CoreBluetooth backend of Lur::Transport::ITransport.
 add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
-    Sources/IosBleTransport.mm
-    Sources/IosAudioDevice.mm)
+    Sources/IosBleTransport.mm)
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
@@ -96,7 +95,7 @@ target_link_libraries(OnlyChess PRIVATE
     lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math
-    lur::audio  # wait-free SFX mixer + LSF1 codec (IosAudioDevice.mm is its RemoteIO backend)
+    lur::audio  # wait-free SFX mixer + LSF1 codec, incl. its RemoteIO device seam
     lur::trace) # named CPU scopes (#101) + the touch->present latency (#192)
 
 # The .mm sources are Objective-C++ and use ARC. CMake's Xcode generator does NOT
@@ -104,7 +103,6 @@ target_link_libraries(OnlyChess PRIVATE
 set_source_files_properties(
     Sources/AppMain.mm
     Sources/IosBleTransport.mm
-    Sources/IosAudioDevice.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # MoltenVK + Apple frameworks. MoltenVK is linked as the matching static slice;
@@ -118,7 +116,7 @@ target_link_libraries(OnlyChess PRIVATE
     "-framework QuartzCore"
     "-framework IOSurface"
     "-framework CoreGraphics"
-    "-framework AudioToolbox"   # RemoteIO Audio Unit (IosAudioDevice.mm)
+    "-framework AudioToolbox"   # RemoteIO Audio Unit (lur::audio's iOS device seam)
     "-framework AVFAudio")      # AVAudioSession (playback category + IO buffer)
 
 # iOS app bundle metadata. The Info.plist (with the Bluetooth usage strings) is

@@ -29,8 +29,7 @@ target_include_directories(native_app_glue PUBLIC
 # (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
 add_library(onlychess SHARED
     AndroidMain.cpp
-    AndroidBleTransport.cpp
-    AndroidAudioDevice.cpp)
+    AndroidBleTransport.cpp)
 
 target_link_libraries(onlychess
     native_app_glue

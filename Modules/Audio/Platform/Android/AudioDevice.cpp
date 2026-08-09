@@ -1,7 +1,7 @@
 // Android audio backend: an AAudio low-latency output stream implementing the engine's
-// IAudioDevice. AAudio is a pure NDK C API (API 26+, our minSdk) — no Java, no JNI. This is
-// the audio twin of AndroidBleTransport.cpp / AndroidVulkanSurface.cpp: a per-OS seam file
-// that defines Lur::Audio::CreateAudioDevice(), compiled only into the app.
+// IAudioDevice. AAudio is a pure NDK C API (API 26+, our minSdk) — no Java, no JNI. The audio
+// twin of the renderer's surface seam: one copy per PLATFORM, defining
+// Lur::Audio::CreateAudioDevice(), compiled in only on Android.
 //
 // We request mono 16-bit @ 48 kHz on the LOW_LATENCY path and hand the callback straight to
 // the mixer's RenderCallback. The buffer is sized to two bursts — the smallest that avoids
