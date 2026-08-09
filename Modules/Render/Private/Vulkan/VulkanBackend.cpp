@@ -187,7 +187,11 @@ public:
         if (Surface != VK_NULL_HANDLE && Instance != VK_NULL_HANDLE)
             vkDestroySurfaceKHR(Instance, Surface, nullptr);
         if (Instance != VK_NULL_HANDLE) vkDestroyInstance(Instance, nullptr);
-        *this = VulkanRendererImpl{};
+        // Wipe every handle back to its default by assigning a fresh instance — but carry the
+        // app name across. It is identity, not per-session state, and Android tears the
+        // renderer down and re-Inits it on every surface loss, so a reset name would leave the
+        // second instance reporting a different app than the first.
+        *this = VulkanRendererImpl{AppName};
     }
 
     MeshHandle CreateMesh(const Vertex* Vertices, uint32_t VertexCount,
