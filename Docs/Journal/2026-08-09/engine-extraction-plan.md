@@ -252,6 +252,55 @@ hand-maintained Xcode project to fight.
 - **"Time ago" formatting** and a **long-press recognizer** — cut by the YAGNI pass (one and zero
   consumers respectively).
 
+## Tracker reconciliation
+
+Reviewing the open tracker against these directives found seven issues that had gone stale, plus
+three that were already done. Recorded here because *why* something was closed is the part that
+rots first.
+
+**Closed as superseded by the directives**
+
+- **#15 "Spec: BLE wire format & on-disk save record"** — three decisions invalidate it: the wire
+  version splits in two; its framing rule (`length == 1 → move`) is a **chess assumption presented
+  as an engine invariant** (only chess has a 1-byte move, and `SendMove` is being deleted); and its
+  on-disk section is replaced by game-declared persistence schemas + the recorder's version field.
+  Content moves to a checked-in `Modules/Net/README.md` in Phase 7 — it was a spec living in a
+  never-closing issue, the exact anti-pattern CLAUDE.md warns about.
+- **#16 "Transport & robustness follow-ups"** — 3 of 4 items dead (item 3 fixed by #40; item 2's
+  files deleted by #42/#197; item 4 absorbed by #197). The survivor, iOS `VK_ERROR_DEVICE_LOST`
+  non-recovery, is re-filed as **#199**.
+
+**Absorbed — work still happens, inside a phase**
+
+- **#14** (Android teardown leaks the renderer), **#73** (iOS relaunch black screen), **#199** (iOS
+  device-lost) are **one root cause seen from three platforms: nobody owns the window/device
+  lifecycle.** All three land in Phase 3. Note #73's reattach heal *already exists in both iOS
+  mains* (~51 + ~73 LOC), so it may be fixed-but-unclosed — verify on device.
+- **#74** (chess record > 1 datagram can't resync) — solved as a side effect of Phase 4; chess
+  inherits chunked resync from the shared coordinator.
+- **#49** split four ways and **retitled** to its only surviving bullet (`DrawGlyphs` silent drop).
+  The Kotlin API-33 migration moved to #197 (that code is being rewritten — migrating first is
+  wasted, after is moot); renderer resource-lifetime moved to Phase 5; and `NO_RESPONSE` writes are
+  **likely already done** per the 2026-08-04 journal — verify before picking up.
+
+**Notes added, not closed**
+
+- **#9 (glTF)** — Phase 0 deletes `Quat`/`Perspective`/`LookAt`, so this now carries a prerequisite:
+  re-add the 3D math *with tests* when it wakes. Recorded so nobody later reads the deletion as 3D
+  being abandoned.
+- **#59–#64 (L2CAP CoC)** — stays parked, but its design was drawn against today's transport shape
+  and needs rebasing onto `IBleRadio`/`BleLinkController`. A stale design is worse than none.
+- **#81 (RTS audio)** — sequenced behind #82; implementing it first would write a second variation
+  policy that the promotion then has to reconcile. The audio *device seam* moves in Phase 1
+  specifically to stop it being copied a 3rd and 4th time.
+
+**Closed as already complete** (verified against HEAD, not inferred from commit messages)
+
+- **#7** threefold repetition — `RepetitionKey` + `PosKeys` history + `RepetitionCount() >= 3`.
+- **#67** capture trays — derived by replaying the record, nothing persisted, `Flip` honoured.
+- **#78** chess audio — all four `EMoveSound` events with the documented precedence, 3-variant
+  no-repeat picking for frequent events, single-clip alerts for rare ones.
+
 ## Provenance
 
 Interview and per-decision records: `.claude/Documents/interviews/engine-extraction-2026-08-09/`.
