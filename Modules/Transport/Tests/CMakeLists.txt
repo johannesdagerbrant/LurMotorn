@@ -17,3 +17,12 @@ target_compile_definitions(transport_tests PRIVATE
 target_compile_features(transport_tests PRIVATE cxx_std_20)
 
 add_test(NAME transport_tests COMMAND transport_tests)
+
+# The BLE send-queue policy, host-tested against a fake radio (#197). This logic used to live in
+# BleShim.kt where no test could reach it — which is why it drifted between the two games. The
+# fake is the point: it can refuse a write, lose a completion, or drop the link on demand, none
+# of which a real radio does when asked.
+add_executable(ble_send_queue_tests BleSendQueueTests.cpp)
+target_link_libraries(ble_send_queue_tests PRIVATE lur::transport)
+target_compile_features(ble_send_queue_tests PRIVATE cxx_std_20)
+add_test(NAME ble_send_queue_tests COMMAND ble_send_queue_tests)
