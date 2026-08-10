@@ -65,9 +65,12 @@
 //
 // So: let NSString do the formatting (it handles %@ for NSError, %zu, %s alike, so no call site
 // changes) and hand os_log the finished string as a single %{public}s. Same pattern the app mains
-// already use for their engine log sink. Adjacent NSString literals concatenate, so multi-line
-// formats still work, and ##__VA_ARGS__ swallows the comma for a call with no arguments.
-#define BLE_LOG(Fmt, ...)                                                              os_log(OS_LOG_DEFAULT, "%{public}s BLE: %{public}s", Lur::Core::LogTag,                   [[NSString stringWithFormat:Fmt, ##__VA_ARGS__] UTF8String])
+// already use for their engine log sink. NSString handles the multi-line concatenated formats
+// unchanged, and ##__VA_ARGS__ swallows the comma for a call with no arguments of its own.
+#define BLE_LOG(Fmt, ...)                                                    \
+    os_log(OS_LOG_DEFAULT, "%{public}s BLE: %{public}s", Lur::Core::LogTag,  \
+           [[NSString stringWithFormat:Fmt, ##__VA_ARGS__] UTF8String])
+
 #include "Lur/Transport/EventInbox.h"
 
 using namespace Lur::Transport;
