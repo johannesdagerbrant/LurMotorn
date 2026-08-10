@@ -1,8 +1,14 @@
-// Bridges Lur::Transport::ITransport to the Kotlin BleShim over JNI (issue #3,
-// Android half). The Kotlin side owns the radio (advertise/scan/GATT); this side
-// is the platform-neutral seam the engine speaks to: Send() pushes a datagram to
-// BleShim.send over JNI, and the BleShim's radio callbacks land in the native
-// methods below, which feed bytes/state back to the engine.
+// Bridges Lur::Transport::ITransport to the Kotlin BleShim over JNI (issue #3, Android half).
+// ONE copy, shared by every game — this and BleShim.kt beside it are the whole Android radio.
+//
+// The Kotlin side owns the radio API (advertise/scan/GATT); this side is the platform-neutral seam
+// the engine speaks to: Send() pushes a datagram to BleShim.send over JNI, and the BleShim's radio
+// callbacks land in the native methods below, which feed bytes and state back to the engine.
+//
+// It was per-game because the JNI symbol convention bakes the app's package into the exported
+// names. The natives bind by RegisterNatives against a fixed engine class now (see the table at the
+// end of the file), so nothing here names an app: the log tag arrives as LUR_LOG_TAG and the BLE
+// UUIDs are served to Kotlin from BleProtocol.h.
 #include <jni.h>
 #include <android/log.h>
 #include <cstdint>
@@ -10,17 +16,19 @@
 #include <string>
 #include <vector>
 #if LUR_AGENT
-#include <sys/system_properties.h>   // role override via debug.lur.role (#196/#197)
+#include <sys/system_properties.h>   // agent role override via debug.lur.role (#196)
 #endif
 
+#include "Lur/Core/LogTag.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/BleProtocol.h"
 #include "Lur/Transport/EventInbox.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, "OnlyRps", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "OnlyRps", __VA_ARGS__)
+// The app's log tag, from LUR_LOG_TAG (Lur/Core/LogTag.h #errors if an app forgot to set it).
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, Lur::Core::LogTag, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, Lur::Core::LogTag, __VA_ARGS__)
 
 namespace Lur::Transport {
 namespace {
@@ -33,6 +41,8 @@ class AndroidBleTransport : public ITransport, public EventInbox::Sink {
 public:
     void Send(const uint8_t* Data, std::size_t Size) override;
     void SendExpedited(const uint8_t* Data, std::size_t Size) override;
+    void RestartRadio() override;                              // #182 hard reset
+    bool CanRestartRadio() const override { return true; }     // ...and we really have one
 
 private:
     void SendWithPriority(const uint8_t* Data, std::size_t Size, bool Expedited);
@@ -40,7 +50,6 @@ public:
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
     void ResetLink() override;
-    void RestartRadio() override;
     void Pump() override { Inbox.Drain(*this); }  // engine thread: dispatch queued events
 
     // EventInbox::Sink — invoked by Drain() on the engine thread, in arrival order.
@@ -61,9 +70,9 @@ AndroidBleTransport g_Transport;
 // JNI plumbing cached at load / shim-registration time.
 JavaVM*   g_Vm         = nullptr;
 jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
-jmethodID g_SendMethod    = nullptr; // BleShim.send([B)V
-jmethodID g_ResetMethod   = nullptr; // BleShim.resetLink()V
-jmethodID g_RestartMethod = nullptr; // BleShim.restartRadio()V  (#182 hard reset)
+jmethodID g_SendMethod  = nullptr; // BleShim.send([B)V
+jmethodID g_RestartMethod = nullptr;  // BleShim.restartRadio()V (#182 hard reset)
+jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
 
 // Get a JNIEnv for the calling thread, attaching it if necessary. android_main
 // runs on a native thread the JVM doesn't know about, so Send() may need attach.
@@ -104,23 +113,23 @@ void AndroidBleTransport::SendExpedited(const uint8_t* Data, std::size_t Size) {
 // drop the (dead) link and resume discovery, rather than waiting out the BLE
 // supervision timeout (10-20s) for a disconnect callback. This makes a killed-peer
 // drop detected in ~5s on Android too, matching iOS.
-void AndroidBleTransport::ResetLink() {
-    if (g_Shim == nullptr || g_ResetMethod == nullptr) return;
-    JNIEnv* Env = EnvForThisThread();
-    if (Env == nullptr) return;
-    Env->CallVoidMethod(g_Shim, g_ResetMethod);
-}
-
-// #182: the harder reset the net layer escalates to once a link is judged HALF-OPEN — a soft
-// ResetLink (above) merely drops the link and rediscovers; on a WEDGED BLE stack that clears
-// nothing (80 tried on hardware). This tears the whole BluetoothGatt down (close, not just
-// disconnect) and refresh()es its stale service cache before rebuilding the radio — the Kotlin
-// side does the real work. Bounded by the Session (MaxRadioRestarts) so it can't become churn.
+// #182: the SOFT ResetLink below provably cannot clear a wedged BLE stack — on hardware 80 soft
+// resets in a row cleared nothing and only a reboot did. This is the harder escalation the session
+// reaches for once it has concluded the link is half-open: tear the whole radio down and rebuild it.
+// Chess had no implementation at all, so the session's escalation logged three attempts that never
+// happened.
 void AndroidBleTransport::RestartRadio() {
     if (g_Shim == nullptr || g_RestartMethod == nullptr) return;
     JNIEnv* Env = EnvForThisThread();
     if (Env == nullptr) return;
     Env->CallVoidMethod(g_Shim, g_RestartMethod);
+}
+
+void AndroidBleTransport::ResetLink() {
+    if (g_Shim == nullptr || g_ResetMethod == nullptr) return;
+    JNIEnv* Env = EnvForThisThread();
+    if (Env == nullptr) return;
+    Env->CallVoidMethod(g_Shim, g_ResetMethod);
 }
 
 } // namespace
@@ -132,115 +141,70 @@ ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
 using namespace Lur::Transport;
 
 
+// The BLE wire identity, served to Kotlin from its single source of truth (BleProtocol.h).
+//
+// The Kotlin used to declare all three UUIDs itself, under a comment reading "MUST match
+// Lur::Transport::BleProtocol". That is a duplication maintained by hope: nothing checks it, and a
+// mismatch does not fail loudly — two phones simply never see each other, which is the hardest BLE
+// symptom to attribute. Reading them across the seam makes drift impossible rather than discouraged.
+// #146: is a device id read off the peer well-formed (32 lowercase hex)? A failed or truncated GATT
+// read yields bytes that are not an id, and a role decided from those is one the peer cannot mirror
+// — which IS the deadlock's mechanism. Guarding the read is the other half of the breaker.
+static jboolean Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject, jbyteArray Id) {
+    const jsize Len = Env->GetArrayLength(Id);
+    std::string S(static_cast<std::size_t>(Len), 0);
+    if (Len > 0) Env->GetByteArrayRegion(Id, 0, Len, reinterpret_cast<jbyte*>(S.data()));
+    return Lur::Save::IsValidDeviceId(S) ? JNI_TRUE : JNI_FALSE;
+}
+
+static jstring Ble_nativeServiceUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleServiceUuid).c_str());
+}
+static jstring Ble_nativeDatagramUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleDatagramCharacteristicUuid).c_str());
+}
+static jstring Ble_nativeDeviceIdUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleDeviceIdCharacteristicUuid).c_str());
+}
+
 
 // --- JNI: BleShim hands C++ a durable reference to itself + caches send(). ---
 static void JNICALL Ble_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
-    g_SendMethod    = Env->GetMethodID(Cls, "send", "([BZ)V");   // (bytes, expedited)
-    g_ResetMethod   = Env->GetMethodID(Cls, "resetLink", "()V");
+    g_SendMethod  = Env->GetMethodID(Cls, "send", "([BZ)V");   // (bytes, expedited)
     g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
+    g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
 }
 
-namespace {
-std::string JBytesToString(JNIEnv* Env, jbyteArray Arr) {
-    const jsize Len = Env->GetArrayLength(Arr);
-    std::string S(static_cast<std::size_t>(Len), '\0');
-    Env->GetByteArrayRegion(Arr, 0, Len, reinterpret_cast<jbyte*>(S.data()));
-    return S;
-}
-#if LUR_AGENT
-// FORCED STATE OVER A SYSTEM PROPERTY, SO LUR_AGENT — settled in #197. This was LUR_INTERNAL,
-// which meant it shipped in every Development build, i.e. every build someone actually plays.
-// Re-read the role pin on EVERY decision, so `adb shell setprop debug.lur.role
-// central|peripheral` takes effect on the next (re)launch/discovery without a reinstall;
-// empty = auto. Returns whether a pin is now in force, so the caller can say so out loud —
-// the prop survives until reboot, and a stale one from an earlier rig run is the first thing
-// to suspect when the roles come out wrong (#146).
-bool RefreshRolePin() {
-    char Prop[PROP_VALUE_MAX] = {};
-    __system_property_get("debug.lur.role", Prop);
-    if (std::strcmp(Prop, "central") == 0)         SetBleRoleOverride(EBleRole::Central);
-    else if (std::strcmp(Prop, "peripheral") == 0) SetBleRoleOverride(EBleRole::Peripheral);
-    else                                           ClearBleRoleOverride();
-    if (IsBleRolePinned())
-        LOGI("BLE role PINNED by debug.lur.role=%s (dev override; `setprop debug.lur.role \"\"` "
-             "to restore the auto tie-break)", Prop);
-    return IsBleRolePinned();
-}
-#endif
-}  // namespace
-
-// --- JNI: the shared, cross-platform role tie-break (single source of truth). Defers is how
-// many times we have already connected out, been told "you're the peripheral" and deferred
-// with no peer ever claiming Central — at the threshold the shared breaker takes Central so a
-// both-Peripheral state cannot deadlock (#146). ---
+// --- JNI: the shared, cross-platform role tie-break (single source of truth). ---
 static jint JNICALL Ble_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
                                                       jbyteArray LocalId, jbyteArray PeerId,
                                                       jint Defers) {
+// FORCED STATE OVER A SYSTEM PROPERTY, SO LUR_AGENT (issue #196) — the same channel shape as
+// the autoplay hook #195 moved, and note it is re-read on EVERY role decision rather than once
+// at startup, so a stale property keeps applying for the life of the install.
 #if LUR_AGENT
-    RefreshRolePin();
+    // Dev role override (issue: test BOTH role configs on one device pair). Read the
+    // prop on every decision so `adb shell setprop debug.lur.role central|peripheral`
+    // takes effect on the next (re)launch/discovery without a reinstall; empty = auto.
+    {
+        char Prop[PROP_VALUE_MAX] = {};
+        __system_property_get("debug.lur.role", Prop);
+        if (std::strcmp(Prop, "central") == 0)         SetBleRoleOverride(EBleRole::Central);
+        else if (std::strcmp(Prop, "peripheral") == 0) SetBleRoleOverride(EBleRole::Peripheral);
+        else                                           ClearBleRoleOverride();
+    }
 #endif
-    const std::string Local = JBytesToString(Env, LocalId);
-    const std::string Peer  = JBytesToString(Env, PeerId);
+    const jsize LocalLen = Env->GetArrayLength(LocalId);
+    const jsize PeerLen  = Env->GetArrayLength(PeerId);
+    std::string Local(static_cast<std::size_t>(LocalLen), '\0');
+    std::string Peer(static_cast<std::size_t>(PeerLen), '\0');
+    Env->GetByteArrayRegion(LocalId, 0, LocalLen, reinterpret_cast<jbyte*>(Local.data()));
+    Env->GetByteArrayRegion(PeerId, 0, PeerLen, reinterpret_cast<jbyte*>(Peer.data()));
     // EBleRole::Peripheral == 0, Central == 1 (matches BleShim's constants).
     return static_cast<jint>(DecideBleRoleBreaking(Local, Peer, static_cast<int>(Defers)));
-}
-
-// --- #83 JNI: pairwise peer binding. While linked, this peripheral serves exactly ONE central; a
-// third device in the room may link with someone else or wait, but must not disturb a live pair.
-//
-// The POLICY is Lur::Transport::PeerBinding (host-tested), not Kotlin, for the same reason the role
-// tie-break above is C++: the rule is tiny and was still wrong in all four transports at once, and
-// none of the platform callbacks it guards can be reached by a host test. The Kotlin shim asks; C++
-// decides. Cleared by nativeOnDisconnected, so a lost link opens the binding up again — which is what
-// keeps chess's deliberate opponent-switch (#38) possible.
-//
-// The id is the BluetoothDevice address, opaque here: compared, never parsed.
-namespace {
-Lur::Transport::PeerBinding g_PeerBinding;
-
-std::string JStringToStd(JNIEnv* Env, jstring S) {
-    if (S == nullptr) return {};
-    const char* Chars = Env->GetStringUTFChars(S, nullptr);
-    std::string Out = Chars != nullptr ? Chars : "";
-    if (Chars != nullptr) Env->ReleaseStringUTFChars(S, Chars);
-    return Out;
-}
-}  // namespace
-
-// A central wrote the CCCD (enabled notifications). True = it is the peer we serve; false = a
-// non-bound device whose subscription must be IGNORED rather than allowed to redirect our notifies.
-static jboolean JNICALL Ble_nativeAcceptSubscriber(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
-    const std::string A = JStringToStd(Env, Addr);
-    const bool Ok = g_PeerBinding.AcceptSubscriber(A.c_str());
-    if (!Ok) LOGI("BLE: IGNORING subscribe from %s — a live pair serves exactly one central (#83)",
-                  A.c_str());
-    return Ok ? JNI_TRUE : JNI_FALSE;
-}
-
-// May a datagram from this central reach the engine? Pre-link traffic passes (that IS the handshake);
-// once bound, only the peer's bytes do — unfiltered, a third device injected straight into the
-// lockstep/move stream.
-static jboolean JNICALL Ble_nativeAcceptData(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
-    const std::string A = JStringToStd(Env, Addr);
-    return g_PeerBinding.AcceptData(A.c_str()) ? JNI_TRUE : JNI_FALSE;
-}
-
-// Is this the bound peer? Only ITS disconnect may end the match — treating any device's departure as
-// link loss is the hijack in reverse, letting an outsider kill a live pair by leaving.
-static jboolean JNICALL Ble_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
-    const std::string A = JStringToStd(Env, Addr);
-    return g_PeerBinding.IsPeer(A.c_str()) ? JNI_TRUE : JNI_FALSE;
-}
-
-// --- JNI: is a device id read off the peer well-formed (32 lowercase hex)? A failed/truncated
-// GATT read yields bytes that are not an id, and deciding a role from those is what produced
-// the both-Peripheral deadlock — so the shim retries the read instead of trusting it (#146). ---
-static jboolean JNICALL Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject /*Self*/,
-                                                           jbyteArray Id) {
-    return Lur::Save::IsValidDeviceId(JBytesToString(Env, Id)) ? JNI_TRUE : JNI_FALSE;
 }
 
 // --- JNI: the persistent device id (issue #17), sourced from the engine's shared
@@ -294,6 +258,54 @@ static void JNICALL Ble_nativeSavePeerId(JNIEnv* Env, jobject /*Self*/,
     DeviceStore.Save(Lur::Save::PeerIdKey, Bytes.data(), Bytes.size());
 }
 
+// --- #83 JNI: pairwise peer binding. While linked, this peripheral serves exactly ONE central; a
+// third device in the room may link with someone else or wait, but must not disturb a live pair.
+//
+// The POLICY is Lur::Transport::PeerBinding (host-tested), not Kotlin, for the same reason the role
+// tie-break is C++: the rule is tiny and was still wrong in all four transports at once, and none of
+// the platform callbacks it guards can be reached by a host test. The Kotlin shim asks; C++ decides.
+// Cleared by nativeOnDisconnected, so a lost link opens the binding up again — which is what keeps the
+// deliberate opponent-switch (#38) possible.
+//
+// The id is the BluetoothDevice address, opaque here: compared, never parsed.
+namespace {
+Lur::Transport::PeerBinding g_PeerBinding;
+
+std::string JStringToStd(JNIEnv* Env, jstring S) {
+    if (S == nullptr) return {};
+    const char* Chars = Env->GetStringUTFChars(S, nullptr);
+    std::string Out = Chars != nullptr ? Chars : "";
+    if (Chars != nullptr) Env->ReleaseStringUTFChars(S, Chars);
+    return Out;
+}
+}  // namespace
+
+// A central wrote the CCCD (enabled notifications). True = it is the peer we serve; false = a
+// non-bound device whose subscription must be IGNORED rather than allowed to redirect our notifies.
+static jboolean JNICALL Ble_nativeAcceptSubscriber(JNIEnv* Env, jobject /*Self*/,
+                                                           jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    const bool Ok = g_PeerBinding.AcceptSubscriber(A.c_str());
+    if (!Ok) LOGI("BLE: IGNORING subscribe from %s — a live pair serves exactly one central (#83)",
+                  A.c_str());
+    return Ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// May a datagram from this central reach the engine? Pre-link traffic passes (that IS the handshake);
+// once bound, only the peer's bytes do — unfiltered, a third device injected straight into the move
+// stream.
+static jboolean JNICALL Ble_nativeAcceptData(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    return g_PeerBinding.AcceptData(A.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// Is this the bound peer? Only ITS disconnect may end the match — treating any device's departure as
+// link loss is the hijack in reverse, letting an outsider kill a live pair by leaving.
+static jboolean JNICALL Ble_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+    const std::string A = JStringToStd(Env, Addr);
+    return g_PeerBinding.IsPeer(A.c_str()) ? JNI_TRUE : JNI_FALSE;
+}
+
 static void JNICALL Ble_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
                                                        jboolean AsPeripheral) {
     // Binder thread: queue the event; the engine thread applies it in Pump().
@@ -312,8 +324,8 @@ static void JNICALL Ble_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
 static void JNICALL Ble_nativeOnDisconnected(JNIEnv* /*Env*/, jobject /*Self*/) {
     LOGI("BLE disconnected");
     // #83: the link is genuinely gone, so release the peer binding — the next central to subscribe may
-    // bind. Doing it HERE means one place covers every path that loses a link, and it is what keeps
-    // chess's deliberate opponent-switch (#38) possible: that flow runs at session level after loss.
+    // bind. Doing it HERE means one place covers every path that loses a link, and it is what keeps the
+    // deliberate opponent-switch (#38) possible: that flow runs at session level after loss.
     g_PeerBinding.Clear();
     g_Transport.Inbox.PushDisconnected();  // Binder thread: engine applies it in Pump()
 }
@@ -324,18 +336,6 @@ static void JNICALL Ble_nativeOnReceived(JNIEnv* Env, jobject /*Self*/, jbyteArr
     if (Len > 0) Env->GetByteArrayRegion(Data, 0, Len, reinterpret_cast<jbyte*>(Bytes.data()));
     // Binder thread: hand the datagram to the engine thread; Pump() calls the receiver.
     g_Transport.Inbox.PushDatagram(Bytes.data(), Bytes.size());
-}
-
-// The BLE wire identity, served to Kotlin from its single source of truth (BleProtocol.h) so the
-// two cannot drift. The Kotlin used to declare all three itself under a "MUST match" comment.
-static jstring Ble_nativeServiceUuid(JNIEnv* Env, jobject) {
-    return Env->NewStringUTF(std::string(BleServiceUuid).c_str());
-}
-static jstring Ble_nativeDatagramUuid(JNIEnv* Env, jobject) {
-    return Env->NewStringUTF(std::string(BleDatagramCharacteristicUuid).c_str());
-}
-static jstring Ble_nativeDeviceIdUuid(JNIEnv* Env, jobject) {
-    return Env->NewStringUTF(std::string(BleDeviceIdCharacteristicUuid).c_str());
 }
 
 // ---- JNI binding by TABLE, not by exported symbol name ----
@@ -352,17 +352,17 @@ static const char* const kBleShimClass = "com/lurmotorn/engine/BleShim";
 
 static const JNINativeMethod kBleShimMethods[] = {
     {"nativeSetShim", "()V", reinterpret_cast<void*>(Ble_nativeSetShim)},
+    {"nativeIsValidDeviceId", "([B)Z", reinterpret_cast<void*>(Ble_nativeIsValidDeviceId)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},
     {"nativeDecideRole", "([B[BI)I", reinterpret_cast<void*>(Ble_nativeDecideRole)},
-    {"nativeAcceptSubscriber", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptSubscriber)},
-    {"nativeAcceptData", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptData)},
-    {"nativeIsBoundPeer", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeIsBoundPeer)},
-    {"nativeIsValidDeviceId", "([B)Z", reinterpret_cast<void*>(Ble_nativeIsValidDeviceId)},
     {"nativeLoadOrCreateDeviceId", "(Ljava/lang/String;)[B", reinterpret_cast<void*>(Ble_nativeLoadOrCreateDeviceId)},
     {"nativeLoadPeerId", "(Ljava/lang/String;)[B", reinterpret_cast<void*>(Ble_nativeLoadPeerId)},
     {"nativeSavePeerId", "(Ljava/lang/String;[B)V", reinterpret_cast<void*>(Ble_nativeSavePeerId)},
+    {"nativeAcceptSubscriber", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptSubscriber)},
+    {"nativeAcceptData", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptData)},
+    {"nativeIsBoundPeer", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeIsBoundPeer)},
     {"nativeOnConnected", "(Z)V", reinterpret_cast<void*>(Ble_nativeOnConnected)},
     {"nativeOnDisconnected", "()V", reinterpret_cast<void*>(Ble_nativeOnDisconnected)},
     {"nativeOnReceived", "([B)V", reinterpret_cast<void*>(Ble_nativeOnReceived)},
@@ -391,8 +391,9 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* Vm, void* /*Reserved*/) {
         LOGE("JNI_OnLoad: no JNIEnv — cannot bind the BLE shim natives");
         return JNI_ERR;
     }
-    // Fail the LOAD, not the first call: an unbound native throws UnsatisfiedLinkError at its
-    // own call site, which surfaces as an unrelated-looking failure deep in the radio flow.
+    // Fail the LOAD, not the first call. An unbound native throws UnsatisfiedLinkError at its own
+    // call site, which surfaces as an unrelated-looking failure deep in the radio flow; refusing to
+    // load names the real problem at the moment it is knowable.
     if (!RegisterBleShimNatives(Env)) return JNI_ERR;
     return JNI_VERSION_1_6;
 }

@@ -29,7 +29,11 @@ target_include_directories(native_app_glue PUBLIC
 # offline (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
 add_library(onlyrps SHARED
     RpsMain.cpp
-    AndroidBleTransport.cpp)
+    # The Android BLE bridge is ENGINE code, one copy for every game
+    # (Modules/Transport/Platform/Android). It stays in the app TARGET rather than in
+    # lur_transport because it needs the NDK's <jni.h> and the app's LUR_LOG_TAG, and
+    # because only an app build has an Android toolchain at all.
+    ${LUR_ROOT}/Modules/Transport/Platform/Android/BleTransport.cpp)
 
 target_link_libraries(onlyrps
     native_app_glue
@@ -65,6 +69,11 @@ target_compile_definitions(onlyrps PRIVATE
     # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none of
     # it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
     LUR_AGENT=${LUR_AGENT_ON}
+    # The app's log tag, for the engine platform sources compiled into THIS target.
+    # Re-applied here because an out-of-tree app target cannot see the engine tree's
+    # add_compile_definitions — the same reason the LUR_* capability macros are repeated
+    # above (CLAUDE.md). Lur/Core/LogTag.h #errors without it.
+    LUR_LOG_TAG="${LUR_LOG_TAG}"
     # Distinct per-game BLE service UUID (matches the Kotlin BleShim SERVICE_UUID and
     # the iOS build) so RPS never cross-links a chess phone.
     "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")

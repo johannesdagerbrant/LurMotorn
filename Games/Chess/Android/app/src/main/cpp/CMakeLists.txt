@@ -29,7 +29,11 @@ target_include_directories(native_app_glue PUBLIC
 # (scripts/gen-shaders.ps1) and embedded in the engine, so no glslc here.
 add_library(onlychess SHARED
     AndroidMain.cpp
-    AndroidBleTransport.cpp)
+    # The Android BLE bridge is ENGINE code, one copy for every game
+    # (Modules/Transport/Platform/Android). It stays in the app TARGET rather than in
+    # lur_transport because it needs the NDK's <jni.h> and the app's LUR_LOG_TAG, and
+    # because only an app build has an Android toolchain at all.
+    ${LUR_ROOT}/Modules/Transport/Platform/Android/BleTransport.cpp)
 
 target_link_libraries(onlychess
     native_app_glue
@@ -66,6 +70,11 @@ target_compile_definitions(onlychess PRIVATE
     # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none
     # of it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
     LUR_AGENT=${LUR_AGENT_ON}
+    # The app's log tag, for the engine platform sources compiled into THIS target.
+    # Re-applied here because an out-of-tree app target cannot see the engine tree's
+    # add_compile_definitions — the same reason the LUR_* capability macros are repeated
+    # above (CLAUDE.md). Lur/Core/LogTag.h #errors without it.
+    LUR_LOG_TAG="${LUR_LOG_TAG}"
     # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
     # phone from cross-linking an RTS phone. Was inherited from a default in
     # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
