@@ -26,3 +26,11 @@ add_executable(ble_send_queue_tests BleSendQueueTests.cpp)
 target_link_libraries(ble_send_queue_tests PRIVATE lur::transport)
 target_compile_features(ble_send_queue_tests PRIVATE cxx_std_20)
 add_test(NAME ble_send_queue_tests COMMAND ble_send_queue_tests)
+
+# Advertise/scan start-failure policy (#194/#197). This is the one-sided fix chess had and RPS did
+# not — so RPS silently never advertises if its first attempt fails. Host-tested here so it can
+# only exist once.
+add_executable(ble_start_retry_tests BleStartRetryTests.cpp)
+target_link_libraries(ble_start_retry_tests PRIVATE lur::transport)
+target_compile_features(ble_start_retry_tests PRIVATE cxx_std_20)
+add_test(NAME ble_start_retry_tests COMMAND ble_start_retry_tests)

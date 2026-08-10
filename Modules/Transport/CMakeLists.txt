@@ -6,7 +6,9 @@
 # used to live in Kotlin and ObjC++, where no host test could reach it — which is exactly why
 # it drifted 650 lines between the two games. The platform drivers stay dumb: API verbs and
 # event forwarding, no decisions.
-add_library(lur_transport STATIC Private/BleSendQueue.cpp)
+add_library(lur_transport STATIC
+    Private/BleSendQueue.cpp
+    Private/BleStartRetry.cpp)
 target_include_directories(lur_transport PUBLIC Public)
 target_compile_features(lur_transport PUBLIC cxx_std_20)
 target_link_libraries(lur_transport PUBLIC lur::core)   # EventInbox uses LUR_ASSERT
