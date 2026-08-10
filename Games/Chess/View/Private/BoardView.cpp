@@ -452,7 +452,10 @@ void BoardView::OnTap(float XPx, float YPx, float WidthPx, float HeightPx) {
                 Lur::Serialization::BitWriter W;
                 EncodeMove(*Chosen, Legal, W);
                 const std::vector<uint8_t>& Bytes = W.Finish();
-                Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size());
+                // #190: EXPEDITED — this is the datagram the opponent is waiting to see land,
+                // so it must not queue behind a keepalive or a multi-datagram resync.
+                Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size(),
+                          Lur::Transport::EBleSendPriority::Expedited);
             }
             const EMoveSound Sound = ClassifyMove(B, *Chosen);
             State->ApplyMove(*Chosen);
@@ -490,7 +493,9 @@ EMoveSound CommitMove(Lur::Net::Session* Net, ChessMatchState* State, const Move
         Lur::Serialization::BitWriter W;
         EncodeMove(Chosen, Legal, W);
         const std::vector<uint8_t>& Bytes = W.Finish();
-        Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size());
+        // #190: EXPEDITED, same reasoning as OnTap's send — the peer is waiting on this one.
+        Net->Send(Lur::Net::EMsgType::Game1, Bytes.data(), Bytes.size(),
+                  Lur::Transport::EBleSendPriority::Expedited);
     }
     const EMoveSound Sound = ClassifyMove(State->CurrentBoard(), Chosen);
     State->ApplyMove(Chosen);

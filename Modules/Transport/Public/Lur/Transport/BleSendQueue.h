@@ -27,6 +27,24 @@ public:
     virtual bool Write(const uint8_t* Data, std::size_t Size) = 0;
 };
 
+// How urgently one datagram wants the radio.
+//
+// Expedited exists because the queue is otherwise FIFO with no notion of urgency, so a
+// latency-critical datagram can sit behind a keepalive or — much worse — behind a multi-datagram
+// resync payload, which is exactly when the queue is deepest and latency is felt most. Each wait
+// costs a whole connection interval (#190).
+//
+// It is passed EXPLICITLY, by the layer that knows what the bytes mean. Both platform backends
+// used to INFER it from the datagram's length — "1 byte means a live move" — which put one game's
+// wire format inside a transport, and then broke silently the moment that format changed: chess's
+// move became a framed 2-byte datagram, `length == 1` stopped matching, and the fast path simply
+// stopped happening. Nothing failed; it just got slower, in the one place latency is felt. That is
+// the whole argument for keeping decisions above the driver seam, in one place, with a test.
+enum class EBleSendPriority : uint8_t {
+    Normal = 0,     // ordered behind everything already queued
+    Expedited = 1,  // ahead of every Normal datagram, but never ahead of another Expedited
+};
+
 // Send flow control for a BLE link.
 //
 // A BLE stack allows exactly ONE outstanding operation, and a second write issued before the
@@ -74,7 +92,11 @@ public:
     // than dropping the oldest: this is an ordered stream, so evicting an earlier datagram would
     // silently break the ordering guarantee the receiver relies on, while refusing tells the
     // caller — the same choice Session::Send makes for an over-long payload.
-    bool Enqueue(const uint8_t* Data, std::size_t Size);
+    //
+    // Expedited overtakes every queued Normal datagram but never another Expedited one (FIFO
+    // within a class), and never the datagram already handed to the radio — that one is gone.
+    bool Enqueue(const uint8_t* Data, std::size_t Size,
+                 EBleSendPriority Priority = EBleSendPriority::Normal);
 
     // The driver reports that a write finished. Callbacks are unlabelled, so this consumes the
     // oldest outstanding one: if the watchdog previously abandoned a datagram, the first
@@ -107,9 +129,12 @@ private:
     };
 
     IBleRadio* Radio_ = nullptr;
-    Slot       Ring_[MaxQueued];
-    int        Head_ = 0;      // next to send
+    // A plain array walked as a deque, not a ring: an Expedited datagram inserts after the last
+    // Expedited one, which needs a position in the middle. At MaxQueued = 32 the shift is a few
+    // hundred bytes at BLE rates — the ordering guarantee is worth more than the memmove.
+    Slot       Queue_[MaxQueued];
     int        Count_ = 0;     // queued, excluding the one in flight
+    int        Fast_ = 0;      // leading Expedited datagrams, so a new one lands after them
     bool       InFlight_ = false;
     uint64_t   InFlightNs_ = 0;
     // Completions we are still owed for datagrams the watchdog gave up on. Each one must be

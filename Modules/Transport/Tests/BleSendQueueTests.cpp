@@ -54,6 +54,11 @@ static void Push(BleSendQueue& Q, uint8_t Tag) {
     CHECK(Q.Enqueue(Bytes, sizeof(Bytes)));
 }
 
+static void PushFast(BleSendQueue& Q, uint8_t Tag) {
+    const uint8_t Bytes[2] = {Tag, 0xAA};
+    CHECK(Q.Enqueue(Bytes, sizeof(Bytes), EBleSendPriority::Expedited));
+}
+
 static uint8_t TagOf(const std::vector<uint8_t>& V) { return V.empty() ? 0 : V[0]; }
 
 // ONE outstanding operation. The second datagram must not reach the radio until the first
@@ -178,6 +183,70 @@ static void TestLinkLossDropsTheBacklog() {
     CHECK(TagOf(Radio.Sent[1]) == 9);
 }
 
+// #190: a latency-critical datagram JUMPS the queue. The queue is otherwise FIFO with no notion
+// of urgency, so a move could sit behind a keepalive or — much worse — behind a multi-datagram
+// resync payload, which is exactly when the queue is deepest and latency is felt most. Each wait
+// costs a whole connection interval.
+//
+// Priority is passed EXPLICITLY. Both platform backends used to infer it from the datagram's
+// LENGTH ("1 byte == a move"), which coupled a transport to one game's wire format and then died
+// silently when that format changed — see the class comment in BleSendQueue.h.
+static void TestExpeditedJumpsTheQueue() {
+    FakeBleRadio Radio;
+    BleSendQueue Q;
+    Q.SetRadio(&Radio);
+
+    Push(Q, 1);                             // goes out immediately (nothing in flight)
+    Push(Q, 2);                             // queued
+    Push(Q, 3);                             // queued behind 2
+    PushFast(Q, 9);                         // must overtake BOTH
+    CHECK(Radio.Sent.size() == 1);
+
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[1]) == 9);       // the urgent one, ahead of 2 and 3
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[2]) == 2);       // ...and the normal ones keep their own order
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[3]) == 3);
+}
+
+// Expedited datagrams do not overtake EACH OTHER: within a priority class the queue stays FIFO.
+// Chess relies on this indirectly (it is turn-alternating, so it never has two moves in flight),
+// but a game that does send two urgent datagrams back to back must not have them reordered.
+static void TestExpeditedKeepsFifoAmongItself() {
+    FakeBleRadio Radio;
+    BleSendQueue Q;
+    Q.SetRadio(&Radio);
+
+    Push(Q, 1);                             // in flight
+    Push(Q, 2);                             // normal, queued
+    PushFast(Q, 7);
+    PushFast(Q, 8);
+
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[1]) == 7);
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[2]) == 8);       // 8 after 7, not before it
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[3]) == 2);       // the normal one last
+}
+
+// An expedited datagram cannot pull back the one already handed to the radio — that one is gone.
+static void TestExpeditedDoesNotPreemptTheInFlightDatagram() {
+    FakeBleRadio Radio;
+    BleSendQueue Q;
+    Q.SetRadio(&Radio);
+
+    Push(Q, 1);
+    CHECK(Radio.Sent.size() == 1);
+    CHECK(TagOf(Radio.Sent[0]) == 1);
+
+    PushFast(Q, 9);
+    CHECK(Radio.Sent.size() == 1);          // still exactly one outstanding
+    Q.OnSendComplete();
+    CHECK(TagOf(Radio.Sent[1]) == 9);
+}
+
 // A link that dies while a completion is owed must not carry that debt into the NEXT link. If
 // it did, the fresh link's first real completion would be swallowed as if it were the ghost of
 // the old one, and the new queue would stall for a full watchdog period on its very first
@@ -254,6 +323,9 @@ int main() {
     TestRefusedWriteStaysQueued();
     TestWatchdogResumesAfterALostCompletion();
     TestLateCompletionAfterWatchdogDoesNotDoublePump();
+    TestExpeditedJumpsTheQueue();
+    TestExpeditedKeepsFifoAmongItself();
+    TestExpeditedDoesNotPreemptTheInFlightDatagram();
     TestLinkLossDropsTheBacklog();
     TestAbandonedDebtDoesNotSurviveLinkLoss();
     TestFullQueueRefusesRatherThanDropping();

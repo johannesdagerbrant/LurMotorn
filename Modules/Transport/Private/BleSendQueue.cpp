@@ -4,14 +4,20 @@
 
 namespace Lur::Transport {
 
-bool BleSendQueue::Enqueue(const uint8_t* Data, std::size_t Size) {
+bool BleSendQueue::Enqueue(const uint8_t* Data, std::size_t Size, EBleSendPriority Priority) {
     if (Data == nullptr || Size == 0 || Size > MaxDatagram) return false;
     if (Count_ >= MaxQueued) { ++Dropped_; return false; }
 
-    Slot& S = Ring_[(Head_ + Count_) % MaxQueued];
+    // Where this datagram goes: an Expedited one lands after the Expedited datagrams already
+    // waiting (FIFO within a class) and ahead of every Normal one; a Normal one goes at the back.
+    const int At = (Priority == EBleSendPriority::Expedited) ? Fast_ : Count_;
+    for (int i = Count_; i > At; --i) Queue_[i] = Queue_[i - 1];
+
+    Slot& S = Queue_[At];
     std::memcpy(S.Bytes, Data, Size);
     S.Size = Size;
     ++Count_;
+    if (Priority == EBleSendPriority::Expedited) ++Fast_;
 
     Pump();
     return true;
@@ -47,8 +53,8 @@ void BleSendQueue::Tick(uint64_t ElapsedNs) {
 }
 
 void BleSendQueue::OnLinkLost() {
-    Head_ = 0;
     Count_ = 0;
+    Fast_ = 0;
     InFlight_ = false;
     InFlightNs_ = 0;
     // A dead link owes us nothing: any pending callback dies with it, so a stale "swallow the
@@ -60,11 +66,12 @@ void BleSendQueue::OnLinkLost() {
 void BleSendQueue::Pump() {
     if (InFlight_ || Count_ == 0 || Radio_ == nullptr) return;
 
-    const Slot& S = Ring_[Head_];
+    const Slot& S = Queue_[0];
     if (!Radio_->Write(S.Bytes, S.Size)) return;   // busy: keep it, retry on the next tick
 
-    Head_ = (Head_ + 1) % MaxQueued;
+    for (int i = 1; i < Count_; ++i) Queue_[i - 1] = Queue_[i];
     --Count_;
+    if (Fast_ > 0) --Fast_;
     InFlight_ = true;
     InFlightNs_ = 0;
 }

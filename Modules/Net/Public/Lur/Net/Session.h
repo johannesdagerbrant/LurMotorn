@@ -4,6 +4,7 @@
 #include <functional>
 #include <string>
 #include <string_view>
+#include "Lur/Transport/BleSendQueue.h"   // EBleSendPriority — which messages jump the queue
 #include "Lur/Transport/Transport.h"
 
 namespace Lur::Net {
@@ -250,7 +251,14 @@ public:
     // of being silently dropped — most payloads are tiny (a move is ~1 byte), but a
     // reconnect Sync grows with the game (issue: the old 64-byte cap silently killed
     // resync past ply ~61). Never truncates the wire.
-    bool Send(EMsgType Type, const uint8_t* Payload, std::size_t Size);
+    //
+    // Expedited marks this message as latency-critical, so the transport sends it ahead of
+    // anything already queued (#190) — for the datagram a player is actively waiting on, e.g. a
+    // move, as opposed to a keepalive or a bulk resync. The GAME decides: only it knows which of
+    // its messages a human is waiting for. Default Normal, so nothing is urgent by accident (if
+    // everything is expedited, nothing is).
+    bool Send(EMsgType Type, const uint8_t* Payload, std::size_t Size,
+              Lur::Transport::EBleSendPriority Priority = Lur::Transport::EBleSendPriority::Normal);
 
 private:
     void SendHello();

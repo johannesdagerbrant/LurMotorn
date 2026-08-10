@@ -32,6 +32,11 @@ namespace {
 class AndroidBleTransport : public ITransport, public EventInbox::Sink {
 public:
     void Send(const uint8_t* Data, std::size_t Size) override;
+    void SendExpedited(const uint8_t* Data, std::size_t Size) override;
+
+private:
+    void SendWithPriority(const uint8_t* Data, std::size_t Size, bool Expedited);
+public:
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
     void ResetLink() override;
@@ -72,7 +77,7 @@ JNIEnv* EnvForThisThread() {
     return Env;
 }
 
-void AndroidBleTransport::Send(const uint8_t* Data, std::size_t Size) {
+void AndroidBleTransport::SendWithPriority(const uint8_t* Data, std::size_t Size, bool Expedited) {
     if (g_Shim == nullptr || g_SendMethod == nullptr) return;
     JNIEnv* Env = EnvForThisThread();
     if (Env == nullptr) return;
@@ -80,8 +85,19 @@ void AndroidBleTransport::Send(const uint8_t* Data, std::size_t Size) {
     jbyteArray Arr = Env->NewByteArray(static_cast<jsize>(Size));
     Env->SetByteArrayRegion(Arr, 0, static_cast<jsize>(Size),
                             reinterpret_cast<const jbyte*>(Data));
-    Env->CallVoidMethod(g_Shim, g_SendMethod, Arr);
+    // Urgency is passed, never inferred. The Kotlin used to guess it from the array's LENGTH
+    // ("1 byte means a live move"), which put one game's wire format inside the radio shim and
+    // broke silently when that format changed — the fast path just stopped happening.
+    Env->CallVoidMethod(g_Shim, g_SendMethod, Arr, static_cast<jboolean>(Expedited));
     Env->DeleteLocalRef(Arr);
+}
+
+void AndroidBleTransport::Send(const uint8_t* Data, std::size_t Size) {
+    SendWithPriority(Data, Size, false);
+}
+
+void AndroidBleTransport::SendExpedited(const uint8_t* Data, std::size_t Size) {
+    SendWithPriority(Data, Size, true);
 }
 
 // The net keepalive timed out — the peer is silently gone. Force the Kotlin radio to
@@ -126,7 +142,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
-    g_SendMethod    = Env->GetMethodID(Cls, "send", "([B)V");
+    g_SendMethod    = Env->GetMethodID(Cls, "send", "([BZ)V");   // (bytes, expedited)
     g_ResetMethod   = Env->GetMethodID(Cls, "resetLink", "()V");
     g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
 }

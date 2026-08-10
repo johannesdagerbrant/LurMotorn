@@ -178,24 +178,24 @@ class BleShim(private val context: Context) {
     /**
      * Send one datagram to the peer. Enqueued + serialized via flow control (issue #72).
      *
-     * A LIVE MOVE JUMPS THE QUEUE (issue #190). The queue is otherwise FIFO with no notion of
-     * urgency, so a 1-byte move could sit behind a keepalive or — much worse — behind a
-     * multi-datagram Sync/resync payload, which is exactly when the queue is deepest and
-     * exactly when latency is felt. Each wait is a whole connection interval.
+     * An EXPEDITED datagram jumps the queue (issue #190). The queue is otherwise FIFO with no
+     * notion of urgency, so the datagram a player is waiting on could sit behind a keepalive or
+     * — much worse — behind a multi-datagram resync payload, which is exactly when the queue is
+     * deepest and exactly when latency is felt. Each wait is a whole connection interval.
      *
-     * A move is identified BY ITS LENGTH, needing no new API: the wire format (#15) makes a
-     * live move exactly one byte and pads every framed message to two or more, which is the
-     * same invariant the RECEIVE path already dispatches on (`length == 1` -> move). So this
-     * cannot drift away from the protocol independently — if it ever did, receiving would
-     * break first and much louder.
+     * Urgency is an ARGUMENT, decided by the engine. It used to be inferred here from the
+     * array's LENGTH ("1 byte means a live move"), which put one game's wire format inside this
+     * radio shim — and it broke silently the moment that format changed: the move became a
+     * framed 2-byte datagram, `size == 1` stopped matching, and this fast path simply stopped
+     * happening. Nothing failed; it just got slower, in the one place latency is felt.
      *
-     * Reordering is safe: chess is strictly turn-alternating, so there is never more than one
-     * move in flight in one direction, and a move can therefore never overtake another move.
+     * Reordering is safe for the caller that asks for it: expedited datagrams keep their order
+     * among themselves, so one can never overtake another.
      */
     @Suppress("unused")
-    fun send(bytes: ByteArray) {
+    fun send(bytes: ByteArray, expedited: Boolean) {
         synchronized(sendLock) {
-            if (bytes.size == 1) sendQueue.addFirst(bytes) else sendQueue.addLast(bytes)
+            if (expedited) sendQueue.addFirst(bytes) else sendQueue.addLast(bytes)
             pumpSendLocked()
         }
     }

@@ -124,7 +124,8 @@ void Session::SetHandler(EMsgType Type, Handler H) {
     if (Idx >= 0 && Idx < MaxMsgTypes) Handlers[Idx] = std::move(H);
 }
 
-bool Session::Send(EMsgType Type, const uint8_t* Payload, std::size_t Size) {
+bool Session::Send(EMsgType Type, const uint8_t* Payload, std::size_t Size,
+                   Lur::Transport::EBleSendPriority Priority) {
     if (Transport == nullptr) return false;
     if (Size > MaxFramedPayload) {                // never truncate the wire — fail loudly
         Logf("send DROPPED: framed payload %zu > max %zu (type=%u)",
@@ -134,7 +135,10 @@ bool Session::Send(EMsgType Type, const uint8_t* Payload, std::size_t Size) {
     uint8_t Frame[1 + MaxFramedPayload];          // [type][payload]
     Frame[0] = static_cast<uint8_t>(Type);
     for (std::size_t i = 0; i < Size; ++i) Frame[1 + i] = Payload[i];
-    Transport->Send(Frame, 1 + Size);
+    if (Priority == Lur::Transport::EBleSendPriority::Expedited)
+        Transport->SendExpedited(Frame, 1 + Size);
+    else
+        Transport->Send(Frame, 1 + Size);
     ++DatagramsSent;
     return true;
 }

@@ -183,9 +183,12 @@ class BleShim(private val context: Context) {
 
     /** Send one datagram to the peer. Enqueued + serialized via flow control (issue #72). */
     @Suppress("unused")
-    fun send(bytes: ByteArray) {
+    fun send(bytes: ByteArray, expedited: Boolean) {
         synchronized(sendLock) {
-            sendQueue.addLast(bytes)
+            // #190, which this game never had: an expedited datagram goes to the FRONT, so the
+            // one a player is waiting on does not queue behind a keepalive or a bulk resync.
+            // Urgency is decided by the engine and passed in — never guessed from the bytes.
+            if (expedited) sendQueue.addFirst(bytes) else sendQueue.addLast(bytes)
             pumpSendLocked()
         }
     }

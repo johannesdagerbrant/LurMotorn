@@ -204,24 +204,25 @@ static void SaveIosPeerId(const std::string& Id) {
 - (BOOL)shouldAdvertise { return !(_HaveCachedRole && !_CachedPeripheral); }  // advertise unless known central
 
 // ---- Outbound ----
-- (void)sendData:(const uint8_t*)Data size:(std::size_t)Size {
+- (void)sendData:(const uint8_t*)Data size:(std::size_t)Size expedited:(BOOL)Expedited {
     // Live-only: drop if not linked. An offline move is healed by the next
     // link-establishment record sync, so we must NOT buffer + replay a stale move
     // (which would decode against a since-advanced position and desync).
     if (!_Connected) return;
-    // A LIVE MOVE JUMPS THE QUEUE (issue #190). Otherwise it is FIFO with no notion of
-    // urgency, so a 1-byte move can sit behind a keepalive or a multi-datagram Sync/resync
-    // payload — exactly when the queue is deepest and exactly when latency is felt, at a
-    // whole connection interval per place in line.
+    // An EXPEDITED datagram jumps the queue (#190). Otherwise it is FIFO with no notion of
+    // urgency, so the datagram a player is waiting on can sit behind a keepalive or a
+    // multi-datagram resync payload — exactly when the queue is deepest and latency is felt
+    // most, at a whole connection interval per place in line.
     //
-    // A move is identified BY ITS LENGTH, needing no new API: the wire format (#15) makes a
-    // live move exactly one byte and pads every framed message to two or more — the same
-    // invariant the RECEIVE path already dispatches on. So this cannot drift away from the
-    // protocol on its own; if it ever did, receiving would break first and far more loudly.
+    // Urgency arrives as an ARGUMENT now. It used to be inferred from the datagram's LENGTH
+    // ("1 byte means a live move"), which put one game's wire format inside this transport —
+    // and it broke silently the moment that format changed: the move became a framed 2-byte
+    // datagram, `Size == 1` stopped matching, and this fast path simply stopped happening.
+    // Nothing failed; it just got slower, in the one place latency is felt.
     //
-    // Reordering is safe: chess is strictly turn-alternating, so there is never more than
-    // one move in flight in one direction and a move can never overtake another move.
-    if (Size == 1) _SendQueue.emplace_front(Data, Data + Size);
+    // Reordering is safe for the caller that uses it: expedited datagrams keep their order
+    // among themselves, so one can never overtake another.
+    if (Expedited) _SendQueue.emplace_front(Data, Data + Size);
     else           _SendQueue.emplace_back(Data, Data + Size);
     [self pumpSend];
 }
@@ -553,7 +554,12 @@ class IosBleTransport : public ITransport {
 public:
     void EnsureDriver() { if (!Driver) Driver = [[IosBleDriver alloc] init]; }
 
-    void Send(const uint8_t* Data, std::size_t Size) override { [Driver sendData:Data size:Size]; }
+    void Send(const uint8_t* Data, std::size_t Size) override {
+        [Driver sendData:Data size:Size expedited:NO];
+    }
+    void SendExpedited(const uint8_t* Data, std::size_t Size) override {
+        [Driver sendData:Data size:Size expedited:YES];
+    }
     void SetReceiver(Receiver NewReceiver) override { [Driver setReceiver:std::move(NewReceiver)]; }
     bool IsConnected() const override { return Driver && [Driver isConnected]; }
     void Pump() override { if (Driver) [Driver pumpInbox]; }  // engine-frame delivery (#40)

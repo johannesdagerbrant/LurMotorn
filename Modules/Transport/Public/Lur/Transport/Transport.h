@@ -22,6 +22,22 @@ public:
     // what the backend guarantees is the net module's concern, per message type.
     virtual void Send(const uint8_t* Data, std::size_t Size) = 0;
 
+    // Deliver one datagram AHEAD of anything the backend already has queued (#190).
+    //
+    // For a latency-critical datagram — the one a player is waiting to see land. A backend with
+    // a send queue is otherwise FIFO with no notion of urgency, so this datagram could wait
+    // behind a keepalive or a multi-datagram resync payload, each wait costing a whole
+    // connection interval. Ordering among expedited datagrams is preserved.
+    //
+    // NOT pure: the default is plain Send, which is correct for any transport without a queue
+    // (loopback, tests). A backend that has one overrides this. Callers may always call it; the
+    // worst case is that it behaves exactly like Send.
+    //
+    // Urgency is stated by the caller and never inferred from the bytes. Two backends used to
+    // guess it from the datagram's LENGTH ("1 byte means a live move"), which put one game's
+    // wire format inside the transport and then broke silently when that format changed.
+    virtual void SendExpedited(const uint8_t* Data, std::size_t Size) { Send(Data, Size); }
+
     // Invoked on the engine thread when a datagram arrives from the peer.
     using Receiver = std::function<void(const uint8_t* Data, std::size_t Size)>;
     virtual void SetReceiver(Receiver NewReceiver) = 0;
