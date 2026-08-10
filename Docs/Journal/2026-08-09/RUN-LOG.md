@@ -249,7 +249,13 @@ same counter that had climbed to its cap all evening.
       watchdog is host-exercisable; fixed capacity, refusing when full rather than evicting the
       oldest (ordered stream), with refusals counted. — verified: host (both trees), android ×2,
       desktop ×2, ios CI run 31336149645
-- [ ] `BleLinkController`: retry/backoff, discovery watchdog, role escalation, reconnect scheduling
+- [x] **`BleStartRetry`** — the advertise/scan start-failure policy, 7 host tests. The #194 fix
+      chess had and RPS did not, so RPS silently never advertises if its first attempt fails.
+      Capped backoff ~0.4→3.2 s, bounded fast retries handing back to the slow watchdog
+      (`HandedOff` = change cadence, never give up), and only the first failure of a run asks for
+      a loud log. NOT yet adopted by the drivers, so RPS's defect closes at the collapse.
+- [ ] Remaining `BleLinkController` policy: discovery watchdog, role escalation, reconnect
+      scheduling
 - [ ] Collapse the 6 backends to 3 dumb drivers under `Modules/Transport/Platform/*`
       (this is also the deferred half of #42, incl. dynamic JNI `RegisterNatives`)
 - [ ] Reconcile every one-sided fix as a decision, not a merge
