@@ -459,3 +459,52 @@ Chess reaches a full handshake to READY over real BLE on the shared driver
 iOS (`IosBleTransport.mm`, 2 copies ~137 diff lines) and Windows (2 copies, 10 diff lines) are
 untouched and still per-game. Also still open: chess iOS's missing #182 restart — it reports the
 absence honestly now, and the other game's peripheral-manager re-publish is the model to port.
+
+## The iOS collapse — done. Both shipping platforms now have ONE radio each.
+
+`Modules/Transport/Platform/Ios/BleTransport.mm`. **RPS's copy was the survivor, because it was
+strictly the more complete one** — it carried the #182 radio restart, the #146 bad-device-id guard
+and the role-pin logging that chess's copy lacked *entirely*. So chess's iOS half gained, in one
+move, recovery from a wedged BLE stack (it had **none** — the session logged three restart attempts
+that never happened), a guard against settling a role from a failed GATT read, and a line that says
+when a stale dev pin is why the roles look wrong.
+
+That asymmetry is the clearest argument for the collapse: the fixes were never disputed, they were
+simply in the other file.
+
+Collapse tally across both platforms: 4 Android files + 2 iOS files (~3,400 lines) → **3 files
+(~1,700)**.
+
+### The iOS logging defect, and why it took two attempts
+
+Found by reading the device log rather than trusting the change — the new driver printed
+`driver up, local id=<private>`.
+
+1. **Plain `NSLog` redacts a DYNAMIC C string.** It forwards to `os_log`, and the device is never
+   attached to Xcode in our workflow. Compile-time literals still render, which is what makes this
+   easy to miss: the log tag and the role NAME looked right while the device IDS did not.
+2. **Adding `%{public}s` to an `NSLog` format made it WORSE** — `<decode: missing data>`. That
+   annotation is `os_log` syntax which `NSLog` cannot encode. Caught only by installing and reading
+   the log a second time.
+3. **The working shape** is the one the app mains already use for their engine log sink: let
+   `NSString` format (it handles `%@` for NSError, `%zu`, `%s` alike, so no call site changes) and
+   hand `os_log` the finished string as a single `%{public}s`.
+
+This mattered rather than being cosmetic: the #146 diagnostic prints `mine=… peer=…`, and a
+both-peripheral deadlock means the two sides compared different BYTES — redacted, the line is
+decoration. Verified on device: `local id=a6266065c520feb93945668fceff5933`.
+
+### Verified
+iOS CI green (both games) at every step; chess's iOS driver runs (`driver up` → `central powered
+on` → `peripheral powered on, publishing service`); and a two-phone chess link forms with **both
+peers on the collapsed drivers** — `READY (peer id known)`, `peer linked -> adopt`, zero crashes.
+Host 28/28.
+
+### Still open in Phase 2
+- **Windows** desktop transports: 2 copies, 10 diff lines. Trivial, and dev-rig-only.
+- **The two-phone soak** (`droptx`, `killown`, `svc bluetooth disable/enable`) — Phase 2's gate to
+  Phase 3, still not run.
+- The engine policy components (`BleSendQueue`, `BleStartRetry`, `BleDiscoveryTimers`) exist and are
+  host-tested but the collapsed drivers do **not yet call them** — they still carry their own
+  in-language versions of the send queue, retry and watchdogs. The cutover is now a single-file
+  change per platform instead of six, which was the point of collapsing first.
