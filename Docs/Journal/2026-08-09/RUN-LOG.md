@@ -359,3 +359,56 @@ collapse, where the other game's peripheral-manager re-publish already exists.
   give `actively refused` (nothing there). That difference is the diagnosis: the phone forgot this
   PC's key, so **`adb pair` with a code is required** — toggling wireless debugging is not enough,
   because the toggle rotates the port but does not re-trust the host.
+
+## Two-phone gate #2 — after `adb pair` (2026-08-10)
+
+Wireless ADB needed **`adb pair` with a code**, not just a toggle: the pairing service was
+advertised on a *different* port (`_adb-tls-pairing._tcp` 34191) from the connect service (34805).
+`adb mdns services` lists both — worth knowing, because the pairing port is not guessable and the
+phone screen shows it only while that dialog is open.
+
+### Chess — PASS, and the #190 restoration measurably holds
+
+```
+android  AUTOPLAY game=22 sameFrame=205/206 delayed=0 ply=160 gate=0
+         rtt(n=205 avg=49ms min=28ms max=66ms)
+android  Net: MATCH END result=1 WLD(lo/hi/dr)=2/3/18 total=23
+ios      AUTOPLAY game=27 sameFrame=2156/2159 delayed=0 gate=0
+         rtt(n=2158 avg=58ms min=32ms max=101ms)
+```
+
+27 matches. Zero desync / resync / mismatch / DROPPED on either peer. Against the pre-#190-fix
+baseline measured last night: Android avg 50 → **49 ms**, iOS max **218 → 101 ms**, iOS
+`delayed` 1 → **0**. So restoring the expedited path is not merely compiled, it shows up in the
+numbers — the tail is less than half what it was.
+
+The new #146 diagnostic works, and this is what it now prints:
+```
+read peer id: mine=e2f0ff033aaba691ff82c1474864ef84
+              peer=a6266065c520feb93945668fceff5933 defers=0 -> CENTRAL (keep link)
+```
+Previously `mine=32B peer=32B`. A both-peripheral deadlock means the two sides compared different
+BYTES, and sizes agree in exactly that case — the values are the only thing that shows it.
+
+### RPS — links and runs clean, but the STRONGEST check did not run
+
+Both peers: `linked=1 started=1 gold=1300 desync=0 badbuild=0 gaps=0 stall=0 halfopen=0
+restarts=0 rollbk=0 resim=0`, advancing the same tick range together (both ~1500 when sampled
+simultaneously). Each placed its own camp (1900 → 1300, 600 each). No crash or regression from the
+send-path change or the new `stop()`.
+
+**Stated honestly, because it matters:** the tick-by-tick recording diff — `pullrec --recdiff`, the
+purpose-built instrument — did NOT run. It pulled only recordings from 2026-07-31/08-01, all
+refused as older formats, because `rps.dev.flight_recorder` is off on the Galaxy (the known
+`cvars.cfg` fixture, pre-flight item 3, which I skipped). And `desync=0` alone can be VACUOUS:
+`CrossCheck` returns early when `PeerHash` has no entry for a tick, so a peer that sent no anchors
+at all would also read as `desync=0`. What does carry weight here is `gaps=0` (missing peer input
+frames) together with `rollbk=0`, and both phones holding the same tick range in lockstep.
+
+**So: RPS is verified as "links, runs, and shows no fault", not as "provably identical on both
+sides".** Turn the recorder on before the next RPS gate and diff the pair — that is the check that
+closes it, and it is a one-line pre-flight, not new work.
+
+### Close-out
+Both games rebuilt WITHOUT `-DLUR_AGENT` and reinstalled on both phones; `debug.lur.*` cleared;
+every `Documents/` marker deleted on both bundles; `svc power stayon` restored.
