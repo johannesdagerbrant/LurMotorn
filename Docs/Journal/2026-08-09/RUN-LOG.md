@@ -412,3 +412,50 @@ closes it, and it is a one-line pre-flight, not new work.
 ### Close-out
 Both games rebuilt WITHOUT `-DLUR_AGENT` and reinstalled on both phones; `debug.lur.*` cleared;
 every `Documents/` marker deleted on both bundles; `svc power stayon` restored.
+
+## The Android backend collapse — done (#197 + the deferred half of #42)
+
+Both games' Android radio is now **one copy**: `Modules/Transport/Platform/Android/{BleShim.kt,
+BleTransport.cpp}`. ~2,200 lines across four files become ~1,100 across two.
+
+Two structural blockers had to go first, and they were the actual reason the files could not be
+shared rather than incidental annoyances:
+
+1. **JNI symbol names bake the app's package in.** `Java_com_lurmotorn_<app>_BleShim_*` is findable
+   only from a class in that exact package, so the Kotlin class *had* to live in the app.
+   `RegisterNatives` binds an explicit table against a class the C++ names itself
+   (`com.lurmotorn.engine.BleShim`), and `JNI_OnLoad` returns `JNI_ERR` if the class or any
+   signature disagrees — failing the LOAD, because an unbound native throws
+   `UnsatisfiedLinkError` at its own call site deep in the radio flow, looking like something else.
+2. **`System.loadLibrary("<app>")`** hardcoded the library name. The app loads it now, before
+   touching the shim. **Learned by breaking it:** removing the load produced exactly that
+   `UnsatisfiedLinkError` on first launch, because the natives bind in `JNI_OnLoad` at library-load
+   time and the Kotlin was reached first.
+
+The per-app values are injected: log tag and library name from the activity, and the **BLE UUIDs
+are read across the JNI seam** from `BleProtocol.h`. The Kotlin used to declare all three under a
+comment reading *"MUST match Lur::Transport::BleProtocol"* — a duplication maintained by hope,
+where a mismatch fails silently as two phones that never see each other.
+
+### Two traps this phase produced, both caught
+
+- **An out-of-tree app target cannot see the engine tree's `add_compile_definitions`**, so
+  `LUR_LOG_TAG` had to be re-applied in each app's `target_compile_definitions` — the exact gotcha
+  CLAUDE.md records for the `LUR_*` capability macros, hit for the same reason.
+- **`CanRestartRadio` defaults to false, and RPS forgot to declare it.** The default is right (a
+  transport without a hard restart must never be narrated as having one), but that makes it a query
+  every *implementor* must opt into — and RPS, which fully implements #182, would have silently
+  lost the recovery. The mirror image of chess's original bug, introduced by my own fix two commits
+  earlier. The lesson: a false-by-default capability query needs an audit of every implementor, not
+  just the one that lacked the feature.
+
+### Verified on hardware
+Chess reaches a full handshake to READY over real BLE on the shared driver
+(`central: linked + notifications on` → `hello RECV` → `READY (peer id known)` →
+`peer linked -> adopt`), and RPS gets a full link and `lockstep started` on it too. No
+`UnsatisfiedLinkError`, no crash. Host 28/28 throughout.
+
+### Remaining in the collapse
+iOS (`IosBleTransport.mm`, 2 copies ~137 diff lines) and Windows (2 copies, 10 diff lines) are
+untouched and still per-game. Also still open: chess iOS's missing #182 restart — it reports the
+absence honestly now, and the other game's peripheral-manager re-publish is the model to port.
