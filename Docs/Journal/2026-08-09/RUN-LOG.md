@@ -323,3 +323,39 @@ as intended", not "does not work". Host tests cover the ordering rules and iOS C
 games' overrides. Queue for the next device session: chess two-phone (confirm rtt is no worse than
 the 50 ms baseline measured earlier tonight) and RPS two-phone (confirm it still links at all now
 that its send path gained a parameter).
+
+### Phase 2 reconciliation — the one-sided BLE fixes, settled as decisions
+
+Each was treated as a decision with reasoning recorded in the shared path, per the plan — not a
+merge. Both directions were live.
+
+| Fix | Was | Now | Decision |
+|---|---|---|---|
+| Role override gate (#196) | chess `LUR_AGENT`, RPS `LUR_INTERNAL` | `LUR_AGENT` | forced state from a hidden channel that outlives the app; Development is what a player plays |
+| #146 deadlock breaker | RPS only | both, both platforms | the deadlock is unrecoverable by retrying and its shape is identical in both games |
+| #182 hard radio restart | RPS only | chess Android done; chess iOS honest | chess had NO recovery from a wedged stack |
+| #194 `onDestroy → ble.stop()` | chess only | both | a leaked registration is what the NEXT launch collides with |
+| #190 priority send | chess only, and DEAD | both, explicit | see the regression section above |
+
+**The #182 work found a log that lied.** `ITransport::RestartRadio` defaults to an empty body —
+right for a loopback — but chess's backends never overrode it, so the session logged
+*"escalating to a full radio restart (attempt 1/3 … 2/3 … 3/3)"* against a transport that did
+nothing. Those exact lines appeared in chess's logcat earlier in this run while the real cause was
+the lock screen, and they made a wedged radio look like the confirmed explanation. `ITransport`
+gained `CanRestartRadio()` (default false) and the session asks before escalating, so an
+unsupported backend says *"this transport cannot restart the radio"* once instead of narrating
+three repairs nobody attempted. A missing capability is a finding, not a silence.
+
+Chess iOS still lacks the restart and now reports that honestly; the port is listed for the driver
+collapse, where the other game's peripheral-manager re-publish already exists.
+
+### Device state, 2026-08-10
+
+- **iPhone: verified.** Latest chess build installed and launched; BLE up, advertising + scanning,
+  no crash from the iOS changes (#146 role logging, expedited send). `role decided` needs a peer,
+  so it waits for the Galaxy.
+- **Galaxy: still unreachable, and now precisely diagnosed.** Port 34805 answers with
+  `failed to connect` (the service IS listening; our TLS key is rejected), while 39261 and 5555
+  give `actively refused` (nothing there). That difference is the diagnosis: the phone forgot this
+  PC's key, so **`adb pair` with a code is required** — toggling wireless debugging is not enough,
+  because the toggle rotates the port but does not re-trust the host.
