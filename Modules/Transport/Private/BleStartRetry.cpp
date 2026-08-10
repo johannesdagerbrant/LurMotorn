@@ -3,11 +3,12 @@
 namespace Lur::Transport {
 
 uint64_t BleStartRetry::DelayNs() const {
-    // Doubling, capped. Attempt_ counts retries already scheduled, so the delay in force is the
-    // one for the most recent schedule (or the first delay when none has happened yet).
+    // Doubling, capped by clamping the SHIFT — which is the whole cap. A second `min(D, MaxDelayNs)`
+    // on the result was here initially and is unreachable by construction (MaxDelayNs is defined as
+    // BaseDelayNs << MaxShift); a mutation test proved it dead, so it is gone rather than left as a
+    // reassuring no-op that hides where the bound actually lives.
     const int Shift = Attempt_ > 0 ? Attempt_ - 1 : 0;
-    const uint64_t D = BaseDelayNs << (Shift < 3 ? Shift : 3);
-    return D < MaxDelayNs ? D : MaxDelayNs;
+    return BaseDelayNs << (Shift < MaxShift ? Shift : MaxShift);
 }
 
 bool BleStartRetry::OnStartFailed() {

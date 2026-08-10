@@ -35,8 +35,10 @@ public:
     // First delay, and the doubling base. ~0.4 s: long enough for a transient stack error to
     // clear, short enough that a human never notices the heal.
     static constexpr uint64_t BaseDelayNs = 400'000'000ull;
-    // Ceiling on the doubling (BaseDelayNs << 3).
-    static constexpr uint64_t MaxDelayNs = BaseDelayNs << 3;    // ~3.2 s
+    // Ceiling on the doubling, expressed as the shift bound — that IS the cap, so there is exactly
+    // one place to change it and no second clamp that could disagree.
+    static constexpr int      MaxShift = 3;
+    static constexpr uint64_t MaxDelayNs = BaseDelayNs << MaxShift;    // ~3.2 s
     // How many fast retries before handing back to the slow watchdog. Five covers a transient
     // failure with room to spare; past that the failure is not transient and a faster cadence
     // would only churn the radio.

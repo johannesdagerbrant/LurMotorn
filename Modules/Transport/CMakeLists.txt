@@ -8,7 +8,8 @@
 # event forwarding, no decisions.
 add_library(lur_transport STATIC
     Private/BleSendQueue.cpp
-    Private/BleStartRetry.cpp)
+    Private/BleStartRetry.cpp
+    Private/BleDiscoveryTimers.cpp)
 target_include_directories(lur_transport PUBLIC Public)
 target_compile_features(lur_transport PUBLIC cxx_std_20)
 target_link_libraries(lur_transport PUBLIC lur::core)   # EventInbox uses LUR_ASSERT

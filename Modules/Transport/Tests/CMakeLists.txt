@@ -34,3 +34,11 @@ add_executable(ble_start_retry_tests BleStartRetryTests.cpp)
 target_link_libraries(ble_start_retry_tests PRIVATE lur::transport)
 target_compile_features(ble_start_retry_tests PRIVATE cxx_std_20)
 add_test(NAME ble_start_retry_tests COMMAND ble_start_retry_tests)
+
+# The three unlinked-radio deadlines: discovery watchdog (#79), connect watchdog, rescan delay
+# (#17). These had NOT drifted between the games — identical numbers in both — so this is the
+# duplication caught before its first divergent edit.
+add_executable(ble_discovery_timers_tests BleDiscoveryTimersTests.cpp)
+target_link_libraries(ble_discovery_timers_tests PRIVATE lur::transport)
+target_compile_features(ble_discovery_timers_tests PRIVATE cxx_std_20)
+add_test(NAME ble_discovery_timers_tests COMMAND ble_discovery_timers_tests)
