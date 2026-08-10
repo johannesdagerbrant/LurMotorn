@@ -429,6 +429,67 @@ class BleShim(private val context: Context) {
         }
     }
 
+    /**
+     * #182: a full radio teardown and rebuild.
+     *
+     * The engine escalates here once it has concluded the link is HALF-OPEN — connected, our writes
+     * leaving, and nothing ever arriving. A soft resetLink provably cannot clear that: on hardware
+     * 80 soft resets in a row cleared nothing and only a reboot did. This game had no implementation
+     * at all, so the escalation logged three attempts that never happened, which sent a real
+     * diagnosis down the wrong path.
+     *
+     * Bounded by the caller (MaxRadioRestarts), because the #163 lesson is that churn degrades the
+     * radio — the recovery must not become the fault.
+     */
+    fun restartRadio() {
+        handler.post {
+            synchronized(this) {
+                if (!started) return@synchronized
+                Log.i(TAG, "restartRadio (#182): full radio teardown + rebuild — a soft reset can't " +
+                           "clear a wedged BLE stack")
+                val wasLinked = linked
+                // Client (central side): purge the cached GATT db, then close it fully.
+                gattClient?.let { g ->
+                    gattRefresh(g)
+                    try { g.disconnect(); g.close() } catch (_: SecurityException) {}
+                }
+                gattClient = null
+                clientDatagram = null
+                // Server (peripheral side): a wedged notify path we SERVE lives here, and resetLink
+                // never touches it — closing + reopening re-publishes the service and drops any stale
+                // subscription. startGattServer() below rebuilds it.
+                try { gattServer?.close() } catch (_: SecurityException) {}
+                gattServer = null
+                serverDatagram = null
+                connectedCentral = null
+                stopScanning()
+                stopAdvertising()
+                // Link state resets exactly as a real loss would: engine goes to Searching, role reopens.
+                linked = false
+                decidedPeripheral = false
+                connecting = false
+                synchronized(sendLock) { sendQueue.clear(); sendInFlight = false; ++sendWatchdogTok }
+                if (wasLinked) nativeOnDisconnected()
+                startGattServer()   // fresh server + service
+                startDiscovery()    // role-aware rediscovery, same as after a link loss
+            }
+        }
+    }
+
+    /** Clear a BluetoothGatt's cached services/CCCD state via the hidden refresh() method (#182).
+     *  Android caches the peer's GATT database and subscription across reconnects; a wedged notify path
+     *  can be that stale cache, and refresh() is the only way to drop it — there is no public API, so
+     *  reflection is the documented workaround. A failure is non-fatal: the close() that follows still
+     *  helps, and the whole escalation is best-effort under a cap. */
+    private fun gattRefresh(gatt: BluetoothGatt) {
+        try {
+            val ok = gatt.javaClass.getMethod("refresh").invoke(gatt) as? Boolean ?: false
+            Log.i(TAG, "gatt.refresh() = $ok (#182: purge stale service/subscription cache)")
+        } catch (e: Exception) {
+            Log.i(TAG, "gatt.refresh() unavailable (${e.javaClass.simpleName}) — relying on close() (#182)")
+        }
+    }
+
     /** Release the radio (#194). A registration left behind is what the NEXT launch collides
      *  with, so a clean exit has to hand it back. A force-stop cannot run this - but a
      *  force-stop is not what we do to players. */

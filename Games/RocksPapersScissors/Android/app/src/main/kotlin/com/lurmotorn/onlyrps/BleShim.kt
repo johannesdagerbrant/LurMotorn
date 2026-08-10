@@ -328,6 +328,31 @@ class BleShim(private val context: Context) {
         startDiscovery()
     }
 
+    /**
+     * Hand the radio back (#194). This game did not have it, and the fix exists because leaving a
+     * registration behind is what the NEXT launch collides with: the advertiser/scanner start earns
+     * ALREADY_STARTED, and the app then looks alive while being invisible and deaf. The collision
+     * outlives the process, so it is the second launch that breaks, which is what made it hard to
+     * attribute.
+     *
+     * A force-stop cannot run this — but a force-stop is not what we do to players, and a normal
+     * exit now leaves nothing behind.
+     */
+    fun stop() {
+        handler.post {
+            if (!started) return@post
+            started = false
+            watchdogHandler.removeCallbacks(discoveryWatchdog)
+            stopScanning()
+            stopAdvertising()
+            try { gattClient?.close() } catch (_: SecurityException) {}
+            gattClient = null
+            try { gattServer?.close() } catch (_: SecurityException) {}
+            gattServer = null
+            Log.i(TAG, "BLE stopped - advertiser/scanner/GATT released")
+        }
+    }
+
     /** Begin discovery. If we already know the peer (a prior link), we know our role
      *  and act one-sided — the peripheral only advertises, the central only scans —
      *  so the two phones never both connect out at once (the reconnect collision,

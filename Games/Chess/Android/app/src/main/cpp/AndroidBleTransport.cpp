@@ -33,6 +33,8 @@ class AndroidBleTransport : public ITransport, public EventInbox::Sink {
 public:
     void Send(const uint8_t* Data, std::size_t Size) override;
     void SendExpedited(const uint8_t* Data, std::size_t Size) override;
+    void RestartRadio() override;                              // #182 hard reset
+    bool CanRestartRadio() const override { return true; }     // ...and we really have one
 
 private:
     void SendWithPriority(const uint8_t* Data, std::size_t Size, bool Expedited);
@@ -61,6 +63,7 @@ AndroidBleTransport g_Transport;
 JavaVM*   g_Vm         = nullptr;
 jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
 jmethodID g_SendMethod  = nullptr; // BleShim.send([B)V
+jmethodID g_RestartMethod = nullptr;  // BleShim.restartRadio()V (#182 hard reset)
 jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
 
 // Get a JNIEnv for the calling thread, attaching it if necessary. android_main
@@ -102,6 +105,18 @@ void AndroidBleTransport::SendExpedited(const uint8_t* Data, std::size_t Size) {
 // drop the (dead) link and resume discovery, rather than waiting out the BLE
 // supervision timeout (10-20s) for a disconnect callback. This makes a killed-peer
 // drop detected in ~5s on Android too, matching iOS.
+// #182: the SOFT ResetLink below provably cannot clear a wedged BLE stack — on hardware 80 soft
+// resets in a row cleared nothing and only a reboot did. This is the harder escalation the session
+// reaches for once it has concluded the link is half-open: tear the whole radio down and rebuild it.
+// Chess had no implementation at all, so the session's escalation logged three attempts that never
+// happened.
+void AndroidBleTransport::RestartRadio() {
+    if (g_Shim == nullptr || g_RestartMethod == nullptr) return;
+    JNIEnv* Env = EnvForThisThread();
+    if (Env == nullptr) return;
+    Env->CallVoidMethod(g_Shim, g_RestartMethod);
+}
+
 void AndroidBleTransport::ResetLink() {
     if (g_Shim == nullptr || g_ResetMethod == nullptr) return;
     JNIEnv* Env = EnvForThisThread();
@@ -129,6 +144,7 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
     g_SendMethod  = Env->GetMethodID(Cls, "send", "([BZ)V");   // (bytes, expedited)
+    g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
     g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
 }
 

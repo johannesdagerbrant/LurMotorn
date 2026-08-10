@@ -191,6 +191,7 @@ struct ReconnectingSilentTransport : Lur::Transport::ITransport {
     void ResetLink() override { ++ResetCount; }  // reconnects instantly, still silent
     void RestartRadio() override { ++RestartCount; }  // #182: the harder reset; still silent (a wedge
     // a radio restart can't clear is the worst case the banner exists for)
+    bool CanRestartRadio() const override { return true; }  // this backend really has one
     void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
 };
 
@@ -230,6 +231,40 @@ static void TestHalfOpenLinkIsDetectedAndBacksOff() {
 // churn that degrades the radio (#163's lesson). Past the cap it stops touching the radio entirely and
 // leaves the LINK STALLED banner to drive the guaranteed human fix. This is the host-testable half of
 // #182 (the real radio teardown is not host-reproducible; the Session-side bounding is exactly this).
+// A transport with NO hard restart must not be narrated as if it had one. The #182 escalation
+// logged "attempt 1/3 … 2/3 … 3/3" against backends that never overrode RestartRadio, so the log
+// described a repair nobody attempted — which is worse than silence, because it is believed. Now
+// the session asks first and says the useful thing instead.
+static void TestNoRestartCapabilityIsReportedNotFaked() {
+    // Same shape as ReconnectingSilentTransport, except it never implements a hard restart —
+    // which is exactly what chess's two backends looked like.
+    struct NoRestartTransport : Lur::Transport::ITransport {
+        int      RestartCount = 0;
+        Receiver Rx;
+        void Send(const uint8_t*, std::size_t) override {}
+        void SetReceiver(Receiver R) override { Rx = std::move(R); }
+        bool IsConnected() const override { return true; }
+        void ResetLink() override {}
+        void RestartRadio() override { ++RestartCount; }   // reachable, but not DECLARED supported
+        void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
+    };
+    NoRestartTransport T;
+    Session S;
+    S.Start(&T, Guid('a'));
+    uint8_t H[35]; MakeHello(H, 'b', /*ready*/ true); T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+    CHECK(!T.CanRestartRadio());          // the default — and what chess's backends silently were
+
+    for (int i = 0; i < 1200 && !S.IsLinkHalfOpen(); ++i) S.Tick(FrameNs);
+    CHECK(S.IsLinkHalfOpen());            // the verdict still forms: that part was never the problem
+    CHECK(T.RestartCount == 0);           // ...but nothing is called, so nothing is claimed
+
+    // And it stays quiet rather than counting up phantom attempts for the rest of the episode.
+    for (int i = 0; i < 4000; ++i) S.Tick(FrameNs);
+    CHECK(T.RestartCount == 0);
+    CHECK(S.RadioRestartsAttempted() == 1);   // latched once, so the log says itself exactly once
+}
+
 static void TestHalfOpenEscalatesToRadioRestartThenStops() {
     ReconnectingSilentTransport T;
     Session S;
@@ -442,6 +477,7 @@ int main() {
     TestKeepaliveTimeoutResetsLink();
     TestHalfOpenLinkIsDetectedAndBacksOff();   // #163
     TestHalfOpenEscalatesToRadioRestartThenStops();  // #182
+    TestNoRestartCapabilityIsReportedNotFaked();     // #182: no capability -> no phantom attempts
     TestKeepaliveKeepsLinkAlive();
     TestOversizedFramedSendRefused();
     TestResyncGateHoldsThenLiftsOnSync();

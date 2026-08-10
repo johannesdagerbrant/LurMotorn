@@ -89,6 +89,16 @@ void Session::Tick(uint64_t ElapsedNs) {
                 // Transient blip: a soft ResetLink recovers it fast, so reset aggressively.
                 Logf("link timeout — peer silent, resetting transport");
                 if (Transport) Transport->ResetLink();  // drop + resume discovery -> reconnect
+            } else if (Transport != nullptr && !Transport->CanRestartRadio()) {
+                // The backend has no hard restart. Say THAT, once, instead of narrating an
+                // escalation that cannot happen: the log used to claim three radio restarts against
+                // a transport that had never implemented one, which sent a real diagnosis down the
+                // wrong path (2026-08-09). A missing capability is a finding, not a silence.
+                if (RadioRestarts_ == 0) {
+                    ++RadioRestarts_;   // latch, so this says itself once per episode
+                    Logf("half-open, and this transport cannot restart the radio — no escalation is "
+                         "possible here. The wedged peer must toggle Bluetooth or reboot.");
+                }
             } else if (RadioRestarts_ < MaxRadioRestarts) {
                 // #182 escalation: the soft reset above provably can't clear a WEDGED stack (80 of them
                 // cleared nothing on hardware), so once half-open, escalate to the harder per-OS radio

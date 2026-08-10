@@ -75,6 +75,20 @@ public:
     // whole premise (a radio restart may only help a SUBSET of wedges). Not host-testable end
     // to end (the wedge is a real-radio phenomenon); the Session-side bounding IS unit-tested.
     virtual void RestartRadio() {}
+
+    // Does RestartRadio() actually DO anything on this transport?
+    //
+    // RestartRadio defaults to an empty body, which is the right default — a loopback or test
+    // transport has no radio to restart. But it made the #182 escalation LIE: the session logged
+    // "escalating to a full radio restart (attempt 1/3)" three times against a backend that had
+    // never overridden it, so a diagnostic claimed an action nobody had taken. That cost real
+    // debugging time on 2026-08-09, when chess's log reported three hard restarts that never
+    // happened while the actual cause was elsewhere.
+    //
+    // A backend that implements RestartRadio overrides this to true. The session asks before
+    // escalating, so an unsupported transport says "cannot restart the radio" — which is a useful
+    // thing to read — instead of narrating a repair it did not attempt.
+    virtual bool CanRestartRadio() const { return false; }
 };
 
 } // namespace Lur::Transport
