@@ -275,3 +275,30 @@ could reach it, and the first thing a test found was a live bug.
 
 `Modules/Transport` is a compiled library now (was INTERFACE). All four app builds, both desktop
 builds and iOS CI re-verified after that change.
+
+### A latency regression Phase 0 caused, found in Phase 2 (#190)
+
+Both BLE backends decided send urgency by **inspecting the datagram's length**: chess's Android
+shim did `if (bytes.size == 1) sendQueue.addFirst(...)`, its iOS driver
+`if (Size == 1) _SendQueue.emplace_front(...)`. The reasoning was sound at the time — the wire
+format made a live move exactly one byte and padded every framed message to two or more.
+
+**Phase 0 deleted that rule.** Chess's move became a framed 2-byte datagram, `size == 1` stopped
+matching, and the #190 priority path stopped happening on both platforms. Nothing failed, nothing
+logged: the move simply started queueing behind keepalives and multi-datagram resyncs again —
+exactly when the queue is deepest and latency is felt. A pure latency regression, invisible to
+every test AND to the two-phone gate, which measures same-frame replies rather than queue position.
+
+The old comment predicted the failure and got the direction wrong: *"if it ever did, receiving
+would break first and much louder."* Receiving changed in the SAME commit, so both ends agreed and
+the only casualty was the optimization. **An invariant asserted in prose, in a file no test
+compiles, is not an invariant.**
+
+Fixed by stating urgency instead of guessing it: `EBleSendPriority` on `BleSendQueue::Enqueue`,
+`ITransport::SendExpedited` (non-pure, defaults to `Send`), a defaulted `Priority` on
+`Session::Send`, and chess marking its move at both send sites. Three host tests cover ordering
+rules the length trick never had. **RPS gains #190 on both platforms**, having never had it.
+
+Worth carrying into later phases: a wire-format change can silently break code that *infers*
+message identity somewhere else. Grep for length checks (`size == 1`, `Size == 1`) after any
+framing change.
