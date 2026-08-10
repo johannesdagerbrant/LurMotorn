@@ -131,14 +131,10 @@ ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
 
 using namespace Lur::Transport;
 
-extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* Vm, void* /*Reserved*/) {
-    g_Vm = Vm;
-    return JNI_VERSION_1_6;
-}
+
 
 // --- JNI: BleShim hands C++ a durable reference to itself + caches send(). ---
-extern "C" JNIEXPORT void JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
+static void JNICALL Ble_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
@@ -180,8 +176,7 @@ bool RefreshRolePin() {
 // many times we have already connected out, been told "you're the peripheral" and deferred
 // with no peer ever claiming Central — at the threshold the shared breaker takes Central so a
 // both-Peripheral state cannot deadlock (#146). ---
-extern "C" JNIEXPORT jint JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
+static jint JNICALL Ble_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
                                                       jbyteArray LocalId, jbyteArray PeerId,
                                                       jint Defers) {
 #if LUR_AGENT
@@ -217,8 +212,7 @@ std::string JStringToStd(JNIEnv* Env, jstring S) {
 
 // A central wrote the CCCD (enabled notifications). True = it is the peer we serve; false = a
 // non-bound device whose subscription must be IGNORED rather than allowed to redirect our notifies.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeAcceptSubscriber(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+static jboolean JNICALL Ble_nativeAcceptSubscriber(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
     const std::string A = JStringToStd(Env, Addr);
     const bool Ok = g_PeerBinding.AcceptSubscriber(A.c_str());
     if (!Ok) LOGI("BLE: IGNORING subscribe from %s — a live pair serves exactly one central (#83)",
@@ -229,16 +223,14 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeAcceptSubscriber(JNIEnv* Env, jobject /
 // May a datagram from this central reach the engine? Pre-link traffic passes (that IS the handshake);
 // once bound, only the peer's bytes do — unfiltered, a third device injected straight into the
 // lockstep/move stream.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeAcceptData(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+static jboolean JNICALL Ble_nativeAcceptData(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
     const std::string A = JStringToStd(Env, Addr);
     return g_PeerBinding.AcceptData(A.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
 
 // Is this the bound peer? Only ITS disconnect may end the match — treating any device's departure as
 // link loss is the hijack in reverse, letting an outsider kill a live pair by leaving.
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
+static jboolean JNICALL Ble_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self*/, jstring Addr) {
     const std::string A = JStringToStd(Env, Addr);
     return g_PeerBinding.IsPeer(A.c_str()) ? JNI_TRUE : JNI_FALSE;
 }
@@ -246,8 +238,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeIsBoundPeer(JNIEnv* Env, jobject /*Self
 // --- JNI: is a device id read off the peer well-formed (32 lowercase hex)? A failed/truncated
 // GATT read yields bytes that are not an id, and deciding a role from those is what produced
 // the both-Peripheral deadlock — so the shim retries the read instead of trusting it (#146). ---
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeIsValidDeviceId(JNIEnv* Env, jobject /*Self*/,
+static jboolean JNICALL Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject /*Self*/,
                                                            jbyteArray Id) {
     return Lur::Save::IsValidDeviceId(JBytesToString(Env, Id)) ? JNI_TRUE : JNI_FALSE;
 }
@@ -257,8 +248,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeIsValidDeviceId(JNIEnv* Env, jobject /*
 // shim supplies its app-private files dir (Context.filesDir) and serves the
 // returned GUID as this device's stable role identity. Idempotent: the same value
 // comes back on every launch, which is exactly the stable-role fix. ---
-extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeLoadOrCreateDeviceId(JNIEnv* Env, jobject /*Self*/,
+static jbyteArray JNICALL Ble_nativeLoadOrCreateDeviceId(JNIEnv* Env, jobject /*Self*/,
                                                                 jstring Dir) {
     const char* DirChars = Env->GetStringUTFChars(Dir, nullptr);
     const std::string DirPath = DirChars ? DirChars : ".";
@@ -275,8 +265,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeLoadOrCreateDeviceId(JNIEnv* Env, jobje
 
 // --- JNI: the last-linked peer's device id (issue #17 Step 3). Enables the cached-
 // role reconnect shortcut. Empty array if none stored yet. ---
-extern "C" JNIEXPORT jbyteArray JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeLoadPeerId(JNIEnv* Env, jobject /*Self*/, jstring Dir) {
+static jbyteArray JNICALL Ble_nativeLoadPeerId(JNIEnv* Env, jobject /*Self*/, jstring Dir) {
     const char* DirChars = Env->GetStringUTFChars(Dir, nullptr);
     const std::string DirPath = DirChars ? DirChars : ".";
     if (DirChars) Env->ReleaseStringUTFChars(Dir, DirChars);
@@ -291,8 +280,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeLoadPeerId(JNIEnv* Env, jobject /*Self*
     return Arr;
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeSavePeerId(JNIEnv* Env, jobject /*Self*/,
+static void JNICALL Ble_nativeSavePeerId(JNIEnv* Env, jobject /*Self*/,
                                                       jstring Dir, jbyteArray Data) {
     const char* DirChars = Env->GetStringUTFChars(Dir, nullptr);
     const std::string DirPath = DirChars ? DirChars : ".";
@@ -306,8 +294,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeSavePeerId(JNIEnv* Env, jobject /*Self*
     DeviceStore.Save(Lur::Save::PeerIdKey, Bytes.data(), Bytes.size());
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
+static void JNICALL Ble_nativeOnConnected(JNIEnv* /*Env*/, jobject /*Self*/,
                                                        jboolean AsPeripheral) {
     // Binder thread: queue the event; the engine thread applies it in Pump().
     LOGI("BLE connected as %s", AsPeripheral ? "peripheral" : "central");
@@ -322,8 +309,7 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeOnConnected(JNIEnv* /*Env*/, jobject /*
     // link up — no demo ping needed, and a bare 1-byte ping would now look like a move.
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeOnDisconnected(JNIEnv* /*Env*/, jobject /*Self*/) {
+static void JNICALL Ble_nativeOnDisconnected(JNIEnv* /*Env*/, jobject /*Self*/) {
     LOGI("BLE disconnected");
     // #83: the link is genuinely gone, so release the peer binding — the next central to subscribe may
     // bind. Doing it HERE means one place covers every path that loses a link, and it is what keeps
@@ -332,11 +318,81 @@ Java_com_lurmotorn_onlyrps_BleShim_nativeOnDisconnected(JNIEnv* /*Env*/, jobject
     g_Transport.Inbox.PushDisconnected();  // Binder thread: engine applies it in Pump()
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_lurmotorn_onlyrps_BleShim_nativeOnReceived(JNIEnv* Env, jobject /*Self*/, jbyteArray Data) {
+static void JNICALL Ble_nativeOnReceived(JNIEnv* Env, jobject /*Self*/, jbyteArray Data) {
     const jsize Len = Env->GetArrayLength(Data);
     std::vector<uint8_t> Bytes(static_cast<std::size_t>(Len));
     if (Len > 0) Env->GetByteArrayRegion(Data, 0, Len, reinterpret_cast<jbyte*>(Bytes.data()));
     // Binder thread: hand the datagram to the engine thread; Pump() calls the receiver.
     g_Transport.Inbox.PushDatagram(Bytes.data(), Bytes.size());
+}
+
+// The BLE wire identity, served to Kotlin from its single source of truth (BleProtocol.h) so the
+// two cannot drift. The Kotlin used to declare all three itself under a "MUST match" comment.
+static jstring Ble_nativeServiceUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleServiceUuid).c_str());
+}
+static jstring Ble_nativeDatagramUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleDatagramCharacteristicUuid).c_str());
+}
+static jstring Ble_nativeDeviceIdUuid(JNIEnv* Env, jobject) {
+    return Env->NewStringUTF(std::string(BleDeviceIdCharacteristicUuid).c_str());
+}
+
+// ---- JNI binding by TABLE, not by exported symbol name ----
+//
+// The Java_<mangled-package>_* convention bakes the app's package into the engine's bridge, so the
+// symbol `Java_com_lurmotorn_<app>_BleShim_nativeSetShim` is findable only from a class in that
+// exact package — which is precisely why this file could not be shared between games and had to be
+// copied instead. RegisterNatives binds an explicit table to a class we name ourselves, so the
+// Kotlin shim lives in ONE fixed engine package no matter which app links the library.
+//
+// The engine class name is a contract with the Kotlin side. If they disagree, JNI_OnLoad fails
+// LOUDLY below rather than leaving every native method unbound to fail one at a time later.
+static const char* const kBleShimClass = "com/lurmotorn/engine/BleShim";
+
+static const JNINativeMethod kBleShimMethods[] = {
+    {"nativeSetShim", "()V", reinterpret_cast<void*>(Ble_nativeSetShim)},
+    {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
+    {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
+    {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},
+    {"nativeDecideRole", "([B[BI)I", reinterpret_cast<void*>(Ble_nativeDecideRole)},
+    {"nativeAcceptSubscriber", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptSubscriber)},
+    {"nativeAcceptData", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeAcceptData)},
+    {"nativeIsBoundPeer", "(Ljava/lang/String;)Z", reinterpret_cast<void*>(Ble_nativeIsBoundPeer)},
+    {"nativeIsValidDeviceId", "([B)Z", reinterpret_cast<void*>(Ble_nativeIsValidDeviceId)},
+    {"nativeLoadOrCreateDeviceId", "(Ljava/lang/String;)[B", reinterpret_cast<void*>(Ble_nativeLoadOrCreateDeviceId)},
+    {"nativeLoadPeerId", "(Ljava/lang/String;)[B", reinterpret_cast<void*>(Ble_nativeLoadPeerId)},
+    {"nativeSavePeerId", "(Ljava/lang/String;[B)V", reinterpret_cast<void*>(Ble_nativeSavePeerId)},
+    {"nativeOnConnected", "(Z)V", reinterpret_cast<void*>(Ble_nativeOnConnected)},
+    {"nativeOnDisconnected", "()V", reinterpret_cast<void*>(Ble_nativeOnDisconnected)},
+    {"nativeOnReceived", "([B)V", reinterpret_cast<void*>(Ble_nativeOnReceived)},
+};
+
+// Bind them. Returns false (having logged) if the class or any signature disagrees.
+static bool RegisterBleShimNatives(JNIEnv* Env) {
+    jclass Cls = Env->FindClass(kBleShimClass);
+    if (Cls == nullptr) {
+        LOGE("JNI: cannot find %s — the Kotlin shim must be in that exact package", kBleShimClass);
+        return false;
+    }
+    const int Count = static_cast<int>(sizeof(kBleShimMethods) / sizeof(kBleShimMethods[0]));
+    if (Env->RegisterNatives(Cls, kBleShimMethods, Count) != JNI_OK) {
+        LOGE("JNI: RegisterNatives failed for %s (a signature disagrees with the Kotlin)",
+             kBleShimClass);
+        return false;
+    }
+    return true;
+}
+
+extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM* Vm, void* /*Reserved*/) {
+    g_Vm = Vm;
+    JNIEnv* Env = nullptr;
+    if (Vm->GetEnv(reinterpret_cast<void**>(&Env), JNI_VERSION_1_6) != JNI_OK || Env == nullptr) {
+        LOGE("JNI_OnLoad: no JNIEnv — cannot bind the BLE shim natives");
+        return JNI_ERR;
+    }
+    // Fail the LOAD, not the first call: an unbound native throws UnsatisfiedLinkError at its
+    // own call site, which surfaces as an unrelated-looking failure deep in the radio flow.
+    if (!RegisterBleShimNatives(Env)) return JNI_ERR;
+    return JNI_VERSION_1_6;
 }

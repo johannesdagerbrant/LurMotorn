@@ -7,6 +7,12 @@ android {
     namespace = "com.lurmotorn.onlyrps"
     compileSdk = 35
 
+    // The engine's Android platform sources (the BLE radio driver) compile INTO this app, exactly
+    // as the C++ engine modules do via add_subdirectory. ONE copy, shared with every other game —
+    // this replaces a 788-line duplicate that had drifted from its sibling.
+    // Path is from the ANDROID PROJECT root, the same anchor cpp/CMakeLists.txt walks up from.
+    sourceSets["main"].kotlin.srcDir("$rootDir/../../../Modules/Transport/Platform/Android")
+
     defaultConfig {
         applicationId = "com.lurmotorn.onlyrps"
         minSdk = 26          // BLE + Vulkan baseline

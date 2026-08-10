@@ -7,6 +7,14 @@ android {
     namespace = "com.lurmotorn.onlychess"
     compileSdk = 35
 
+    // The engine's Android platform sources (the BLE radio driver) compile INTO this app, exactly
+    // as the C++ engine modules do via add_subdirectory. One copy, shared by every game: the class
+    // lives in com.lurmotorn.engine and binds its natives by RegisterNatives, so it no longer has
+    // to sit in this app's package.
+    // Path is from the ANDROID PROJECT root (Games/<Game>/Android), the same anchor
+    // cpp/CMakeLists.txt walks up from — keep the two in step if either moves.
+    sourceSets["main"].kotlin.srcDir("$rootDir/../../../Modules/Transport/Platform/Android")
+
     defaultConfig {
         applicationId = "com.lurmotorn.onlychess"
         minSdk = 26          // BLE + Vulkan baseline

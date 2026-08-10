@@ -1,5 +1,7 @@
 package com.lurmotorn.onlychess
 
+import com.lurmotorn.engine.BleShim
+
 import android.app.NativeActivity
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -18,7 +20,15 @@ class OnlyChessActivity : NativeActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ble = BleShim(this)
+        // Load the native library BEFORE touching BleShim. Its natives are bound by
+        // RegisterNatives inside JNI_OnLoad, which runs at library load — so a BleShim method
+        // called first throws UnsatisfiedLinkError. The library name is per-app
+        // (android.app.lib_name), which is exactly why the engine class cannot load it itself.
+        // Verified the hard way: dropping this produced that crash on the first launch.
+        BleShim.ensureNativeLibrary("onlychess")
+        // The engine's radio driver, told the two things that are this app's: its log tag
+        // (what `logcat -s <tag>` filters on) and, via CMake, its BLE service UUID.
+        ble = BleShim(this, "OnlyChess")
 
         val perms = ble.requiredPermissions()
         if (perms.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {

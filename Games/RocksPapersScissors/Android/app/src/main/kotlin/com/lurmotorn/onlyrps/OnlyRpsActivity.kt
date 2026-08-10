@@ -1,5 +1,7 @@
 package com.lurmotorn.onlyrps
 
+import com.lurmotorn.engine.BleShim
+
 import android.app.NativeActivity
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -18,7 +20,14 @@ class OnlyRpsActivity : NativeActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        ble = BleShim(this)
+        // Load the native library BEFORE touching BleShim: its natives are bound by RegisterNatives
+        // inside JNI_OnLoad, which runs at library load, so a BleShim call made first throws
+        // UnsatisfiedLinkError. The name is per-app (android.app.lib_name), which is exactly why the
+        // engine class cannot load it itself.
+        BleShim.ensureNativeLibrary("onlyrps")
+        // The engine's radio driver, told the one thing that is this app's: its log tag (what
+        // `logcat -s <tag>` filters on). The BLE service UUID comes from CMake, via C++.
+        ble = BleShim(this, "OnlyRps")
 
         val perms = ble.requiredPermissions()
         if (perms.any { checkSelfPermission(it) != PackageManager.PERMISSION_GRANTED }) {
