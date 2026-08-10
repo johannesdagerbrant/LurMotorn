@@ -302,3 +302,18 @@ rules the length trick never had. **RPS gains #190 on both platforms**, having n
 Worth carrying into later phases: a wire-format change can silently break code that *infers*
 message identity somewhere else. Grep for length checks (`size == 1`, `Size == 1`) after any
 framing change.
+
+**Device re-verification of the #190 fix: DEFERRED.** Wireless ADB dropped again mid-phase and
+will not come back: the Galaxy still answers ARP and still ADVERTISES over mDNS
+(`adb-R83WA14EAMK-ME8WPy._adb-tls-connect._tcp 192.168.10.239:39261` — note the port rotated from
+33935), but every `adb connect` is actively refused, on the advertised port and on 5555. That is
+the "phone forgot the PC" state, which needs **Wireless debugging → Pair device with pairing
+code** on the phone — a human step, like the lock screen.
+
+Risk of deferring is genuinely low and worth stating precisely: the priority change moves a
+datagram's POSITION IN A QUEUE. The bytes on the wire are identical, the framing is unchanged, and
+`SendExpedited` defaults to `Send`, so it cannot break a link — the failure mode is "not as fast
+as intended", not "does not work". Host tests cover the ordering rules and iOS CI compiled both
+games' overrides. Queue for the next device session: chess two-phone (confirm rtt is no worse than
+the 50 ms baseline measured earlier tonight) and RPS two-phone (confirm it still links at all now
+that its send path gained a parameter).
