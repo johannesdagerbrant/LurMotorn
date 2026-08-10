@@ -135,7 +135,8 @@ Java_com_lurmotorn_onlychess_BleShim_nativeSetShim(JNIEnv* Env, jobject Self) {
 // --- JNI: the shared, cross-platform role tie-break (single source of truth). ---
 extern "C" JNIEXPORT jint JNICALL
 Java_com_lurmotorn_onlychess_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Self*/,
-                                                      jbyteArray LocalId, jbyteArray PeerId) {
+                                                      jbyteArray LocalId, jbyteArray PeerId,
+                                                      jint Defers) {
 // FORCED STATE OVER A SYSTEM PROPERTY, SO LUR_AGENT (issue #196) — the same channel shape as
 // the autoplay hook #195 moved, and note it is re-read on EVERY role decision rather than once
 // at startup, so a stale property keeps applying for the life of the install.
@@ -158,7 +159,7 @@ Java_com_lurmotorn_onlychess_BleShim_nativeDecideRole(JNIEnv* Env, jobject /*Sel
     Env->GetByteArrayRegion(LocalId, 0, LocalLen, reinterpret_cast<jbyte*>(Local.data()));
     Env->GetByteArrayRegion(PeerId, 0, PeerLen, reinterpret_cast<jbyte*>(Peer.data()));
     // EBleRole::Peripheral == 0, Central == 1 (matches BleShim's constants).
-    return static_cast<jint>(DecideBleRole(Local, Peer));
+    return static_cast<jint>(DecideBleRoleBreaking(Local, Peer, static_cast<int>(Defers)));
 }
 
 // --- JNI: the persistent device id (issue #17), sourced from the engine's shared

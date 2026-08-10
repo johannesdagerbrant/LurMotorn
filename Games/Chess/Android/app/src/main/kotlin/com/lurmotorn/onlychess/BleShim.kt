@@ -61,6 +61,9 @@ class BleShim(private val context: Context) {
         private val DEVICE_ID_UUID = UUID.fromString("4C55524D-4F54-4F52-4E02-4E6F6E636500")
         // Standard Client Characteristic Configuration Descriptor (enables notify).
         private val CCCD_UUID = UUID.fromString("00002902-0000-1000-8000-00805F9B34FB")
+        // Mirrors Lur::Transport::BleMaxPeripheralDefers. LOG-ONLY: C++ owns the actual
+        // breaker decision (nativeDecideRole), this just labels the line that reports it.
+        private const val MAX_FRUITLESS_DEFERS = 2
 
         private const val ROLE_PERIPHERAL = 0
         private const val ROLE_CENTRAL = 1
@@ -76,7 +79,10 @@ class BleShim(private val context: Context) {
     private external fun nativeOnConnected(asPeripheral: Boolean)
     private external fun nativeOnDisconnected()
     private external fun nativeOnReceived(bytes: ByteArray)
-    private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray): Int
+    /** The shared role tie-break. [fruitlessDefers] is how many times we have already deferred to
+     *  a peer that then never connected: past the threshold the C++ side BREAKS the tie and hands
+     *  us Central, escaping the both-peripheral deadlock (#146). */
+    private external fun nativeDecideRole(localId: ByteArray, peerId: ByteArray, fruitlessDefers: Int): Int
     /** #83: may this central become (or already be) the ONE central we serve? A match is strictly
      *  1:1, and any CCCD subscription used to be taken as the canonical one — so a third device in
      *  the room could redirect a live match's notifications to itself. The rule is shared C++ policy
@@ -149,6 +155,14 @@ class BleShim(private val context: Context) {
     @Volatile private var linked = false
     @Volatile private var connecting = false   // an outgoing central attempt is mid-flight
     @Volatile private var decidedPeripheral = false  // we settled as peripheral; stop connecting out
+
+    // #146: consecutive defers that produced NO link. DecideBleRole is a total order, so two
+    // healthy peers always get opposite answers — but on hardware both once settled on Peripheral,
+    // so nobody connected and the link never formed. Retrying cannot escape that: it re-runs the
+    // same comparison and reaches the same answer. Past MAX_FRUITLESS_DEFERS the shared breaker
+    // returns Central regardless, which is the only way out. Cleared by onLinked — a defer that
+    // produced a link was not fruitless.
+    private var fruitlessDefers = 0
 
     // Discovery watchdog (#79): cached-role one-sidedness is keyed to a peer identity
     // we have NOT verified this session — if the peer re-rolled its GUID
@@ -281,7 +295,7 @@ class BleShim(private val context: Context) {
      *  dance (advertise + scan + connect + in-band tie-break). */
     private fun startDiscovery() {
         if (peerId.isNotEmpty()) {
-            if (nativeDecideRole(deviceId, peerId) == ROLE_PERIPHERAL) {
+            if (nativeDecideRole(deviceId, peerId, fruitlessDefers) == ROLE_PERIPHERAL) {
                 decidedPeripheral = true          // known peripheral: never connect out
                 Log.i(TAG, "cached role: PERIPHERAL — advertise + serve, no scan")
                 startAdvertising()
@@ -437,6 +451,7 @@ class BleShim(private val context: Context) {
     private fun onLinked(asPeripheral: Boolean) {
         if (linked) return
         linked = true
+        fruitlessDefers = 0   // #146: a defer that produced a link was not fruitless
         watchdogHandler.removeCallbacks(discoveryWatchdog)  // #79: link up, stop watching
         stopScanning()
         stopAdvertising()
@@ -693,15 +708,25 @@ class BleShim(private val context: Context) {
             if (characteristic.uuid != DEVICE_ID_UUID) return
             val readPeerId = characteristic.value ?: ByteArray(0)
             rememberPeer(readPeerId)   // cache for the fast cached-role reconnect next time
-            val role = nativeDecideRole(deviceId, readPeerId)
-            Log.i(TAG, "read peer id: mine=${deviceId.size}B peer=${readPeerId.size}B -> " +
+            val role = nativeDecideRole(deviceId, readPeerId, fruitlessDefers)
+            // Log the id STRINGS (they are ASCII hex), not just their sizes: a both-peripheral
+            // deadlock means the two sides compared DIFFERENT bytes, and only the values show that
+            // (#146). Sizes agree in exactly the case that is hardest to diagnose.
+            Log.i(TAG, "read peer id: mine=${String(deviceId, Charsets.US_ASCII)} " +
+                "peer=${String(readPeerId, Charsets.US_ASCII)} defers=$fruitlessDefers -> " +
                 if (role == ROLE_CENTRAL) "CENTRAL (keep link)" else "PERIPHERAL (defer)")
             if (role == ROLE_CENTRAL) {
+                // #146: this is also where the breaker lands — past the threshold C++ returns
+                // Central even though the raw compare said Peripheral, so say so out loud.
+                if (fruitlessDefers >= MAX_FRUITLESS_DEFERS)
+                    Log.i(TAG, "role tie-break BROKEN after $fruitlessDefers fruitless defers " +
+                        "-> forcing CENTRAL (nobody was connecting; #146)")
                 enableNotifications(gatt)   // we keep this connection as the live link
             } else {
                 // We should be the peripheral: drop this connection and let the peer
                 // (the canonical central) connect to our server instead.
                 decidedPeripheral = true
+                ++fruitlessDefers          // #146: cleared by onLinked; counts unanswered defers
                 stopScanning()
                 startAdvertising()  // ensure findable even if we began in cached-central mode
                 dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer

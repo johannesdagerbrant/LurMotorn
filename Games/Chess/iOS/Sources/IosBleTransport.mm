@@ -134,6 +134,14 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _Connecting;        // an outgoing central attempt is mid-flight
     bool _DecidedPeripheral; // we settled as peripheral; stop connecting out
 
+    // #146: consecutive defers that produced NO link. DecideBleRole is a total order, so two
+    // healthy peers always get opposite answers — but on hardware both once settled on Peripheral,
+    // so nobody connected and the link never formed. Retrying cannot escape it: the same comparison
+    // reaches the same answer. Past BleMaxPeripheralDefers the shared breaker
+    // (DecideBleRoleBreaking) hands us Central regardless, which is the only way out. Cleared the
+    // moment a link forms — a defer that produced a link was not fruitless.
+    int _FruitlessDefers;
+
     // Send flow control (issue #72). CoreBluetooth drops a writeWithoutResponse /
     // updateValue when its transmit queue is full; unpaced autoplay bursts then lost
     // moves (and resync payloads), wedging the game. We queue datagrams and drain them
@@ -163,6 +171,7 @@ static void SaveIosPeerId(const std::string& Id) {
         _DeviceIdUuid = MakeUuid(BleDeviceIdCharacteristicUuid);
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
+        _FruitlessDefers = 0;
 
 // RIG-PUSHED FORCED STATE, SO LUR_AGENT (issue #196) — it overrides the GUID tie-break that
 // #17 made stable, on a channel a player's device should not be listening to at all.
@@ -431,14 +440,23 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
             _CachedPeripheral = (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
             SaveIosPeerId(_PeerId);
         }
-        const EBleRole Role = DecideBleRole(_LocalId, PeerId);
-        NSLog(@"OnlyChess BLE: role decided = %s",
-              Role == EBleRole::Peripheral ? "Peripheral" : "Central");
+        const EBleRole Role = DecideBleRoleBreaking(_LocalId, PeerId, _FruitlessDefers);
+        // Log the id VALUES, not a verdict alone: a both-peripheral deadlock means the two sides
+        // compared different bytes, and only the values show that (#146).
+        NSLog(@"OnlyChess BLE: role decided = %s (mine=%s peer=%s defers=%d)",
+              Role == EBleRole::Peripheral ? "Peripheral" : "Central",
+              _LocalId.c_str(), PeerId.c_str(), _FruitlessDefers);
         if (Role == EBleRole::Central && _RemoteDatagram) {
+            // #146: the breaker also lands here — past the threshold this is Central even though the
+            // raw compare said Peripheral, so say so out loud rather than leaving it inexplicable.
+            if (_FruitlessDefers >= BleMaxPeripheralDefers)
+                NSLog(@"OnlyChess BLE: role tie-break BROKEN after %d fruitless defers -> forcing "
+                      @"Central (nobody was connecting; #146)", _FruitlessDefers);
             [peripheral setNotifyValue:YES forCharacteristic:_RemoteDatagram];  // keep this link
         } else {
             // We should be the peripheral: drop this connection, let the peer connect to us.
             _DecidedPeripheral = true;
+            ++_FruitlessDefers;   // #146: cleared when a link forms; counts unanswered defers
             [_Central stopScan];
             [self advertiseService];  // ensure findable even if we began in cached-central mode
             [_Central cancelPeripheralConnection:peripheral];
@@ -452,6 +470,7 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
 - (void)peripheral:(CBPeripheral*)peripheral
 didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
     if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.isNotifying) {
+        _FruitlessDefers = 0;   // #146: a defer that produced a link was not fruitless
         NSLog(@"OnlyChess BLE: central linked + notifications on");
         // #83: we are CENTRAL, so our own peripheral manager has no legitimate peer — shut it to
         // everyone. Binding only ever happened in didSubscribeToCharacteristic (the peripheral path),
