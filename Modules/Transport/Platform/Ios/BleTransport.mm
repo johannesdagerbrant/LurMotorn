@@ -53,7 +53,7 @@
 //
 // Adjacent NSString literals concatenate, so a multi-line format string still works; ##__VA_ARGS__
 // swallows the comma for a call with no arguments of its own.
-#define BLE_LOG(Fmt, ...) NSLog(@"%s BLE: " Fmt, Lur::Core::LogTag, ##__VA_ARGS__)
+#define BLE_LOG(Fmt, ...) NSLog(@"%{public}s BLE: " Fmt, Lur::Core::LogTag, ##__VA_ARGS__)
 #include "Lur/Transport/EventInbox.h"
 
 using namespace Lur::Transport;
@@ -217,7 +217,7 @@ static void SaveIosPeerId(const std::string& Id) {
 
         _Central    = [[CBCentralManager alloc] initWithDelegate:self queue:nil];
         _Peripheral = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
-        BLE_LOG(@"driver up, local id=%s, cached role=%s", _LocalId.c_str(),
+        BLE_LOG(@"driver up, local id=%{public}s, cached role=%s", _LocalId.c_str(),
               _HaveCachedRole ? (_CachedPeripheral ? "PERIPHERAL" : "CENTRAL") : "none");
     }
     return self;
@@ -464,7 +464,13 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
         // Log both id STRINGS (they're ASCII hex): a both-Peripheral deadlock means the two
         // sides compared DIFFERENT bytes, which is only diagnosable if each side prints what
         // it actually compared (#146).
-        BLE_LOG(@"role decided = %s (mine=%s peer=%s defers=%d)",
+        // %{public}s on the IDS, not decoration: NSLog forwards to os_log, which REDACTS a
+        // dynamic C string to "<private>" whenever the device is not attached to Xcode — i.e.
+        // always, for us. Verified on device: this line printed `local id=<private>` until the
+        // qualifier was added, while adjacent compile-time literals rendered fine. Redacting these
+        // two would destroy the entire point of logging them: a both-peripheral deadlock means the
+        // sides compared different BYTES, and the values are the only thing that shows it (#146).
+        BLE_LOG(@"role decided = %s (mine=%{public}s peer=%{public}s defers=%d)",
               Role == EBleRole::Peripheral ? "Peripheral" : "Central",
               _LocalId.c_str(), PeerId.c_str(), _FruitlessDefers);
         if (Role == EBleRole::Central && _RemoteDatagram) {
