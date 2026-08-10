@@ -57,10 +57,11 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 # The app bundle. Sources:
 #   AppMain.mm          — UIKit shim: Metal-backed view drives the shared BoardView.
 #   (the iOS Vulkan platform seam now ships with lur::render, one copy per platform)
-#   IosBleTransport.mm  — the CoreBluetooth backend of Lur::Transport::ITransport.
+#   (the CoreBluetooth backend now ships with the engine, one copy per platform:
+#    Modules/Transport/Platform/Ios/BleTransport.mm)
 add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
-    Sources/IosBleTransport.mm)
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm)
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
@@ -80,6 +81,10 @@ target_compile_definitions(OnlyChess PRIVATE
     # from a MANUAL-DISPATCH CI job only (`gh workflow run "macOS CI" -f agent=true`), never
     # an ordinary push, or it would sit next to the player artifact.
     LUR_AGENT=${LUR_AGENT_ON}
+    # The app's log tag, for the engine platform sources compiled into THIS target. An
+    # out-of-tree app target cannot see the engine tree's add_compile_definitions — the same
+    # reason the LUR_* macros above are repeated here. Lur/Core/LogTag.h #errors without it.
+    LUR_LOG_TAG="${LUR_LOG_TAG}"
     # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
     # phone from cross-linking an RTS phone. Was inherited from a default in
     # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
@@ -102,7 +107,7 @@ target_link_libraries(OnlyChess PRIVATE
 # enable ARC by default, so turn it on explicitly for this target.
 set_source_files_properties(
     Sources/AppMain.mm
-    Sources/IosBleTransport.mm
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # MoltenVK + Apple frameworks. MoltenVK is linked as the matching static slice;

@@ -46,7 +46,7 @@ import android.util.Log
 import java.util.UUID
 
 /**
- * The real Bluetooth Low Energy radio for OnlyChess (issue #3, Android half).
+ * The real Bluetooth Low Energy radio (issue #3, Android half) — shared by every game.
  *
  * Its only job is to move opaque `ByteArray` datagrams between this phone and the
  * peer; all framing/encoding/game logic stays in C++ (the Lur::Transport backend

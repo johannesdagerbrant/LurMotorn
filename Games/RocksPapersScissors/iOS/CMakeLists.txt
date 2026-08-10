@@ -38,7 +38,7 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 # Vulkan/BLE seams are copied from chess (package-renamed).
 add_executable(OnlyRps MACOSX_BUNDLE
     Sources/RpsMain.mm
-    Sources/IosBleTransport.mm)
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm)
 
 target_include_directories(OnlyRps PRIVATE ${MVK_INCLUDE})
 
@@ -56,6 +56,10 @@ target_compile_definitions(OnlyRps PRIVATE
     # remote control, since it has no touch injection at all. LUR_AGENT_ON is the derived value
     # EngineFlags publishes (force-zeroed in Shipping); Android's cpp/CMakeLists.txt does the same.
     LUR_AGENT=${LUR_AGENT_ON}
+    # The app's log tag, for the engine platform sources compiled into THIS target. An
+    # out-of-tree app target cannot see the engine tree's add_compile_definitions — the same
+    # reason the LUR_* macros above are repeated here. Lur/Core/LogTag.h #errors without it.
+    LUR_LOG_TAG="${LUR_LOG_TAG}"
     # Distinct per-game BLE service UUID so RPS never cross-links a chess phone
     # (chess keeps the default ...7370; RPS advertises/scans ...7371).
     "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")
@@ -77,7 +81,7 @@ target_link_libraries(OnlyRps PRIVATE
 # The .mm sources are Objective-C++ with ARC (CMake's Xcode generator doesn't default it on).
 set_source_files_properties(
     Sources/RpsMain.mm
-    Sources/IosBleTransport.mm
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 target_link_libraries(OnlyRps PRIVATE

@@ -1,7 +1,13 @@
 // CoreBluetooth backend of Lur::Transport::ITransport — the iOS counterpart of
-// Games/Chess/Android/.../AndroidBleTransport.cpp. This is the iPhone side of the
-// cross-platform BLE link that lets an iPhone and an Android phone play locally
-// with no server (CLAUDE.md).
+// Modules/Transport/Platform/Android/BleTransport.cpp. This is the iPhone side of the
+// cross-platform BLE link that lets an iPhone and an Android phone play locally with no
+// server (CLAUDE.md).
+//
+// ONE copy, shared by every game. It was duplicated per app, and the two copies had drifted:
+// this one carried the #182 radio restart, the #146 bad-device-id guard and the role-pin
+// logging that the other lacked entirely — so the game without them had no recovery from a
+// wedged BLE stack and could settle a role from a failed GATT read. Nothing here names an app
+// now: the log tag arrives as LUR_LOG_TAG and the BLE UUIDs come from BleProtocol.h.
 //
 // Protocol identity is SHARED and defined exactly once in BleProtocol.h; this file
 // uses those exact constants so it interoperates with the Kotlin/Android side:
@@ -38,7 +44,16 @@
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
+#include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleProtocol.h"
+
+// Every line this driver logs is prefixed with the APP's tag — the string an iOS syslog capture
+// greps for — which is the only per-app value left in this file now that the UUIDs come from
+// BleProtocol.h. It used to be hardcoded at all 16 call sites, in two copies of this file.
+//
+// Adjacent NSString literals concatenate, so a multi-line format string still works; ##__VA_ARGS__
+// swallows the comma for a call with no arguments of its own.
+#define BLE_LOG(Fmt, ...) NSLog(@"%s BLE: " Fmt, Lur::Core::LogTag, ##__VA_ARGS__)
 #include "Lur/Transport/EventInbox.h"
 
 using namespace Lur::Transport;
@@ -134,12 +149,10 @@ static void SaveIosPeerId(const std::string& Id) {
     bool _Connecting;        // an outgoing central attempt is mid-flight
     bool _DecidedPeripheral; // we settled as peripheral; stop connecting out
 
-    // #146: consecutive defers that produced NO link. DecideBleRole is a total order, so two
-    // healthy peers always get opposite answers — but on hardware both once settled on Peripheral,
-    // so nobody connected and the link never formed. Retrying cannot escape it: the same comparison
-    // reaches the same answer. Past BleMaxPeripheralDefers the shared breaker
-    // (DecideBleRoleBreaking) hands us Central regardless, which is the only way out. Cleared the
-    // moment a link forms — a defer that produced a link was not fruitless.
+    // #146: how many times we have connected out, been told "you are the peripheral", and
+    // deferred — with NO peer ever arriving to claim Central. Cleared the moment a link forms.
+    // Past BleMaxPeripheralDefers the shared breaker (DecideBleRoleBreaking) hands us Central
+    // instead, so two peers that both computed Peripheral cannot stall each other forever.
     int _FruitlessDefers;
 
     // Send flow control (issue #72). CoreBluetooth drops a writeWithoutResponse /
@@ -173,10 +186,11 @@ static void SaveIosPeerId(const std::string& Id) {
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
         _FruitlessDefers = 0;
 
-// RIG-PUSHED FORCED STATE, SO LUR_AGENT (issue #196) — it overrides the GUID tie-break that
-// #17 made stable, on a channel a player's device should not be listening to at all.
 #if LUR_AGENT
-        // Dev role override (rig-pushed Documents/role = "central"|"peripheral"):
+        // Role override (rig-pushed Documents/role = "central"|"peripheral"), LUR_AGENT and not
+        // LUR_INTERNAL — settled in #197. It is forced state from a hidden channel that outlives
+        // the app, and Development is the build a player plays.
+        // Rig-pushed Documents/role = "central"|"peripheral":
         // pins DecideBleRole so the rig can test BOTH role configs on one device
         // pair. Read once at driver startup — push the marker BEFORE launching.
         {
@@ -187,7 +201,12 @@ static void SaveIosPeerId(const std::string& Id) {
             if ([Role isEqualToString:@"central"])         SetBleRoleOverride(EBleRole::Central);
             else if ([Role isEqualToString:@"peripheral"]) SetBleRoleOverride(EBleRole::Peripheral);
             else                                           ClearBleRoleOverride();
-            if (Role.length) NSLog(@"OnlyChess BLE: dev role override = %@", Role);
+            // #146: say it LOUDLY — the marker outlives the app, so a stale one from an earlier
+            // rig run is the first suspect whenever the roles come out wrong, and it also
+            // suppresses the deadlock breaker (a pin is a deliberate choice, never overridden).
+            if (IsBleRolePinned())
+                BLE_LOG(@"role PINNED by Documents/role = %@ (dev override; delete the "
+                      @"marker to restore the auto tie-break)", Role);
         }
 #endif
 
@@ -198,7 +217,7 @@ static void SaveIosPeerId(const std::string& Id) {
 
         _Central    = [[CBCentralManager alloc] initWithDelegate:self queue:nil];
         _Peripheral = [[CBPeripheralManager alloc] initWithDelegate:self queue:nil];
-        NSLog(@"OnlyChess BLE: driver up, local id=%s, cached role=%s", _LocalId.c_str(),
+        BLE_LOG(@"driver up, local id=%s, cached role=%s", _LocalId.c_str(),
               _HaveCachedRole ? (_CachedPeripheral ? "PERIPHERAL" : "CENTRAL") : "none");
     }
     return self;
@@ -218,19 +237,9 @@ static void SaveIosPeerId(const std::string& Id) {
     // link-establishment record sync, so we must NOT buffer + replay a stale move
     // (which would decode against a since-advanced position and desync).
     if (!_Connected) return;
-    // An EXPEDITED datagram jumps the queue (#190). Otherwise it is FIFO with no notion of
-    // urgency, so the datagram a player is waiting on can sit behind a keepalive or a
-    // multi-datagram resync payload — exactly when the queue is deepest and latency is felt
-    // most, at a whole connection interval per place in line.
-    //
-    // Urgency arrives as an ARGUMENT now. It used to be inferred from the datagram's LENGTH
-    // ("1 byte means a live move"), which put one game's wire format inside this transport —
-    // and it broke silently the moment that format changed: the move became a framed 2-byte
-    // datagram, `Size == 1` stopped matching, and this fast path simply stopped happening.
-    // Nothing failed; it just got slower, in the one place latency is felt.
-    //
-    // Reordering is safe for the caller that uses it: expedited datagrams keep their order
-    // among themselves, so one can never overtake another.
+    // #190, which RPS never had: an expedited datagram goes to the FRONT. Urgency is an
+    // argument, never guessed from the bytes — see the chess sibling's comment for the
+    // length-inference bug that cost.
     if (Expedited) _SendQueue.emplace_front(Data, Data + Size);
     else           _SendQueue.emplace_back(Data, Data + Size);
     [self pumpSend];
@@ -283,6 +292,7 @@ static void SaveIosPeerId(const std::string& Id) {
 }
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
+    _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
     [_DiscoveryWatchdog invalidate];
     _DiscoveryWatchdog = nil;
     [_Central stopScan];
@@ -305,7 +315,7 @@ static void SaveIosPeerId(const std::string& Id) {
 
 - (void)discoveryWatchdogFired {
     if (_Linked) return;
-    NSLog(@"OnlyChess BLE: discovery watchdog: no link in 8s - dropping cached-role "
+    BLE_LOG(@"discovery watchdog: no link in 8s - dropping cached-role "
           @"gates, going symmetric (#79)");
     _HaveCachedRole = _CachedPeripheral = _DecidedPeripheral = false;
     _Connecting = false;
@@ -331,7 +341,7 @@ static void SaveIosPeerId(const std::string& Id) {
 // it as a link loss so we resume discovery and the UI goes to Disconnected.
 - (void)resetLink {
     if (!_Linked) return;
-    NSLog(@"OnlyChess BLE: net keepalive timeout -> forcing link reset");
+    BLE_LOG(@"net keepalive timeout -> forcing link reset");
     [self onLinkLost];
 }
 
@@ -362,10 +372,10 @@ static void SaveIosPeerId(const std::string& Id) {
 - (void)centralManagerDidUpdateState:(CBCentralManager*)central {
     if (central.state != CBManagerStatePoweredOn) return;
     if ([self shouldScan]) {
-        NSLog(@"OnlyChess BLE: central powered on, scanning");
+        BLE_LOG(@"central powered on, scanning");
         [central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
     } else {
-        NSLog(@"OnlyChess BLE: central powered on, cached PERIPHERAL role -> not scanning");
+        BLE_LOG(@"central powered on, cached PERIPHERAL role -> not scanning");
     }
     [self armDiscoveryWatchdog];  // #79: one-sidedness may not outlive the watchdog
 }
@@ -389,7 +399,7 @@ static void SaveIosPeerId(const std::string& Id) {
 
 - (void)centralManager:(CBCentralManager*)central
 didFailToConnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
-    NSLog(@"OnlyChess BLE: connect failed: %@", error);
+    BLE_LOG(@"connect failed: %@", error);
     [self resetClientAndRescan];
 }
 
@@ -434,29 +444,40 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
         // Got the peer's device id -> run the shared tie-break.
         NSData* V = characteristic.value;
         std::string PeerId(V ? static_cast<const char*>(V.bytes) : "", V ? V.length : 0);
-        if (!PeerId.empty() && PeerId != _PeerId) {   // cache for the fast cached-role reconnect
+        // #146: a role settled from a BAD read is a role the peer cannot mirror — and two peers
+        // that both land on Peripheral deadlock with nobody central. An errored read leaves a
+        // stale/absent value, so never decide from it: treat the READ as the failure and retry.
+        if (error != nil || !Lur::Save::IsValidDeviceId(PeerId)) {
+            BLE_LOG(@"bad device-id read (err=%@, %zuB) - not deciding a role; "
+                  @"retrying discovery", error, PeerId.size());
+            [_Central cancelPeripheralConnection:peripheral];
+            [self armDiscoveryWatchdog];
+            return;
+        }
+        if (PeerId != _PeerId) {   // cache for the fast cached-role reconnect
             _PeerId = PeerId;
             _HaveCachedRole = true;
             _CachedPeripheral = (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
             SaveIosPeerId(_PeerId);
         }
         const EBleRole Role = DecideBleRoleBreaking(_LocalId, PeerId, _FruitlessDefers);
-        // Log the id VALUES, not a verdict alone: a both-peripheral deadlock means the two sides
-        // compared different bytes, and only the values show that (#146).
-        NSLog(@"OnlyChess BLE: role decided = %s (mine=%s peer=%s defers=%d)",
+        // Log both id STRINGS (they're ASCII hex): a both-Peripheral deadlock means the two
+        // sides compared DIFFERENT bytes, which is only diagnosable if each side prints what
+        // it actually compared (#146).
+        BLE_LOG(@"role decided = %s (mine=%s peer=%s defers=%d)",
               Role == EBleRole::Peripheral ? "Peripheral" : "Central",
               _LocalId.c_str(), PeerId.c_str(), _FruitlessDefers);
         if (Role == EBleRole::Central && _RemoteDatagram) {
-            // #146: the breaker also lands here — past the threshold this is Central even though the
-            // raw compare said Peripheral, so say so out loud rather than leaving it inexplicable.
             if (_FruitlessDefers >= BleMaxPeripheralDefers)
-                NSLog(@"OnlyChess BLE: role tie-break BROKEN after %d fruitless defers -> forcing "
+                BLE_LOG(@"role tie-break BROKEN after %d fruitless defers -> forcing "
                       @"Central (nobody was connecting; #146)", _FruitlessDefers);
             [peripheral setNotifyValue:YES forCharacteristic:_RemoteDatagram];  // keep this link
         } else {
             // We should be the peripheral: drop this connection, let the peer connect to us.
             _DecidedPeripheral = true;
-            ++_FruitlessDefers;   // #146: cleared when a link forms; counts unanswered defers
+            // #146: cleared by onLinked; counts UNANSWERED defers only — a Central decision that
+            // lands here (no datagram characteristic) is a broken peer, not a tie-break failure.
+            if (Role == EBleRole::Peripheral) ++_FruitlessDefers;
             [_Central stopScan];
             [self advertiseService];  // ensure findable even if we began in cached-central mode
             [_Central cancelPeripheralConnection:peripheral];
@@ -470,14 +491,13 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
 - (void)peripheral:(CBPeripheral*)peripheral
 didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
     if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.isNotifying) {
-        _FruitlessDefers = 0;   // #146: a defer that produced a link was not fruitless
-        NSLog(@"OnlyChess BLE: central linked + notifications on");
+        BLE_LOG(@"central linked + notifications on");
         // #83: we are CENTRAL, so our own peripheral manager has no legitimate peer — shut it to
         // everyone. Binding only ever happened in didSubscribeToCharacteristic (the peripheral path),
         // which left a central-role phone playing a whole match with an OPEN binding on a service that
         // is still published; stopping advertising is not protection, since a device that scanned
         // earlier keeps the handle. Such a device could bind itself, inject datagrams into the
-        // move stream, and end a healthy match just by disconnecting.
+        // lockstep stream, and end a healthy match just by disconnecting.
         _Binding.Close();
         [self onLinked];                              // central side: link is live
     }
@@ -488,8 +508,15 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 // ===========================================================================
 - (void)peripheralManagerDidUpdateState:(CBPeripheralManager*)peripheral {
     if (peripheral.state != CBManagerStatePoweredOn) return;
-    NSLog(@"OnlyChess BLE: peripheral powered on, publishing service");
+    BLE_LOG(@"peripheral powered on, publishing service");
+    [self publishService];
+}
 
+// Build + add the GATT service (datagram + device-id characteristics). Factored out of
+// peripheralManagerDidUpdateState so #182's restartRadio can RE-publish it: removing and re-adding
+// the service is how a wedged peripheral sheds a stale subscription (candidate 1 in #163).
+- (void)publishService {
+    if (_Peripheral.state != CBManagerStatePoweredOn) return;
     _LocalDatagram = [[CBMutableCharacteristic alloc]
         initWithType:_DatagramUuid
           properties:(CBCharacteristicPropertyWrite | CBCharacteristicPropertyWriteWithoutResponse |
@@ -507,12 +534,47 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 
     CBMutableService* Service = [[CBMutableService alloc] initWithType:_ServiceUuid primary:YES];
     Service.characteristics = @[_LocalDatagram, DeviceIdChar];
-    [peripheral addService:Service];
+    [_Peripheral addService:Service];
+}
+
+// #182: the HARDER reset the net layer escalates to when it judges the link HALF-OPEN — connected, our
+// writes leave, but the peer's notify path is wedged so nothing inbound ever arrives. resetLink (which
+// just forces onLinkLost -> re-advertise) provably can't clear a wedged BLE stack. The iOS-specific
+// deeper move: REMOVE AND RE-ADD the peripheral service, so a stale central subscription is rebuilt
+// rather than merely re-advertised — candidate 1 in #163. Also drops any central-side connection and
+// rescans. Bounded by the Session (MaxRadioRestarts) so it can't become churn; may still not clear a
+// device-level wedge (the hardware case needed the SILENT peer to reboot), so the LINK STALLED banner
+// stays the floor. Runs on the CB delegate queue (nil == main), same thread as every callback here.
+- (void)restartRadio {
+    BLE_LOG(@"restartRadio (#182): republishing service + dropping the link — a soft reset "
+          @"can't clear a wedged BLE stack");
+    // Central side: drop any outgoing connection so it re-forms cleanly.
+    _Connecting = false;
+    _RemoteDatagram = nil;
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    // Peripheral side: shed the wedged notify path by removing + re-adding the service.
+    _Subscriber = nil;
+    _Binding.Clear();                 // #83: link is going down, reopen the binding
+    _SendQueue.clear();               // drop stale backlog (#72)
+    if (_Peripheral.state == CBManagerStatePoweredOn) {
+        if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
+        [_Peripheral removeAllServices];   // drop the stale service + its subscription...
+        _LocalDatagram = nil;
+        [self publishService];             // ...and re-add it (didAddService re-advertises)
+    }
+    // Link/role state resets exactly as a real loss would; the engine sees IsConnected() go false on
+    // its next Pump (iOS reports connection via the _Connected flag, no explicit disconnect event).
+    _Linked = _Connected = false;
+    _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
+    // Central rediscovery (role-aware, mirroring onLinkLost).
+    if (_Central.state == CBManagerStatePoweredOn && [self shouldScan])
+        [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
+    [self armDiscoveryWatchdog];      // #79: one-sidedness may not outlive the watchdog
 }
 
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
             didAddService:(CBService*)service error:(NSError*)error {
-    if (error) { NSLog(@"OnlyChess BLE: addService error: %@", error); return; }
+    if (error) { BLE_LOG(@"addService error: %@", error); return; }
     // Advertise the service UUID + a human name ONLY (iOS allows no more, and the
     // device id now travels in-band via the device-id characteristic).
     [self advertiseService];
@@ -526,12 +588,12 @@ didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
         // central is fine (an MTU renegotiation does that); anyone else is a third device trying to
         // take over a live pair's notify channel, and is ignored rather than obeyed.
         if (!_Binding.AcceptSubscriber(central.identifier.UUIDString.UTF8String)) {
-            NSLog(@"OnlyChess BLE: IGNORING subscribe from a non-bound central (#83) — a live pair "
+            BLE_LOG(@"IGNORING subscribe from a non-bound central (#83) — a live pair "
                    "serves exactly one");
             return;
         }
         _Subscriber = central;
-        NSLog(@"OnlyChess BLE: central subscribed (peripheral) — link ready");
+        BLE_LOG(@"central subscribed (peripheral) — link ready");
         [self onLinked];                              // peripheral side: link is live
     }
 }
@@ -583,6 +645,12 @@ public:
     bool IsConnected() const override { return Driver && [Driver isConnected]; }
     void Pump() override { if (Driver) [Driver pumpInbox]; }  // engine-frame delivery (#40)
     void ResetLink() override { if (Driver) [Driver resetLink]; }
+    void RestartRadio() override { if (Driver) [Driver restartRadio]; }  // #182: harder, per-OS reset
+    // Declare it, or the session refuses to escalate: CanRestartRadio defaults to false so a
+    // transport WITHOUT a hard restart is never narrated as having one — which means one that HAS
+    // it must say so. Chess's iOS driver, now deleted in favour of this file, lacked the restart
+    // entirely and the session logged three attempts that never happened.
+    bool CanRestartRadio() const override { return true; }
 
 private:
     IosBleDriver* Driver = nil;  // ARC-retained
