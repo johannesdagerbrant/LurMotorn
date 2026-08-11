@@ -68,6 +68,7 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     SentBatches_.clear();
     { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
     Desync = false;
+    DesyncsSeen_ = 0;   // #204: per-MATCH, so the next match is not judged by this one's divergence
     MyHash.clear();
     PeerHash.clear();
     RecEvents.clear();
@@ -821,6 +822,11 @@ void LockstepPeer::CrossCheck(uint32_t Tick) {
     // the consistency rule (a contested outcome must resolve the same way on both screens). A draw
     // still exists, but only after recovery has failed its bounded attempts.
     Desync = true;
+    // #204: count it HERE, before the survivor/loser split below. BeginRecovery clears `Desync` on the
+    // survivor immediately, so the live flag alone made one divergence read as desync=1 on one phone and
+    // desync=0 on the other — and the clean-looking one is the phone whose timeline won. This line is
+    // reached by BOTH peers (they cross-check the same anchor tick), so the sticky count agrees.
+    ++DesyncsSeen_;
     Lur::Log::Error("RPS: DESYNC at tick %u — mine %08x, peer %08x. Recovering (this is still a bug: "
                     "identical builds should never diverge).",
                     Tick, Mine->second, Theirs->second);

@@ -784,11 +784,17 @@ void android_main(android_app* App) {
                     // and a diff; gaps>0 says it on the line everyone already reads, and gapat names
                     // the tick. stall=1 identifies the half-open pre-match hang, which otherwise looks
                     // to the player (and in the log) exactly like a frozen app.
-                    LOGI("%s tick=%u you=%d foe=%d desync=%d badbuild=%d presented=%u hash=%08x gold=%d "
+                    // #204: `desync` is the STICKY per-match count of detected anchor mismatches, which
+                    // is what a reader means by "did this match diverge" and is the same on both
+                    // phones. `dsgate` is the live gate, which the recovery SURVIVOR clears at once —
+                    // printing only that made one real divergence read as 1 here and 0 on the peer.
+                    LOGI("%s tick=%u you=%d foe=%d desync=%u dsgate=%d badbuild=%d presented=%u "
+                         "hash=%08x gold=%d "
                          "frontier=%d started=%d gaps=%d gapat=%u stall=%d halfopen=%d restarts=%d "
                          "rollbk=%d resim=%u spec=%lld",
                          SoloDiag ? "SOLO" : "LOCKSTEP",
                          SoloDiag ? DS.Tick : State.Lp.ExecTick(), DS.AliveCount(0), DS.AliveCount(1),
+                         SoloDiag ? 0u : State.Lp.DesyncsSeen(),
                          (!SoloDiag && State.Lp.Desynced()) ? 1 : 0,
                          State.Lp.BuildMismatch() ? 1 : 0,
                          State.PresentedFrames.load(std::memory_order_relaxed),
@@ -1145,9 +1151,12 @@ void android_main(android_app* App) {
                     if (LinkedRec.IsOpen()) {
                         LinkedRec.Census(State.Lp.GetSim(), Me, /*no AI*/ -1, -1);
                         LinkedRec.End(State.Lp.GetSim());
-                        LOGI("REC linked match finished: result=%u tick=%u desync=%d -> %s",
+                        // #204: the MATCH verdict wants the sticky count — the live gate is often
+                        // already cleared by the time a match ends, so this line used to report a
+                        // match that had genuinely diverged as desync=0.
+                        LOGI("REC linked match finished: result=%u tick=%u desync=%u -> %s",
                              static_cast<unsigned>(R), State.Lp.GetSim().Tick,
-                             State.Lp.Desynced() ? 1 : 0, LinkedRecFile.c_str());
+                             State.Lp.DesyncsSeen(), LinkedRecFile.c_str());
                     }
 #endif
                     // Per-RIVAL and persistent, keyed on the peer's device GUID — so the row reads

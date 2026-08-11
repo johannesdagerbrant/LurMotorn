@@ -2143,6 +2143,20 @@ static void TestLockstepDetectsDivergence() {
     // runs and is cleared on convergence), so it is no longer a record that a divergence happened.
     CHECK(A.RecoveryAttempts() >= 1);  // anchor hash mismatch caught within ~1 s
     CHECK(B.RecoveryAttempts() >= 1);
+
+    // #204: and THIS is the record the diagnostics needed. The comment above had already worked out
+    // that Desynced() is not evidence a divergence happened — but every on-device log line still
+    // printed exactly that as `desync=`, and BeginRecovery clears it immediately on the recovery
+    // SURVIVOR. So one genuine divergence was reported by the two phones as desync=1 and desync=0, and
+    // the phone claiming a clean match was simply the one whose timeline won. A contested outcome has
+    // to read the same on both screens, so assert the counts agree — that is the whole property.
+    CHECK(A.DesyncsSeen() >= 1);
+    CHECK(B.DesyncsSeen() >= 1);
+    CHECK(A.DesyncsSeen() == B.DesyncsSeen());
+    // The asymmetry that fooled us is REAL and expected in the live gate — it just must not be what
+    // gets reported. At least one peer has already cleared its gate here (the survivor does so before
+    // BeginRecovery returns), while both still record the divergence.
+    CHECK(!A.Desynced() || !B.Desynced());
 }
 
 // ---- Rollback rides through a peer blip by SPECULATING (not stalling), then re-converges ----

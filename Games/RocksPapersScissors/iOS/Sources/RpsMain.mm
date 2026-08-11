@@ -1101,10 +1101,16 @@ static void UnblockStdio() {
                 DiagAccumNs = 0;
                 const Rps::Sim& DS = SoloDiag ? _SoloSim : _Lp.GetSim();
                 const uint8_t Me = _LinkedTeam.load(std::memory_order_relaxed);
-                os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%d badbuild=%d "
+                // #204: `desync` is the STICKY per-match count of detected anchor mismatches — the same
+                // on both phones — and `dsgate` is the live gate, which the recovery SURVIVOR clears at
+                // once. Printing only the gate made one real divergence read as 1 here and 0 there.
+                // Keep this identical to the Android main: these two lines have drifted before.
+                os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s tick=%u you=%d foe=%d desync=%u dsgate=%d "
+                       "badbuild=%d "
                        "presented=%u hash=%08x gold=%d frontier=%d started=%d gaps=%d gapat=%u stall=%d "
                        "halfopen=%d restarts=%d rollbk=%d resim=%u spec=%lld",
                        SoloDiag ? "SOLO" : "LOCKSTEP", DS.Tick, DS.AliveCount(0), DS.AliveCount(1),
+                       SoloDiag ? 0u : _Lp.DesyncsSeen(),
                        (!SoloDiag && _Lp.Desynced()) ? 1 : 0, _Lp.BuildMismatch() ? 1 : 0,
                        _PresentedFrames.load(std::memory_order_relaxed),
                        static_cast<uint32_t>(DS.StateHash() & 0xFFFFFFFFu),
@@ -1358,9 +1364,11 @@ static void UnblockStdio() {
                 if (_LinkedRec.IsOpen()) {
                     _LinkedRec.Census(_Lp.GetSim(), Me, /*no AI*/ -1, -1);
                     _LinkedRec.End(_Lp.GetSim());
+                    // #204: the MATCH verdict wants the sticky count; the live gate is usually already
+                    // cleared by the time a match ends, so this reported diverged matches as desync=0.
                     os_log(OS_LOG_DEFAULT, "OnlyRps: REC linked match finished: result=%u tick=%u "
-                           "desync=%d -> %{public}s", static_cast<unsigned>(R), _Lp.GetSim().Tick,
-                           _Lp.Desynced() ? 1 : 0, _LinkedRecFile.c_str());
+                           "desync=%u -> %{public}s", static_cast<unsigned>(R), _Lp.GetSim().Tick,
+                           _Lp.DesyncsSeen(), _LinkedRecFile.c_str());
                 }
 #endif
                 // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed

@@ -328,9 +328,13 @@ int RunLoopback(bool Auto, int MaxFrames, uint64_t Seed) {
         RenderPeer(*B, Now, DtSec);
 
         if (MaxFrames > 0 && ++Frame >= MaxFrames) {
-            Lur::Log::Info("rendered %d frames headless (started=%d ticks A=%u B=%u desync=%d) - exiting",
+            // #204: sticky per-match counts, and print them PER PEER. Both must agree — the two-window
+            // loopback is the cheapest place to notice if they ever stop agreeing, which is exactly the
+            // asymmetry that made a real divergence look like a clean match on one phone.
+            Lur::Log::Info("rendered %d frames headless (started=%d ticks A=%u B=%u desyncA=%u "
+                           "desyncB=%u) - exiting",
                            Frame, Started ? 1 : 0, A->Lp.ExecTick(), B->Lp.ExecTick(),
-                           (A->Lp.Desynced() || B->Lp.Desynced()) ? 1 : 0);
+                           A->Lp.DesyncsSeen(), B->Lp.DesyncsSeen());
             break;
         }
     }
@@ -1406,9 +1410,10 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
         QualAccumNs += ElapsedNs;
         if (Started && QualAccumNs > 2'000'000'000ull) {  // ~0.5 Hz liveness line
             QualAccumNs = 0;
-            Lur::Log::Info("BLE tick=%u you=%d foe=%d desync=%d txB=%llu rxB=%llu",
+            Lur::Log::Info("BLE tick=%u you=%d foe=%d desync=%u dsgate=%d txB=%llu rxB=%llu",
                            Lp.ExecTick(), Lp.GetSim().AliveCount(0), Lp.GetSim().AliveCount(1),
-                           Lp.Desynced() ? 1 : 0, (unsigned long long)Ble.GetBytesOut(),
+                           Lp.DesyncsSeen(), Lp.Desynced() ? 1 : 0,   // #204: sticky count + live gate
+                           (unsigned long long)Ble.GetBytesOut(),
                            (unsigned long long)Ble.GetBytesIn());
         }
 

@@ -262,6 +262,18 @@ public:
     // it for diagnostics ("that draw was a desync, not a real draw"), not as "the session is over".
     // The draw is a STOPGAP — **#161** replaces it with actually recovering the match.
     bool Desynced() const { return Desync; }
+    // #204: how many anchor mismatches this match has DETECTED — sticky for the life of the match,
+    // where Desynced() above is a live gate that clears as soon as the repair is under way.
+    //
+    // These answer different questions and the difference bit us. `Desynced()` is what every
+    // diagnostic printed as `desync=`, and a human reads that as "did this match diverge" — but
+    // BeginRecovery clears it IMMEDIATELY on the survivor (its timeline stands, so there is nothing to
+    // gate), while the adopting peer holds it until the rebuild converges. So one genuine divergence
+    // was reported by the two phones as `desync=1` and `desync=0`: the survivor's screen said the match
+    // was clean. Under the consistency rule a contested outcome must read the same on both screens, and
+    // this is the counter that does, because BOTH peers cross-check the same anchor tick and so both
+    // pass through CrossCheck before either decides who survives.
+    uint32_t DesyncsSeen() const { return DesyncsSeen_; }
     bool Stalled() const { return TheSim.Tick < WallTicks; }  // behind wallclock = waiting on peer
 
     // #135/#139: match-start ready gate. The match clock does NOT start until BOTH teams have
@@ -469,6 +481,7 @@ private:
 
     std::unordered_map<uint32_t, uint32_t> MyHash, PeerHash;  // exec tick -> truncated StateHash
     bool Desync = false;
+    uint32_t DesyncsSeen_ = 0;   // #204: anchor mismatches detected THIS match; see DesyncsSeen()
 
     // #163 diagnostics. The sequence is the LOW BYTE of the produced exec tick, not a separate
     // counter: one byte per frame (10 B/s at the tick rate) catches every gap of 1..255 frames, which
