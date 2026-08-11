@@ -48,6 +48,7 @@
 
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleProtocol.h"
+#include "Lur/Transport/BleSendQueue.h"
 
 // Every line this driver logs is prefixed with the APP's tag — the string an iOS syslog capture
 // greps for — which is the only per-app value left in this file now that the UUIDs come from
@@ -117,9 +118,26 @@ static void SaveIosPeerId(const std::string& Id) {
 // The Obj-C driver: owns BOTH a peripheral manager (advertise + host the service)
 // and a central manager (scan + connect), and implements the delegate protocols.
 // ---------------------------------------------------------------------------
+// The dumb radio the engine queue drives: one verb, forwarding to the driver's -radioWrite:size:.
+// Declared before the driver so the ivar can hold one; the driver pointer is filled in at init.
+@class IosBleDriver;
+
+namespace {
+class IosRadio final : public Lur::Transport::IBleRadio {
+public:
+    __weak IosBleDriver* Driver = nil;
+    bool Write(const uint8_t* Data, std::size_t Size) override;
+};
+}  // namespace
+
 @interface IosBleDriver : NSObject <CBCentralManagerDelegate,
                                     CBPeripheralManagerDelegate,
                                     CBPeripheralDelegate>
+// Hand ONE datagram to CoreBluetooth; YES if it took it. The engine send queue calls this through
+// IosRadio and keeps anything refused. Declared here (the rest of the driver's methods are private
+// to the implementation) because the C++ adapter below has to message it.
+- (BOOL)radioWrite:(const uint8_t*)Data size:(std::size_t)Size;
+- (void)drainSend;
 @end
 
 @implementation IosBleDriver {
@@ -177,7 +195,10 @@ static void SaveIosPeerId(const std::string& Id) {
     // moves (and resync payloads), wedging the game. We queue datagrams and drain them
     // only while the radio reports ready — no added network time. Everything here runs
     // on the CB delegate queue (nil == main), same thread as sendData, so no locking.
-    std::deque<std::vector<uint8_t>> _SendQueue;
+    // The queue itself is Lur::Transport::BleSendQueue (engine C++, host-tested); this object is
+    // only the radio it drives. The driver keeps no ordering of its own.
+    Lur::Transport::BleSendQueue _SendQueue;
+    IosRadio                     _Radio;
 
     // Inbound deferral (issue #40 contract): CB callbacks land between frames; the
     // receiver must fire from Pump() inside the engine tick. Same EventInbox as
@@ -202,6 +223,8 @@ static void SaveIosPeerId(const std::string& Id) {
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
         _FruitlessDefers = 0;
+        _Radio.Driver = self;          // the engine queue writes through us
+        _SendQueue.SetRadio(&_Radio);
 
 #if LUR_AGENT
         // Role override (rig-pushed Documents/role = "central"|"peripheral"), LUR_AGENT and not
@@ -257,36 +280,63 @@ static void SaveIosPeerId(const std::string& Id) {
     // #190, which RPS never had: an expedited datagram goes to the FRONT. Urgency is an
     // argument, never guessed from the bytes — see the chess sibling's comment for the
     // length-inference bug that cost.
-    if (Expedited) _SendQueue.emplace_front(Data, Data + Size);
-    else           _SendQueue.emplace_back(Data, Data + Size);
-    [self pumpSend];
+    _SendQueue.Enqueue(Data, Size, Expedited ? Lur::Transport::EBleSendPriority::Expedited
+                                             : Lur::Transport::EBleSendPriority::Normal);
+    [self drainSend];
 }
 
-// Drain the send queue while the radio can accept datagrams. Stops (leaving the rest
-// queued) the moment CoreBluetooth's transmit queue is full; the corresponding
-// "ready" delegate callback resumes us. WithoutResponse (issue #49) is preserved —
-// this only PACES sends to the connection interval so none are dropped (issue #72).
-- (void)pumpSend {
-    while (!_SendQueue.empty()) {
-        const std::vector<uint8_t>& Bytes = _SendQueue.front();
-        NSData* Payload = [NSData dataWithBytes:Bytes.data() length:Bytes.size()];
-        if (_RemoteDatagram && _PeerDevice) {            // we are central -> write
-            if (!_PeerDevice.canSendWriteWithoutResponse) break;   // wait for ready callback
-            [_PeerDevice writeValue:Payload
-                  forCharacteristic:_RemoteDatagram
-                               type:CBCharacteristicWriteWithoutResponse];
-            _SendQueue.pop_front();
-        } else if (_LocalDatagram && _Subscriber) {      // we are peripheral -> notify
-            if (![_Peripheral updateValue:Payload
-                        forCharacteristic:_LocalDatagram
-                     onSubscribedCentrals:@[_Subscriber]]) break;  // queue full; wait for ready
-            _SendQueue.pop_front();
-        } else {
-            _SendQueue.clear();                          // no live characteristic -> drop backlog
-            break;
-        }
-    }
+// Hand ONE datagram to CoreBluetooth. Returns whether it took it; the engine queue keeps anything
+// refused and retries. WithoutResponse (#49) is preserved — this only PACES sends to the connection
+// interval so none are dropped (#72).
+//
+// CoreBluetooth has no per-write COMPLETION callback, unlike Android: it exposes a pollable
+// readiness flag plus a "ready again" delegate call. So the queue is told the write completed the
+// moment it is accepted (see writeOne: below), which reproduces iOS's drain-while-ready behaviour
+// exactly. A consequence worth stating: BleSendQueue's lost-completion watchdog is INERT here, and
+// correctly so — there is no completion that could go missing.
+// Defined after the driver interface so the message send resolves. A write ACCEPTED by
+// CoreBluetooth is immediately complete from the queue's point of view — see radioWrite:.
+namespace {
+bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
+    if (Driver == nil) return false;
+    return [Driver radioWrite:Data size:Size] == YES;
 }
+}  // namespace
+
+- (BOOL)radioWrite:(const uint8_t*)Data size:(std::size_t)Size {
+    NSData* Payload = [NSData dataWithBytes:Data length:Size];
+    if (_RemoteDatagram && _PeerDevice) {                // we are central -> write
+        if (!_PeerDevice.canSendWriteWithoutResponse) return NO;   // wait for the ready callback
+        [_PeerDevice writeValue:Payload
+              forCharacteristic:_RemoteDatagram
+                           type:CBCharacteristicWriteWithoutResponse];
+        return YES;
+    }
+    if (_LocalDatagram && _Subscriber) {                 // we are peripheral -> notify
+        return [_Peripheral updateValue:Payload
+                      forCharacteristic:_LocalDatagram
+                   onSubscribedCentrals:@[_Subscriber]] ? YES : NO;   // NO = queue full
+    }
+    return NO;                                           // no live characteristic
+}
+
+// Drain while CoreBluetooth keeps accepting.
+//
+// This is the one real difference from Android, and it is why the cutover is not a copy. Android
+// reports a per-write COMPLETION, so the queue holds one datagram in flight until that callback
+// lands. CoreBluetooth reports no such thing: it exposes a readiness flag and a "ready again"
+// delegate call, and a write it ACCEPTS is finished as far as we can ever know. So we tell the
+// queue so immediately, which reproduces iOS's drain-while-ready behaviour exactly.
+//
+// The loop ends when a write is refused (InFlight stays false because nothing was taken) or the
+// queue empties — both of which leave InFlight false. Bounded by construction: every iteration
+// either removes a datagram or stops.
+- (void)drainSend {
+    while (_SendQueue.InFlight()) _SendQueue.OnSendComplete();
+}
+
+// CoreBluetooth became ready, so anything it refused can go now.
+- (void)pumpSend { _SendQueue.Tick(0); [self drainSend]; }
 
 // CoreBluetooth is ready for more datagrams — resume draining the send queue (#72).
 - (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral*)peripheral { [self pumpSend]; }
@@ -367,7 +417,7 @@ static void SaveIosPeerId(const std::string& Id) {
     if (!_Linked) return;
     _Linked = _Connected = _Connecting = false;
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
-    _SendQueue.clear();                                           // drop stale send backlog (#72)
+    _SendQueue.OnLinkLost();                                      // drop stale send backlog (#72)
     _Subscriber = nil;
     // #83: the link is genuinely gone, so open the binding up again. This is what keeps chess's
     // deliberate opponent-switch (#38) working — it operates at session level AFTER link loss, so a
