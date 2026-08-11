@@ -640,3 +640,98 @@ has the number in front of them.
 avg 49 ms) — the race did not bite in that particular run. A green autoplay gate is not proof of
 absence for a timing bug; the human noticing "this feels slow" is a real instrument, and in this
 case the only one that fired.
+
+---
+
+## 2026-08-11 (evening) — the two-phone soak, and the one-way link it found
+
+#197's last open item was the soak, and the hand-off report was blunt that it had *"not run at all —
+no drop/reconnect cycle has been exercised since the collapse, and the collapse touched the exact code
+that handles it."* It has now run: ~23 minutes, 3 matches, both phones on `LUR_AGENT` builds at
+`dceacf5` (Android `-PlurAgent=ON`, iOS from `macOS CI -f agent=true`).
+
+**The recovery machinery is in good shape.** Three Bluetooth power cycles recovered unattended, 3/3,
+with the role alternating central/peripheral each time — the symmetric tie-break doing its job rather
+than a cached role sticking. The #162 starvation bound ended a starved match cleanly and returned both
+sides to the camp handshake instead of wedging. The #146 role decision came from a *valid* device-id
+read, and the #79 watchdog dropped its cached-role gates at 8 s. `droptx 10` swallowed ticks 515–524
+on Android and the iPhone named the hole at exactly `gaps=1 gapat=515`, repaired it, and carried on at
+`desync=0`.
+
+**The #163/#182 ladder fired to spec, on hardware, for the first time since the collapse** — the
+single most important untested path in Phase 2:
+
+```
+19:24:27  link HALF-OPEN — 3 peer-silent resets, no inbound between them
+19:24:27  half-open: escalating to a full radio restart (attempt 1/3)
+19:24:48  ... (attempt 2/3)          <- ~21 s apart: HalfOpenResetNs = 20 s
+19:25:09  ... (attempt 3/3)          <- then stops at the cap, defers to the human
+```
+
+And RPS finally has the evidence it was missing. Per the hand-off, RPS was verified only as "links,
+runs, no fault", never as "provably identical on both sides". Match 1 — which survived a *full
+Bluetooth outage* — diffs perfectly: 69 hashes on each peer, both ending at tick 704,
+`the two recordings agree on every compared tick`.
+
+### What it found: a silent one-way link (#202)
+
+Freezing the Android app with `kill -STOP` — the lock-screen signature, app loop stalled while the
+connection stays established — then resuming it produces a **durable one-way link**. The iPhone keeps
+receiving throughout (`recv msg type=5/9/10` every few seconds) while every datagram it sends
+evaporates. Android sees total silence, resets every 5 s, climbs the ladder, spends all three hard
+radio restarts **on its own perfectly healthy radio**, and gives up.
+
+The iPhone's log is the tell: after `central subscribed (peripheral) — link ready` at 19:20:29 it says
+*nothing at all* for four minutes, across ~15 Android reconnections. Not even the #83
+`IGNORING subscribe from a non-bound central` branch. So `didSubscribeToCharacteristic` never fired,
+`_Subscriber` still points at the previous connection's `CBCentral`, and
+`updateValue:onSubscribedCentrals:@[_Subscriber]` notifies a handle that is gone. `didUnsubscribe`
+never fired either, so `_Linked` stayed `YES` and the driver never reported loss or re-advertised.
+
+**Why it is silent rather than loud:** `updateValue:` returns `YES` for the stale central, so `Write()`
+succeeds and `BleSendQueue` drains normally. Nothing upstream can tell. Restarting *only* the iOS app
+fixed it instantly (`hello RECV (peerReady=1 oursReady=1)`, counters cleared) — which is what proves
+the wedge was peripheral-side.
+
+That is the third defect in this batch whose whole character is *an unverified success return*, and it
+is worth naming as a pattern: the send queue's lost completions, the escalation narrating restarts a
+transport could not perform, and now a notify to a dead handle that reports success. **In this
+subsystem, "it returned OK" is not evidence that anything happened.**
+
+Two smaller findings of the same family, both filed: the Android shim logs
+`BLE up: serving + advertising + scanning` from inside `startScanning()` whenever `startScan` fails to
+*throw* — it printed six times with the adapter switched off, while the real `scan failed: 2` was
+deliberately quieted (#203) — and `desync=1` appeared on the iPhone only, for a match whose peer
+recordings agree on every compared tick (#204).
+
+### Two things that cost time, worth knowing
+
+**`pullrec` is not usable on a phone with history.** It walked all 606 recordings, was bounded, and
+stopped having pulled 355 — with the *newest* missing (latest pulled was 08-01; the ones from tonight
+were absent), then spent its remaining time diffing months-old format-incompatible pairs. It looks
+exactly like success. Pull by hand until it has a newest-N filter:
+`adb exec-out run-as <pkg> cat …` and `pymobiledevice3 apps pull <bundle> "Library/Application Support/<f>"`.
+
+**`linked` really does go first — including after a mid-run restart.** I placed camps directly, having
+watched the auto-switch work twice, and the third time the iPhone had just been restarted: it opened
+in the solo AI match and swallowed the placement. The error line added for exactly this said so
+verbatim (*"the SOLO sim, not the linked peer … Send `linked` first"*), which turned what the hand-off
+doc calls a relaunch-costing mistake into a ten-second correction. The rule is not "send `linked` when
+the link might be down", it is "send it after any process start".
+
+**Also stale in the hand-off doc:** `rps.dev.flight_recorder` needs no enabling — it defaults `true`
+(`Tunables.h:832`) and the Galaxy's `rps-cvars.cfg` fixture does not override it. Recordings were
+written for every match without intervention. The #169 cvar merge is healthy: the iPhone adopted the
+Galaxy's `starting_gold = 1900` and both phones opened at `hash=2eb8f9bf gold=1900`.
+
+### Where that leaves Phase 2
+
+The soak's own scenarios pass, but it found a recovery defect *in the code the collapse produced*, so
+I have not marked the gate green. #202 is small (refresh `_Subscriber` from the inbound write, which
+proves which handle is live), reachable by an ordinary lock screen, and precisely the class of failure
+this gate exists to catch. Fix it, re-run the freeze/resume case, then Phase 3.
+
+Handed the phones back clean: both rebuilt and reinstalled **without** `-DLUR_AGENT` (banner count 0,
+so the code is absent rather than idle), `debug.lur.{agent.cmd,autoplay,role}` cleared, and
+`Documents/{agent.cmd,autoplay,role,clearsave}` removed. Verified they still link and start lockstep
+on the handover builds.
