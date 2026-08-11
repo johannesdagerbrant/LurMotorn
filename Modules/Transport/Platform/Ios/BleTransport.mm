@@ -172,7 +172,7 @@ public:
     // Peripheral-side state (we host the service; peer connected to us).
     CBMutableCharacteristic* _LocalDatagram;
     CBCentral*               _Subscriber;
-    // #202: whether we have already reported swapping the notify target this link episode. The swap
+    // #202: whether we have already reported adopting the link from a write this episode. The adoption
     // itself is idempotent and cheap, but CoreBluetooth makes no promise that CBATTRequest.central
     // hands back the SAME object every callback, so an ungated log could repeat per datagram. Cleared
     // wherever _Subscriber is (onLinkLost / restartRadio), so each episode says it at most once.
@@ -694,31 +694,46 @@ didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
         // writes injected straight into the lockstep/move stream. Pre-link traffic still passes —
         // that IS the handshake — but once bound, only the peer does.
         if (!_Binding.AcceptData(Req.central.identifier.UUIDString.UTF8String)) continue;
-        // #202: the LIVE write names the LIVE handle. `_Subscriber` is otherwise only ever assigned in
-        // didSubscribeToCharacteristic, and that callback does NOT reliably fire when a central drops
-        // and reconnects — on hardware (2026-08-11) a central reconnected ~15 times over four minutes
-        // and neither didSubscribe NOR didUnsubscribe fired once. `_Subscriber` then still referenced
-        // the PREVIOUS connection's CBCentral, and updateValue:onSubscribedCentrals: returns YES for
-        // that dead handle, so radioWrite reported success and BleSendQueue drained normally while
-        // every outbound datagram evaporated: a silent ONE-WAY link. Inbound kept working the whole
-        // time, because it arrives here — on a path that never touched _Subscriber. That asymmetry is
-        // the whole bug, and this is the seam where the truth is available.
+        // #202: THE LIVE WRITE IS THE EVIDENCE. Peripheral link state (_Subscriber, the binding,
+        // _Linked) is established in exactly one place — didSubscribeToCharacteristic — and that
+        // callback does NOT reliably fire when a central drops and reconnects to an already-published
+        // service. On hardware (2026-08-11) a central reconnected ~15 times over four minutes and
+        // neither didSubscribe NOR didUnsubscribe fired once, not even the #83 reject branch.
         //
-        // Trusting Req.central as the reply target is NOT a new trust decision: AcceptData (#83) has
-        // already cleared this central to inject bytes into the lockstep stream, and answering the peer
-        // we are already accepting data from is strictly weaker than that. Refreshing here also fixes
-        // the nil case (a write arriving before any subscribe callback), where radioWrite would
-        // otherwise return NO and the handshake could not be answered at all.
-        if (_Subscriber != Req.central) {
-            // Say it once per episode. A driver silently swapping its notify target is exactly what
-            // the original investigation needed and did not have — four minutes of iPhone log said
-            // nothing at all while the link was dead in one direction.
-            if (!_NotifyTargetSwapLogged) {
-                _NotifyTargetSwapLogged = true;
-                BLE_LOG(@"peripheral: adopting the notify target from a live write (#202) — the "
-                         "subscribe callback did not fire for this connection");
+        // The shape that produces: our own keepalive-driven resetLink had correctly torn this state
+        // down (onLinkLost nils _Subscriber and clears the binding, since the peer really was silent),
+        // and the reconnect then never rebuilt it. So radioWrite's peripheral branch found no
+        // _Subscriber and sent NOTHING, while inbound datagrams kept arriving right here and being
+        // delivered into the engine — because this path has no link-state gate. A silent ONE-WAY link:
+        // the phone ingests the peer's whole match and cannot answer a byte of it. Nothing was logged
+        // because from the driver's point of view there was simply no link, so it had nothing to say.
+        // Meanwhile the peer, seeing pure silence, spends its bounded #182 hard radio restarts on its
+        // own perfectly healthy radio and gives up.
+        //
+        // Trusting Req.central here is NOT a new trust decision: AcceptData (#83) has already cleared
+        // this central to inject bytes into the lockstep stream, so answering the peer whose data we
+        // already accept is strictly weaker than what we just did. This also covers the milder variant
+        // where _Subscriber merely points at a previous connection's CBCentral —
+        // updateValue:onSubscribedCentrals: returns YES for a dead handle, so radioWrite would report
+        // success and BleSendQueue would drain normally while every datagram evaporated.
+        // Setting _Subscriber alone is NOT enough, and that is the subtle half: onLinked runs only from
+        // didSubscribeToCharacteristic too, so a link recovered this way would leave _Linked/_Connected
+        // false — ITransport::IsConnected() then reports no link, Session never sends, and the notify
+        // target we just fixed is never used. Recovery has to take the whole peripheral-link path, which
+        // is why this mirrors didSubscribe rather than patching one field.
+        if (!_Linked || _Subscriber != Req.central) {
+            // Same admission decision as a real subscribe, so #83 is preserved exactly: a central that
+            // may not be served cannot become our notify target by writing instead of subscribing.
+            // (AcceptData above has already passed, so this only ever rejects a genuinely bad case.)
+            if (_Binding.AcceptSubscriber(Req.central.identifier.UUIDString.UTF8String)) {
+                if (!_NotifyTargetSwapLogged) {
+                    _NotifyTargetSwapLogged = true;
+                    BLE_LOG(@"peripheral: adopting the link from a live write (#202) — the subscribe "
+                             "callback did not fire for this connection");
+                }
+                _Subscriber = Req.central;
+                [self onLinked];   // idempotent (guards on _Linked); publishes the link to the engine
             }
-            _Subscriber = Req.central;
         }
         if ([Req.characteristic.UUID isEqual:_DatagramUuid] && Req.value) {
             [self deliverInbound:Req.value];
