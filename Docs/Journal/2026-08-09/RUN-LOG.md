@@ -735,3 +735,89 @@ Handed the phones back clean: both rebuilt and reinstalled **without** `-DLUR_AG
 so the code is absent rather than idle), `debug.lur.{agent.cmd,autoplay,role}` cleared, and
 `Documents/{agent.cmd,autoplay,role,clearsave}` removed. Verified they still link and start lockstep
 on the handover builds.
+## 2026-08-11 (late) — fixing #202, and three false starts before the test could even run
+
+The soak's finding was a silent one-way link on the iOS peripheral. The fix is small; getting a
+hardware verdict on it took four attempts, and the obstacles are worth recording because every one of
+them is a trap the next person hits too.
+
+### The fix, and the half I got wrong first
+
+`f430f67` took the notify target from the live inbound write: `didSubscribeToCharacteristic` does not
+reliably fire when a central drops and reconnects to an already-published service, so the peripheral
+is left with no way to answer, while inbound writes keep arriving on a path that has no link-state
+gate at all.
+
+That commit was **incomplete, and I pushed it before checking.** `onLinked()` runs only from that same
+subscribe callback, so repairing `_Subscriber` alone leaves `_Linked`/`_Connected` false —
+`IsConnected()` reports no link, `Session` never sends, and the target just repaired is never used.
+Silent in a second way. `262774f` makes the write path take the *whole* peripheral-link path, mirroring
+`didSubscribe`: the same #83 `AcceptSubscriber` admission decision, then `_Subscriber`, then
+`onLinked`. Using `AcceptSubscriber` rather than the `AcceptData` that already passed keeps #83 exactly
+as strict — a central that may not be served cannot become the notify target by writing instead of
+subscribing.
+
+It also corrected the mechanism I had written into #202. `resetLink → onLinkLost` **nils**
+`_Subscriber`, and the iPhone logged `forcing link reset` before the reconnect, so the handle was not
+stale-but-set: iOS had already torn its own state down (correctly — the peer really was silent) and the
+reconnect never rebuilt it. The stale-handle variant is real and equally silent, it just is not what
+happened.
+
+### Why the first two runs proved nothing
+
+**Run 1 never touched the bug.** The role tie-break made iOS the *central*, so the peripheral path
+this defect lives on was never in play, and the absence of the new log line meant nothing. The lesson
+is durable: **this test is role-dependent, and the roles must be pinned or the result is
+uninterpretable.** A pass with iOS as central is not a pass.
+
+**Run 2 could not form a link at all.** Pinning iOS=peripheral / Android=central is right, but a
+pinned central *only scans* — and the Galaxy's BLE scanner registration had leaked from all the
+force-stop cycles (`scan failed: 2`, surviving several Bluetooth toggles). No scan, no link, and no way
+around it. Only a reboot cleared it, which cost wireless ADB (Samsung disables Wireless debugging on
+reboot) and needed a human to restore.
+
+Two smaller ones, both self-inflicted and both already-documented hazards:
+
+- **A stale `Documents/agent.cmd` replayed at startup and then blocked its own replacement.** The
+  leftover `2 place …` was accepted by the fresh process (`LastSeq_` resets to 0), placed a camp into
+  the *solo* sim, and thereby made my new `1 linked` / `2 place` stale-seq rejects. The channel is
+  idempotent *given a monotonic seq*; a process restart breaks that assumption. **Clear the channel on
+  teardown — bumping the number is not enough**, because the number is not what resets.
+- **`badbuild=1`**: the phones were one commit apart (Android on v1, iPhone on v2). Only the `.mm` had
+  changed, but the fingerprint gates the match, so nothing would start. Rebuild *both* peers after any
+  commit, even one that touches a single platform file.
+
+### #203 is not cosmetic — it misled me inside my own investigation
+
+While diagnosing the dead scan, `BLE up: serving + advertising + scanning for LurMotorn peers` printed
+happily while `startScan` was failing, so the log asserted a healthy radio during the exact outage I
+was trying to read. I filed that line as a minor logging defect this afternoon; having now been fooled
+by it myself, with full knowledge of what it does, it deserves better than "cosmetic". An unverified
+success claim is worse than no line, because it redirects the reader.
+
+### The verdict, on the fourth attempt
+
+Pinned iOS=peripheral / Android=central, `badbuild=0`, 40 s freeze:
+
+```
+20:44:15  net keepalive timeout -> forcing link reset          (iOS tears its own state down)
+20:44:32  starved at the ceiling for 20000ms at tick 351       (#162 ends the match)
+20:44:52  [Android resumed]
+20:44:51  peripheral: adopting the link from a live write (#202)
+          — the subscribe callback did not fire for this connection
+```
+
+That line is only reachable when `didSubscribeToCharacteristic` really does not fire, so it is
+confirmation of the *mechanism* rather than an absence of symptoms — which matters, because "the bug
+stopped happening" is the weakest possible evidence in this subsystem.
+
+Before, same scenario: one-way forever, peer burns 3/3 hard radio restarts, dead until the iOS app was
+restarted. After: recovers with no restart, `halfopen=0 restarts=0`, and a match ran **2585 ticks**
+(4+ minutes) continuous on both phones at `desync=0 badbuild=0`, with one detected-and-repaired gap.
+
+**A third method lesson, and the one I would most want to know in advance:** do not freeze for
+minutes. A ~165 s `SIGSTOP` gets the foreground app **reaped by Android** rather than stalled — the
+process was simply gone, a fresh one relinked normally, `didSubscribe` fired as it should, and no wedge
+was possible. ~40 s is sufficient and safe: all it has to do is outlast the 5 s liveness timeout so the
+peripheral tears its state down, while leaving the process alive to resume. The original 2m43s freeze
+happened to survive, which is exactly the kind of nondeterminism that makes a harness lie to you.
