@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 #include <vector>
 #if LUR_AGENT
 #include <sys/system_properties.h>  // read debug.lur.autoplay (agent-driven soak, #195)
@@ -20,10 +21,10 @@
 #include "Chess/View/SfxLibrary.h"
 #include "Lur/Audio/AudioDevice.h"
 #include "Lur/Audio/Mixer.h"
+#include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
-#include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Transport/Ble.h"
@@ -37,9 +38,11 @@ struct AppState {
     Lur::Render::IRenderer* Renderer = nullptr;
     bool Ready = false;
     Chess::BoardView View;
-    Lur::Net::Session Session;
+    // #43: the session + persistence choreography lives in the engine now. This main holds no
+    // Session, Store or SyncManager of its own — the host owns them, and what used to be ~50 lines
+    // of wiring duplicated with the iOS main is now a Config plus four game hooks.
+    Lur::App::GameHost Host;
     Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
-    Lur::Save::SyncManager* Sync = nullptr;  // for persist-on-background (set in android_main)
     uint64_t PendingTouchNs = 0;             // oldest touch sample not yet presented (#192)
     uint64_t TouchDownNs = 0;                // press time of the gesture in progress (#192)
     Lur::Audio::Mixer Mixer;                 // wait-free SFX mixer (audio thread reads it)
@@ -67,7 +70,7 @@ void HandleCmd(android_app* App, int32_t Cmd) {
                     // that park sits between the loop's two inbox drains (#189) and the
                     // next iteration — which is exactly where a peer's move was waiting.
                     State->Renderer->SetIdleWaitCallback(
-                        [](void* U) { static_cast<AppState*>(U)->Session.PumpInbox(); }, State);
+                        [](void* U) { static_cast<AppState*>(U)->Host.PumpInbox(); }, State);
                 }
 
                 // Bring up audio: load the cooked SFX into the mixer, wire each move to the
@@ -104,7 +107,7 @@ void HandleCmd(android_app* App, int32_t Cmd) {
             break;
         case APP_CMD_PAUSE:
             // Backgrounded: persist the in-progress match so it survives a close.
-            if (State->Sync != nullptr) State->Sync->Persist();
+            State->Host.OnBackground();   // #43: persist the in-progress record
             break;
         default:
             break;
@@ -166,52 +169,51 @@ void android_main(android_app* App) {
     // read from the app's internal data dir (== Context.filesDir, where the Kotlin
     // radio reads it too, so both agree). Drives colour + the per-opponent stats key.
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
-    Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
-    const std::string DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
-    Lur::Save::SyncManager Sync(Store, State.Match);
-    State.Sync = &Sync;                                       // for persist-on-background
-    State.Match.SetOnMatchEnd([&Sync, &State] {
-        Sync.Persist();                                      // durable all-time stats on game end
-        LOGI("Net: MATCH END result=%d WLD(lo/hi/dr)=%u/%u/%u total=%u",
-             static_cast<int>(State.Match.LastResult()), State.Match.Record().WinsLower,
-             State.Match.Record().WinsHigher, State.Match.Record().Draws,
-             State.Match.Record().TotalMatches());
-    });
 
-    // Wire the BLE transport into the net session. The session Hello exchanges the
-    // device GUIDs; the shared BoardView renders + mutates State.Match and ships the
-    // peer's moves via Chess::MoveCodec. Colour comes from the two GUIDs (not the
-    // radio role). The per-opponent record syncs once per link establishment.
-    auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
-    State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
+    // #43: everything below used to be ~50 lines duplicated comment-for-comment with the iOS main
+    // — Store, device id, SyncManager, the match-end persist+log, the hijack-guarded record send,
+    // the ready/resync/hash/Sync handlers, Session::Start. All of it is engine choreography, none
+    // of it is chess, and the two copies had drifted (ownership, capture style, wiring order, and
+    // a MATCH END line whose format differed per phone). What remains here is what is genuinely
+    // this app's: where files live, which radio role, how to log — and the game's four decisions.
+    Lur::App::GameHost::Config HostCfg;
+    HostCfg.SaveDir = DataDir != nullptr ? DataDir : ".";
+    // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs, not
+    // from the radio role.
+    HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
+    HostCfg.Log = [](const char* M) { LOGI("%s", M); };
+    // Init before the view is attached: the view is handed Store/Sync/DeviceId, and it must hold
+    // them before a peer can go ready (the ready handler calls back into the view's adopt rule).
+    State.Host.Init(HostCfg, State.Match);
+
     State.View.SetState(&State.Match);
-    State.View.AttachSession(&State.Session);
-    State.View.AttachPersistence(&Store, &Sync, DeviceId);  // selector + match switching
+    State.View.AttachSession(&State.Host.Session());
+    State.View.AttachPersistence(&State.Host.Store(), &State.Host.Sync(),
+                                 State.Host.DeviceId());   // selector + match switching
     State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
 
-    auto SendRecord = [&State, &Sync] {
-        // Only share OUR game with the peer we're actually playing (hijack rule, #38).
-        if (State.View.ActiveOpponentGuid() != State.Session.GetPeerGuid()) return;
-        const std::vector<uint8_t> Snap = Sync.Snapshot();
-        State.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
+    State.Match.SetOnMatchEnd([&State] { State.Host.OnMatchEnded(); });  // persist + report
+
+    Lur::App::GameHost::Hooks Hooks;
+    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
+    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
+    // route through this one hook now, so they cannot drift apart.
+    Hooks.OnPeerAdopted = [&State](const std::string& Peer) { return State.View.OnPeerLinked(Peer); };
+    // Only share OUR game with the peer we are actually playing.
+    Hooks.IsActiveOpponent = [&State](const std::string& Peer) {
+        return State.View.ActiveOpponentGuid() == Peer;
     };
-    // The view applies the hijack rule and sets identity + loads the record for the
-    // adopted peer; we send our record only when it adopted this peer. Both the
-    // initial link (ReadyHandler) AND a reconnect (ResyncHandler) go through it, so a
-    // peer that (re)joins is adopted per the hijack rule — not just on first contact.
-    auto OnLive = [&State, &SendRecord] {
-        if (State.View.OnPeerLinked(State.Session.GetPeerGuid())) SendRecord();
+    Hooks.StateHash = [&State] { return State.Match.PositionHash(); };   // desync detection (#72)
+    Hooks.Summarize = [&State] {
+        Lur::App::GameHost::Hooks::MatchSummary S;
+        S.Result     = static_cast<int>(State.Match.LastResult());
+        S.WinsLower  = State.Match.Record().WinsLower;
+        S.WinsHigher = State.Match.Record().WinsHigher;
+        S.Draws      = State.Match.Record().Draws;
+        S.Total      = State.Match.Record().TotalMatches();
+        return S;
     };
-    State.Session.SetReadyHandler(OnLive);
-    State.Session.SetResyncHandler(OnLive);                              // reconnect: re-adopt + re-sync
-    State.Session.SetStateHashFn([&State] { return State.Match.PositionHash(); });  // desync detection (#72)
-    State.Session.SetHandler(Lur::Net::EMsgType::Sync,
-                             [&State, &Sync](const uint8_t* D, std::size_t N) {
-                                 if (State.View.ActiveOpponentGuid() == State.Session.GetPeerGuid())
-                                     Sync.OnSync(D, N);
-                             });
-    State.Session.Start(Transport, DeviceId);
-    LOGI("Net session started (device id %zuB)", DeviceId.size());
+    State.Host.Start(std::move(Hooks));
 
 #if LUR_INTERNAL
     uint64_t TraceAccumNs = 0;   // #192: latency report — OBSERVATION, so it stays INTERNAL
@@ -229,7 +231,7 @@ void android_main(android_app* App) {
 // the opponent's move was received (issue #57/#58).
 #if LUR_AGENT
     bool AutoEnabled = false;
-    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(DeviceId.size());
+    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(State.Host.DeviceId().size());
     uint64_t Frame = 0, PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
     uint64_t ReportAccumNs = 0;
     // Net-ms RTT: our move leaves -> the peer's same-frame reply arrives. Measured on
@@ -249,7 +251,7 @@ void android_main(android_app* App) {
         const bool     WasMyTurn = State.Match.IsMyTurn();
         const uint32_t MatchesBefore = State.Match.Record().TotalMatches();
 #endif
-        State.Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
+        State.Host.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
 #if LUR_AGENT
         {
             const bool     NowMyTurn = State.Match.IsMyTurn();
@@ -272,7 +274,7 @@ void android_main(android_app* App) {
                     if (Ms > RttMaxMs) RttMaxMs = Ms;
                     MoveSentNs = 0;
                 }
-                const bool Played = (State.Session.IsReady() && NowMyTurn)
+                const bool Played = (State.Host.Session().IsReady() && NowMyTurn)
                                         ? State.View.AutoPlayRandomLegalMove(Rng) : false;
                 if (Played) MoveSentNs = ClockNs;       // our move is on the wire; await reply
                 if (GotPeerMove) {
@@ -296,7 +298,7 @@ void android_main(android_app* App) {
                      (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies,
                      State.Match.IsMyTurn() ? 1 : 0, State.Match.Record().Moves.size(),
                      (unsigned)(State.Match.PositionHash() & 0xFFFFFFFFu),
-                     State.Session.IsAwaitingResync() ? 1 : 0,
+                     State.Host.Session().IsAwaitingResync() ? 1 : 0,
                      (unsigned long long)RttCount,
                      (unsigned long long)(RttCount ? RttSumMs / RttCount : 0),
                      (unsigned long long)(RttCount ? RttMinMs : 0),
@@ -334,7 +336,7 @@ void android_main(android_app* App) {
             // landed after the top-of-loop Tick would otherwise wait for the NEXT
             // iteration — and this loop is vsync-bound, so that is a whole refresh of
             // sitting still. Half a frame off every inbound move, on average.
-            State.Session.PumpInbox();
+            State.Host.PumpInbox();
             State.View.Render(State.Renderer,
                               static_cast<float>(ANativeWindow_getWidth(App->window)),
                               static_cast<float>(ANativeWindow_getHeight(App->window)));

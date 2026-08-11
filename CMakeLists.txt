@@ -32,6 +32,7 @@ add_subdirectory(Modules/Trace)  # named CPU scopes (Insights-style), issue #101
 # --- Header-only interface modules (contracts; backends live in the app builds) ---
 add_subdirectory(Modules/Transport)
 add_subdirectory(Modules/Net)
+add_subdirectory(Modules/App)      # app-level choreography: GameHost (#43), Phase 3 of #39
 add_subdirectory(Modules/Render)
 add_subdirectory(Modules/Input)
 add_subdirectory(Modules/Hud)
@@ -58,6 +59,7 @@ if(LUR_BUILD_TESTS)
     add_subdirectory(Modules/Transport/Tests)
     add_subdirectory(Modules/Input/Tests)
     add_subdirectory(Modules/Net/Tests)
+    add_subdirectory(Modules/App/Tests)
     add_subdirectory(Modules/Save/Tests)
     add_subdirectory(Modules/Text/Tests)
     add_subdirectory(Modules/Audio/Tests)
