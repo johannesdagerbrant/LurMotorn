@@ -625,7 +625,7 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
     // Peripheral side: shed the wedged notify path by removing + re-adding the service.
     _Subscriber = nil;
     _Binding.Clear();                 // #83: link is going down, reopen the binding
-    _SendQueue.clear();               // drop stale backlog (#72)
+    _SendQueue.OnLinkLost();          // drop stale backlog (#72)
     if (_Peripheral.state == CBManagerStatePoweredOn) {
         if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
         [_Peripheral removeAllServices];   // drop the stale service + its subscription...
