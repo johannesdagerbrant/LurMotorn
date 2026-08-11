@@ -1,10 +1,12 @@
 #include "Lur/Transport/BleSendQueue.h"
 
 #include <cstring>
+#include <mutex>
 
 namespace Lur::Transport {
 
 bool BleSendQueue::Enqueue(const uint8_t* Data, std::size_t Size, EBleSendPriority Priority) {
+    std::lock_guard<std::mutex> Lock(Mutex_);
     if (Data == nullptr || Size == 0 || Size > MaxDatagram) return false;
     if (Count_ >= MaxQueued) { ++Dropped_; return false; }
 
@@ -24,6 +26,7 @@ bool BleSendQueue::Enqueue(const uint8_t* Data, std::size_t Size, EBleSendPriori
 }
 
 void BleSendQueue::OnSendComplete() {
+    std::lock_guard<std::mutex> Lock(Mutex_);
     // Platform completion callbacks carry no identity, so the only way to tell whose it is, is
     // to consume them oldest-first. Anything the watchdog abandoned is still owed a callback;
     // that one arrives first and must be swallowed. Acting on it would release the next datagram
@@ -37,6 +40,7 @@ void BleSendQueue::OnSendComplete() {
 }
 
 void BleSendQueue::Tick(uint64_t ElapsedNs) {
+    std::lock_guard<std::mutex> Lock(Mutex_);
     if (InFlight_) {
         InFlightNs_ += ElapsedNs;
         if (InFlightNs_ >= SendTimeoutNs) {
@@ -53,6 +57,7 @@ void BleSendQueue::Tick(uint64_t ElapsedNs) {
 }
 
 void BleSendQueue::OnLinkLost() {
+    std::lock_guard<std::mutex> Lock(Mutex_);
     Count_ = 0;
     Fast_ = 0;
     InFlight_ = false;

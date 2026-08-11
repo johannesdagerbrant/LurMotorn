@@ -1,6 +1,7 @@
 #pragma once
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 
 namespace Lur::Transport {
 
@@ -69,7 +70,22 @@ enum class EBleSendPriority : uint8_t {
 // The Kotlin has the same hole (its token guards the timer, not the callback). We count the
 // completions we are owed but no longer want, and swallow exactly that many.
 //
-// Not thread-safe: drive it from the thread that owns the transport.
+// INTERNALLY SYNCHRONIZED, and that is not incidental — it is what the platforms require.
+//
+// A radio reports its write completions on ITS OWN thread: Android's GATT callbacks arrive on
+// Binder threads, while Enqueue() and Tick() run on the engine thread. This class was written
+// "drive it from one thread" and then wired up exactly that way, which raced — and the failure was
+// not a crash but a SLOWDOWN, because the engine thread often failed to observe InFlight_ being
+// cleared (ARM has a weak memory model) and the 300 ms lost-completion watchdog became the de-facto
+// pacer. Measured on device: average move round-trip went from ~50 ms to ~297 ms, sitting just
+// under the timeout, with 24 delayed replies in ~940. The Kotlin this replaced held a lock for the
+// same reason; dropping it was the regression.
+//
+// A mutex rather than marshalling onto the engine thread: a completion must release the NEXT
+// datagram immediately, and deferring that to the next Pump() would cost up to a frame per
+// datagram — which would serialise a multi-datagram resync at one per frame, the slowest possible
+// moment to be slow. The lock is uncontended in the common case and this path carries a few
+// datagrams per second, not per frame.
 class BleSendQueue {
 public:
     // One datagram at an ATT MTU of 517 (what both backends negotiate): MTU - 3.
@@ -114,14 +130,17 @@ public:
     // burst of stale state ahead of the resync that is supposed to reconcile them.
     void OnLinkLost();
 
-    int  Queued() const { return Count_; }
-    bool InFlight() const { return InFlight_; }
+    int  Queued() const { std::lock_guard<std::mutex> Lock(Mutex_); return Count_; }
+    bool InFlight() const { std::lock_guard<std::mutex> Lock(Mutex_); return InFlight_; }
     // Datagrams refused for want of room, cumulative. A full queue means the radio has stopped
     // draining; the count is what makes that visible instead of merely felt.
-    uint32_t Dropped() const { return Dropped_; }
+    uint32_t Dropped() const { std::lock_guard<std::mutex> Lock(Mutex_); return Dropped_; }
 
 private:
+    // Assumes Mutex_ is held.
     void Pump();
+
+    mutable std::mutex Mutex_;
 
     struct Slot {
         uint8_t     Bytes[MaxDatagram];
