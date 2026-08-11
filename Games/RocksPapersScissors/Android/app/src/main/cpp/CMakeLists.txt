@@ -44,6 +44,7 @@ target_link_libraries(onlyrps
     lur::render
     lur::transport
     lur::net
+    lur::app    # #43: GameHost — engine-owned identity + session lifecycle
     lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math

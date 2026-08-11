@@ -72,6 +72,7 @@ target_link_libraries(OnlyRps PRIVATE
     lur::render
     lur::transport
     lur::net
+    lur::app    # #43: GameHost — engine-owned identity + session lifecycle
     lur::save
     lur::sim
     lur::math

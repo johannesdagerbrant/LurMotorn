@@ -28,6 +28,7 @@
 #include "Lur/Core/Log.h"         // the engine logger — routed into logcat below
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with iOS/desktop
 #include "Lur/Save/DeviceId.h"
+#include "Lur/App/GameHost.h"   // #43: engine-owned identity + session lifecycle
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"
@@ -101,7 +102,10 @@ struct AppState {
     Lur::Render::IRenderer* Renderer = nullptr;  // glue only (lifecycle in HandleCmd)
     bool Ready = false;                          // glue only
     Rps::GameView View;                          // glue only
-    Lur::Net::Session Session;                   // SIM only (after Start)
+    // #43: the engine owns identity + the session lifecycle. RPS uses only that half of GameHost —
+    // no record sync: ScoreBook is not an ISaveState, is never sent over the wire, and there is no
+    // hijack rule to apply here.
+    Lur::App::GameHost Host;                     // SIM only (after Start)
     Rps::LockstepPeer Lp;                        // SIM only; glue touches ONLY SetLocalMask (atomic)
     std::string DeviceId;
     std::string CvarsPath;                       // set once at startup (glue), then read-only
@@ -535,12 +539,21 @@ void android_main(android_app* App) {
 
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
     State.DataDir = DataDir != nullptr ? DataDir : ".";
-    Lur::Save::Store Store(DataDir != nullptr ? DataDir : ".");
-    State.DeviceId = Lur::Save::LoadOrCreateDeviceId(Store);
+    // #43: identity + the session lifecycle come from the engine now. RPS takes ONLY that half of
+    // GameHost — no EnableRecordSync, because ScoreBook is not an ISaveState (it Loads/Saves itself
+    // and never crosses the wire) and there is no per-opponent record to adopt or hijack-guard.
+    {
+        Lur::App::GameHost::Config HostCfg;
+        HostCfg.SaveDir = DataDir != nullptr ? DataDir : ".";
+        HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
+        HostCfg.Log = [](const char* M) { LOGI("%s", M); };
+        State.Host.Init(HostCfg);
+    }
+    State.DeviceId = State.Host.DeviceId();   // cached: read-only after startup, used on both threads
     // All-time W-L-D, loaded before the sim thread starts. Seeding the display atomics here is what
     // makes the ladder show your real record the moment the dropdown first opens, instead of 0-0-0
     // until the first match of this session finishes.
-    State.Scores.Load(Store);
+    State.Scores.Load(State.Host.Store());
     for (int T = 0; T < Rps::AiTierCount; ++T) {
         const Rps::Tally S = State.Scores.Ai(T);
         State.AiWins_[T].store(static_cast<int>(S.Wins), std::memory_order_relaxed);
@@ -548,17 +561,18 @@ void android_main(android_app* App) {
         State.AiDraws_[T].store(static_cast<int>(S.Draws), std::memory_order_relaxed);
     }
 
-    auto* Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
-    State.Session.SetLogger([](const char* M) { LOGI("Net: %s", M); });
+    // Route the framed game messages to the lockstep peer. The message SET lives in
+    // Rps/SessionWiring.h — one definition shared with the iOS/desktop mains and the test harness,
+    // because an unregistered slot is dropped silently at both ends (#147) and four hand-maintained
+    // copies is how three of them end up stale.
+    Rps::RouteSessionToPeer(State.Host.Session(), State.Lp);
 
-    // Route the framed game messages to the lockstep peer; a reconnect triggers resync. The message
-    // SET lives in Rps/SessionWiring.h — one definition shared with the iOS/desktop mains and the
-    // test harness, because an unregistered slot is dropped silently at both ends (#147) and four
-    // hand-maintained copies is how three of them end up stale.
-    Rps::RouteSessionToPeer(State.Session, State.Lp);
-    State.Session.SetResyncHandler([&State] { State.Lp.BeginResync(); });
-    State.Session.Start(Transport, State.DeviceId);
-    LOGI("RPS session started (device id %zuB)", State.DeviceId.size());
+    // A reconnect rebases the lockstep timeline. This is RPS's whole use of the link hooks — and it
+    // is why the host's record-sync half is opt-in: chess's resync means "re-adopt the peer and
+    // re-send our record", which has no meaning here.
+    Lur::App::GameHost::Hooks Hooks;
+    Hooks.OnResync = [&State] { State.Lp.BeginResync(); };
+    State.Host.Start(std::move(Hooks));
 
     // Persisted dev-cvar overrides (per-game cvars.cfg). Load into the globals now
     // (before the sim thread's match-start Init latches them); route commits back to disk +
@@ -808,11 +822,11 @@ void android_main(android_app* App) {
                          // #163: the half-open verdict on the line everyone reads — a wedged notify
                          // path (connected, our writes leave, the peer never notifies) now reads as
                          // halfopen=1 instead of a silent freeze.
-                         (!SoloDiag && State.Session.IsLinkHalfOpen()) ? 1 : 0,
+                         (!SoloDiag && State.Host.Session().IsLinkHalfOpen()) ? 1 : 0,
                          // #182: hard radio restarts fired this half-open episode (capped at
                          // MaxRadioRestarts). On real hardware this is the ONLY proof the escalation ran
                          // — the wedge isn't host-reproducible, so a climbing restarts= is the test.
-                         SoloDiag ? 0 : State.Session.RadioRestartsAttempted(),
+                         SoloDiag ? 0 : State.Host.Session().RadioRestartsAttempted(),
                          // Rollback (Docs/Journal/2026-08-03): how often a delivered peer frame
                          // contradicted the prediction and forced a rewind+resim, the total ticks
                          // re-simulated, and how far the head is speculating past the confirmed frontier
@@ -879,8 +893,8 @@ void android_main(android_app* App) {
             // that's what raises the "opponent link established" notice + the Linked-opponent row. Lp
             // stays uninitialised until we actually enter the peer match, and no MsgInput flows until
             // both peers do, so this only advances the Session-level handshake here.
-            State.Session.Tick(ElapsedNs);
-            const bool PeerReady = State.Session.IsReady();
+            State.Host.Tick(ElapsedNs);
+            const bool PeerReady = State.Host.Session().IsReady();
             if (PeerReady && !PeerEverReady) {
                 PeerEverReady = true;
                 State.PeerLinked.store(true, std::memory_order_release);  // glue: View.SetLinked + blink
@@ -902,7 +916,7 @@ void android_main(android_app* App) {
             // against THIS rival into the display atomics. Without it the linked row would read
             // 0-0-0 until the first match of the session ended, even with a long history on disk.
             if (LinkEdge) {
-                const Rps::Tally T = State.Scores.Peer(State.Session.GetPeerGuid(), State.DeviceId);
+                const Rps::Tally T = State.Scores.Peer(State.Host.Session().GetPeerGuid(), State.DeviceId);
                 State.PeerWins_.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
                 State.PeerLosses_.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
                 State.PeerDraws_.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
@@ -1071,8 +1085,8 @@ void android_main(android_app* App) {
 
             if (!State.Started && PeerReady) {
                 // Team from GUID order (both phones derive it identically; smaller = team 0).
-                const uint8_t Team = State.DeviceId < State.Session.GetPeerGuid() ? 0 : 1;
-                State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Session);
+                const uint8_t Team = State.DeviceId < State.Host.Session().GetPeerGuid() ? 0 : 1;
+                State.Lp.Init(kMatchSeed, Team, SendViaSession, &State.Host.Session());
 #if LUR_INTERNAL
                 // #112: exchange the build fingerprint (refuse mismatched builds) and our
                 // persisted gameplay-CVar overrides, so a designer's tuning reaches the peer
@@ -1101,7 +1115,7 @@ void android_main(android_app* App) {
                 LinkedScored = false;  // #2 tally this match's result once
                 State.LinkedTeam.store(Team, std::memory_order_relaxed);
                 State.Linked.store(true, std::memory_order_release);  // glue applies the view flip
-                LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Session.GetPeerGuid().c_str());
+                LOGI("linked - lockstep started (team %d, peer %.8s)", Team, State.Host.Session().GetPeerGuid().c_str());
             }
 #if LUR_INTERNAL
             // #137b: the linked auto-soak spammed a random press mask, retired with the mask.
@@ -1111,7 +1125,7 @@ void android_main(android_app* App) {
             if (State.Started) {
                 { LUR_TRACE_SCOPE("net.tick"); State.Lp.Tick(ElapsedNs); }  // produce+send input, execute (sim.step nests)
                 State.Recovering.store(State.Lp.Recovering(), std::memory_order_relaxed);  // #161 -> HUD
-                State.LinkHalfOpen.store(State.Session.IsLinkHalfOpen(),
+                State.LinkHalfOpen.store(State.Host.Session().IsLinkHalfOpen(),
                                          std::memory_order_relaxed);  // #163 -> HUD
                 // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can
                 // show it while we wait for the opponent. Clears itself the moment the match starts
@@ -1163,7 +1177,7 @@ void android_main(android_app* App) {
                     // "your record against THIS person", not "against whoever is in the room". A
                     // malformed/absent GUID is refused by RecordPeer rather than tallied against a
                     // junk opponent, so fall back to publishing the in-memory count in that case.
-                    const std::string& PeerGuid = State.Session.GetPeerGuid();
+                    const std::string& PeerGuid = State.Host.Session().GetPeerGuid();
                     if (State.Scores.RecordPeer(PeerGuid, State.DeviceId, R, Me)) {
                         State.Scores.Save(ScoreStore);
                         const Rps::Tally T = State.Scores.Peer(PeerGuid, State.DeviceId);
@@ -1254,7 +1268,7 @@ void android_main(android_app* App) {
             if (!ViewLinkedApplied && State.PeerLinked.load(std::memory_order_acquire)) {
                 // Label the row with the PEER's device id, not a generic word (#178): with two
                 // phones on a table, a label that reads the same on both tells you nothing.
-                State.View.SetLinked(true, State.Session.GetPeerGuid());
+                State.View.SetLinked(true, State.Host.Session().GetPeerGuid());
                 State.View.NotifyPeerLinked();    // blink the bar
                 ViewLinkedApplied = true;
             }

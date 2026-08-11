@@ -23,6 +23,7 @@
 #include <mutex>     // #183: guards the main->render touch-event queue
 #include <pthread.h> // #183: the render thread runs on a pthread (not std::thread) for a 4MB stack
 #include <string>
+#include <utility>
 #include <thread>    // #69/#183: the sim/net thread and now the render thread, both off the UIKit main thread
 #include <vector>    // #183: the touch-event queue backing store
 
@@ -33,6 +34,7 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
+#include "Lur/App/GameHost.h"   // #43: engine-owned identity + session lifecycle
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
@@ -160,7 +162,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 
     // ---- MAIN (UIKit / lifecycle) thread only ----
     Lur::Transport::ITransport* _Transport;   // created on main; the CB delegate pushes to the (thread-safe) inbox
-    Lur::Save::Store* _Store;  // main uses it once (device id + score load) BEFORE the sim thread; sim-only after
+    Lur::Save::Store* _Store;  // -> &_Host.Store(): main uses it once (score load) BEFORE the sim
+                               // thread; sim-only after
     std::string _SaveDir;      // Application Support — the Store's dir, kept for the .rec paths
     std::string _DeviceId;
     // #73: a DVT launch can initialise the renderer while the app is NOT active — the layer created in
@@ -194,7 +197,9 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     Lur::Input::ConsoleGesture _DevGesture;
 
     // ---- SIM thread only (after _SimThread starts) ----
-    Lur::Net::Session _Session;
+    // #43: engine-owned identity + session lifecycle. RPS takes only that half of GameHost — no
+    // record sync (ScoreBook is not an ISaveState and never crosses the wire).
+    Lur::App::GameHost _Host;
     Rps::LockstepPeer _Lp;
     Rps::ScoreBook _Scores;    // loaded on MAIN before the thread starts (the handoff), sim-only after
     Rps::Sim _SoloSim;         // #2/#127 solo-vs-AI local sim
@@ -371,7 +376,15 @@ static void UnblockStdio() {
         NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
     NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
     _SaveDir = std::string(Dir.UTF8String);
-    _Store = new Lur::Save::Store(_SaveDir);
+    {
+        Lur::App::GameHost::Config HostCfg;
+        HostCfg.SaveDir = _SaveDir;
+        HostCfg.Log = [](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s", M); };
+        HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
+        _Transport = HostCfg.Transport;
+        _Host.Init(HostCfg);
+    }
+    _Store = &_Host.Store();
 #if LUR_AGENT
     {
         // Documents/, not Application Support: Documents is what the dev rig can push into.
@@ -384,7 +397,7 @@ static void UnblockStdio() {
                "be handed to a player. Channel: %{public}s", _AgentCmdPath.c_str());
     }
 #endif
-    _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
+    _DeviceId = _Host.DeviceId();   // cached: read-only after startup, read on both threads
     // All-time W-L-D per AI tier / per rival, loaded on MAIN before the sim thread exists (thread
     // creation is the handoff — from then on _Scores is written ONLY by the sim thread). Seeding the
     // display atomics here is what makes the ladder show the real record the moment the dropdown first
@@ -400,9 +413,6 @@ static void UnblockStdio() {
                          static_cast<int>(S.Draws));
     }
 
-    _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
-    _Session.SetLogger([](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyRps: Net: %{public}s", M); });
-
     Rps::LockstepPeer* Lp = &_Lp;
     // #160: the message SET is defined once, in Rps/SessionWiring.h, and shared with the Android and
     // desktop mains plus the test harness. It was four hand-maintained copies, and the copies drifted
@@ -410,10 +420,13 @@ static void UnblockStdio() {
     // ONLY, so an iPhone silently dropped the Android's MsgCvarSync, the peers simulated on different
     // Cv and desynced at the first anchor (#147). An unregistered slot fails with no error at either
     // end, so this is not a place to keep a copy.
-    Rps::RouteSessionToPeer(_Session, _Lp);
-    _Session.SetResyncHandler([Lp] { Lp->BeginResync(); });
-    _Session.Start(_Transport, _DeviceId);
-    os_log(OS_LOG_DEFAULT, "OnlyRps: session started (device id %zuB)", _DeviceId.size());
+    Rps::RouteSessionToPeer(_Host.Session(), _Lp);
+    // A reconnect rebases the lockstep timeline — RPS's whole use of the link hooks, and why the
+    // host's record-sync half is opt-in: chess's resync means "re-adopt and re-send our record",
+    // which has no meaning here.
+    Lur::App::GameHost::Hooks Hooks;
+    Hooks.OnResync = [Lp] { Lp->BeginResync(); };
+    _Host.Start(std::move(Hooks));
 
     // Initialise the cross-thread surface before the sim thread reads any of it. The zero-defaults
     // (all the sim->main flags, false/0) rely on ObjC's zeroed ivar storage; these three are the ones
@@ -550,7 +563,7 @@ static void UnblockStdio() {
 // sent — and every step of that reports success. Mirrors WarnIfSolo in the Android main.
 - (void)warnIfSolo:(const char*)What {
     if (!_SoloActiveAtomic.load(std::memory_order_acquire)) return;
-    if (_Session.IsReady())
+    if (_Host.Session().IsReady())
         os_log_error(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the SOLO sim, not the linked peer "
                      "(a peer IS linked). The other phone will wait forever. Send `linked` first, "
                      "then re-send this.", What);
@@ -894,7 +907,7 @@ static void UnblockStdio() {
     // Fire once on the rising edge. GetPeerGuid is set once at handshake, so reading it here on the render
     // thread (after the acquire load establishes happens-before) is safe even though Session is sim-owned.
     if (!_ViewLinkedApplied && _PeerLinkedAtomic.load(std::memory_order_acquire)) {
-        _View.SetLinked(true, _Session.GetPeerGuid());   // label the row with the peer's id (#178)
+        _View.SetLinked(true, _Host.Session().GetPeerGuid());   // label the row with the peer's id (#178)
         _View.NotifyPeerLinked();                        // blink the bar
         _ViewLinkedApplied = true;
     }
@@ -1118,8 +1131,8 @@ static void UnblockStdio() {
                        SoloDiag ? 1 : (_Lp.MatchStarted() ? 1 : 0),
                        SoloDiag ? 0 : _Lp.InputGaps(), SoloDiag ? 0u : _Lp.LastInputGapTick(),
                        (!SoloDiag && _Lp.PreMatchStalled()) ? 1 : 0,
-                       (!SoloDiag && _Session.IsLinkHalfOpen()) ? 1 : 0,
-                       SoloDiag ? 0 : _Session.RadioRestartsAttempted(),
+                       (!SoloDiag && _Host.Session().IsLinkHalfOpen()) ? 1 : 0,
+                       SoloDiag ? 0 : _Host.Session().RadioRestartsAttempted(),
                        // Rollback (Docs/Journal/2026-08-03): rewind+resim frequency, ticks re-simulated,
                        // and the head's speculation depth past the confirmed frontier — §correction-cost.
                        SoloDiag ? 0 : _Lp.Rollbacks(), SoloDiag ? 0u : _Lp.ResimTicks(),
@@ -1157,8 +1170,8 @@ static void UnblockStdio() {
 
         // Pump the session ALWAYS (even during solo) so a real peer can complete the handshake — that
         // raises the "opponent link established" notice + the Linked-opponent row.
-        _Session.Tick(ElapsedNs);
-        const bool PeerReady = _Session.IsReady();
+        _Host.Tick(ElapsedNs);
+        const bool PeerReady = _Host.Session().IsReady();
         if (PeerReady && !PeerEverReady) {
             PeerEverReady = true;
             _PeerLinkedAtomic.store(true, std::memory_order_release);   // main: View.SetLinked + blink
@@ -1170,7 +1183,7 @@ static void UnblockStdio() {
         // On the link edge the peer's GUID is finally known, so publish the ALL-TIME record vs THIS
         // rival (else the row would read 0-0-0 until the session's first match ended).
         if (LinkEdge) {
-            const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
+            const Rps::Tally T = _Scores.Peer(_Host.Session().GetPeerGuid(), _DeviceId);
             _PeerWinsA.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
             _PeerLossesA.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
             _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
@@ -1283,9 +1296,9 @@ static void UnblockStdio() {
         } else {
             // ---- LINKED path ----
             if (!Started && PeerReady) {
-                const uint8_t Team = _DeviceId < _Session.GetPeerGuid() ? 0 : 1;
+                const uint8_t Team = _DeviceId < _Host.Session().GetPeerGuid() ? 0 : 1;
                 _LinkedTeam.store(Team, std::memory_order_relaxed);
-                _Lp.Init(kMatchSeed, Team, SendViaSession, &_Session);
+                _Lp.Init(kMatchSeed, Team, SendViaSession, &_Host.Session());
 #if LUR_INTERNAL
                 // #147/#112: refuse a mismatched build, exchange our gameplay-CVar override set so both
                 // peers converge on ONE merged set before tick 0. iOS has no on-device cvars.cfg today,
@@ -1323,7 +1336,7 @@ static void UnblockStdio() {
 #endif
                 // Peer's GUID known now -> show the ALL-TIME record vs THIS rival rather than 0-0-0.
                 {
-                    const Rps::Tally T = _Scores.Peer(_Session.GetPeerGuid(), _DeviceId);
+                    const Rps::Tally T = _Scores.Peer(_Host.Session().GetPeerGuid(), _DeviceId);
                     _PeerWinsA.store(static_cast<int>(T.Wins), std::memory_order_relaxed);
                     _PeerLossesA.store(static_cast<int>(T.Losses), std::memory_order_relaxed);
                     _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
@@ -1332,7 +1345,7 @@ static void UnblockStdio() {
             }
             if (Started) _Lp.Tick(ElapsedNs);   // produce+send input, execute (sim.step nests)
             _Recovering.store(Started && _Lp.Recovering(), std::memory_order_relaxed);          // #161 -> HUD
-            _LinkHalfOpen.store(Started && _Session.IsLinkHalfOpen(), std::memory_order_relaxed); // #163 -> HUD
+            _LinkHalfOpen.store(Started && _Host.Session().IsLinkHalfOpen(), std::memory_order_relaxed); // #163 -> HUD
             // #139/feedback: publish the committed-but-not-yet-simulated camp so the view can show it
             // while we wait for the opponent. Clears the moment the match starts.
             const bool Pending = Started && _Lp.HasLocalCamp() && !_Lp.MatchStarted();
@@ -1373,7 +1386,7 @@ static void UnblockStdio() {
 #endif
                 // Per-rival and persistent, keyed on their device GUID. RecordPeer refuses a malformed
                 // or absent id rather than inventing a rivalry row, so keep the session count then.
-                const std::string& PeerGuid = _Session.GetPeerGuid();
+                const std::string& PeerGuid = _Host.Session().GetPeerGuid();
                 if (_Scores.RecordPeer(PeerGuid, _DeviceId, R, Me)) {
                     _Scores.Save(*_Store);
                     const Rps::Tally T = _Scores.Peer(PeerGuid, _DeviceId);

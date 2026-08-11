@@ -93,17 +93,17 @@ static void TestInitialLinkAdoptsAndSyncs() {
     P.StateB.Value = 3;
 
     int AdoptedA = 0, AdoptedB = 0;
-    Lur::App::GameHost::Hooks Ha, Hb;
-    Ha.OnPeerAdopted    = [&](const std::string&) { ++AdoptedA; return true; };
-    Ha.IsActiveOpponent = [](const std::string&) { return true; };
-    Hb.OnPeerAdopted    = [&](const std::string&) { ++AdoptedB; return true; };
-    Hb.IsActiveOpponent = [](const std::string&) { return true; };
+    Lur::App::GameHost::RecordSync Ra, Rb;
+    Ra.OnPeerAdopted    = [&](const std::string&) { ++AdoptedA; return true; };
+    Ra.IsActiveOpponent = [](const std::string&) { return true; };
+    Rb.OnPeerAdopted    = [&](const std::string&) { ++AdoptedB; return true; };
+    Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
     Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
     Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
-    P.HostA.Init(Ca, P.StateA);  P.HostA.Start(Ha);
-    P.HostB.Init(Cb, P.StateB);  P.HostB.Start(Hb);
+    P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
+    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
 
     P.Pump(40);
 
@@ -128,17 +128,17 @@ static void TestNonAdoptSendsNothing() {
     P.StateA.Value = 9;
     P.StateB.Value = 1;
 
-    Lur::App::GameHost::Hooks Ha, Hb;
-    Ha.OnPeerAdopted    = [](const std::string&) { return false; };   // A refuses this peer
-    Ha.IsActiveOpponent = [](const std::string&) { return false; };
-    Hb.OnPeerAdopted    = [](const std::string&) { return true; };
-    Hb.IsActiveOpponent = [](const std::string&) { return true; };
+    Lur::App::GameHost::RecordSync Ra, Rb;
+    Ra.OnPeerAdopted    = [](const std::string&) { return false; };   // A refuses this peer
+    Ra.IsActiveOpponent = [](const std::string&) { return false; };
+    Rb.OnPeerAdopted    = [](const std::string&) { return true; };
+    Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
     Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
     Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
-    P.HostA.Init(Ca, P.StateA);  P.HostA.Start(Ha);
-    P.HostB.Init(Cb, P.StateB);  P.HostB.Start(Hb);
+    P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
+    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
 
     P.Pump(40);
 
@@ -162,17 +162,17 @@ static void TestReconnectReAdoptsAndReSyncs() {
     Lur::Transport::LoopbackTransport::Link(P.Ta, P.Tb);
 
     int AdoptedA = 0;
-    Lur::App::GameHost::Hooks Ha, Hb;
-    Ha.OnPeerAdopted    = [&](const std::string&) { ++AdoptedA; return true; };
-    Ha.IsActiveOpponent = [](const std::string&) { return true; };
-    Hb.OnPeerAdopted    = [](const std::string&) { return true; };
-    Hb.IsActiveOpponent = [](const std::string&) { return true; };
+    Lur::App::GameHost::RecordSync Ra, Rb;
+    Ra.OnPeerAdopted    = [&](const std::string&) { ++AdoptedA; return true; };
+    Ra.IsActiveOpponent = [](const std::string&) { return true; };
+    Rb.OnPeerAdopted    = [](const std::string&) { return true; };
+    Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
     Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
     Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
-    P.HostA.Init(Ca, P.StateA);  P.HostA.Start(Ha);
-    P.HostB.Init(Cb, P.StateB);  P.HostB.Start(Hb);
+    P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
+    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
     P.Pump(40);
     CHECK(P.HostA.Session().IsReady());
     const int AfterFirstLink = AdoptedA;
@@ -202,18 +202,19 @@ static void TestMatchEndPersistsAndReportsOnce() {
     C.Transport = &T;
     C.Log = [&](const char* M) { Lines.emplace_back(M); };
 
-    Lur::App::GameHost::Hooks H;
-    H.OnPeerAdopted    = [](const std::string&) { return true; };
-    H.IsActiveOpponent = [](const std::string&) { return true; };
-    H.Summarize = [] {
-        Lur::App::GameHost::Hooks::MatchSummary S;
+    Lur::App::GameHost::RecordSync R;
+    R.OnPeerAdopted    = [](const std::string&) { return true; };
+    R.IsActiveOpponent = [](const std::string&) { return true; };
+    R.Summarize = [] {
+        Lur::App::GameHost::RecordSync::MatchSummary S;
         S.Result = 2; S.WinsLower = 3; S.WinsHigher = 1; S.Draws = 4; S.Total = 8;
         return S;
     };
 
     Lur::App::GameHost Host;
-    Host.Init(C, State);
-    Host.Start(H);
+    Host.Init(C);
+    Host.EnableRecordSync(State, R);
+    Host.Start({});
     const std::size_t Before = Lines.size();
     Host.OnMatchEnded();
 
@@ -230,15 +231,56 @@ static void TestMatchEndPersistsAndReportsOnce() {
     std::vector<std::string> Quiet;
     Lur::App::GameHost::Config C2 = C;
     C2.Log = [&](const char* M) { Quiet.emplace_back(M); };
-    Lur::App::GameHost::Hooks H2 = H;
-    H2.Summarize = nullptr;
+    Lur::App::GameHost::RecordSync R2 = R;
+    R2.Summarize = nullptr;
     CounterState State2;
     Lur::App::GameHost Host2;
-    Host2.Init(C2, State2);
-    Host2.Start(H2);
+    Host2.Init(C2);
+    Host2.EnableRecordSync(State2, R2);
+    Host2.Start({});
     const std::size_t QBefore = Quiet.size();
     Host2.OnMatchEnded();
     CHECK(Quiet.size() == QBefore);
+}
+
+// ---- 5. A game with NO record sync still gets identity + a session, and no SyncManager ------
+// This is the RPS shape, and it is why the record flow became opt-in: RPS's ScoreBook is not an
+// ISaveState, it is never sent over the wire, and its resync means "rebase the lockstep timeline",
+// not "re-adopt and re-send a record". Forcing it through the chess shape would have meant a dummy
+// save-state plus three no-op hooks — the tell that a default is wrong.
+static void TestHostWithoutRecordSync() {
+    Pair P;
+    P.Ta.SetDeferred(true);
+    P.Tb.SetDeferred(true);
+    Lur::Transport::LoopbackTransport::Link(P.Ta, P.Tb);
+
+    int ReadyA = 0, ResyncA = 0;
+    Lur::App::GameHost::Hooks Ha, Hb;
+    Ha.OnLinkReady = [&] { ++ReadyA; };
+    Ha.OnResync    = [&] { ++ResyncA; };
+
+    Lur::App::GameHost::Config Ca, Cb;
+    Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
+    Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
+    P.HostA.Init(Ca);  P.HostA.Start(Ha);   // no EnableRecordSync
+    P.HostB.Init(Cb);  P.HostB.Start(Hb);
+
+    P.Pump(40);
+
+    CHECK(P.HostA.Session().IsReady());          // identity + session still work
+    CHECK(!P.HostA.DeviceId().empty());
+    CHECK(!P.HostA.HasRecordSync());             // ...and no SyncManager was ever constructed
+    CHECK(ReadyA == 1);                          // the game's own link hook fired, exactly once
+
+    // The resync route reaches the game's hook — this is RPS's BeginResync path.
+    P.HostA.Session().RequestResync();
+    P.Pump(10);
+    CHECK(ResyncA >= 1);
+
+    // And the no-record-sync host tolerates the record calls without a save state behind it, so a
+    // game need not guard every call site on "did I enable that half".
+    P.HostA.OnBackground();
+    P.HostA.OnMatchEnded();
 }
 
 int main() {
@@ -246,6 +288,7 @@ int main() {
     TestNonAdoptSendsNothing();
     TestReconnectReAdoptsAndReSyncs();
     TestMatchEndPersistsAndReportsOnce();
+    TestHostWithoutRecordSync();
     if (Failures == 0) std::printf("app_tests: all passed\n");
     return Failures == 0 ? 0 : 1;
 }

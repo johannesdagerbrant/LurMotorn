@@ -197,7 +197,7 @@ static void UnblockStdio() {
         // not from the radio role.
         _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
         HostCfg.Transport = _Transport;
-        _Host.Init(HostCfg, _Match);
+        _Host.Init(HostCfg);
     }
     _Match.SetOnMatchEnd([H = &_Host] { H->OnMatchEnded(); });  // persist + report, one seam
     // Persist the in-progress match when backgrounded, so it survives a close.
@@ -228,18 +228,17 @@ static void UnblockStdio() {
     // send, the ready/resync/state-hash/Sync handlers, Session::Start — now live once in
     // Lur::App::GameHost. What is left is the game's four decisions, and they must read IDENTICALLY
     // to the Android main's: that they did not is what this extraction is for.
-    Lur::App::GameHost::Hooks Hooks;
+    Lur::App::GameHost::RecordSync Rec;
     // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
     // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
     // route through this one hook now, so they cannot drift apart.
-    Hooks.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
+    Rec.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
     // Only share OUR game with the peer we are actually playing.
-    Hooks.IsActiveOpponent = [View = &_View](const std::string& Peer) {
+    Rec.IsActiveOpponent = [View = &_View](const std::string& Peer) {
         return View->ActiveOpponentGuid() == Peer;
     };
-    Hooks.StateHash = [M = &_Match] { return M->PositionHash(); };   // desync detection (#72)
-    Hooks.Summarize = [M = &_Match] {
-        Lur::App::GameHost::Hooks::MatchSummary S;
+    Rec.Summarize = [M = &_Match] {
+        Lur::App::GameHost::RecordSync::MatchSummary S;
         S.Result     = static_cast<int>(M->LastResult());
         S.WinsLower  = M->Record().WinsLower;
         S.WinsHigher = M->Record().WinsHigher;
@@ -247,6 +246,11 @@ static void UnblockStdio() {
         S.Total      = M->Record().TotalMatches();
         return S;
     };
+    _Host.EnableRecordSync(_Match, std::move(Rec));
+
+    // Chess hashes its board so the session can catch a divergence (#72).
+    Lur::App::GameHost::Hooks Hooks;
+    Hooks.StateHash = [M = &_Match] { return M->PositionHash(); };
     _Host.Start(std::move(Hooks));
 #if LUR_AGENT
     _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_Host.DeviceId().size());  // per-device autoplay seed

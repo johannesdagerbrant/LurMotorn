@@ -184,7 +184,7 @@ void android_main(android_app* App) {
     HostCfg.Log = [](const char* M) { LOGI("%s", M); };
     // Init before the view is attached: the view is handed Store/Sync/DeviceId, and it must hold
     // them before a peer can go ready (the ready handler calls back into the view's adopt rule).
-    State.Host.Init(HostCfg, State.Match);
+    State.Host.Init(HostCfg);
 
     State.View.SetState(&State.Match);
     State.View.AttachSession(&State.Host.Session());
@@ -194,18 +194,17 @@ void android_main(android_app* App) {
 
     State.Match.SetOnMatchEnd([&State] { State.Host.OnMatchEnded(); });  // persist + report
 
-    Lur::App::GameHost::Hooks Hooks;
+    Lur::App::GameHost::RecordSync Rec;
     // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
     // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
     // route through this one hook now, so they cannot drift apart.
-    Hooks.OnPeerAdopted = [&State](const std::string& Peer) { return State.View.OnPeerLinked(Peer); };
+    Rec.OnPeerAdopted = [&State](const std::string& Peer) { return State.View.OnPeerLinked(Peer); };
     // Only share OUR game with the peer we are actually playing.
-    Hooks.IsActiveOpponent = [&State](const std::string& Peer) {
+    Rec.IsActiveOpponent = [&State](const std::string& Peer) {
         return State.View.ActiveOpponentGuid() == Peer;
     };
-    Hooks.StateHash = [&State] { return State.Match.PositionHash(); };   // desync detection (#72)
-    Hooks.Summarize = [&State] {
-        Lur::App::GameHost::Hooks::MatchSummary S;
+    Rec.Summarize = [&State] {
+        Lur::App::GameHost::RecordSync::MatchSummary S;
         S.Result     = static_cast<int>(State.Match.LastResult());
         S.WinsLower  = State.Match.Record().WinsLower;
         S.WinsHigher = State.Match.Record().WinsHigher;
@@ -213,6 +212,12 @@ void android_main(android_app* App) {
         S.Total      = State.Match.Record().TotalMatches();
         return S;
     };
+    State.Host.EnableRecordSync(State.Match, std::move(Rec));
+
+    // Chess hashes its board so the session can catch a divergence (#72). RPS leaves StateHash unset
+    // — it detects divergence itself with per-tick anchors.
+    Lur::App::GameHost::Hooks Hooks;
+    Hooks.StateHash = [&State] { return State.Match.PositionHash(); };
     State.Host.Start(std::move(Hooks));
 
 #if LUR_INTERNAL
