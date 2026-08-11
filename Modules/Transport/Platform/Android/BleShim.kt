@@ -192,6 +192,15 @@ class BleShim(private val context: Context, private val TAG: String) {
     private var scanRetries = 0
     private var advFailLogged = false      // rate-limit: the retry loop must not bury the log
     private var scanFailLogged = false
+    // #203: is our GATT service actually published? Confirmed by onServiceAdded, not assumed from
+    // addService() returning. Nothing tracked this before, yet the startup log asserted "serving".
+    private var serving = false
+    // #203: the last radio state we reported, so reporting is EDGE-triggered. The old line was
+    // effectively level-triggered on the retry loop: it printed on every start ATTEMPT, so a radio
+    // that was failing to scan announced itself healthy six times in twenty seconds while the real
+    // `scan failed: 2` was deliberately quieted to once. Symmetry matters more than volume here —
+    // if the failure is quiet, the recovery must be quiet too, and both must be truthful.
+    private var lastRadioState = ""
 
     @Volatile private var started = false
     @Volatile private var linked = false
@@ -379,10 +388,32 @@ class BleShim(private val context: Context, private val TAG: String) {
         try {
             sc.startScan(listOf(filter), settings, scanCallback)
             scanning = true              // cleared again by onScanFailed
-            Log.i(TAG, "BLE up: serving + advertising + scanning for LurMotorn peers")
         } catch (e: SecurityException) {
             Log.e(TAG, "startScan: missing BLE permission", e)
         }
+    }
+
+    // #203: report what the radio IS, never what we hoped a call would do. Reported only where the
+    // state is actually KNOWN (a confirming callback, a failure, a teardown) and only when it CHANGES.
+    //
+    // The line this replaced — "BLE up: serving + advertising + scanning for LurMotorn peers" — was
+    // emitted from inside startScanning() whenever startScan() merely failed to THROW, and asserted
+    // all three states while having checked none of them: startScan reports failure asynchronously via
+    // onScanFailed, startAdvertising can bail out before it ever starts, and nothing tracked the GATT
+    // service at all. On 2026-08-11 it printed six times with the adapter switched OFF, which sent a
+    // live investigation down the wrong path — the same defect class as the escalation that narrated
+    // three radio restarts against a transport with no restart. An unverified success claim is worse
+    // than no line, because it actively redirects the reader.
+    //
+    // `BLE up` is kept as the grep token (CLAUDE.md's log vocabulary: "radio started"), which is the
+    // one thing it always did say truthfully. The flags now qualify it, so a partial start reads as
+    // partial instead of as health.
+    private fun reportRadioState(cause: String) {
+        val state = "serving=${if (serving) 1 else 0} advertising=${if (advertising) 1 else 0} " +
+            "scanning=${if (scanning) 1 else 0}"
+        if (state == lastRadioState) return
+        lastRadioState = state
+        Log.i(TAG, "BLE up: $state ($cause)")
     }
 
     private fun stopAdvertising() {
@@ -424,6 +455,7 @@ class BleShim(private val context: Context, private val TAG: String) {
             advFailLogged = true
             Log.e(TAG, "advertise failed: $errorCode - retrying (repeats quiet until one succeeds)")
         }
+        reportRadioState("advertise failed $errorCode")   // #203: say what we now ARE, not just why
         if (advRetries < 5 && started && !linked) {
             handler.postDelayed(advRetry, retryDelayMs(advRetries++))
         }
@@ -438,6 +470,7 @@ class BleShim(private val context: Context, private val TAG: String) {
             scanFailLogged = true
             Log.e(TAG, "scan failed: $errorCode - retrying (repeats quiet until one succeeds)")
         }
+        reportRadioState("scan failed $errorCode")        // #203: say what we now ARE, not just why
         if (scanRetries < 5 && started && !linked) {
             handler.postDelayed(scanRetry, retryDelayMs(scanRetries++))
         }
@@ -475,6 +508,7 @@ class BleShim(private val context: Context, private val TAG: String) {
                 try { gattServer?.close() } catch (_: SecurityException) {}
                 gattServer = null
                 serverDatagram = null
+                serving = false          // #203: republished (and re-confirmed) by startGattServer below
                 connectedCentral = null
                 stopScanning()
                 stopAdvertising()
@@ -518,6 +552,8 @@ class BleShim(private val context: Context, private val TAG: String) {
             gattClient = null
             try { gattServer?.close() } catch (_: SecurityException) {}
             gattServer = null
+            serving = false
+            lastRadioState = ""          // #203: next start reports afresh, not deduped against a dead run
             Log.i(TAG, "BLE stopped - advertiser/scanner/GATT released")
         }
     }
@@ -554,6 +590,7 @@ class BleShim(private val context: Context, private val TAG: String) {
             advertising = true
             advRetries = 0
             advFailLogged = false        // a later failure is news again
+            reportRadioState("advertise confirmed")   // #203: the callback IS the confirmation
         }
         override fun onStartFailure(errorCode: Int) { onAdvertiseStartFailed(errorCode) }
     }
@@ -562,6 +599,10 @@ class BleShim(private val context: Context, private val TAG: String) {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             scanRetries = 0
             scanFailLogged = false       // the scanner is demonstrably alive
+            // #203: Android has no onScanSuccess, so a delivered result is the ONLY positive proof
+            // that scanning works. If a previous failure had cleared the flag, this is the recovery —
+            // and it must be reported, or the log keeps the last thing it said, which was a failure.
+            if (!scanning) { scanning = true; reportRadioState("scan live (result delivered)") }
             if (linked || connecting || decidedPeripheral) return
             connecting = true
             Log.i(TAG, "scan: found a LurMotorn peer, connecting as central")
@@ -610,6 +651,19 @@ class BleShim(private val context: Context, private val TAG: String) {
     }
 
     private val gattServerCallback = object : BluetoothGattServerCallback() {
+        // #203: addService() is ASYNCHRONOUS — it returning true means "queued", not "published".
+        // Nothing observed this before, so "serving" was pure assumption; a service that failed to
+        // publish left us invisible to a central with no line anywhere saying so.
+        override fun onServiceAdded(status: Int, service: BluetoothGattService) {
+            if (service.uuid != SERVICE_UUID) return
+            serving = status == BluetoothGatt.GATT_SUCCESS
+            if (!serving) {
+                Log.e(TAG, "addService FAILED: status=$status - this device cannot be connected to " +
+                    "as a peripheral (a central will never find our service)")
+            }
+            reportRadioState(if (serving) "service published" else "service add failed $status")
+        }
+
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
             // #83: only the BOUND peer's departure ends the match. `device == connectedCentral` already
             // said that, and nativeIsBoundPeer is the same answer from the shared policy — kept so both
