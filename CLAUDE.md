@@ -144,6 +144,15 @@ rather than idle, and **leave no device state behind** — clear properties and 
 "inert by default" is not the same as "not there". Configuring with the flag on prints a CMake
 warning naming the hazard.
 
+**The handover happens WHEN THE USER ASKS FOR IT — not at the end of every task, issue or phase.**
+The two rules above govern *how* to hand over, never *how often*. Leaving agent builds installed
+between pieces of work is expected and fine: during development the phones are dev hardware, and
+tearing the rig down after each issue costs a rebuild, a CI round-trip and two installs — which was
+slowing real work down (said 2026-08-11). So keep the agent builds on the devices across a work
+session, and do the close-out only on an explicit "we're done" / "give me the handover". The hazard
+the rules exist for is a *player* holding a remote-controllable build; that risk arrives at handover
+time, not at the end of an issue.
+
 **The harness that lives behind it (RPS).** `Rps/AgentControl.h` defines one command grammar —
 `<seq> <verb> [args]`, verbs `place queue stress corrupt droptx console gesture killown linked` — so an
 assistant can drive both phones with no hands. It exists because the interesting failures aren't
