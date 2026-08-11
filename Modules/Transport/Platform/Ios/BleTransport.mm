@@ -172,6 +172,11 @@ public:
     // Peripheral-side state (we host the service; peer connected to us).
     CBMutableCharacteristic* _LocalDatagram;
     CBCentral*               _Subscriber;
+    // #202: whether we have already reported swapping the notify target this link episode. The swap
+    // itself is idempotent and cheap, but CoreBluetooth makes no promise that CBATTRequest.central
+    // hands back the SAME object every callback, so an ungated log could repeat per datagram. Cleared
+    // wherever _Subscriber is (onLinkLost / restartRadio), so each episode says it at most once.
+    bool                     _NotifyTargetSwapLogged;
     // #83: which central this peripheral is BOUND to while linked. Any CCCD subscription used to
     // become the canonical central unconditionally, so a third device in the room could silently
     // redirect a live match's notifications to itself — and the engine was never told, because
@@ -222,6 +227,7 @@ public:
         _DeviceIdUuid = MakeUuid(BleDeviceIdCharacteristicUuid);
         _LocalId      = LoadOrCreateIosDeviceId();
         _Connected = _Linked = _Connecting = _DecidedPeripheral = false;
+        _NotifyTargetSwapLogged = false;
         _FruitlessDefers = 0;
         _Radio.Driver = self;          // the engine queue writes through us
         _SendQueue.SetRadio(&_Radio);
@@ -419,6 +425,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
     _SendQueue.OnLinkLost();                                      // drop stale send backlog (#72)
     _Subscriber = nil;
+    _NotifyTargetSwapLogged = false;                              // #202: next episode may say it again
     // #83: the link is genuinely gone, so open the binding up again. This is what keeps chess's
     // deliberate opponent-switch (#38) working — it operates at session level AFTER link loss, so a
     // binding that outlived the link would forbid ever changing opponents.
@@ -624,6 +631,7 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
     // Peripheral side: shed the wedged notify path by removing + re-adding the service.
     _Subscriber = nil;
+    _NotifyTargetSwapLogged = false;                          // #202: next episode may say it again
     _Binding.Clear();                 // #83: link is going down, reopen the binding
     _SendQueue.OnLinkLost();          // drop stale backlog (#72)
     if (_Peripheral.state == CBManagerStatePoweredOn) {
@@ -686,6 +694,32 @@ didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
         // writes injected straight into the lockstep/move stream. Pre-link traffic still passes —
         // that IS the handshake — but once bound, only the peer does.
         if (!_Binding.AcceptData(Req.central.identifier.UUIDString.UTF8String)) continue;
+        // #202: the LIVE write names the LIVE handle. `_Subscriber` is otherwise only ever assigned in
+        // didSubscribeToCharacteristic, and that callback does NOT reliably fire when a central drops
+        // and reconnects — on hardware (2026-08-11) a central reconnected ~15 times over four minutes
+        // and neither didSubscribe NOR didUnsubscribe fired once. `_Subscriber` then still referenced
+        // the PREVIOUS connection's CBCentral, and updateValue:onSubscribedCentrals: returns YES for
+        // that dead handle, so radioWrite reported success and BleSendQueue drained normally while
+        // every outbound datagram evaporated: a silent ONE-WAY link. Inbound kept working the whole
+        // time, because it arrives here — on a path that never touched _Subscriber. That asymmetry is
+        // the whole bug, and this is the seam where the truth is available.
+        //
+        // Trusting Req.central as the reply target is NOT a new trust decision: AcceptData (#83) has
+        // already cleared this central to inject bytes into the lockstep stream, and answering the peer
+        // we are already accepting data from is strictly weaker than that. Refreshing here also fixes
+        // the nil case (a write arriving before any subscribe callback), where radioWrite would
+        // otherwise return NO and the handshake could not be answered at all.
+        if (_Subscriber != Req.central) {
+            // Say it once per episode. A driver silently swapping its notify target is exactly what
+            // the original investigation needed and did not have — four minutes of iPhone log said
+            // nothing at all while the link was dead in one direction.
+            if (!_NotifyTargetSwapLogged) {
+                _NotifyTargetSwapLogged = true;
+                BLE_LOG(@"peripheral: adopting the notify target from a live write (#202) — the "
+                         "subscribe callback did not fire for this connection");
+            }
+            _Subscriber = Req.central;
+        }
         if ([Req.characteristic.UUID isEqual:_DatagramUuid] && Req.value) {
             [self deliverInbound:Req.value];
         }
