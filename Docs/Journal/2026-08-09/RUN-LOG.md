@@ -508,3 +508,47 @@ Host 28/28.
   host-tested but the collapsed drivers do **not yet call them** — they still carry their own
   in-language versions of the send queue, retry and watchdogs. The cutover is now a single-file
   change per platform instead of six, which was the point of collapsing first.
+
+## Policy cutover, Android send queue — done and load-verified
+
+`BleShim.kt`'s ~60 lines of send flow control are gone. Kotlin exposes exactly one verb,
+`writeRaw(bytes) -> "did the radio take it"`, plus two callbacks (`nativeOnSendComplete`,
+`nativeOnLinkLost`). Everything that DECIDES is `Lur::Transport::BleSendQueue`, under 13 host tests.
+
+**What it buys beyond tidiness:** the Kotlin's watchdog token guarded the TIMER but not the
+CALLBACK, so a completion arriving after the watchdog gave up pumped a second datagram into a radio
+that already held one — which a BLE stack answers by silently dropping one. The engine queue counts
+the completions it is owed but no longer wants and swallows exactly those.
+
+Two mechanics worth reusing for the iOS cutover:
+- `ITransport::Pump()` carries no elapsed time. Rather than change that signature for every backend,
+  the transport measures its own `steady_clock` delta — `Pump()` runs once per `Session::Tick`,
+  exactly the cadence the watchdog wants.
+- The JNI thunks live at global scope and cannot see the anonymous namespace holding the queue; two
+  named entry points bridge it. (Getting this wrong first produced a link error naming
+  `Lur::Transport::(anonymous namespace)::EnqueueOutbound` — the definitions had landed in the
+  GLOBAL anonymous namespace, not `Lur::Transport`'s.)
+
+### Verified under load, which is the only test that matters here
+The queue exists because unpaced sends dropped nearly every datagram (#72), so a link check proves
+nothing — it needs traffic.
+
+```
+android  AUTOPLAY game=35 sameFrame=210/210 delayed=0 ply=177 gate=0
+         rtt(n=210 avg=50ms min=27ms max=78ms)
+android  Net: MATCH END result=3 WLD(lo/hi/dr)=3/4/28 total=35
+ios      AUTOPLAY game=38 sameFrame=2020/2023 delayed=0
+         rtt(n=2022 avg=58ms min=32ms max=83ms)
+```
+
+**Android 210/210 same-frame, zero delayed**, and no desync / dropped-send / half-open on either
+peer. rtt is unchanged from the pre-cutover baseline (avg 50 / 58 ms), and the max improved
+slightly (78/83 vs 66/101) — so replacing the hardened Kotlin queue cost nothing measurable.
+
+### Remaining
+- **iOS send queue** still uses its own `std::deque` + CoreBluetooth ready callbacks. Same cutover,
+  and the map is cleaner than Android's (it is already C++ in the same file).
+- `BleStartRetry` and `BleDiscoveryTimers` are still not called by either driver — the drivers keep
+  their own retry/watchdog timers. Those cutovers invert more control (the driver must ASK the
+  policy what to do), so they are a bigger step than the send queue was.
+- Windows desktop pair; the two-phone soak.
