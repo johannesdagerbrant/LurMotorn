@@ -113,6 +113,11 @@ class BleShim(private val context: Context, private val TAG: String) {
     private external fun nativeSetShim()
     private external fun nativeOnConnected(asPeripheral: Boolean)
     private external fun nativeOnDisconnected()
+    /** A queued write finished; the engine's send queue releases the next one. */
+    private external fun nativeOnSendComplete()
+    /** The link is gone: the engine drops the send backlog, which is only meaningful to a peer
+     *  that received the earlier datagrams. */
+    private external fun nativeOnLinkLost()
     private external fun nativeOnReceived(bytes: ByteArray)
     /** The shared role tie-break. [fruitlessDefers] is how many times we have already deferred to
      *  a peer that then never connected: past the threshold the C++ side BREAKS the tie and hands
@@ -162,17 +167,19 @@ class BleShim(private val context: Context, private val TAG: String) {
     // Post delayed retries/watchdogs on the main thread.
     private val handler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    // Send flow control (issue #72). Android allows only ONE outstanding GATT operation:
-    // a second write/notify issued before the previous one's completion callback is
-    // SILENTLY DROPPED. Under autoplay (a move every turn + keepalives + resync) that
-    // dropped nearly every move, so state only propagated via the slower resync. We
-    // serialize sends here: enqueue, issue one, and issue the next only on
-    // onCharacteristicWrite / onNotificationSent. No added network time — writes stay
-    // WRITE_NO_RESPONSE, just paced to the connection interval instead of overrunning it.
-    private val sendQueue = ArrayDeque<ByteArray>()
+    // Send flow control lives in C++ now (Lur::Transport::BleSendQueue), where host tests can
+    // reach it. Android allows only ONE outstanding GATT operation and silently drops a second
+    // write issued before the first completes (#72), so sends must be serialized — but WHICH
+    // datagram goes next, when to give up waiting for a completion, and what to do with the
+    // backlog on link loss are all DECISIONS, and decisions do not belong in a platform file.
+    //
+    // Keeping them here is what let this queue drift between two games, and it hid a real bug:
+    // the watchdog token below guarded the TIMER but not the CALLBACK, so a completion arriving
+    // after the watchdog gave up pumped a second datagram into a radio that already had one.
+    //
+    // What is left here is the radio's own fact — whether a write is outstanding — which the C++
+    // side is told about via nativeOnSendComplete().
     private val sendLock = Any()
-    private var sendInFlight = false
-    private var sendWatchdogTok = 0
 
     // Discovery state (#194). Without this, start/stop are not idempotent and every caller
     // (startDiscovery, the #79 watchdog, the post-connect "ensure findable" path) can
@@ -242,62 +249,34 @@ class BleShim(private val context: Context, private val TAG: String) {
      * among themselves, so one can never overtake another.
      */
     @Suppress("unused")
-    fun send(bytes: ByteArray, expedited: Boolean) {
+    fun writeRaw(bytes: ByteArray): Boolean {
         synchronized(sendLock) {
-            if (expedited) sendQueue.addFirst(bytes) else sendQueue.addLast(bytes)
-            pumpSendLocked()
-        }
-    }
-
-    /** Issue the next queued datagram iff none is outstanding. Call under sendLock. */
-    private fun pumpSendLocked() {
-        if (sendInFlight || sendQueue.isEmpty()) return
-        val bytes = sendQueue.first()
-        val issued = try {
-            val client = gattClient
-            val clientCh = clientDatagram
-            val central = connectedCentral
-            val serverCh = serverDatagram
-            if (client != null && clientCh != null) {           // we are central -> write
-                clientCh.value = bytes
-                // Write WITHOUT response (issue #49): drop the ATT ack round-trip per
-                // datagram. Flow control (below) still paces us to one outstanding write.
-                clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-                client.writeCharacteristic(clientCh)            // true if accepted for tx
-            } else if (central != null && serverCh != null) {   // we are peripheral -> notify
-                serverCh.value = bytes
-                gattServer?.notifyCharacteristicChanged(central, serverCh, false) ?: false
-            } else {
-                sendQueue.clear()                               // no link -> drop the backlog
-                false
-            }
-        } catch (e: SecurityException) {
-            Log.e(TAG, "send: missing BLE permission", e); false
-        }
-        if (issued) {
-            sendQueue.removeFirst()
-            sendInFlight = true
-            // Watchdog: if the completion callback never fires (dropped link), don't stall
-            // the queue forever — clear + resume after a bounded wait.
-            val tok = ++sendWatchdogTok
-            handler.postDelayed({
-                synchronized(sendLock) {
-                    if (sendInFlight && tok == sendWatchdogTok) { sendInFlight = false; pumpSendLocked() }
+            return try {
+                val client = gattClient
+                val clientCh = clientDatagram
+                val central = connectedCentral
+                val serverCh = serverDatagram
+                if (client != null && clientCh != null) {           // we are central -> write
+                    clientCh.value = bytes
+                    // Write WITHOUT response (issue #49): drop the ATT ack round-trip per
+                    // datagram. The engine's queue still paces us to one outstanding write.
+                    clientCh.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    client.writeCharacteristic(clientCh)            // true if accepted for tx
+                } else if (central != null && serverCh != null) {   // we are peripheral -> notify
+                    serverCh.value = bytes
+                    gattServer?.notifyCharacteristicChanged(central, serverCh, false) ?: false
+                } else {
+                    false                                           // no link: the caller keeps it
                 }
-            }, 300)
+            } catch (e: SecurityException) {
+                Log.e(TAG, "send: missing BLE permission", e); false
+            }
         }
-        // If not issued (stack momentarily busy / returned false), leave it queued; the
-        // in-flight completion (or the watchdog) will call pumpSendLocked again.
     }
 
-    /** A send completed (write ack'd locally / notification handed to the stack). */
-    private fun onSendComplete() {
-        synchronized(sendLock) {
-            sendInFlight = false
-            ++sendWatchdogTok                                   // invalidate the pending watchdog
-            pumpSendLocked()
-        }
-    }
+    /** A send completed (write ack'd locally / notification handed to the stack). Straight to
+     *  C++: it owns the queue, so it decides what — if anything — goes next. */
+    private fun onSendComplete() = nativeOnSendComplete()
 
     /** Called FROM C++ when the net keepalive times out: treat the silently-gone peer
      *  as a link loss now, instead of waiting out the BLE supervision timeout. */
@@ -503,7 +482,7 @@ class BleShim(private val context: Context, private val TAG: String) {
                 linked = false
                 decidedPeripheral = false
                 connecting = false
-                synchronized(sendLock) { sendQueue.clear(); sendInFlight = false; ++sendWatchdogTok }
+                nativeOnLinkLost()   // C++ owns the queue: it drops the backlog (stale state)
                 if (wasLinked) nativeOnDisconnected()
                 startGattServer()   // fresh server + service
                 startDiscovery()    // role-aware rediscovery, same as after a link loss
@@ -565,7 +544,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         clientDatagram = null
         try { gattClient?.close() } catch (_: SecurityException) {}
         gattClient = null
-        synchronized(sendLock) { sendQueue.clear(); sendInFlight = false; ++sendWatchdogTok }  // drop stale send state (#72)
+        nativeOnLinkLost()   // drop stale send state (#72) — the queue lives in C++
         nativeOnDisconnected()
         startDiscovery()   // role-aware: cached peer -> one-sided, no reconnect collision
     }

@@ -19,7 +19,10 @@
 #include <sys/system_properties.h>   // agent role override via debug.lur.role (#196)
 #endif
 
+#include <chrono>
+
 #include "Lur/Core/LogTag.h"
+#include "Lur/Transport/BleSendQueue.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
@@ -32,6 +35,12 @@
 
 namespace Lur::Transport {
 namespace {
+
+// The engine send queue lives further down, next to the JNI helpers it needs. These are declared
+// here because the transport class comes first in the file and drives both.
+void TickSendQueue();                                                    // advance its watchdog
+void EnqueueOutbound(const uint8_t* Data, std::size_t Size, bool Expedited);
+void DropOutboundBacklog();                                              // link lost
 
 // The BLE radio callbacks (below) fire on Binder threads; they Push into Inbox, and
 // the engine thread drains it via Pump() (called from Session::Tick). So ReceiverFn
@@ -50,7 +59,10 @@ public:
     void SetReceiver(Receiver NewReceiver) override { ReceiverFn = std::move(NewReceiver); }
     bool IsConnected() const override { return Connected; }
     void ResetLink() override;
-    void Pump() override { Inbox.Drain(*this); }  // engine thread: dispatch queued events
+    void Pump() override {
+        Inbox.Drain(*this);   // engine thread: dispatch queued events
+        TickSendQueue();      // ...and advance the send watchdog on the same cadence
+    }
 
     // EventInbox::Sink — invoked by Drain() on the engine thread, in arrival order.
     void OnConnected() override    { Connected = true; }
@@ -70,7 +82,7 @@ AndroidBleTransport g_Transport;
 // JNI plumbing cached at load / shim-registration time.
 JavaVM*   g_Vm         = nullptr;
 jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
-jmethodID g_SendMethod  = nullptr; // BleShim.send([B)V
+jmethodID g_WriteMethod = nullptr; // BleShim.writeRaw([B)Z — one datagram, "did it take it"
 jmethodID g_RestartMethod = nullptr;  // BleShim.restartRadio()V (#182 hard reset)
 jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
 
@@ -87,18 +99,11 @@ JNIEnv* EnvForThisThread() {
 }
 
 void AndroidBleTransport::SendWithPriority(const uint8_t* Data, std::size_t Size, bool Expedited) {
-    if (g_Shim == nullptr || g_SendMethod == nullptr) return;
-    JNIEnv* Env = EnvForThisThread();
-    if (Env == nullptr) return;
-
-    jbyteArray Arr = Env->NewByteArray(static_cast<jsize>(Size));
-    Env->SetByteArrayRegion(Arr, 0, static_cast<jsize>(Size),
-                            reinterpret_cast<const jbyte*>(Data));
-    // Urgency is passed, never inferred. The Kotlin used to guess it from the array's LENGTH
-    // ("1 byte means a live move"), which put one game's wire format inside the radio shim and
-    // broke silently when that format changed — the fast path just stopped happening.
-    Env->CallVoidMethod(g_Shim, g_SendMethod, Arr, static_cast<jboolean>(Expedited));
-    Env->DeleteLocalRef(Arr);
+    // Straight into the engine queue, which issues it when the radio is free. Urgency is passed,
+    // never inferred: the Kotlin used to guess it from the array's LENGTH ("1 byte means a live
+    // move"), which put one game's wire format inside the radio shim and broke silently when that
+    // format changed.
+    EnqueueOutbound(Data, Size, Expedited);
 }
 
 void AndroidBleTransport::Send(const uint8_t* Data, std::size_t Size) {
@@ -140,6 +145,72 @@ ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
 
 using namespace Lur::Transport;
 
+// ---- The dumb radio, and the engine queue that drives it ----
+//
+// BleShim used to own a send queue: ~60 lines of ordering, an in-flight flag, a 300 ms Handler
+// watchdog and a token to invalidate stale timers. All of that is policy — which datagram goes
+// next, how long to wait for a completion, what to do with the backlog when the link dies — and
+// living in Kotlin is what let it drift between two games AND hide a real bug: the token guarded
+// the timer but not the callback, so a completion arriving after the watchdog gave up pumped a
+// second datagram into a radio that already had one, which a BLE stack answers by silently
+// dropping one of them.
+//
+// Now Kotlin exposes one verb, writeRaw(bytes) -> "did the radio take it", and Lur::Transport::
+// BleSendQueue decides the rest, under host tests.
+namespace Lur::Transport {
+namespace {
+
+class AndroidRadio final : public IBleRadio {
+public:
+    bool Write(const uint8_t* Data, std::size_t Size) override {
+        if (g_Shim == nullptr || g_WriteMethod == nullptr) return false;
+        JNIEnv* Env = EnvForThisThread();
+        if (Env == nullptr) return false;
+        jbyteArray Arr = Env->NewByteArray(static_cast<jsize>(Size));
+        Env->SetByteArrayRegion(Arr, 0, static_cast<jsize>(Size),
+                                reinterpret_cast<const jbyte*>(Data));
+        const jboolean Took = Env->CallBooleanMethod(g_Shim, g_WriteMethod, Arr);
+        Env->DeleteLocalRef(Arr);
+        return Took == JNI_TRUE;
+    }
+};
+
+AndroidRadio  g_Radio;
+BleSendQueue  g_SendQueue;
+
+// The queue's watchdog is denominated in nanoseconds so it is host-testable, but ITransport::Pump()
+// carries no time. Rather than change that signature for every backend, measure here: Pump() is
+// called once per Session::Tick, which is exactly the cadence the deadline wants.
+void EnqueueOutbound(const uint8_t* Data, std::size_t Size, bool Expedited) {
+    g_SendQueue.SetRadio(&g_Radio);
+    g_SendQueue.Enqueue(Data, Size,
+                        Expedited ? EBleSendPriority::Expedited : EBleSendPriority::Normal);
+}
+
+void DropOutboundBacklog() { g_SendQueue.OnLinkLost(); }
+
+}  // namespace
+
+// Named entry points for the JNI thunks, which live at global scope and cannot see the anonymous
+// namespace above.
+void OnOutboundSendComplete() { g_SendQueue.OnSendComplete(); }
+void OnOutboundLinkLost()     { g_SendQueue.OnLinkLost(); }
+
+namespace {
+
+void TickSendQueue() {
+    static bool Started = false;
+    static std::chrono::steady_clock::time_point Last;
+    const auto Now = std::chrono::steady_clock::now();
+    if (!Started) { Started = true; Last = Now; return; }   // first call establishes the baseline
+    const auto Delta = std::chrono::duration_cast<std::chrono::nanoseconds>(Now - Last).count();
+    Last = Now;
+    g_SendQueue.Tick(static_cast<uint64_t>(Delta));
+}
+
+}  // namespace
+}  // namespace Lur::Transport
+
 
 // The BLE wire identity, served to Kotlin from its single source of truth (BleProtocol.h).
 //
@@ -150,6 +221,19 @@ using namespace Lur::Transport;
 // #146: is a device id read off the peer well-formed (32 lowercase hex)? A failed or truncated GATT
 // read yields bytes that are not an id, and a role decided from those is one the peer cannot mirror
 // — which IS the deadlock's mechanism. Guarding the read is the other half of the breaker.
+// The radio finished the outstanding write; the engine queue releases the next datagram. Note it
+// takes NO argument: which datagram goes next is the queue's decision, not the radio's.
+static void Ble_nativeOnSendComplete(JNIEnv*, jobject) {
+    Lur::Transport::OnOutboundSendComplete();
+}
+
+// The link is gone. The backlog goes with it: a datagram stream is only meaningful to a peer that
+// received the earlier ones, so delivering it on reconnect would hand the peer stale state ahead of
+// the resync meant to reconcile them.
+static void Ble_nativeOnLinkLost(JNIEnv*, jobject) {
+    Lur::Transport::OnOutboundLinkLost();
+}
+
 static jboolean Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject, jbyteArray Id) {
     const jsize Len = Env->GetArrayLength(Id);
     std::string S(static_cast<std::size_t>(Len), 0);
@@ -173,7 +257,7 @@ static void JNICALL Ble_nativeSetShim(JNIEnv* Env, jobject Self) {
     if (g_Shim != nullptr) Env->DeleteGlobalRef(g_Shim);
     g_Shim = Env->NewGlobalRef(Self);
     jclass Cls = Env->GetObjectClass(Self);
-    g_SendMethod  = Env->GetMethodID(Cls, "send", "([BZ)V");   // (bytes, expedited)
+    g_WriteMethod = Env->GetMethodID(Cls, "writeRaw", "([B)Z");  // dumb write; queue is C++
     g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
     g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
 }
@@ -353,6 +437,8 @@ static const char* const kBleShimClass = "com/lurmotorn/engine/BleShim";
 static const JNINativeMethod kBleShimMethods[] = {
     {"nativeSetShim", "()V", reinterpret_cast<void*>(Ble_nativeSetShim)},
     {"nativeIsValidDeviceId", "([B)Z", reinterpret_cast<void*>(Ble_nativeIsValidDeviceId)},
+    {"nativeOnSendComplete", "()V", reinterpret_cast<void*>(Ble_nativeOnSendComplete)},
+    {"nativeOnLinkLost",     "()V", reinterpret_cast<void*>(Ble_nativeOnLinkLost)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},
