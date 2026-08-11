@@ -97,6 +97,7 @@ target_link_libraries(OnlyChess PRIVATE
     lur::render
     lur::transport
     lur::net
+    lur::app    # #43: GameHost — the session + persistence choreography, engine-owned
     lur::save   # persistent device id (issue #17) — stable BLE role across restarts
     lur::sim
     lur::math

@@ -15,6 +15,7 @@
 
 #include <cstdlib>   // setenv: MoltenVK log level, before any vkCreateInstance
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "Chess/Board.h"
@@ -25,7 +26,7 @@
 #include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
-#include "Lur/Save/DeviceId.h"
+#include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
@@ -58,11 +59,11 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     Lur::Render::IRenderer* _Renderer;
     Chess::BoardView _View;
     Lur::Transport::ITransport* _Transport;  // owned by its translation unit
-    Lur::Net::Session _Session;
+    // #43: the engine owns the session + persistence choreography now. No Session, Store,
+    // SyncManager or device id of its own — this main supplies where files live, which radio role
+    // and how to log, plus the game's four decisions.
+    Lur::App::GameHost _Host;
     Chess::ChessMatchState _Match;           // authoritative game state
-    Lur::Save::Store* _Store;                // heap: lives for the app
-    Lur::Save::SyncManager* _Sync;
-    std::string _DeviceId;
     Lur::Audio::Mixer _Mixer;                // wait-free SFX mixer (audio thread reads it)
     Chess::SfxLibrary _Sfx;                  // cooked move sounds, loaded into _Mixer
     Lur::Audio::IAudioDevice* _Audio;        // RemoteIO output stream
@@ -185,16 +186,20 @@ static void UnblockStdio() {
         }
     }
 #endif
-    _Store = new Lur::Save::Store(std::string(Dir.UTF8String));
-    _DeviceId = Lur::Save::LoadOrCreateDeviceId(*_Store);
-    _Sync = new Lur::Save::SyncManager(*_Store, _Match);
-    _Match.SetOnMatchEnd([SyncPtr = _Sync, M = &_Match] {
-        SyncPtr->Persist();                                          // durable stats on game end
-        os_log(OS_LOG_DEFAULT, "OnlyChess: Net: MATCH END result=%d WLD=%d/%d/%d total=%d",
-               static_cast<int>(M->LastResult()), static_cast<int>(M->Record().WinsLower),
-               static_cast<int>(M->Record().WinsHigher), static_cast<int>(M->Record().Draws),
-               static_cast<int>(M->Record().TotalMatches()));
-    });
+    // #43: Init now, Start after the view is attached — the view is handed Store/Sync/DeviceId and
+    // must hold them before a peer can go ready, because the ready handler calls straight back into
+    // the view's adopt rule.
+    {
+        Lur::App::GameHost::Config HostCfg;
+        HostCfg.SaveDir = std::string(Dir.UTF8String);
+        HostCfg.Log = [](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyChess: %{public}s", M); };
+        // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs,
+        // not from the radio role.
+        _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
+        HostCfg.Transport = _Transport;
+        _Host.Init(HostCfg, _Match);
+    }
+    _Match.SetOnMatchEnd([H = &_Host] { H->OnMatchEnded(); });  // persist + report, one seam
     // Persist the in-progress match when backgrounded, so it survives a close.
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(persistState)
@@ -210,48 +215,41 @@ static void UnblockStdio() {
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
 
-    // Wire the BLE transport into the net session. Hello exchanges the device GUIDs;
-    // the shared BoardView renders + mutates _Match and ships moves via MoveCodec.
-    // Colour comes from the two GUIDs, and the per-opponent record syncs once per link.
-    _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
-    _Session.SetLogger([](const char* M) {
-        os_log(OS_LOG_DEFAULT, "OnlyChess: Net: %{public}s", M);
-    });
-
-    auto* Sync = _Sync;
-    auto* Session = &_Session;
-    auto* View = &_View;
-    auto SendRecord = [View, Sync, Session] {
-        // Only share OUR game with the peer we're actually playing (hijack rule, #38).
-        if (View->ActiveOpponentGuid() != Session->GetPeerGuid()) return;
-        const std::vector<uint8_t> Snap = Sync->Snapshot();
-        Session->Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
-    };
-    // The view applies the hijack rule and sets identity + loads the record for the
-    // adopted peer; we send our record only when it adopted this peer. Both the
-    // initial link (ReadyHandler) AND a reconnect (ResyncHandler) go through it, so a
-    // peer that (re)joins is adopted per the hijack rule — not just on first contact.
-    auto OnLive = [View, Session, SendRecord] {
-        if (View->OnPeerLinked(Session->GetPeerGuid())) SendRecord();
-    };
-    Session->SetReadyHandler(OnLive);
-    Session->SetResyncHandler(OnLive);                         // reconnect: re-adopt + re-sync
-    Session->SetStateHashFn([M = &_Match] { return M->PositionHash(); });  // desync detection (#72)
-    Session->SetHandler(Lur::Net::EMsgType::Sync,
-                        [View, Sync, Session](const uint8_t* D, std::size_t N) {
-                            if (View->ActiveOpponentGuid() == Session->GetPeerGuid())
-                                Sync->OnSync(D, N);
-                        });
-
+    // The shared BoardView renders + mutates _Match and ships moves via MoveCodec.
     _View.SetState(&_Match);
-    _View.AttachSession(&_Session);
-    _View.AttachPersistence(_Store, _Sync, _DeviceId);     // selector + match switching
+    _View.AttachSession(&_Host.Session());
+    _View.AttachPersistence(&_Host.Store(), &_Host.Sync(),
+                            _Host.DeviceId());  // selector + match switching
     _View.SetLogger([](const char* M) {
         os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
     });
-    _Session.Start(_Transport, _DeviceId);
+
+    // #43: the ~35 lines of session choreography that used to sit here — the hijack-guarded record
+    // send, the ready/resync/state-hash/Sync handlers, Session::Start — now live once in
+    // Lur::App::GameHost. What is left is the game's four decisions, and they must read IDENTICALLY
+    // to the Android main's: that they did not is what this extraction is for.
+    Lur::App::GameHost::Hooks Hooks;
+    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
+    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
+    // route through this one hook now, so they cannot drift apart.
+    Hooks.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
+    // Only share OUR game with the peer we are actually playing.
+    Hooks.IsActiveOpponent = [View = &_View](const std::string& Peer) {
+        return View->ActiveOpponentGuid() == Peer;
+    };
+    Hooks.StateHash = [M = &_Match] { return M->PositionHash(); };   // desync detection (#72)
+    Hooks.Summarize = [M = &_Match] {
+        Lur::App::GameHost::Hooks::MatchSummary S;
+        S.Result     = static_cast<int>(M->LastResult());
+        S.WinsLower  = M->Record().WinsLower;
+        S.WinsHigher = M->Record().WinsHigher;
+        S.Draws      = M->Record().Draws;
+        S.Total      = M->Record().TotalMatches();
+        return S;
+    };
+    _Host.Start(std::move(Hooks));
 #if LUR_AGENT
-    _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_DeviceId.size());  // per-device autoplay seed
+    _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_Host.DeviceId().size());  // per-device autoplay seed
     _RttMinMs = ~0ull;                                           // other RTT ivars zero-init
 #endif
 }
@@ -282,7 +280,7 @@ static void UnblockStdio() {
             // #188: make the frame's idle wait feed the radio — see the Android note. The
             // callback runs on this same thread, inside the wait, so nothing is shared.
             _Renderer->SetIdleWaitCallback(
-                [](void* U) { static_cast<Lur::Net::Session*>(U)->PumpInbox(); }, &_Session);
+                [](void* U) { static_cast<Lur::App::GameHost*>(U)->PumpInbox(); }, &_Host);
             _DisplayLink = [CADisplayLink displayLinkWithTarget:self
                                                        selector:@selector(renderFrame)];
             [_DisplayLink addToRunLoop:NSRunLoop.mainRunLoop forMode:NSDefaultRunLoopMode];
@@ -354,7 +352,7 @@ static void UnblockStdio() {
     const bool WasMyTurn = _Match.IsMyTurn();
     const uint32_t MatchesBefore = _Match.Record().TotalMatches();
 #endif
-    _Session.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness (applies peer move)
+    _Host.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness (applies peer move)
 #if LUR_AGENT
     {
         // Arm on first sight of Documents/autoplay (pushed via pymobiledevice3), then
@@ -382,7 +380,7 @@ static void UnblockStdio() {
                 if (Ms > _RttMaxMs) _RttMaxMs = Ms;
                 _MoveSentNs = 0;
             }
-            const bool Played = (_Session.IsReady() && NowMyTurn) ? _View.AutoPlayRandomLegalMove(_Rng) : false;
+            const bool Played = (_Host.Session().IsReady() && NowMyTurn) ? _View.AutoPlayRandomLegalMove(_Rng) : false;
             if (Played) _MoveSentNs = _ClockNs;         // our move is on the wire; await reply
             if (GotPeerMove) {
                 ++_PeerReplies;
@@ -403,7 +401,7 @@ static void UnblockStdio() {
                        (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies,
                        _Match.IsMyTurn() ? 1 : 0, _Match.Record().Moves.size(),
                        (unsigned)(_Match.PositionHash() & 0xFFFFFFFFu),
-                       _Session.IsAwaitingResync() ? 1 : 0,
+                       _Host.Session().IsAwaitingResync() ? 1 : 0,
                        (unsigned long long)_RttCount,
                        (unsigned long long)(_RttCount ? _RttSumMs / _RttCount : 0),
                        (unsigned long long)(_RttCount ? _RttMinMs : 0),
@@ -417,7 +415,7 @@ static void UnblockStdio() {
     // #189: one more inbox drain, immediately before we draw. A peer move that landed
     // after the Tick above would otherwise wait for the next CADisplayLink callback —
     // and on this device that beat is 40 Hz, so it is ~25 ms of sitting still.
-    _Session.PumpInbox();
+    _Host.PumpInbox();
     CAMetalLayer* Layer = [self metalLayer];
     _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));
@@ -442,7 +440,7 @@ static void UnblockStdio() {
 
 // Backgrounded: persist the in-progress match so it survives a close.
 - (void)persistState {
-    if (_Sync != nullptr) _Sync->Persist();
+    _Host.OnBackground();   // #43: persist the in-progress record
     if (_Audio != nullptr) _Audio->Stop();   // release the audio stream while backgrounded
 }
 
