@@ -552,3 +552,53 @@ slightly (78/83 vs 66/101) — so replacing the hardened Kotlin queue cost nothi
   their own retry/watchdog timers. Those cutovers invert more control (the driver must ASK the
   policy what to do), so they are a bigger step than the send queue was.
 - Windows desktop pair; the two-phone soak.
+
+## Policy cutover, iOS send queue — done and load-verified
+
+`Modules/Transport/Platform/Ios/BleTransport.mm` now drives `BleSendQueue` too. Both shipping
+platforms share one tested send-flow-control implementation.
+
+**The cutover is not a copy of Android's, and the difference is the interesting part.** Android
+reports a per-write COMPLETION, so the queue holds one datagram in flight until that callback lands.
+CoreBluetooth reports no such thing — it exposes a readiness flag and a "ready again" delegate call,
+and a write it ACCEPTS is finished as far as we can ever know. So the driver tells the queue the
+write completed the moment it is accepted, and drains in a loop until a write is refused or the
+queue empties. That reproduces iOS's drain-while-ready behaviour exactly.
+
+A consequence worth stating rather than discovering later: **`BleSendQueue`'s lost-completion
+watchdog is INERT on iOS**, and correctly so — there is no completion that could go missing. What
+iOS gains instead is bounded capacity, refusal-with-counting instead of unbounded growth, and one
+tested ordering implementation (its `std::deque` had priority but no bound and no diagnostics).
+
+### Verified under load, on a build I checked was actually installed
+
+The first attempt was nearly a false pass: `device-rig -Action install` **failed** with
+`could not terminate OnlyChess headlessly, and a running app blocks apps install`, and the load test
+that followed was therefore measuring the PREVIOUS iOS build. Killing the process and reinstalling
+first is what makes the numbers below mean anything. (Recorded because the failure scrolled past
+above a wall of passing output — the rig said so plainly and I nearly took the result.)
+
+```
+android  AUTOPLAY game=72 sameFrame=202/202 delayed=0 ply=164 rtt(avg=49ms min=30 max=79)
+android  Net: MATCH END result=5 WLD(lo/hi/dr)=6/7/59 total=72
+ios      AUTOPLAY game=74 sameFrame=3128/3130 delayed=1 rtt(n=3129 avg=73ms min=20ms max=11718ms)
+```
+
+**Android 202/202 same-frame with zero delayed; iOS 3128/3130 (99.94%).** Zero desync, dropped-send
+or half-open on either peer.
+
+The iOS `max=11718ms` outlier is **mine, not the queue's**: I force-stopped the Android peer while a
+move was outstanding, so that one reply waited out a force-stop, relaunch and BLE re-link. Checked
+rather than assumed — over a further ~1,140 replies `delayed` stayed at **1** and `max` never moved
+off 11718 ms, so it never recurred.
+
+### Note on a commit message
+`f9604cb` went out titled `wip:` — it should not have. The change was mid-cutover and compiled only
+on CI, but that is what a local build check is for, not a placeholder title. `8bb447f` and this
+entry carry the real explanation; the history keeps the lapse.
+
+### Remaining in Phase 2
+`BleStartRetry` and `BleDiscoveryTimers` are still not called by either driver — they keep their own
+retry and watchdog timers. Those cutovers invert control (the driver must ASK the policy what to do,
+rather than being handed bytes to write), so they are a larger step than the send queue was. Plus
+the Windows desktop pair and the two-phone soak.
