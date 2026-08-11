@@ -602,3 +602,41 @@ entry carry the real explanation; the history keeps the lapse.
 retry and watchdog timers. Those cutovers invert control (the driver must ASK the policy what to do,
 rather than being handed bytes to write), so they are a larger step than the send queue was. Plus
 the Windows desktop pair and the two-phone soak.
+
+## A regression I shipped, and how it was caught: slow chess moves
+
+Reported from PLAYING, not from a test: "the chess moves are very slow now."
+
+Measured rather than guessed, and the number named the cause on sight:
+
+```
+before  sameFrame=914/941  delayed=24  gate=1  rtt(avg=297ms min=26ms max=13004ms)
+after   sameFrame=177/177  delayed=0   gate=0  rtt(avg=52ms  min=25ms max=110ms)
+```
+
+**297 ms sits just under `BleSendQueue::SendTimeoutNs` (300 ms).** The lost-completion watchdog had
+become the de-facto pacer for nearly every send.
+
+**Cause: my own send-queue cutover.** A radio reports write completions on ITS OWN thread —
+Android's GATT callbacks arrive on Binder threads — while `Enqueue()` and `Tick()` run on the engine
+thread. `BleSendQueue` was written *"not thread-safe: drive it from one thread"* and I wired it up
+exactly the way that comment forbids. `BleTransport.cpp`'s own header comment says *"The BLE radio
+callbacks fire on Binder threads"* — the file told me, and the Kotlin I replaced held a lock across
+the same transitions. Dropping that lock was the regression.
+
+**The failure mode is the lesson.** No crash, no corruption, no dropped datagram — the engine thread
+simply often failed to observe `InFlight_` being cleared (ARM has a weak memory model), so each send
+waited out the timeout instead of being released by its completion. *A data race that presents
+purely as latency*, in a subsystem whose entire history is people blaming the radio. Nothing in the
+host suite could see it: the race needs two real threads and a real radio.
+
+Fixed by synchronizing the queue internally — a mutex rather than marshalling onto the engine
+thread, because a completion must release the NEXT datagram immediately and deferring it to the
+following `Pump()` would cost a frame per datagram, serialising a multi-datagram resync at one per
+frame. The header now carries the measurement, so the next person tempted to simplify the lock away
+has the number in front of them.
+
+**Worth carrying forward:** my load test DID pass before this was reported (`sameFrame=225/225`,
+avg 49 ms) — the race did not bite in that particular run. A green autoplay gate is not proof of
+absence for a timing bug; the human noticing "this feels slow" is a real instrument, and in this
+case the only one that fired.
