@@ -11,9 +11,6 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 
-#include <fcntl.h>   // O_NONBLOCK on stdout/stderr — see UnblockStdio
-#include <unistd.h>
-
 #include <atomic>    // #69: the sim<->render cross-thread surface (mirrors Android's AppState atomics)
 #include <chrono>
 #include <cstddef>
@@ -34,8 +31,9 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
-#include "Lur/App/GameHost.h"
-#include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink   // #43: engine-owned identity + session lifecycle
+#include "Lur/App/GameHost.h"     // #43: engine-owned identity + session lifecycle
+#include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
+#include "Lur/App/Platform.h"     // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
@@ -669,60 +667,39 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // VkSurfaceKHR) recreate against the SAME layer cannot fix that (proven by 898999b),
 // so on the first activation we rebuild the whole chain against the now-live window
 // server: fresh UIWindow + fresh view/CAMetalLayer + full renderer Shutdown/Init.
+//
+// #43 section B: the UIKit half is LurRebuildViewHost, shared with chess. What stays here is what RPS
+// genuinely does differently: the render thread (#183) owns the renderer, so it must be PARKED across the
+// rebuild and handed the Shutdown/Init afterwards, and the outgoing view must outlive this method.
 - (void)reattachForActivation {
-    // Scene-aware (#73 round 5): a window made with initWithFrame relies on legacy
-    // adoption into the implicit scene — exactly what the broken launch never does.
-    // Attach EXPLICITLY to a connected UIWindowScene; without one, any new window is
-    // another orphan, so skip and let the render-loop retry when a scene exists.
-    UIWindowScene* Scene = nil;
-    for (UIScene* S in UIApplication.sharedApplication.connectedScenes) {
-        if (![S isKindOfClass:UIWindowScene.class]) continue;
-        Scene = (UIWindowScene*)S;
-        if (S.activationState == UISceneActivationStateForegroundActive) break;  // best pick
-    }
-    if (Scene == nil) {
-        os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach SKIPPED: no connected UIWindowScene "
-                               "(scenes=%lu) - will retry",
-               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
+    // Cheap check first: with no scene to host into there is nothing to heal yet, and parking the render
+    // thread to find that out would stall rendering for up to a second on every 2 s retry. The nil guard
+    // below still covers the scene vanishing between here and the rebuild.
+    if (!LurHasConnectedWindowScene()) {
+        os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach SKIPPED: no connected UIWindowScene - will retry");
         return;
     }
-    os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: view unhosted - pausing render thread + rebuilding "
-                           "window+view+layer on scene state=%ld", (long)Scene.activationState);
-    // #183: the render thread owns the renderer, so PARK it before touching the layer it renders into.
-    // Bounded busy-wait on MAIN — this is a rare heal, not the hot loop; the ack normally lands within one
-    // frame (~16 ms). Proceed best-effort if it somehow doesn't park (better than wedging the heal).
+    // #183: park the render thread BEFORE touching the layer it renders into. Bounded busy-wait on MAIN —
+    // this is a rare heal, not the hot loop; the ack normally lands within one frame (~16 ms). Proceed
+    // best-effort if it somehow doesn't park (better than wedging the heal).
     _RenderPauseReq.store(true, std::memory_order_release);
     for (int I = 0; I < 250 && !_RenderPausedAck.load(std::memory_order_acquire); ++I)
         [NSThread sleepForTimeInterval:0.004];  // ~1 s cap
     if (!_RenderPausedAck.load(std::memory_order_acquire))
         os_log_error(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: render thread did not park in time — proceeding");
 
-    // Detach the OLD window FIRST: it still holds rootViewController == self, and its
-    // later dealloc tears the root VC's view out of whatever window now hosts it —
-    // which re-unhosted the fresh view and made this reattach loop every 2 s.
-    RpsAppDelegate* Delegate = (RpsAppDelegate*)UIApplication.sharedApplication.delegate;
-    UIWindow* Old = Delegate.window;
-    Old.hidden = YES;
-    Old.rootViewController = nil;
     // Hold the OLD view (and its CAMetalLayer) alive until the render thread finishes Shutdown/Init on it —
     // the old VkSurfaceKHR wraps that layer, and vkDestroySurfaceKHR runs on the render thread AFTER this
     // method returns. Released on the render thread's _ReinitDone ack (in lifecycleTick), on MAIN, so the
-    // UIView still deallocs on the main thread.
-    _RetiringView = self.view;
-    RpsView* NewView = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.view = NewView;
+    // UIView still deallocs on the main thread. Grabbed BEFORE the rebuild, which reassigns self.view.
+    UIView* Retiring = self.view;
+    RpsView* NewView = (RpsView*)LurRebuildViewHost(self, RpsView.class);
+    if (NewView == nil) {  // no connected scene yet — un-park and let the tick retry
+        _RenderPauseReq.store(false, std::memory_order_release);
+        return;
+    }
+    _RetiringView = Retiring;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
-    Layer.device = MTLCreateSystemDefaultDevice();
-    Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    Layer.contentsScale = UIScreen.mainScreen.scale;
-    Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
-                                    NewView.bounds.size.height * Layer.contentsScale);
-
-    UIWindow* NewWindow = [[UIWindow alloc] initWithWindowScene:Scene];
-    NewWindow.frame = Scene.coordinateSpace.bounds;
-    NewWindow.rootViewController = self;
-    [NewWindow makeKeyAndVisible];
-    Delegate.window = NewWindow;
 
     // Publish the fresh layer + size + insets, record the precondition, then hand the Shutdown/Init to the
     // render thread and RESUME it — it re-inits against _LayerPtr and signals _ReinitDone.

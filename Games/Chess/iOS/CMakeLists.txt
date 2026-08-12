@@ -63,7 +63,9 @@ add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
     ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
     # #43 section B: engine log sink + the MoltenVK stdio guard, written once per platform.
-    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm)
+    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
+    # #43 section B: the shared UIKit half of the #73 reattach heal.
+    ${LUR_ROOT}/Modules/App/Platform/Ios/IosViewHost.mm)
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
@@ -112,6 +114,7 @@ set_source_files_properties(
     Sources/AppMain.mm
     ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
     ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
+    ${LUR_ROOT}/Modules/App/Platform/Ios/IosViewHost.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # MoltenVK + Apple frameworks. MoltenVK is linked as the matching static slice;

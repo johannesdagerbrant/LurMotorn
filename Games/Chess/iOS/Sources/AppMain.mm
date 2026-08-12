@@ -10,10 +10,6 @@
 #import <Foundation/Foundation.h>
 #import <os/log.h>
 
-#include <fcntl.h>   // O_NONBLOCK on stdout/stderr - see UnblockStdio
-#include <unistd.h>
-
-#include <cstdlib>   // setenv: MoltenVK log level, before any vkCreateInstance
 #include <string>
 #include <utility>
 #include <vector>
@@ -26,8 +22,9 @@
 #include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
-#include "Lur/App/GameHost.h"
-#include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink   // #43: engine-owned session + persistence choreography
+#include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
+#include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
+#include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
@@ -449,47 +446,15 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // CAMetalLayer is bound to a window-server surface that is never composited. Rebuild
 // the whole chain against the now-live window server: fresh UIWindow + fresh
 // view/CAMetalLayer + full renderer Shutdown/Init (+ re-created view resources).
+//
+// #43 section B: the UIKit half (scene pick, window/view/layer rebuild, and the two
+// ordering fixes that took rounds to find) is now LurRebuildViewHost, shared with RPS.
+// What stays here is the part the two games genuinely disagree on: chess owns its
+// renderer on the main thread, so it can tear down and re-init inline.
 - (void)reattachForActivation {
-    // Scene-aware (#73 round 5): a window made with initWithFrame relies on legacy
-    // adoption into the implicit scene — exactly what the broken launch never does.
-    // Attach EXPLICITLY to a connected UIWindowScene; without one, any new window is
-    // another orphan, so skip and let the render-loop retry when a scene exists.
-    UIWindowScene* Scene = nil;
-    for (UIScene* S in UIApplication.sharedApplication.connectedScenes) {
-        if (![S isKindOfClass:UIWindowScene.class]) continue;
-        Scene = (UIWindowScene*)S;
-        if (S.activationState == UISceneActivationStateForegroundActive) break;  // best pick
-    }
-    if (Scene == nil) {
-        os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach SKIPPED: no connected UIWindowScene "
-                               "(scenes=%lu) - will retry",
-               (unsigned long)UIApplication.sharedApplication.connectedScenes.count);
-        return;
-    }
-    os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: view unhosted - rebuilding "
-                           "window+view+layer+renderer on scene state=%ld",
-           (long)Scene.activationState);
-    // Detach the OLD window FIRST: it still holds rootViewController == self, and its
-    // later dealloc tears the root VC's view out of whatever window now hosts it —
-    // which re-unhosted the fresh view and made this reattach loop every 2 s.
-    OnlyChessAppDelegate* Delegate = (OnlyChessAppDelegate*)UIApplication.sharedApplication.delegate;
-    UIWindow* Old = Delegate.window;
-    Old.hidden = YES;
-    Old.rootViewController = nil;
-    OnlyChessView* NewView = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
-    self.view = NewView;
+    UIView* NewView = LurRebuildViewHost(self, OnlyChessView.class);
+    if (NewView == nil) return;  // no connected scene yet — the render loop retries
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
-    Layer.device = MTLCreateSystemDefaultDevice();
-    Layer.pixelFormat = MTLPixelFormatBGRA8Unorm;
-    Layer.contentsScale = UIScreen.mainScreen.scale;
-    Layer.drawableSize = CGSizeMake(NewView.bounds.size.width * Layer.contentsScale,
-                                    NewView.bounds.size.height * Layer.contentsScale);
-
-    UIWindow* NewWindow = [[UIWindow alloc] initWithWindowScene:Scene];
-    NewWindow.frame = Scene.coordinateSpace.bounds;
-    NewWindow.rootViewController = self;
-    [NewWindow makeKeyAndVisible];
-    Delegate.window = NewWindow;
 
     _Renderer->Shutdown();  // full teardown (device, surface, everything)
     _Ready = _Renderer->Init((__bridge void*)Layer);
