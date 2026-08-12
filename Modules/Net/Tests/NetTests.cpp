@@ -150,6 +150,25 @@ struct SilentTransport : Lur::Transport::ITransport {
     void Deliver(const uint8_t* D, std::size_t N) { if (Rx) Rx(D, N); }
 };
 
+// Like SilentTransport, but inbound datagrams land on Pump() rather than instantly — which is what
+// a real backend does (radio thread queues, engine thread drains, issue #40) and the only way to
+// reproduce a handshake completing INSIDE Session::Tick.
+struct QueueingTransport : Lur::Transport::ITransport {
+    bool     Connected = true;
+    Receiver Rx;
+    std::vector<std::vector<uint8_t>> Inbound;
+    void Send(const uint8_t*, std::size_t) override {}
+    void SetReceiver(Receiver R) override { Rx = std::move(R); }
+    bool IsConnected() const override { return Connected; }
+    void Pump() override {
+        std::vector<std::vector<uint8_t>> Batch;
+        Batch.swap(Inbound);
+        for (const std::vector<uint8_t>& D : Batch)
+            if (Rx) Rx(D.data(), D.size());
+    }
+    void Queue(const uint8_t* D, std::size_t N) { Inbound.emplace_back(D, D + N); }
+};
+
 // Build a valid peer Hello datagram (type + version + guid + ready), used to push a
 // Session to Ready without a live peer.
 static void MakeHello(uint8_t (&H)[35], char GuidChar, bool Ready) {
@@ -158,6 +177,52 @@ static void MakeHello(uint8_t (&H)[35], char GuidChar, bool Ready) {
     H[1]  = ProtocolVersion;
     for (int i = 0; i < 32; ++i) H[2 + i] = static_cast<uint8_t>(GuidChar);
     H[34] = Ready ? 1 : 0;
+}
+
+// The INITIAL link must NOT be reported as a reconnect. Found on 2026-08-12 by the App suite, which
+// saw a peer's record adopted and sent TWICE for one link-up.
+//
+// Mechanism: Tick drains the inbox FIRST (#40 — receivers fire on the engine thread), so the
+// handshake can complete inside that PumpInbox. The reconnect-edge test below it then reads
+// `Ready && Connected && !PrevConnected` on the very first tick that ever observed the transport as
+// connected — and fires. The `Ready &&` in that condition exists precisely to mean "post-handshake",
+// but PumpInbox running first makes Ready true before the test is reached, so a link that never
+// dropped logs "reconnected — requesting resync" and calls ResyncHandler.
+//
+// It needs the handshake and the first connected observation to fall in ONE tick, which is why the
+// phones mostly escaped it (BLE connects several ticks before the hello round-trip finishes) and the
+// loopback pair always hit it. "Mostly" is not a guarantee: a reconnect where the peer's hello is
+// already queued when the connect edge is drained lands both in the same Pump.
+//
+// What it cost when a game was listening: chess re-sent its whole per-opponent record on every fresh
+// link — harmless (MergeIfNewer is monotonic) but a doubled payload on a link whose slimness IS the
+// product — and RPS's OnResync means "rebase the lockstep timeline", i.e. a spurious rebase at
+// link-up on the path that is already the prime suspect for #204.
+static void TestInitialLinkIsNotReportedAsReconnect() {
+    QueueingTransport T;
+    Session S;
+    int Readies = 0, Resyncs = 0;
+    S.SetReadyHandler([&] { ++Readies; });
+    S.SetResyncHandler([&] { ++Resyncs; });
+    S.Start(&T, Guid('a'));
+
+    uint8_t H[35];
+    MakeHello(H, 'b', /*ready*/ true);
+    T.Queue(H, sizeof(H));      // delivered by the Pump inside Tick — the handshake lands mid-Tick
+    S.Tick(16'000'000ull);
+
+    CHECK(S.IsReady());
+    CHECK(Readies == 1);
+    CHECK(Resyncs == 0);        // nothing ever dropped, so there is nothing to resynchronise
+
+    // And a REAL reconnect after that still fires exactly once — the fix must not cost the case the
+    // edge exists for.
+    T.Connected = false;
+    S.Tick(16'000'000ull);
+    T.Connected = true;
+    S.Tick(16'000'000ull);
+    CHECK(Resyncs == 1);
+    CHECK(Readies == 1);        // a reconnect is not a re-handshake
 }
 
 // After going Ready, a Session whose peer falls silent must time out and ask the
@@ -474,6 +539,7 @@ int main() {
     TestEveryGameSlotDispatches();
     TestVersionMismatchRefused();
     TestOneByteDatagramDispatchesByType();
+    TestInitialLinkIsNotReportedAsReconnect();
     TestKeepaliveTimeoutResetsLink();
     TestHalfOpenLinkIsDetectedAndBacksOff();   // #163
     TestHalfOpenEscalatesToRadioRestartThenStops();  // #182

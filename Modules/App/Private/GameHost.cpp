@@ -79,6 +79,9 @@ void GameHost::Start(Hooks GameHooks) {
     if (Sync_) {
         Session_.SetHandler(Lur::Net::EMsgType::Sync,
                             [this](const uint8_t* D, std::size_t N) {
+                                // Observers first, and unconditionally: a rejected record still
+                                // belongs in a capture (see OnRecordDatagram).
+                                if (Record_.OnRecordDatagram) Record_.OnRecordDatagram(D, N);
                                 // Only the peer we are actually playing may touch our record. Absent
                                 // hook -> refuse, same reasoning as OnPeerLive.
                                 if (!Record_.IsActiveOpponent) return;

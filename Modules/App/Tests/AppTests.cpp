@@ -148,14 +148,28 @@ static void TestNonAdoptSendsNothing() {
     Lur::App::GameHost::RecordSync Ra, Rb;
     Ra.OnPeerAdopted    = [](const std::string&) { return false; };   // A refuses this peer
     Ra.IsActiveOpponent = [](const std::string&) { return false; };
-    Rb.OnPeerAdopted    = [](const std::string&) { return true; };
+    int AdoptCallsB = 0;
+    Rb.OnPeerAdopted    = [&](const std::string&) { ++AdoptCallsB; return true; };
     Rb.IsActiveOpponent = [](const std::string&) { return true; };
+    // The capture seam: A REFUSES B's record, and must still be handed the bytes. The host owns
+    // EMsgType::Sync outright, so without this hook the desktop workbench's flight recorder — whose
+    // only DatagramIn call site was the handler the host replaces — would have gone quiet on
+    // adoption, and a shorter recording is not a failure anything reports.
+    int  ObservedA = 0;
+    std::size_t ObservedBytesA = 0;
+    Ra.OnRecordDatagram = [&](const uint8_t* D, std::size_t N) {
+        if (D != nullptr && N > 0) { ++ObservedA; ObservedBytesA += N; }
+    };
 
     Lur::App::GameHost::Config Ca, Cb;
     Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
     Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
+    int ReadyB = 0, ResyncB = 0;
+    Lur::App::GameHost::Hooks Hb;
+    Hb.OnLinkReady = [&] { ++ReadyB; };
+    Hb.OnResync    = [&] { ++ResyncB; };
     P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
-    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
+    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start(Hb);
 
     P.Pump(40);
 
@@ -166,6 +180,18 @@ static void TestNonAdoptSendsNothing() {
     // And B's record never entered A's, because A's IsActiveOpponent gate refused it.
     CHECK(P.StateA.Value == 9);
     CHECK(P.StateA.Merges == 0);
+    // B adopted A, so B DID send its record; A observed the bytes and then refused them. Both
+    // halves matter: seeing it proves the observer runs, Merges == 0 proves it did not become a
+    // back door around the gate.
+    CHECK(ObservedA == 1);
+    CHECK(ObservedBytesA > 0);
+    // ONE record per link-up, from ONE adopt call. Both counts read 2 until 2026-08-12, because
+    // Session fired a spurious reconnect on the initial link (see TestInitialLinkIsNotReportedAsReconnect
+    // in the Net suite) — so pin them: a doubled record send is invisible in behaviour, since
+    // MergeIfNewer is monotonic, and only a count catches it coming back.
+    CHECK(AdoptCallsB == 1);
+    CHECK(ReadyB == 1);
+    CHECK(ResyncB == 0);
 }
 
 // ---- 3. A reconnect RE-adopts and re-syncs --------------------------------------------------
@@ -290,9 +316,22 @@ static void TestHostWithoutRecordSync() {
     CHECK(ReadyA == 1);                          // the game's own link hook fired, exactly once
 
     // The resync route reaches the game's hook — this is RPS's BeginResync path.
+    //
+    // The Pump first, and it is not padding: going Ready ARMS the resync gate (#71 — hold moves until
+    // the peer's Sync reconciles), and RequestResync refuses while that gate is up so a resync cannot
+    // storm. A host with no record sync never sends a Sync, so only the ~3 s fallback lifts it.
+    //
+    // Until 2026-08-12 this assertion passed WITHOUT any of that, because Session mistook the initial
+    // link for a reconnect and fired OnResync spuriously — so the line below proved nothing about the
+    // route it names, and the count it read came from the bug. Fixing Session is what exposed it. A
+    // test that passes for the wrong reason is worse than a missing one: it reports coverage.
+    CHECK(ResyncA == 0);                         // nothing has dropped, so nothing has resynced yet
+    P.Pump(200);                                 // 200 x 16 ms > the 3 s gate fallback
+    CHECK(!P.HostA.Session().IsAwaitingResync());
     P.HostA.Session().RequestResync();
     P.Pump(10);
-    CHECK(ResyncA >= 1);
+    CHECK(ResyncA == 1);
+    CHECK(ReadyA == 1);                          // a resync is not a re-handshake
 
     // And the no-record-sync host tolerates the record calls without a save state behind it, so a
     // game need not guard every call site on "did I enable that half".

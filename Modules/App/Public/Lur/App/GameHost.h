@@ -75,6 +75,18 @@ public:
         // OnPeerAdopted because this is asked per message, not per link.
         std::function<bool(const std::string& PeerGuid)> IsActiveOpponent;
 
+        // Optional: every inbound record datagram, handed over BEFORE IsActiveOpponent decides
+        // whether it may touch ours. Purely an observer — for capture, not for policy.
+        //
+        // It exists because the host takes sole ownership of EMsgType::Sync, so a game that also
+        // wanted to SEE those bytes had nowhere to stand. The desktop workbench is what found
+        // that: its flight recorder's only DatagramIn call site was inside the Sync handler this
+        // replaces, so adopting the host would have quietly shrunk the recording while every log
+        // line still looked right. Deliberately fires for REJECTED records too — "record
+        // everything" (Review #2), and a record we refused is precisely what you want in the file
+        // when a pairing goes wrong.
+        std::function<void(const uint8_t* Data, std::size_t Size)> OnRecordDatagram;
+
         // Optional: the tally to report when a match ends. Both games happen to keep exactly
         // this shape (Chess::ChessRecord, Rps::ScoreBook) anchored to the lower/higher GUID
         // rather than to a player, which is what makes ONE log line correct for both. Supply it

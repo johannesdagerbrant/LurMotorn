@@ -267,6 +267,13 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
 
     Ready = true;
     AwaitingResync = true; ResyncWaitNs = 0;  // hold moves until the peer's Sync lands (#71)
+    // Latch the connected state as ALREADY SEEN, so Tick's reconnect edge below cannot mistake this
+    // handshake for a link coming back. Tick drains the inbox first (#40), so we may be running
+    // inside the very tick that will go on to evaluate `Ready && Connected && !PrevConnected` — and
+    // without this, a link that never dropped fires ResyncHandler and logs "reconnected". The
+    // `Ready &&` there was meant to exclude exactly this; it can't, because Ready becomes true here,
+    // upstream of the test, in the same tick.
+    PrevConnected = (Transport != nullptr && Transport->IsConnected());
     Logf("READY (peer id known)");
     SendHello();  // ready-flagged reply, so the peer learns our id + that we're set
     if (ReadyHandler) ReadyHandler();
