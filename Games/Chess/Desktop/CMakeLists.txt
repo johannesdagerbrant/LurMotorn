@@ -1,6 +1,7 @@
-# Desktop chess shell (Workbench, roadmap Phase 0.5). A copy-pasted third main that
-# drives the shared BoardView on Windows — deliberately NOT extracted into a GameHost
-# yet (that's Phase 4). Built only for the desktop Workbench configuration.
+# Desktop chess shell (Workbench, roadmap Phase 0.5). Drives the shared BoardView on
+# Windows; the session + persistence choreography is lur::app's GameHost since #43, so
+# this is platform plus the workbench's own two-peer arrangement. Built only for the
+# desktop Workbench configuration.
 if(LUR_DESKTOP AND WIN32)
     # WindowsBleTransport is the dev-rig's third radio (issue #58): a real BLE central
     # on Windows, bridged to a C# WinRT subprocess. It lives in the app build (not the
@@ -11,6 +12,7 @@ if(LUR_DESKTOP AND WIN32)
         chess::view
         chess::core
         lur::render
+        lur::app    # #43: GameHost — Store/device id/SyncManager/Session, one copy
         lur::net
         lur::transport
         lur::save

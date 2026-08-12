@@ -1,8 +1,9 @@
 // Desktop entry point for the Workbench build (roadmap Phase 0.5). A thin platform
 // shim — like AndroidMain.cpp / AppMain.mm — that owns the Win32 windows + the loop,
-// creates the shared Vulkan renderer(s), and drives the shared Chess::BoardView. This
-// is deliberately a THIRD copy-pasted chess main (Phase-4 extraction evidence); the
-// point of Phase 0.5 is to bring up the Windows platform against the known-good game.
+// creates the shared Vulkan renderer(s), and drives the shared Chess::BoardView. It
+// began as a deliberately copy-pasted THIRD chess main (Phase-4 extraction evidence);
+// #43 has since taken the session + persistence choreography into Lur::App::GameHost,
+// so what is left here really is platform + the workbench's own two-peer arrangement.
 //
 // TWO windows, two full game instances, one process, a LoopbackTransport between them
 // (issue #53): human-vs-human on one PC. Every net-flow bug is now reproducible in a
@@ -19,6 +20,7 @@
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
+#include "Lur/App/GameHost.h"   // #43: the session + persistence choreography, engine-owned
 #include "Lur/Core/FlightRecorder.h"
 #include "Lur/Core/Log.h"
 #include "Lur/Hud/DebugOverlay.h"
@@ -36,14 +38,17 @@
 namespace {
 
 // Everything one peer needs. Two of these, linked by loopback, are a full local game.
+//
+// #43: Store / device id / SyncManager / Session are all inside GameHost now — this main was the
+// THIRD copy of that choreography (its own header said so, as Phase-4 extraction evidence), and it
+// had already drifted: its own MATCH END line, its own SendRecord, its own hijack-guard spelling.
+// Two hosts in one process is also the first real test of the extraction, since nothing about
+// GameHost may be static for the workbench to work at all.
 struct GameInstance {
     Lur::Platform::Window            Win;
     Lur::Render::IRenderer*          Renderer = nullptr;
-    std::unique_ptr<Lur::Save::Store>       Store;   // distinct dir -> distinct GUID -> colour
-    std::string                      DeviceId;
+    Lur::App::GameHost               Host;    // Store + device id + SyncManager + Session
     Chess::ChessMatchState           Match;
-    std::unique_ptr<Lur::Save::SyncManager> Sync;
-    Lur::Net::Session                Session;
     Chess::BoardView                 View;
     Lur::Transport::LoopbackTransport Transport;
     Lur::Core::FlightRecorder        Recorder;   // record the session for replay/debug
@@ -53,79 +58,84 @@ struct GameInstance {
     float                            FrameMs = 0.0f;
 };
 
-// The hijack-guarded record share, mirroring the phone mains: only send OUR game to
-// the peer we're actually playing.
-void SendRecord(GameInstance& G) {
-    if (G.View.ActiveOpponentGuid() != G.Session.GetPeerGuid()) return;
-    const std::vector<uint8_t> Snap = G.Sync->Snapshot();
-    G.Session.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
-}
-
-// Link (ReadyHandler) and reconnect (ResyncHandler): adopt the peer per the hijack
-// rule, and if adopted, share our record.
-void OnLive(GameInstance& G) {
-    if (G.View.OnPeerLinked(G.Session.GetPeerGuid())) SendRecord(G);
-}
-
 // Portrait, matching the phones (~9:20) — the HUD margins above/below the square
 // board are designed for that shape, so a square desktop window mislaid them.
 constexpr int kWinW = 360;
 constexpr int kWinH = 800;
 
-bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X) {
+// `Transport` is taken here rather than chosen inside, because the host needs it at Init: the
+// loopback pair and the dev-rig BLE radio are different objects, and Init->EnableRecordSync->view
+// wiring->Start is one ordered sequence that must not be split across the caller (see GameHost.h —
+// attaching the view AFTER Start was the shape that silently killed persistence on device).
+bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X,
+           Lur::Transport::ITransport* Transport) {
     if (!G.Win.Create(Title, kWinW, kWinH, X, 30)) return false;
     G.Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
     if (G.Renderer == nullptr || !G.Renderer->Init(G.Win.NativeHandle())) return false;
 
-    G.Store    = std::make_unique<Lur::Save::Store>(SaveDir);
-    G.DeviceId = Lur::Save::LoadOrCreateDeviceId(*G.Store);
-    G.Sync     = std::make_unique<Lur::Save::SyncManager>(*G.Store, G.Match);
+    Lur::App::GameHost::Config HostCfg;
+    HostCfg.SaveDir   = SaveDir;   // distinct dir -> distinct GUID -> colour
+    HostCfg.Transport = Transport;
+    HostCfg.Log       = [](const char* M) { Lur::Log::Info("%s", M); };
+    G.Host.Init(HostCfg);
 
-    G.Match.SetOnMatchEnd([&G] {
-        G.Sync->Persist();
-        Lur::Log::Info("MATCH END result=%d WLD(lo/hi/dr)=%u/%u/%u total=%u",
-                       static_cast<int>(G.Match.LastResult()), G.Match.Record().WinsLower,
-                       G.Match.Record().WinsHigher, G.Match.Record().Draws,
-                       G.Match.Record().TotalMatches());
-    });
+    Lur::App::GameHost::RecordSync Rec;
+    // The #38 hijack rule, unchanged — still the game's decision, just no longer the game's plumbing.
+    Rec.OnPeerAdopted    = [&G](const std::string& Peer) { return G.View.OnPeerLinked(Peer); };
+    Rec.IsActiveOpponent = [&G](const std::string& Peer) { return G.View.ActiveOpponentGuid() == Peer; };
+    Rec.Summarize        = [&G] {
+        Lur::App::GameHost::RecordSync::MatchSummary S;
+        S.Result     = static_cast<int>(G.Match.LastResult());
+        S.WinsLower  = G.Match.Record().WinsLower;
+        S.WinsHigher = G.Match.Record().WinsHigher;
+        S.Draws      = G.Match.Record().Draws;
+        S.Total      = G.Match.Record().TotalMatches();
+        return S;
+    };
+    // Record everything (Review #2), including a record we go on to refuse: this was the workbench's
+    // only DatagramIn site, and the host owns EMsgType::Sync now, so it hands the bytes back here.
+    Rec.OnRecordDatagram = [&G](const uint8_t* D, std::size_t N) {
+        G.Recorder.Record(Lur::Core::EFlightEvent::DatagramIn, 0, D, N);
+    };
+    G.Host.EnableRecordSync(G.Match, Rec);
+
+    G.Match.SetOnMatchEnd([&G] { G.Host.OnMatchEnded(); });   // persist + the one MATCH END line
 
     G.View.SetState(&G.Match);
-    G.View.AttachSession(&G.Session);
-    G.View.AttachPersistence(G.Store.get(), G.Sync.get(), G.DeviceId);
+    G.View.AttachSession(&G.Host.Session());
+    G.View.AttachPersistence(&G.Host.Store(), &G.Host.Sync(), G.Host.DeviceId());
     G.View.SetLogger([](const char* M) { Lur::Log::Info("View: %s", M); });
     G.View.CreateResources(G.Renderer);
     G.Overlay.CreateResources(G.Renderer);
     // #188: the frame's idle wait pumps the inbox — see AndroidMain. On the loopback pair
     // this mostly proves the plumbing; on the BLE rig it is the same win the phones get.
     G.Renderer->SetIdleWaitCallback(
-        [](void* U) { static_cast<GameInstance*>(U)->Session.PumpInbox(); }, &G);
+        [](void* U) { static_cast<GameInstance*>(U)->Host.PumpInbox(); }, &G);
 
     // Debug overlay drawn inside the frame, on top of the board (F1 toggles it).
     G.View.SetPostGuiHook([&G] {
         if (!G.ShowOverlay) return;
         int W = 0, H = 0;
         G.Win.GetSize(&W, &H);
-        const std::string& Peer = G.Session.GetPeerGuid();
+        Lur::Net::Session& S1 = G.Host.Session();
+        const std::string& Peer = S1.GetPeerGuid();
         const std::string Short = Peer.empty() ? std::string() : Peer.substr(0, 8);
         Lur::Hud::DebugStats S;
         S.FrameMs = G.FrameMs;
-        S.Link = Lur::Net::LinkStateName(G.Session.GetLinkState());
-        S.NsSinceRecv = G.Session.GetNsSinceRecv();
-        S.Sent = G.Session.GetDatagramsSent();
-        S.Recv = G.Session.GetDatagramsReceived();
+        S.Link = Lur::Net::LinkStateName(S1.GetLinkState());
+        S.NsSinceRecv = S1.GetNsSinceRecv();
+        S.Sent = S1.GetDatagramsSent();
+        S.Recv = S1.GetDatagramsReceived();
         S.PeerShort = Short.c_str();
         G.Overlay.Draw(G.Renderer, static_cast<float>(W), static_cast<float>(H), S);
     });
 
-    G.Session.SetLogger([](const char* M) { Lur::Log::Info("Net: %s", M); });
+    // Start LAST: the view is now holding Store/Sync/DeviceId, so a peer going ready can call
+    // straight back into the adopt rule and find everything in place.
+    Lur::App::GameHost::Hooks Hooks;
+    Hooks.StateHash = [&G] { return G.Match.PositionHash(); };   // desync detection (#72)
+    G.Host.Start(Hooks);
 
-    G.Session.SetReadyHandler([&G] { OnLive(G); });
-    G.Session.SetResyncHandler([&G] { OnLive(G); });
-    G.Session.SetStateHashFn([&G] { return G.Match.PositionHash(); });  // desync detection (#72)
-    G.Session.SetHandler(Lur::Net::EMsgType::Sync, [&G](const uint8_t* D, std::size_t N) {
-        G.Recorder.Record(Lur::Core::EFlightEvent::DatagramIn, 0, D, N);  // Sync in
-        if (G.View.ActiveOpponentGuid() == G.Session.GetPeerGuid()) G.Sync->OnSync(D, N);
-    });
     G.RecPath = std::string(SaveDir) + ".flightrec";
     return true;
 }
@@ -149,7 +159,7 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
     }
     // #189: drain the inbox once more immediately before drawing, so a peer move that
     // arrived after this frame's Tick is shown NOW rather than one iteration later.
-    G.Session.PumpInbox();
+    G.Host.PumpInbox();
     if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
 }
 
@@ -177,12 +187,9 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
            int LoopMs) {
     Lur::Log::Info("LurMotorn desktop (Workbench) - BLE peer vs phone (radio=%s)", RadioExe);
 
-    GameInstance G;
-    if (!Setup(G, "OnlyChess - BLE peer", ".lur-desktop-save/ble", 320)) {
-        Lur::Log::Error("setup failed");
-        return 1;
-    }
-
+    // The radio comes up FIRST now: GameHost takes the transport at Init and starts the session at
+    // the end of Setup, as one ordered sequence. Starting before the link is up is normal — that is
+    // what the phones do at launch, and Tick resends Hello until the handshake completes.
     Lur::DevRig::WindowsBleTransport Ble(RadioExe);
     Ble.SetLogger([](const char* M) { Lur::Log::Info("%s", M); });
     if (!Ble.Start()) {
@@ -191,8 +198,13 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
         return 1;
     }
 
-    G.Session.Start(&Ble, G.DeviceId);
-    Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise", G.DeviceId.c_str());
+    GameInstance G;
+    if (!Setup(G, "OnlyChess - BLE peer", ".lur-desktop-save/ble", 320, &Ble)) {
+        Lur::Log::Error("setup failed");
+        return 1;
+    }
+    Lur::Log::Info("session started (id %.8s); waiting for the phone to advertise",
+                   G.Host.DeviceId().c_str());
 
     // Parse the move script into (From,To) pairs we play on our turn.
     std::vector<std::pair<int, int>> Moves;
@@ -209,7 +221,7 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
 
     int Frame = 0;
     bool Linked = false;
-    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(G.DeviceId.size());  // per-device autoplay seed
+    uint32_t Rng = 0xC0FFEEu ^ static_cast<uint32_t>(G.Host.DeviceId().size());  // per-device autoplay seed
     uint64_t TraceAccumNs = 0;   // ~1 Hz connection-quality trace
     // Same-frame reply accounting: did we move the frame we received the peer's move?
     uint64_t PeerReplies = 0, SameFrame = 0, NewGameOpens = 0, DelayedReplies = 0;
@@ -225,13 +237,13 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
         const bool     WasMyTurn = G.Match.IsMyTurn();
         const uint32_t MatchesBefore = G.Match.Record().TotalMatches();
 
-        G.Session.Tick(ElapsedNs);  // pumps the radio inbox -> applies any peer move THIS frame
+        G.Host.Tick(ElapsedNs);  // pumps the radio inbox -> applies any peer move THIS frame
 
-        if (!Linked && G.Session.IsReady()) {
+        if (!Linked && G.Host.Session().IsReady()) {
             Linked = true;
             G.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
             Lur::Log::Info("handshake complete - live over BLE with peer %.8s; we are %s",
-                           G.Session.GetPeerGuid().c_str(), ColorName(G.Match.MyColor()));
+                           G.Host.Session().GetPeerGuid().c_str(), ColorName(G.Match.MyColor()));
         }
 
         const bool     NowMyTurn = G.Match.IsMyTurn();
@@ -266,10 +278,10 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
         if (Linked && TraceAccumNs > 1'000'000'000ull) {
             TraceAccumNs = 0;
             Lur::Log::Info("QUAL link=%d game=%u tx=%u/%lluB rx=%u/%lluB sinceRx=%llums sameFrame=%llu/%llu",
-                           static_cast<int>(G.Session.GetLinkState()), MatchesAfterTick,
-                           G.Session.GetDatagramsSent(), (unsigned long long)Ble.GetBytesOut(),
-                           G.Session.GetDatagramsReceived(), (unsigned long long)Ble.GetBytesIn(),
-                           (unsigned long long)(G.Session.GetNsSinceRecv() / 1'000'000ull),
+                           static_cast<int>(G.Host.Session().GetLinkState()), MatchesAfterTick,
+                           G.Host.Session().GetDatagramsSent(), (unsigned long long)Ble.GetBytesOut(),
+                           G.Host.Session().GetDatagramsReceived(), (unsigned long long)Ble.GetBytesIn(),
+                           (unsigned long long)(G.Host.Session().GetNsSinceRecv() / 1'000'000ull),
                            (unsigned long long)SameFrame, (unsigned long long)PeerReplies);
         }
 
@@ -343,17 +355,17 @@ int main(int argc, char** argv) {
     Lur::Log::Info("LurMotorn desktop (Workbench) - two-window loopback");
 
     GameInstance A, B;
-    if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 120) ||
-        !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 520)) {
+    // Link the pair BEFORE Setup: each host starts its session at the end of its own Setup, and an
+    // unlinked loopback would drop that first Hello. Harmless either way (Tick resends until Ready),
+    // but linking first means the handshake starts on frame one instead of after the resend interval.
+    Lur::Transport::LoopbackTransport::Link(A.Transport, B.Transport);
+    if (!Setup(A, "OnlyChess - White side", ".lur-desktop-save/a", 120, &A.Transport) ||
+        !Setup(B, "OnlyChess - Black side", ".lur-desktop-save/b", 520, &B.Transport)) {
         Lur::Log::Error("setup failed");
         return 1;
     }
-    Lur::Log::Info("two renderers up; ids A=%.8s B=%.8s", A.DeviceId.c_str(), B.DeviceId.c_str());
-
-    // One in-process link. Start both, then Tick drives the Hello handshake to Ready.
-    Lur::Transport::LoopbackTransport::Link(A.Transport, B.Transport);
-    A.Session.Start(&A.Transport, A.DeviceId);
-    B.Session.Start(&B.Transport, B.DeviceId);
+    Lur::Log::Info("two renderers up; ids A=%.8s B=%.8s",
+                   A.Host.DeviceId().c_str(), B.Host.DeviceId().c_str());
 
     Lur::Log::Info("entering frame loop (%s)",
                    MaxFrames > 0 ? "headless --frames" : "close either window to quit");
@@ -367,8 +379,8 @@ int main(int argc, char** argv) {
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
 
-        A.Session.Tick(ElapsedNs);
-        B.Session.Tick(ElapsedNs);
+        A.Host.Tick(ElapsedNs);
+        B.Host.Tick(ElapsedNs);
 #if LUR_INTERNAL
         // --auto here too, not just in --ble: without a move driver the two-window window
         // never leaves the start position, so anything that only appears once pieces have
@@ -379,7 +391,7 @@ int main(int argc, char** argv) {
             B.View.AutoPlayRandomLegalMove(RngB);
         }
 #endif
-        if (!Linked && A.Session.IsReady() && B.Session.IsReady()) {
+        if (!Linked && A.Host.Session().IsReady() && B.Host.Session().IsReady()) {
             Linked = true;
             A.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
             B.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
