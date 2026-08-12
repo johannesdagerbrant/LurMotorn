@@ -8,7 +8,10 @@
 
 #include <fcntl.h>    // O_NONBLOCK on stdout/stderr — see UnblockStdio
 #include <unistd.h>
-#include <cstdlib>    // setenv: MoltenVK log level, before any vkCreateInstance
+#include <cstdlib>            // setenv: MoltenVK log level, before any vkCreateInstance
+#include <initializer_list>   // the range-for over {STDOUT_FILENO, STDERR_FILENO} below
+                              // (the mains this moved out of got it transitively; a standalone
+                              //  translation unit has to ask, and only CI compiles this file)
 
 #include "Lur/Core/Log.h"
 #include "Lur/Core/LogTag.h"
