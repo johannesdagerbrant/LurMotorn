@@ -186,14 +186,6 @@ void android_main(android_app* App) {
     // them before a peer can go ready (the ready handler calls back into the view's adopt rule).
     State.Host.Init(HostCfg);
 
-    State.View.SetState(&State.Match);
-    State.View.AttachSession(&State.Host.Session());
-    State.View.AttachPersistence(&State.Host.Store(), &State.Host.Sync(),
-                                 State.Host.DeviceId());   // selector + match switching
-    State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
-
-    State.Match.SetOnMatchEnd([&State] { State.Host.OnMatchEnded(); });  // persist + report
-
     Lur::App::GameHost::RecordSync Rec;
     // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
     // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
@@ -213,6 +205,16 @@ void android_main(android_app* App) {
         return S;
     };
     State.Host.EnableRecordSync(State.Match, std::move(Rec));
+
+
+    State.View.SetState(&State.Match);
+    State.View.AttachSession(&State.Host.Session());
+    State.View.AttachPersistence(&State.Host.Store(), &State.Host.Sync(),
+                                 State.Host.DeviceId());   // selector + match switching
+    State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
+
+    State.Match.SetOnMatchEnd([&State] { State.Host.OnMatchEnded(); });  // persist + report
+
 
     // Chess hashes its board so the session can catch a divergence (#72). RPS leaves StateHash unset
     // — it detects divergence itself with per-tick anchors.

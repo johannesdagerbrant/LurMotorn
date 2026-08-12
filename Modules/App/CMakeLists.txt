@@ -7,5 +7,5 @@
 add_library(lur_app Private/GameHost.cpp)
 target_include_directories(lur_app PUBLIC Public)
 target_compile_features(lur_app PUBLIC cxx_std_20)
-target_link_libraries(lur_app PUBLIC lur::net lur::save lur::transport)
+target_link_libraries(lur_app PUBLIC lur::net lur::save lur::transport lur::core)
 add_library(lur::app ALIAS lur_app)

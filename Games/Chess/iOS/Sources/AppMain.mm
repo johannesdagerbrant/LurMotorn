@@ -199,6 +199,27 @@ static void UnblockStdio() {
         HostCfg.Transport = _Transport;
         _Host.Init(HostCfg);
     }
+
+    Lur::App::GameHost::RecordSync Rec;
+    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
+    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
+    // route through this one hook now, so they cannot drift apart.
+    Rec.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
+    // Only share OUR game with the peer we are actually playing.
+    Rec.IsActiveOpponent = [View = &_View](const std::string& Peer) {
+        return View->ActiveOpponentGuid() == Peer;
+    };
+    Rec.Summarize = [M = &_Match] {
+        Lur::App::GameHost::RecordSync::MatchSummary S;
+        S.Result     = static_cast<int>(M->LastResult());
+        S.WinsLower  = M->Record().WinsLower;
+        S.WinsHigher = M->Record().WinsHigher;
+        S.Draws      = M->Record().Draws;
+        S.Total      = M->Record().TotalMatches();
+        return S;
+    };
+    _Host.EnableRecordSync(_Match, std::move(Rec));
+
     _Match.SetOnMatchEnd([H = &_Host] { H->OnMatchEnded(); });  // persist + report, one seam
     // Persist the in-progress match when backgrounded, so it survives a close.
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -228,25 +249,6 @@ static void UnblockStdio() {
     // send, the ready/resync/state-hash/Sync handlers, Session::Start — now live once in
     // Lur::App::GameHost. What is left is the game's four decisions, and they must read IDENTICALLY
     // to the Android main's: that they did not is what this extraction is for.
-    Lur::App::GameHost::RecordSync Rec;
-    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
-    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
-    // route through this one hook now, so they cannot drift apart.
-    Rec.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
-    // Only share OUR game with the peer we are actually playing.
-    Rec.IsActiveOpponent = [View = &_View](const std::string& Peer) {
-        return View->ActiveOpponentGuid() == Peer;
-    };
-    Rec.Summarize = [M = &_Match] {
-        Lur::App::GameHost::RecordSync::MatchSummary S;
-        S.Result     = static_cast<int>(M->LastResult());
-        S.WinsLower  = M->Record().WinsLower;
-        S.WinsHigher = M->Record().WinsHigher;
-        S.Draws      = M->Record().Draws;
-        S.Total      = M->Record().TotalMatches();
-        return S;
-    };
-    _Host.EnableRecordSync(_Match, std::move(Rec));
 
     // Chess hashes its board so the session can catch a divergence (#72).
     Lur::App::GameHost::Hooks Hooks;

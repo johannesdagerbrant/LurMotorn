@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 
+#include "Lur/Core/Assert.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Save/SaveState.h"
 #include "Lur/Save/Store.h"
@@ -133,7 +134,17 @@ public:
     bool HasRecordSync() const { return Sync_ != nullptr; }
 
     Lur::Net::Session&      Session()       { return Session_; }
-    Lur::Save::SyncManager& Sync()          { return *Sync_; }
+    // ONLY valid after EnableRecordSync. This asserts because getting it wrong is SILENT: the caller
+    // hands the resulting pointer to its view, the view's `if (Sync != nullptr)` guard then skips
+    // SyncManager::OnLink, the peer key is never set, and Persist() no-ops for the life of the
+    // process — the per-opponent record simply stops being written, with every log line still
+    // reporting success. That is exactly what happened on device (2026-08-12): both chess mains
+    // called AttachPersistence(&Host.Sync(), ...) BEFORE EnableRecordSync, and only a file mtime
+    // gave it away. A dereference of a null unique_ptr is UB, so the fix is to trap, not to hope.
+    Lur::Save::SyncManager& Sync() {
+        LUR_ASSERT(Sync_ != nullptr && "GameHost::Sync() before EnableRecordSync()");
+        return *Sync_;
+    }
     Lur::Save::Store&       Store()         { return *Store_; }
     const std::string&      DeviceId() const { return DeviceId_; }
     bool                    Started() const { return Started_; }

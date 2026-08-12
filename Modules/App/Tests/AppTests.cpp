@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -18,16 +19,32 @@
 // hosts at one dir and they load the SAME id, which makes a peer indistinguishable from itself and
 // quietly invalidates every assertion below. (Distinct dirs also mean Persist() really writes, so
 // the disk half of the flow is exercised rather than failing silently into a missing directory.)
-static const char* DirA() {
-    static const std::string D = (std::filesystem::temp_directory_path() / "lur_app_tests_a").string();
-    std::filesystem::create_directories(D);
-    return D.c_str();
+// WIPED once per run, not merely created. These tests really do write to disk (that is the point of
+// TestMatchEndReachesDisk), so a dir left over from the previous run carries a persisted record — and
+// since adoption LOADS that record and merges it, a stale file silently changes what later tests
+// observe. Found the hard way: the disk test's own output leaked into the first test's expectations.
+static std::string MakeCleanDir(const std::string& Name) {
+    const std::string D = (std::filesystem::temp_directory_path() / Name).string();
+    std::error_code Ec;
+    std::filesystem::remove_all(D, Ec);        // ignore "not there"; we only need it gone
+    std::filesystem::create_directories(D, Ec);
+    return D;
 }
-static const char* DirB() {
-    static const std::string D = (std::filesystem::temp_directory_path() / "lur_app_tests_b").string();
-    std::filesystem::create_directories(D);
-    return D.c_str();
+
+// PER-TEST, and wiped. These tests really write to disk (that is the point of
+// TestMatchEndReachesDisk), and adoption LOADS the stored record and merges it — so any shared
+// directory turns one test's output into another's hidden input. Both variants of that bit me: a dir
+// left from the previous RUN, and then within one run, test 1's OnSync persisting a record that test 2
+// then adopted. Keyed on __func__ so each test gets its own empty disk without having to invent a name.
+static const char* Dir(const char* Test, const char* Side) {
+    static std::map<std::string, std::string> Cache;
+    const std::string Key = std::string(Test) + "_" + Side;
+    auto It = Cache.find(Key);
+    if (It == Cache.end()) It = Cache.emplace(Key, MakeCleanDir("lur_app_tests_" + Key)).first;
+    return It->second.c_str();
 }
+#define DIR_A Dir(__func__, "a")
+#define DIR_B Dir(__func__, "b")
 
 static int Failures = 0;
 #define CHECK(Cond)                                                                    \
@@ -100,8 +117,8 @@ static void TestInitialLinkAdoptsAndSyncs() {
     Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
-    Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
-    Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
+    Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
+    Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
     P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
     P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
 
@@ -135,8 +152,8 @@ static void TestNonAdoptSendsNothing() {
     Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
-    Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
-    Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
+    Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
+    Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
     P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
     P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
 
@@ -169,8 +186,8 @@ static void TestReconnectReAdoptsAndReSyncs() {
     Rb.IsActiveOpponent = [](const std::string&) { return true; };
 
     Lur::App::GameHost::Config Ca, Cb;
-    Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
-    Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
+    Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
+    Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
     P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
     P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
     P.Pump(40);
@@ -198,7 +215,7 @@ static void TestMatchEndPersistsAndReportsOnce() {
 
     std::vector<std::string> Lines;
     Lur::App::GameHost::Config C;
-    C.SaveDir = DirA();
+    C.SaveDir = DIR_A;
     C.Transport = &T;
     C.Log = [&](const char* M) { Lines.emplace_back(M); };
 
@@ -260,8 +277,8 @@ static void TestHostWithoutRecordSync() {
     Ha.OnResync    = [&] { ++ResyncA; };
 
     Lur::App::GameHost::Config Ca, Cb;
-    Ca.SaveDir = DirA(); Ca.Transport = &P.Ta;
-    Cb.SaveDir = DirB(); Cb.Transport = &P.Tb;
+    Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
+    Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
     P.HostA.Init(Ca);  P.HostA.Start(Ha);   // no EnableRecordSync
     P.HostB.Init(Cb);  P.HostB.Start(Hb);
 
@@ -283,12 +300,69 @@ static void TestHostWithoutRecordSync() {
     P.HostA.OnMatchEnded();
 }
 
+// ---- 6. A match end actually REACHES DISK -----------------------------------------------------
+// The regression this exists for, found on device 2026-08-12 and not by any test: persistence had
+// silently stopped. `SyncManager::Persist()` writes under the peer KEY, the key is set by OnLink, and
+// OnLink was being skipped — so Persist() no-opped for the whole run while every log line, including
+// the MATCH END tally, still read as success. Nothing on the host noticed, because nothing on the host
+// had ever asserted that the bytes land.
+//
+// So assert the artifact, not the log. This is the same lesson as the rest of this batch: in this
+// codebase a success-shaped signal is not evidence, and the only honest check is the far end.
+static void TestMatchEndReachesDisk() {
+    Pair P;
+    P.Ta.SetDeferred(true);
+    P.Tb.SetDeferred(true);
+    Lur::Transport::LoopbackTransport::Link(P.Ta, P.Tb);
+
+    P.StateA.Value = 11;
+
+    Lur::App::GameHost::RecordSync Ra, Rb;
+    Ra.OnPeerAdopted    = [](const std::string&) { return true; };
+    Ra.IsActiveOpponent = [](const std::string&) { return true; };
+    Rb.OnPeerAdopted    = [](const std::string&) { return true; };
+    Rb.IsActiveOpponent = [](const std::string&) { return true; };
+
+    Lur::App::GameHost::Config Ca, Cb;
+    Ca.SaveDir = DIR_A; Ca.Transport = &P.Ta;
+    Cb.SaveDir = DIR_B; Cb.Transport = &P.Tb;
+    P.HostA.Init(Ca);  P.HostA.EnableRecordSync(P.StateA, Ra);  P.HostA.Start({});
+    P.HostB.Init(Cb);  P.HostB.EnableRecordSync(P.StateB, Rb);  P.HostB.Start({});
+    P.Pump(40);
+    CHECK(P.HostA.Session().IsReady());
+
+    const std::string Peer = P.HostA.Session().GetPeerGuid();
+    CHECK(!Peer.empty());
+
+    // Nothing on disk for this peer until a match resolves...
+    P.StateA.Value = 12;
+    P.HostA.OnMatchEnded();
+    // ...and after it, the bytes are there under the peer's key. If OnLink never ran, Persist() is a
+    // no-op and this vector is empty — which is exactly the bug, caught here instead of on a phone.
+    const std::vector<uint8_t> OnDisk = P.HostA.Store().Load(Peer);
+    CHECK(!OnDisk.empty());
+    CHECK(OnDisk.size() >= 2);
+    if (OnDisk.size() >= 2) {
+        const uint32_t Stored = static_cast<uint32_t>(OnDisk[0] | (OnDisk[1] << 8));
+        CHECK(Stored == 12);   // and they are the CURRENT record, not a stale one
+    }
+
+    // OnBackground is the other persist route (the app going away mid-match); it must land too.
+    P.StateA.Value = 13;
+    P.HostA.OnBackground();
+    const std::vector<uint8_t> After = P.HostA.Store().Load(Peer);
+    CHECK(After.size() >= 2);
+    if (After.size() >= 2)
+        CHECK(static_cast<uint32_t>(After[0] | (After[1] << 8)) == 13);
+}
+
 int main() {
     TestInitialLinkAdoptsAndSyncs();
     TestNonAdoptSendsNothing();
     TestReconnectReAdoptsAndReSyncs();
     TestMatchEndPersistsAndReportsOnce();
     TestHostWithoutRecordSync();
+    TestMatchEndReachesDisk();
     if (Failures == 0) std::printf("app_tests: all passed\n");
     return Failures == 0 ? 0 : 1;
 }

@@ -30,11 +30,18 @@ void GameHost::OnPeerLive() {
     // one being played, and sending our record to the wrong peer is the failure the rule exists to
     // prevent. Refusing is the safe direction.
     if (!Record_.OnPeerAdopted || !Record_.OnPeerAdopted(Peer)) return;
-    // NOTE the host does NOT call Sync::OnLink here. Adoption is one game-side step — set identity,
-    // load that opponent's record, reconcile — and the game already does the reconcile inside the
-    // hook (chess: BoardView::OnPeerLinked). Calling it again would be a harmless second
-    // MergeIfNewer, but it would move the reconcile relative to the identity change, and "behaviour
-    // on device is unchanged" is an acceptance criterion of this extraction, not a nice-to-have.
+    // OnLink AFTER the hook, and yes it is usually the second call — chess's BoardView::OnPeerLinked
+    // already reconciles inside the hook. It is here anyway because the host cannot depend on that:
+    // OnLink is what sets the peer KEY, and without the key Persist() silently writes nothing, for
+    // the life of the process, with every log line still reporting success. That is not theoretical —
+    // it is what shipped for one build on 2026-08-12: the mains handed the view a null SyncManager
+    // (Sync() called before EnableRecordSync), the view's null-guard skipped its OnLink, and the
+    // per-opponent record simply stopped being written. Only a file mtime gave it away.
+    //
+    // Calling it here costs one idempotent re-reconcile (MergeIfNewer is monotonic, and it runs after
+    // the game's own, so the game's ordering is unchanged) and buys a host that persists correctly
+    // even if a game forgets. Ownership of persistence and ownership of the key belong together.
+    Sync_->OnLink(Peer);
     const std::vector<uint8_t> Snap = Sync_->Snapshot();
     Session_.Send(Lur::Net::EMsgType::Sync, Snap.data(), Snap.size());
 }
