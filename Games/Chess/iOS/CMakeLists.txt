@@ -61,7 +61,9 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 #    Modules/Transport/Platform/Ios/BleTransport.mm)
 add_executable(OnlyChess MACOSX_BUNDLE
     Sources/AppMain.mm
-    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm)
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
+    # #43 section B: engine log sink + the MoltenVK stdio guard, written once per platform.
+    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm)
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
@@ -109,6 +111,7 @@ target_link_libraries(OnlyChess PRIVATE
 set_source_files_properties(
     Sources/AppMain.mm
     ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
+    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 # MoltenVK + Apple frameworks. MoltenVK is linked as the matching static slice;

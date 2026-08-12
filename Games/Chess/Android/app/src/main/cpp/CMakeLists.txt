@@ -33,7 +33,10 @@ add_library(onlychess SHARED
     # (Modules/Transport/Platform/Android). It stays in the app TARGET rather than in
     # lur_transport because it needs the NDK's <jni.h> and the app's LUR_LOG_TAG, and
     # because only an app build has an Android toolchain at all.
-    ${LUR_ROOT}/Modules/Transport/Platform/Android/BleTransport.cpp)
+    ${LUR_ROOT}/Modules/Transport/Platform/Android/BleTransport.cpp
+    # #43 section B: the engine log sink, written once per platform. Same reason it lives in the
+    # app TARGET: it needs <android/log.h> and the app's LUR_LOG_TAG.
+    ${LUR_ROOT}/Modules/App/Platform/Android/AppPlatform.cpp)
 
 target_link_libraries(onlychess
     native_app_glue

@@ -34,7 +34,8 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
-#include "Lur/App/GameHost.h"   // #43: engine-owned identity + session lifecycle
+#include "Lur/App/GameHost.h"
+#include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink   // #43: engine-owned identity + session lifecycle
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
@@ -76,10 +77,6 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 // 2026-07-30: the #112 build-fingerprint gate fired, said so via Lur::Log::Error, and the line went
 // nowhere. %{public}s is mandatory — a plain %s is redacted to <private> unless Xcode is attached,
 // which is never our case (see the iOS notes in CLAUDE.md).
-void EngineLogSink(bool Error, const char* Line, void* /*User*/) {
-    if (Error) os_log_error(OS_LOG_DEFAULT, "OnlyRps: %{public}s", Line);
-    else       os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s", Line);
-}
 // View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
 // over the wire, so no float crosses the determinism boundary.
 Rps::Fixed WorldToFixed(float Wv) {
@@ -307,41 +304,15 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     self.view = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
 }
 - (CAMetalLayer*)metalLayer { return (CAMetalLayer*)self.view.layer; }
-
-// A BLOCKING WRITE TO STDERR CAN KILL THE APP. Diagnosed from a crash report 2026-08-01: the main
-// thread stopped in
-//     __write_nocancel <- fprintf <- MVKBaseObject::reportMessage <- MVKInstance::logVersions
-//                      <- vkCreateInstance <- VulkanRendererImpl::Init <- reattachForActivation
-// and FrontBoard killed the process with 0x8BADF00D — "scene-update watchdog transgression,
-// exhausted real (wall clock) time allowance of 10.00 seconds".
-//
-// MoltenVK announces its version through plain fprintf. Nothing on the device drains the app's
-// stdio after a `dvt launch`, so once that pipe's buffer fills, write(2) blocks — forever, on the
-// thread that also runs the render loop and the sim. The visible symptom is the nastiest kind: a
-// BLACK SCREEN with NO log output at all, because os_log never gets a turn either, and the process
-// is still alive in proclist so every "is it running?" probe says yes. The #73 heal makes it more
-// likely, not less: reattachForActivation creates a SECOND Vulkan instance, so it emits the banner
-// a second time.
-//
-// Two guards, cheapest first. The env var stops MoltenVK writing the chatty lines at all (errors
-// still get through); O_NONBLOCK makes any write that would block fail with EAGAIN and DROP the
-// bytes instead. Losing a diagnostic line is always better than wedging the app: the log is
-// os_log's job here, and stdio has no reader by construction.
-static void UnblockStdio() {
-    setenv("MVK_CONFIG_LOG_LEVEL", "1", /*overwrite*/ 0);   // 1 = errors only; 0 respects an explicit override
-    for (int Fd : {STDOUT_FILENO, STDERR_FILENO}) {
-        const int Flags = fcntl(Fd, F_GETFL, 0);
-        if (Flags != -1) fcntl(Fd, F_SETFL, Flags | O_NONBLOCK);
-    }
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     // BEFORE anything else, including the logger: this is what stops a full stdio pipe from
     // freezing the main thread and getting us watchdog-killed with a black screen.
-    UnblockStdio();
+    Lur::App::Platform::UnblockStdio();
     // Then give the engine logger a home, before anything can try to report a problem.
-    Lur::Log::Init(&EngineLogSink, "OnlyRps");
+    Lur::App::Platform::InstallLogSink();   // #43 section B: one sink per platform
 #if LUR_INTERNAL
     // #159: "no recording open yet" must be a value MatchIndex can never take, and an Obj-C ivar is
     // ZERO-initialised — which is exactly the index of the FIRST match. The open-on-match-started edge

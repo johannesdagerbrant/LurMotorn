@@ -26,7 +26,8 @@
 #include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
-#include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
+#include "Lur/App/GameHost.h"
+#include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink   // #43: engine-owned session + persistence choreography
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
@@ -110,34 +111,14 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 - (CAMetalLayer*)metalLayer {
     return (CAMetalLayer*)self.view.layer;
 }
-
-// A BLOCKING WRITE TO STDERR CAN KILL THE APP. Diagnosed on OnlyRps 2026-08-01 from a crash report:
-// the main thread stopped in
-//     __write_nocancel <- fprintf <- MVKBaseObject::reportMessage <- MVKInstance::logVersions
-//                      <- vkCreateInstance <- VulkanRendererImpl::Init
-// and FrontBoard killed the process with 0x8BADF00D - "scene-update watchdog transgression,
-// exhausted real (wall clock) time allowance of 10.00 seconds".
-//
-// MoltenVK announces its version through plain fprintf, and nothing drains the app's stdio after a
-// `dvt launch`, so once that pipe's buffer fills write(2) blocks - forever, on the thread that also
-// runs the render loop. The symptom is a BLACK SCREEN with NO log output (os_log never gets a turn)
-// while the process is still alive in proclist, so every "is it running?" probe says yes.
-//
-// Chess shares the MoltenVK exposure exactly, so it gets the same two guards rather than waiting to
-// be bitten: the env var stops the chatty lines (errors still get through), and O_NONBLOCK makes a
-// would-block write fail with EAGAIN and DROP bytes instead. Losing a diagnostic line always beats
-// wedging the app - logging here is os_log's job and stdio has no reader by construction.
-static void UnblockStdio() {
-    setenv("MVK_CONFIG_LOG_LEVEL", "1", /*overwrite*/ 0);   // 1 = errors only; 0 respects an explicit override
-    for (int Fd : {STDOUT_FILENO, STDERR_FILENO}) {
-        const int Flags = fcntl(Fd, F_GETFL, 0);
-        if (Flags != -1) fcntl(Fd, F_SETFL, Flags | O_NONBLOCK);
-    }
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    UnblockStdio();   // before the renderer: a full stdio pipe must never freeze the main thread
+    // #43 section B: give the engine logger a home before anything can report a problem. Chess had
+    // no sink on either phone, so engine-side messages went nowhere on device.
+    Lur::App::Platform::InstallLogSink();
+    Lur::App::Platform::UnblockStdio();   // before the renderer: a full stdio pipe must never freeze the main thread
 
     CAMetalLayer* Layer = [self metalLayer];
     Layer.device = MTLCreateSystemDefaultDevice();

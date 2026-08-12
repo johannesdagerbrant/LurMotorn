@@ -29,6 +29,7 @@
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with iOS/desktop
 #include "Lur/Save/DeviceId.h"
 #include "Lur/App/GameHost.h"   // #43: engine-owned identity + session lifecycle
+#include "Lur/App/Platform.h"   // #43 section B: engine log sink
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"
@@ -62,9 +63,6 @@ namespace {
 // the line. The pair then played for 13 minutes and desynced, and the first question — "were the
 // builds even the same?" — had no answer in the log. One function pointer fixes it for every
 // engine-side message, present and future.
-void EngineLogSink(bool Error, const char* Line, void* /*User*/) {
-    __android_log_print(Error ? ANDROID_LOG_ERROR : ANDROID_LOG_INFO, "OnlyRps", "%s", Line);
-}
 
 // Both phones derive the SAME match seed so their sims match. The seed is currently
 // gameplay-inert (v1 map is fixed + mirrored, no RNG in the tick — spec §2); a
@@ -535,7 +533,7 @@ void android_main(android_app* App) {
     App->onInputEvent = HandleInput;
 
     // FIRST: give the engine logger a home, before anything can try to report a problem.
-    Lur::Log::Init(&EngineLogSink, "OnlyRps");
+    Lur::App::Platform::InstallLogSink();   // #43 section B: one sink per platform
 
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
     State.DataDir = DataDir != nullptr ? DataDir : ".";

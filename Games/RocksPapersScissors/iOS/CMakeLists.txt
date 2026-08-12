@@ -38,7 +38,9 @@ target_include_directories(lur_render PRIVATE ${MVK_INCLUDE})
 # Vulkan/BLE seams are copied from chess (package-renamed).
 add_executable(OnlyRps MACOSX_BUNDLE
     Sources/RpsMain.mm
-    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm)
+    ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
+    # #43 section B: engine log sink + the MoltenVK stdio guard, written once per platform.
+    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm)
 
 target_include_directories(OnlyRps PRIVATE ${MVK_INCLUDE})
 
@@ -83,6 +85,7 @@ target_link_libraries(OnlyRps PRIVATE
 set_source_files_properties(
     Sources/RpsMain.mm
     ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
+    ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 target_link_libraries(OnlyRps PRIVATE

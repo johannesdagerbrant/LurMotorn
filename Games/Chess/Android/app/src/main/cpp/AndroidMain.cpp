@@ -22,6 +22,7 @@
 #include "Lur/Audio/AudioDevice.h"
 #include "Lur/Audio/Mixer.h"
 #include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
+#include "Lur/App/Platform.h"   // #43 section B: engine log sink
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
@@ -168,6 +169,12 @@ void android_main(android_app* App) {
     // Persistent device identity (issue #17/#18): the same GUID the BLE role uses,
     // read from the app's internal data dir (== Context.filesDir, where the Kotlin
     // radio reads it too, so both agree). Drives colour + the per-opponent stats key.
+    // #43 section B: FIRST, give the engine logger a home. Chess never installed a sink on either
+    // phone, so every Lur::Log::* line from inside the engine — including the build-fingerprint
+    // mismatch that exists to be seen — went to a stdout nobody reads. RPS learned this the hard way
+    // (2026-07-30) and grew a sink; chess simply never got one.
+    Lur::App::Platform::InstallLogSink();
+
     const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
 
     // #43: everything below used to be ~50 lines duplicated comment-for-comment with the iOS main
