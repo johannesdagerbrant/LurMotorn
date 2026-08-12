@@ -7,6 +7,7 @@
 
 #include <fstream>
 
+#include "Lur/Core/Assert.h"
 #include "Lur/Core/CVar.h"
 #include "Lur/Core/CVarConfig.h"
 #include "Lur/Core/DevCommand.h"
@@ -62,6 +63,41 @@ static void TestLogRoutesToSink() {
 
     Lur::Log::Init(nullptr, "Lur");  // restore the default writer
 }
+
+// A failed assert's MESSAGE must reach the installed sink, not stderr.
+//
+// This is not a style point. On a phone stderr is nowhere — nothing drains a sideloaded app's
+// stdio, and on iOS Lur::App::Platform::UnblockStdio deliberately makes those writes DROP rather
+// than wedge the app (a blocking write to a full pipe once got the process killed with
+// 0x8BADF00D). So an assert that printed to stderr trapped silently on device, leaving only a
+// backtrace: "deafening in Development" was true on the desktop and false where it mattered. A
+// 2026-07-20 plan even listed `logcat | grep "LUR_ASSERT failed:"` as its evidence step for
+// classifying crashes — a grep that could never have matched.
+//
+// Report() is called directly, without the trap: the macro would take the process down, and what
+// needs proving is the ROUTING, which is the half that was broken.
+//
+// Guarded because Report itself is compiled out with the asserts (a Shipping test build) — the
+// same capability gate the macro keys on, never the config name.
+#if LUR_ASSERTS_ENABLED
+static void TestAssertMessageRoutesToSink() {
+    int UserCounter = 0;
+    GCalls = 0;
+    Lur::Log::Init(&CaptureSink, "Test", &UserCounter);
+
+    Lur::Assert::Detail::Report("X == 1", "Some/File.cpp", 42, "context %d", 7);
+    CHECK(GCalls == 1);
+    CHECK(GLastError);  // an assert is an error, so it must take the sink's error path
+    // The expression, the file:line and the message all survive, on ONE line — os_log and logcat
+    // are line-oriented, and reading device logs means grepping a filtered capture.
+    CHECK(GLast.find("X == 1") != std::string::npos);
+    CHECK(GLast.find("Some/File.cpp:42") != std::string::npos);
+    CHECK(GLast.find("context 7") != std::string::npos);
+    CHECK(GLast.find('\n') == std::string::npos);
+
+    Lur::Log::Init(nullptr, "Lur");
+}
+#endif
 
 // FNV-1a is deterministic and sensitive to any byte change (the desync-hash property).
 static void TestHashDeterministicAndSensitive() {
@@ -412,6 +448,9 @@ int main() {
     Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
 
     TestLogRoutesToSink();
+#if LUR_ASSERTS_ENABLED
+    TestAssertMessageRoutesToSink();
+#endif
     TestHashDeterministicAndSensitive();
     TestFlightRecorderRoundtrip();
     TestFlightRecorderRingBounded();
