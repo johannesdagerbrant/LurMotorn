@@ -111,7 +111,6 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 - (CAMetalLayer*)metalLayer {
     return (CAMetalLayer*)self.view.layer;
 }
-}
 
 - (void)viewDidLoad {
     [super viewDidLoad];

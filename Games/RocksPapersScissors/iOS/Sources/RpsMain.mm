@@ -304,7 +304,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     self.view = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
 }
 - (CAMetalLayer*)metalLayer { return (CAMetalLayer*)self.view.layer; }
-}
 
 - (void)viewDidLoad {
     [super viewDidLoad];
