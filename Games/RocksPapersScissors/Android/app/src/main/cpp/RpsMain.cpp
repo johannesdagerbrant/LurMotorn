@@ -221,7 +221,7 @@ void ApplyAgentCommand(AppState& S, const Rps::AgentCommand& Cmd) {
     // the sim thread, so IsReady() is safe to ask here.
     auto WarnIfSolo = [&S](const char* What) {
         if (!S.SoloActive.load(std::memory_order_acquire)) return;
-        if (S.Session.IsReady())
+        if (S.Host.Session().IsReady())
             LOGE("AGENT %s -> the SOLO sim, not the linked peer (a peer IS linked). The other phone "
                  "will wait forever. Send `linked` first, then re-send this.", What);
         else
