@@ -1,7 +1,11 @@
-// Android entry point. A thin platform shim: it owns the NativeActivity loop,
-// creates the Vulkan renderer + BLE transport, and drives the shared
-// Chess::BoardView (which owns all render + touch logic). The iOS app drives the
-// same BoardView from its UIKit shim — one source of truth for the game view.
+// Chess's Android main. What is left of it after #43: the FRAME LOOP — whose cadence is a latency
+// decision this game owns (#188/#189) — plus the four points where chess has an opinion about the
+// platform, the BLE transport, and the glue to the shared Chess::BoardView (which owns all render +
+// touch logic; the iOS app drives the same BoardView from its UIKit shim, one source of truth).
+//
+// The NativeActivity ceremony around that loop is Lur::App::AndroidApp, and the session +
+// persistence choreography is Lur::App::GameHost. Neither is chess's business, and both were being
+// re-derived in the RPS main alongside this one.
 #include <android_native_app_glue.h>
 #include <android/log.h>
 #include <chrono>
@@ -21,10 +25,9 @@
 #include "Chess/View/SfxLibrary.h"
 #include "Lur/Audio/AudioDevice.h"
 #include "Lur/Audio/Mixer.h"
+#include "Lur/App/AndroidApp.h"  // #43 section B: the NativeActivity ceremony, engine-owned
 #include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
-#include "Lur/App/Platform.h"   // #43 section B: engine log sink
 #include "Lur/Net/Session.h"
-#include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
@@ -36,8 +39,10 @@
 namespace {
 
 struct AppState {
-    Lur::Render::IRenderer* Renderer = nullptr;
-    bool Ready = false;
+    // #43 section B: the window/renderer/looper ceremony is the engine's now. This main no longer
+    // owns a renderer pointer, a Ready flag, an ALooper drain or an internalDataPath lookup — all
+    // of which it had been re-deriving alongside RPS, comment for comment.
+    Lur::App::AndroidApp Plat;
     Chess::BoardView View;
     // #43: the session + persistence choreography lives in the engine now. This main holds no
     // Session, Store or SyncManager of its own — the host owns them, and what used to be ~50 lines
@@ -56,69 +61,59 @@ void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     static_cast<Lur::Audio::Mixer*>(User)->Render(Out, Frames);
 }
 
-void HandleCmd(android_app* App, int32_t Cmd) {
-    auto* State = static_cast<AppState*>(App->userData);
-    switch (Cmd) {
-        case APP_CMD_INIT_WINDOW:
-            if (App->window != nullptr) {
-                State->Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
-                State->Ready = State->Renderer && State->Renderer->Init(App->window);
-                LOGI("Renderer init: %s", State->Ready ? "ok" : "failed");
-                if (State->Ready) {
-                    State->View.CreateResources(State->Renderer);
-                    // #188: make the frame's idle wait feed the radio. At one frame in
-                    // flight the CPU parks ~15 ms per frame inside vkWaitForFences, and
-                    // that park sits between the loop's two inbox drains (#189) and the
-                    // next iteration — which is exactly where a peer's move was waiting.
-                    State->Renderer->SetIdleWaitCallback(
-                        [](void* U) { static_cast<AppState*>(U)->Host.PumpInbox(); }, State);
-                }
+// The window and the Vulkan renderer are up. What is left here is genuinely chess's: GPU
+// resources, the radio's piggy-back on the idle wait, audio, and the core smoke test.
+//
+// ONE DELIBERATE BEHAVIOUR CHANGE, in a failure path: audio startup and the smoke test used to sit
+// inside INIT_WINDOW but OUTSIDE its `if (Ready)` guard, so a renderer that failed to initialise
+// still opened an AAudio stream and still logged a movegen count. Nothing could be drawn in that
+// state — the loop parks on a -1 poll timeout forever — so those two were serving an app that was
+// already dead. "Surface ready" now means ready.
+void OnSurfaceReady(AppState& State) {
+    State.View.CreateResources(State.Plat.Renderer());
+    // #188: make the frame's idle wait feed the radio. At one frame in flight the CPU
+    // parks ~15 ms per frame inside vkWaitForFences, and that park sits between the
+    // loop's two inbox drains (#189) and the next iteration — which is exactly where a
+    // peer's move was waiting.
+    State.Plat.Renderer()->SetIdleWaitCallback(
+        [](void* U) { static_cast<AppState*>(U)->Host.PumpInbox(); }, &State);
 
-                // Bring up audio: load the cooked SFX into the mixer, wire each move to the
-                // sound for its KIND (move / capture / check / checkmate — the view
-                // classifies, SfxLibrary picks the clip and its variation), then open the
-                // low-latency stream. Order matters — Sfx.Load (which calls Mixer::Add) must
-                // finish before the device thread starts pulling.
-                if (State->Audio == nullptr) {
-                    State->Mixer.Init(Lur::Audio::Mixer::DefaultRate);
-                    State->Sfx.Load(State->Mixer);
-                    AppState* St = State;
-                    State->View.SetMovePlayed(
-                        [St](Chess::EMoveSound S) { St->Sfx.Play(St->Mixer, S); });
-                    State->Audio = Lur::Audio::CreateAudioDevice();
-                    const bool AudioOk = State->Audio && State->Audio->Start(MixThunk, &State->Mixer);
-                    LOGI("Audio init: %s", AudioOk ? "ok" : "failed");
-                }
+    // Bring up audio: load the cooked SFX into the mixer, wire each move to the
+    // sound for its KIND (move / capture / check / checkmate — the view
+    // classifies, SfxLibrary picks the clip and its variation), then open the
+    // low-latency stream. Order matters — Sfx.Load (which calls Mixer::Add) must
+    // finish before the device thread starts pulling.
+    if (State.Audio == nullptr) {
+        State.Mixer.Init(Lur::Audio::Mixer::DefaultRate);
+        State.Sfx.Load(State.Mixer);
+        AppState* St = &State;
+        State.View.SetMovePlayed([St](Chess::EMoveSound S) { St->Sfx.Play(St->Mixer, S); });
+        State.Audio = Lur::Audio::CreateAudioDevice();
+        const bool AudioOk = State.Audio && State.Audio->Start(MixThunk, &State.Mixer);
+        LOGI("Audio init: %s", AudioOk ? "ok" : "failed");
+    }
 
-                // Smoke test: the shared, perft-verified C++ core runs on-device.
-                Chess::Board Board = Chess::Board::StartPosition();
-                Chess::MoveList Moves;
-                Chess::GenerateLegalMoves(Board, Moves);
-                LOGI("Chess core alive: %d legal moves from the start position", Moves.Count);
-            }
-            break;
-        case APP_CMD_TERM_WINDOW:
-            if (State->Audio != nullptr) {
-                State->Audio->Stop();
-                delete State->Audio;
-                State->Audio = nullptr;
-            }
-            if (State->Renderer != nullptr) State->Renderer->Shutdown();
-            State->Ready = false;
-            break;
-        case APP_CMD_PAUSE:
-            // Backgrounded: persist the in-progress match so it survives a close.
-            State->Host.OnBackground();   // #43: persist the in-progress record
-            break;
-        default:
-            break;
+    // Smoke test: the shared, perft-verified C++ core runs on-device.
+    Chess::Board Board = Chess::Board::StartPosition();
+    Chess::MoveList Moves;
+    Chess::GenerateLegalMoves(Board, Moves);
+    LOGI("Chess core alive: %d legal moves from the start position", Moves.Count);
+}
+
+// The window is going away. The audio device must stop BEFORE the renderer teardown that
+// follows this callback — the engine runs them in that order for exactly this reason.
+void OnSurfaceLost(AppState& State) {
+    if (State.Audio != nullptr) {
+        State.Audio->Stop();
+        delete State.Audio;
+        State.Audio = nullptr;
     }
 }
 
-int32_t HandleInput(android_app* App, AInputEvent* Event) {
-    auto* State = static_cast<AppState*>(App->userData);
-    if (State == nullptr || !State->Ready || App->window == nullptr) return 0;
-    if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
+bool HandleInput(AppState& State, AInputEvent* Event) {
+    // Readiness and the window are the engine's precondition now — it drops events before
+    // they reach here, so what remains is chess's own filter.
+    if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return false;
 
     // #192 (ported from RPS #185): how long the OS took to hand us this sample. Everything
     // before this point is digitiser + input dispatch — a floor we do not control — so
@@ -129,7 +124,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // Keep the OLDEST unpresented sample: several samples can arrive between two frames,
     // and overwriting would measure the last one to squeak in before the present —
     // flattering, and not what the finger saw.
-    if (State->PendingTouchNs == 0) State->PendingTouchNs = EventNs;
+    if (State.PendingTouchNs == 0) State.PendingTouchNs = EventNs;
 
     // The dead time this epic exists to reclaim (#187): how long the finger sits on the
     // glass before we do anything with it. Committing on UP spends all of it. A synthetic
@@ -137,10 +132,10 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // only meaningful under a REAL finger — which is the point: it is the human's gesture,
     // not the machine's, that we are paying for.
     const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
-    if (Action == AMOTION_EVENT_ACTION_DOWN) State->TouchDownNs = EventNs;
-    if (Action == AMOTION_EVENT_ACTION_UP && State->TouchDownNs != 0) {
-        LUR_TRACE_LATENCY("input.downToUp", State->TouchDownNs);
-        State->TouchDownNs = 0;
+    if (Action == AMOTION_EVENT_ACTION_DOWN) State.TouchDownNs = EventNs;
+    if (Action == AMOTION_EVENT_ACTION_UP && State.TouchDownNs != 0) {
+        LUR_TRACE_LATENCY("input.downToUp", State.TouchDownNs);
+        State.TouchDownNs = 0;
     }
 
     // #187: commit on DOWN, not UP. This used to wait for ACTION_UP, which spent the whole
@@ -151,32 +146,34 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
     // chess's own TOUCH-MOVE RULE says that once you touch a piece you must move it. This
     // makes the app MORE faithful to over-the-board play, not less. (There is no drag
     // gesture here either, so in practice nothing is lost.)
-    if (Action != AMOTION_EVENT_ACTION_DOWN) return 0;
-    State->View.OnTap(AMotionEvent_getX(Event, 0), AMotionEvent_getY(Event, 0),
-                      static_cast<float>(ANativeWindow_getWidth(App->window)),
-                      static_cast<float>(ANativeWindow_getHeight(App->window)));
-    return 1;
+    if (Action != AMOTION_EVENT_ACTION_DOWN) return false;
+    State.View.OnTap(AMotionEvent_getX(Event, 0), AMotionEvent_getY(Event, 0),
+                     State.Plat.Width(), State.Plat.Height());
+    return true;
 }
 
 } // namespace
 
 void android_main(android_app* App) {
     AppState State;
-    App->userData = &State;
-    App->onAppCmd = HandleCmd;
-    App->onInputEvent = HandleInput;  // tap to select / move pieces
+
+    // #43 section B: hand the NativeActivity ritual to the engine — glue callbacks, the engine log
+    // sink, renderer create/init/teardown with the window, the looper drain, internalDataPath. What
+    // stays here are the four points where chess actually has an opinion. Start() only WIRES; the
+    // callbacks below cannot fire until the first PumpEvents inside the loop, which is why they may
+    // safely reference a Host that is configured further down.
+    Lur::App::AndroidApp::Callbacks Cb;
+    Cb.OnSurfaceReady = [&State] { OnSurfaceReady(State); };
+    Cb.OnSurfaceLost  = [&State] { OnSurfaceLost(State); };
+    // Backgrounded: persist the in-progress match so it survives a close.
+    Cb.OnPause        = [&State] { State.Host.OnBackground(); };
+    Cb.OnInput        = [&State](AInputEvent* E) { return HandleInput(State, E); };
+    State.Plat.Start(App, std::move(Cb));
 
     // Persistent device identity (issue #17/#18): the same GUID the BLE role uses,
     // read from the app's internal data dir (== Context.filesDir, where the Kotlin
     // radio reads it too, so both agree). Drives colour + the per-opponent stats key.
-    // #43 section B: FIRST, give the engine logger a home. Chess never installed a sink on either
-    // phone, so every Lur::Log::* line from inside the engine — including the build-fingerprint
-    // mismatch that exists to be seen — went to a stdout nobody reads. RPS learned this the hard way
-    // (2026-07-30) and grew a sink; chess simply never got one.
-    Lur::App::Platform::InstallLogSink();
-
-    const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
-
+    //
     // #43: everything below used to be ~50 lines duplicated comment-for-comment with the iOS main
     // — Store, device id, SyncManager, the match-end persist+log, the hijack-guarded record send,
     // the ready/resync/hash/Sync handlers, Session::Start. All of it is engine choreography, none
@@ -184,7 +181,7 @@ void android_main(android_app* App) {
     // a MATCH END line whose format differed per phone). What remains here is what is genuinely
     // this app's: where files live, which radio role, how to log — and the game's four decisions.
     Lur::App::GameHost::Config HostCfg;
-    HostCfg.SaveDir = DataDir != nullptr ? DataDir : ".";
+    HostCfg.SaveDir = State.Plat.SaveDir();
     // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs, not
     // from the radio role.
     HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
@@ -255,7 +252,7 @@ void android_main(android_app* App) {
     uint64_t RttCount = 0, RttSumMs = 0, RttMinMs = ~0ull, RttMaxMs = 0;
 #endif
     auto PrevTime = std::chrono::steady_clock::now();
-    while (!App->destroyRequested) {
+    while (State.Plat.IsRunning()) {
         const auto Now = std::chrono::steady_clock::now();
         const uint64_t ElapsedNs =
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
@@ -317,7 +314,7 @@ void android_main(android_app* App) {
                      (unsigned long long)(RttCount ? RttSumMs / RttCount : 0),
                      (unsigned long long)(RttCount ? RttMinMs : 0),
                      (unsigned long long)RttMaxMs,
-                     State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u);
+                     State.Plat.Renderer() != nullptr ? State.Plat.Renderer()->PresentedFrames() : 0u);
             }
             ++Frame;
         }
@@ -335,25 +332,16 @@ void android_main(android_app* App) {
                 LOGI("TRACE %s", TraceLine);
         }
 #endif
-        int Events = 0;
-        android_poll_source* Source = nullptr;
-        // Re-evaluate the timeout on every poll: INIT_WINDOW flips State.Ready
-        // inside this loop, and a stale -1 would block forever before rendering.
-        while (ALooper_pollOnce(State.Ready ? 0 : -1, nullptr, &Events,
-                                reinterpret_cast<void**>(&Source)) >= 0) {
-            if (Source != nullptr) Source->process(App, Source);
-            if (App->destroyRequested) break;
-        }
+        // Window/lifecycle commands + input. The callbacks wired at the top fire from in here.
+        State.Plat.PumpEvents();
 
-        if (State.Ready) {
+        if (State.Plat.IsReady()) {
             // #189: one more inbox drain, immediately before we draw. A peer move that
             // landed after the top-of-loop Tick would otherwise wait for the NEXT
             // iteration — and this loop is vsync-bound, so that is a whole refresh of
             // sitting still. Half a frame off every inbound move, on average.
             State.Host.PumpInbox();
-            State.View.Render(State.Renderer,
-                              static_cast<float>(ANativeWindow_getWidth(App->window)),
-                              static_cast<float>(ANativeWindow_getHeight(App->window)));
+            State.View.Render(State.Plat.Renderer(), State.Plat.Width(), State.Plat.Height());
             // #192: touch sample -> this frame handed to the presentation engine. Bounds OUR
             // share of move latency: OS dispatch + the wait for this loop iteration + tap
             // handling + record + submit, stopping at vkQueuePresentKHR returning. It does
@@ -366,5 +354,5 @@ void android_main(android_app* App) {
         }
     }
 
-    if (State.Renderer != nullptr) State.Renderer->Shutdown();
+    State.Plat.Shutdown();
 }

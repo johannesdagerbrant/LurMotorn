@@ -28,8 +28,8 @@
 #include "Lur/Core/Log.h"         // the engine logger — routed into logcat below
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with iOS/desktop
 #include "Lur/Save/DeviceId.h"
+#include "Lur/App/AndroidApp.h"  // #43 section B: the NativeActivity ceremony, engine-owned
 #include "Lur/App/GameHost.h"   // #43: engine-owned identity + session lifecycle
-#include "Lur/App/Platform.h"   // #43 section B: engine log sink
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"
@@ -97,8 +97,10 @@ Rps::Fixed WorldToFixed(float W) {
 // glue-only; Session/Lp/Sim are sim-only after Start. This gets the 10 Hz sim + BLE off
 // the input/render thread so a datagram is serviced in ~ms, not up to a rendered frame.
 struct AppState {
-    Lur::Render::IRenderer* Renderer = nullptr;  // glue only (lifecycle in HandleCmd)
-    bool Ready = false;                          // glue only
+    // #43 section B: the NativeActivity ceremony — glue callbacks, window/renderer lifecycle, the
+    // looper drain, internalDataPath — is the engine's, shared with the chess main that had been
+    // re-deriving the same code. GLUE ONLY: nothing on the sim thread may touch it.
+    Lur::App::AndroidApp Plat;                   // glue only
     Rps::GameView View;                          // glue only
     // #43: the engine owns identity + the session lifecycle. RPS uses only that half of GameHost —
     // no record sync: ScoreBook is not an ISaveState, is never sent over the wire, and there is no
@@ -329,31 +331,20 @@ void OnCvarCommit(void* Ctx, Lur::Core::ICVar& Cv) {
 }
 #endif
 
-void HandleCmd(android_app* App, int32_t Cmd) {
-    auto* S = static_cast<AppState*>(App->userData);
-    switch (Cmd) {
-        case APP_CMD_INIT_WINDOW:
-            if (App->window != nullptr) {
-                S->Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
-                S->Ready = S->Renderer && S->Renderer->Init(App->window);
-                LOGI("Renderer init: %s", S->Ready ? "ok" : "failed");
-                if (S->Ready) {
-                    S->View.CreateResources(S->Renderer);
-                    // OS safe areas (#85 feedback): status bar above the HUD, nav bar
-                    // below the plates. dp values scaled by the device density — the
-                    // proper WindowInsets seam is the phase-2 window-metrics item.
-                    const float Dpx = static_cast<float>(AConfiguration_getDensity(App->config)) / 160.0f;
-                    S->View.SetInsets(28.0f * Dpx, 56.0f * Dpx);
-                }
-            }
-            break;
-        case APP_CMD_TERM_WINDOW:
-            if (S->Renderer != nullptr) S->Renderer->Shutdown();
-            S->Ready = false;
-            break;
-        default:
-            break;
-    }
+// The window and the Vulkan renderer are up (#43 section B: the engine did that part). What is
+// left is RPS's own: GPU resources and the safe-area insets.
+//
+// There is deliberately no OnSurfaceLost and no OnPause here. RPS has never handled APP_CMD_PAUSE,
+// and GameHost::OnBackground is a no-op without record sync, so wiring one in now would be a
+// behaviour change — what a match in flight should do when backgrounded is an open question, not a
+// cleanup. Leaving the callback unset says that out loud.
+void OnSurfaceReady(AppState& S) {
+    S.View.CreateResources(S.Plat.Renderer());
+    // OS safe areas (#85 feedback): status bar above the HUD, nav bar below the plates.
+    // dp values scaled by the device density — the proper WindowInsets seam is the
+    // phase-2 window-metrics item.
+    const float Dpx = S.Plat.DisplayDensity();
+    S.View.SetInsets(28.0f * Dpx, 56.0f * Dpx);
 }
 
 // Touch (#139/#140, mirror of the desktop HandlePeerInput): once a match is live (solo vs the AI,
@@ -362,12 +353,12 @@ void HandleCmd(android_app* App, int32_t Cmd) {
 // other drag pans the camera (design §9); a tap on a building's x1/x5 button queues units. Taps
 // still reach the HUD first (opponent selector + dev console). View/camera are glue-only; unit
 // input crosses to the sim via RouteLocalEvent (solo inbox / Lp inbox).
-int32_t HandleInput(android_app* App, AInputEvent* Event) {
-    auto* S = static_cast<AppState*>(App->userData);
-    if (S == nullptr || !S->Ready || App->window == nullptr) return 0;
-    if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return 0;
-    const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
-    const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
+bool HandleInput(AppState* S, AInputEvent* Event) {
+    // Readiness and a live window are the engine's precondition now — it drops events before they
+    // reach here. What remains is RPS's own filter.
+    if (AInputEvent_getType(Event) != AINPUT_EVENT_TYPE_MOTION) return false;
+    const float W = S->Plat.Width();
+    const float H = S->Plat.Height();
     const float X = AMotionEvent_getX(Event, 0);
     const float Y = AMotionEvent_getY(Event, 0);
     const int32_t Action = AMotionEvent_getAction(Event) & AMOTION_EVENT_ACTION_MASK;
@@ -406,7 +397,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             default:
                 break;  // extra fingers / cancel: consumed, but no gameplay side effect
         }
-        return 1;
+        return true;
     }
 #endif
 
@@ -454,11 +445,11 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 }
                 S->Cam.Begin(Y);
             }
-            return 1;
+            return true;
         }
         case AMOTION_EVENT_ACTION_POINTER_DOWN:  // a second finger landed
             S->DevGesture.PointersDown(static_cast<int>(Count), NowNs());
-            return 1;
+            return true;
         case AMOTION_EVENT_ACTION_MOVE:
             if (S->View.IsPlacing()) {
                 float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
@@ -467,9 +458,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             } else if (Count == 1) {
                 S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
             }
-            return 1;
+            return true;
         case AMOTION_EVENT_ACTION_POINTER_UP:
-            return 1;  // the whole gesture is decided at ACTION_UP (last finger up)
+            return true;  // the whole gesture is decided at ACTION_UP (last finger up)
         case AMOTION_EVENT_ACTION_UP: {
             // A placement in progress commits (valid drop -> Place event) or slides back.
             if (S->View.IsPlacing()) {
@@ -483,7 +474,7 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 }
                 S->View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
                 S->DevGesture.Cancel();        // a placement is not a console tap
-                return 1;
+                return true;
             }
             S->Cam.End();
 #if !LUR_SHIPPING
@@ -493,9 +484,9 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
             const bool WasTwoFinger = S->DevGesture.TwoFingerActive();
             if (S->DevGesture.LiftAndShouldOpen(NowNs())) {
                 S->View.SetDevOverlayOpen(true);
-                return 1;
+                return true;
             }
-            if (WasTwoFinger) return 1;   // a tap in the chain: do not also hit the HUD underneath
+            if (WasTwoFinger) return true;   // a tap in the chain: do not also hit the HUD underneath
 #endif
             const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
             if (Tap && !S->DevGesture.TwoFingerActive()) {
@@ -511,10 +502,10 @@ int32_t HandleInput(android_app* App, AInputEvent* Event) {
                 // (Per-building x1/x5 queue buttons now fire on ACTION_DOWN — see above — not here.)
             }
             S->DevGesture.Cancel();   // the gesture is over either way
-            return 1;
+            return true;
         }
         default:
-            return 0;
+            return false;
     }
 }
 
@@ -528,21 +519,23 @@ void android_main(android_app* App) {
     auto StateOwned = std::make_unique<AppState>();
     AppState& State = *StateOwned;
     LOGI("AppState heap-allocated: %zu bytes", sizeof(AppState));
-    App->userData = &State;
-    App->onAppCmd = HandleCmd;
-    App->onInputEvent = HandleInput;
 
-    // FIRST: give the engine logger a home, before anything can try to report a problem.
-    Lur::App::Platform::InstallLogSink();   // #43 section B: one sink per platform
+    // #43 section B: the NativeActivity ritual is the engine's — glue callbacks, the log sink (FIRST,
+    // before anything can try to report a problem), renderer create/init/teardown with the window,
+    // the looper drain, internalDataPath. Start() only WIRES; nothing below can fire until the first
+    // PumpEvents in the glue loop. No OnSurfaceLost/OnPause on purpose — see OnSurfaceReady above.
+    Lur::App::AndroidApp::Callbacks Cb;
+    Cb.OnSurfaceReady = [&State] { OnSurfaceReady(State); };
+    Cb.OnInput = [&State](AInputEvent* E) { return HandleInput(&State, E); };
+    State.Plat.Start(App, std::move(Cb));
 
-    const char* DataDir = App->activity != nullptr ? App->activity->internalDataPath : nullptr;
-    State.DataDir = DataDir != nullptr ? DataDir : ".";
+    State.DataDir = State.Plat.SaveDir();
     // #43: identity + the session lifecycle come from the engine now. RPS takes ONLY that half of
     // GameHost — no EnableRecordSync, because ScoreBook is not an ISaveState (it Loads/Saves itself
     // and never crosses the wire) and there is no per-opponent record to adopt or hijack-guard.
     {
         Lur::App::GameHost::Config HostCfg;
-        HostCfg.SaveDir = DataDir != nullptr ? DataDir : ".";
+        HostCfg.SaveDir = State.DataDir;
         HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
         HostCfg.Log = [](const char* M) { LOGI("%s", M); };
         State.Host.Init(HostCfg);
@@ -575,7 +568,7 @@ void android_main(android_app* App) {
     // Persisted dev-cvar overrides (per-game cvars.cfg). Load into the globals now
     // (before the sim thread's match-start Init latches them); route commits back to disk +
     // the peer sync via the GameView hook. Dev-only.
-    State.CvarsPath = std::string(DataDir != nullptr ? DataDir : ".") + "/rps-cvars.cfg";
+    State.CvarsPath = State.DataDir + "/rps-cvars.cfg";
 #if LUR_INTERNAL
     if (const int N = Lur::Core::LoadCVarConfig(State.CvarsPath.c_str()); N > 0)
         LOGI("loaded %d persisted cvar override(s) from %s", N, State.CvarsPath.c_str());
@@ -1206,31 +1199,27 @@ void android_main(android_app* App) {
     char ConsolePropLast[PROP_VALUE_MAX] = {};   // last value seen, so we act on CHANGES only
     bool ConsolePropSeeded = false;              // first read is a baseline, never an action
 #endif
-    while (!App->destroyRequested) {
+    while (State.Plat.IsRunning()) {
         // WAIT-EARLY, SAMPLE-LATE: spend the GPU fence-wait idle up front, BEFORE polling
         // input, so the touch we render is the freshest possible for this present (cuts
         // ~1 frame of scroll/touch latency — the wait no longer sits between input & draw).
-        if (State.Ready && State.Renderer != nullptr) {
+        // This ordering is why the engine's entry point does NOT own the loop: chess's cadence
+        // is a different one, arrived at by its own measurements.
+        if (State.Plat.IsReady()) {
             LUR_TRACE_SCOPE("gpu.wait");
-            State.Renderer->WaitForFrame();
+            State.Plat.Renderer()->WaitForFrame();
         }
 
-        int Events = 0;
-        android_poll_source* Source = nullptr;
-        while (ALooper_pollOnce(State.Ready ? 0 : -1, nullptr, &Events,
-                                reinterpret_cast<void**>(&Source)) >= 0) {
-            if (Source != nullptr) Source->process(App, Source);
-            if (App->destroyRequested) break;
-        }
+        State.Plat.PumpEvents();
 
-        if (State.Ready && App->window != nullptr) {
+        if (State.Plat.IsReady()) {
             LUR_TRACE_SCOPE("frame.render");
             const auto Now = std::chrono::steady_clock::now();
             const float DtSec =
                 std::chrono::duration_cast<std::chrono::nanoseconds>(Now - FramePrev).count() / 1.0e9f;
             FramePrev = Now;
-            const float W = static_cast<float>(ANativeWindow_getWidth(App->window));
-            const float H = static_cast<float>(ANativeWindow_getHeight(App->window));
+            const float W = State.Plat.Width();
+            const float H = State.Plat.Height();
 
 #if LUR_AGENT
             // ASSISTANT-ONLY hook: `adb shell setprop debug.lur.console 1` opens the CVar console, 0
@@ -1341,7 +1330,7 @@ void android_main(android_app* App) {
                     Pend,
                     static_cast<float>(State.PendingCampX.load(std::memory_order_relaxed)) / FixedOne,
                     static_cast<float>(State.PendingCampY.load(std::memory_order_relaxed)) / FixedOne);
-                State.View.Render(State.Renderer, State.Snap, State.Snap.AlphaAt(NowNs()), State.Cam.Y, W, H,
+                State.View.Render(State.Plat.Renderer(), State.Snap, State.Snap.AlphaAt(NowNs()), State.Cam.Y, W, H,
                                   State.LinkedTeam.load(std::memory_order_relaxed) == 1, DtSec);
             }
             // #185: touch sample -> this frame handed to the presentation engine. Bounds our share
@@ -1354,12 +1343,13 @@ void android_main(android_app* App) {
                 LUR_TRACE_LATENCY("input.toPresent", State.PendingTouchNs);
                 State.PendingTouchNs = 0;
             }
-            State.PresentedFrames.store(State.Renderer != nullptr ? State.Renderer->PresentedFrames() : 0u,
-                                        std::memory_order_relaxed);
+            State.PresentedFrames.store(
+                State.Plat.Renderer() != nullptr ? State.Plat.Renderer()->PresentedFrames() : 0u,
+                std::memory_order_relaxed);
         }
     }
 
     State.SimRunning.store(false, std::memory_order_release);  // stop + join the sim thread first
     if (SimThread.joinable()) SimThread.join();
-    if (State.Renderer != nullptr) State.Renderer->Shutdown();
+    State.Plat.Shutdown();
 }

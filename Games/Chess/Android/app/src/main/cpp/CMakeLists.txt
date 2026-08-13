@@ -36,7 +36,11 @@ add_library(onlychess SHARED
     ${LUR_ROOT}/Modules/Transport/Platform/Android/BleTransport.cpp
     # #43 section B: the engine log sink, written once per platform. Same reason it lives in the
     # app TARGET: it needs <android/log.h> and the app's LUR_LOG_TAG.
-    ${LUR_ROOT}/Modules/App/Platform/Android/AppPlatform.cpp)
+    ${LUR_ROOT}/Modules/App/Platform/Android/AppPlatform.cpp
+    # #43 section B: the NativeActivity entry-point ceremony (glue callbacks, window/renderer
+    # lifecycle, the looper drain, internalDataPath). App target for the same reason again — it
+    # needs the NDK's native_app_glue, which only an app build has.
+    ${LUR_ROOT}/Modules/App/Platform/Android/AndroidApp.cpp)
 
 target_link_libraries(onlychess
     native_app_glue
