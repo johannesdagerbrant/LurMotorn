@@ -47,8 +47,18 @@ Thumbs.db
 # Transient build logs from scripts/
 scripts/*.log
 
-# Downloaded build artifacts (e.g. the sideloadable .ipa)
+# Downloaded build artifacts (e.g. the sideloadable .ipa).
+# ANCHORED and UNANCHORED both, on purpose: `/dist/` alone let a 1.8 MB .ipa be committed at
+# Games/Chess/Android/dist/ on 2026-08-12, because `gh run download -D dist` inherited a shell
+# cwd left behind by a `cd … /Android && ./gradlew` a few commands earlier. The download lands
+# wherever the shell happens to be, so the ignore has to hold wherever that is.
 /dist/
+dist/
+# Belt and braces: no signed/unsigned app package belongs in the tree at all, least of all an
+# AGENT build (LUR_AGENT artifacts must never sit next to a player one — see CLAUDE.md).
+*.ipa
+*.apk
+*.aab
 
 # Offline cook tools downloaded on demand (e.g. msdf-atlas-gen by scripts/gen-font.ps1)
 # — NOT committed; sanctioned build-time tools, never linked into the app. (Was /tools/,
