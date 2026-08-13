@@ -32,6 +32,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/App/GameHost.h"     // #43: engine-owned identity + session lifecycle
+#include "Lur/App/IosApp.h"        // #43 section B: the shared entry point + Metal view + delegate
 #include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
 #include "Lur/App/Platform.h"     // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/Save/Store.h"
@@ -110,19 +111,8 @@ LUR_CVAR_RANGE(CvRenderScale, "rps.dev.render_scale", Rps::F(1), Rps::F(1, 4), R
                "iOS render-resolution multiplier (1.0 = native retina; lower = cheaper fill). #103 A/B");
 }  // namespace
 
-// A Metal-backed view: its backing layer is a CAMetalLayer, which MoltenVK turns into
-// a Vulkan surface.
-@interface RpsView : UIView
-@end
-@implementation RpsView
-+ (Class)layerClass { return [CAMetalLayer class]; }
-@end
-
-// Declared ahead of the view controller: the #73 reattach hands the delegate a fresh
-// UIWindow (the old one may be bound to a dead window-server surface).
-@interface RpsAppDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic, strong) UIWindow* window;
-@end
+// #43 section B: the Metal-backed view (LurMetalView) and the app delegate are the engine's now —
+// both games had declared their own, identical apart from the class name.
 
 @interface RpsViewController : UIViewController
 // #183: declared so the C pthread trampoline below can message it (the render thread runs on a raw
@@ -299,7 +289,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 }
 
 - (void)loadView {
-    self.view = [[RpsView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view = [[LurMetalView alloc] initWithFrame:UIScreen.mainScreen.bounds];
 }
 - (CAMetalLayer*)metalLayer { return (CAMetalLayer*)self.view.layer; }
 
@@ -693,7 +683,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // method returns. Released on the render thread's _ReinitDone ack (in lifecycleTick), on MAIN, so the
     // UIView still deallocs on the main thread. Grabbed BEFORE the rebuild, which reassigns self.view.
     UIView* Retiring = self.view;
-    RpsView* NewView = (RpsView*)LurRebuildViewHost(self, RpsView.class);
+    LurMetalView* NewView = (LurMetalView*)LurRebuildViewHost(self, LurMetalView.class);
     if (NewView == nil) {  // no connected scene yet — un-park and let the tick retry
         _RenderPauseReq.store(false, std::memory_order_release);
         return;
@@ -1516,25 +1506,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 }
 @end
 
-@implementation RpsAppDelegate
-- (BOOL)application:(UIApplication*)application didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
-    self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-    self.window.rootViewController = [[RpsViewController alloc] init];
-    [self.window makeKeyAndVisible];
-    return YES;
-}
-@end
-
+// #43 section B: the delegate, the autorelease pool, UIApplicationMain and the #103 MoltenVK
+// pre-instance setting all live in LurIosMain now. The setting moved VERBATIM — including the
+// reasoning that it is safe only because the shared backend pipelines with per-slot fences — and
+// chess picks it up by adopting the same entry point, which it never had.
 int main(int argc, char* argv[]) {
-    // #103: let vkQueueSubmit return WITHOUT blocking on Metal command-buffer scheduling. MoltenVK
-    // defaults this ON, so every submit stalled a full vsync in nextDrawable (measured es.submit
-    // ~16ms) — the CPU could never run ahead even with 2 frames in flight. Turning it off is safe
-    // ONLY because the backend now pipelines N frames with per-slot fences + per-image semaphores
-    // (VulkanBackend.cpp), which order the GPU work that async submit no longer serializes. Set here,
-    // before UIApplicationMain, so it lands before the first vkCreateInstance. Env-var form (not the
-    // vk_mvk_moltenvk API) keeps the shared backend free of MoltenVK headers.
-    setenv("MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS", "0", /*overwrite*/ 1);
-    @autoreleasepool {
-        return UIApplicationMain(argc, argv, nil, NSStringFromClass([RpsAppDelegate class]));
-    }
+    return LurIosMain(argc, argv, [RpsViewController class]);
 }

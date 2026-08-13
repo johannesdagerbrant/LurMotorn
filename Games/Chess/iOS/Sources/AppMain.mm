@@ -23,6 +23,7 @@
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
+#include "Lur/App/IosApp.h"      // #43 section B: the shared entry point + Metal view + delegate
 #include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
 #include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/Save/Store.h"
@@ -31,24 +32,13 @@
 #include "Lur/Transport/Ble.h"
 #include "Lur/Transport/Transport.h"
 
-// A Metal-backed view: its backing layer is a CAMetalLayer, which MoltenVK turns
-// into a Vulkan surface.
-@interface OnlyChessView : UIView
-@end
-@implementation OnlyChessView
-+ (Class)layerClass { return [CAMetalLayer class]; }
-@end
-
 // The audio device's realtime callback: forward straight to the mixer. Wait-free.
 static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     static_cast<Lur::Audio::Mixer*>(User)->Render(Out, Frames);
 }
 
-// Declared ahead of the view controller: the #73 reattach hands the delegate a fresh
-// UIWindow (the old one may be bound to a dead window-server surface).
-@interface OnlyChessAppDelegate : UIResponder <UIApplicationDelegate>
-@property(nonatomic, strong) UIWindow* window;
-@end
+// #43 section B: the Metal-backed view (LurMetalView) and the app delegate are the engine's now —
+// both games had declared their own, identical apart from the class name.
 
 @interface OnlyChessViewController : UIViewController
 @end
@@ -102,7 +92,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 }
 
 - (void)loadView {
-    self.view = [[OnlyChessView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    self.view = [[LurMetalView alloc] initWithFrame:UIScreen.mainScreen.bounds];
 }
 
 - (CAMetalLayer*)metalLayer {
@@ -452,7 +442,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // What stays here is the part the two games genuinely disagree on: chess owns its
 // renderer on the main thread, so it can tear down and re-init inline.
 - (void)reattachForActivation {
-    UIView* NewView = LurRebuildViewHost(self, OnlyChessView.class);
+    UIView* NewView = LurRebuildViewHost(self, LurMetalView.class);
     if (NewView == nil) return;  // no connected scene yet — the render loop retries
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
 
@@ -524,21 +514,10 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 
 @end
 
-@implementation OnlyChessAppDelegate
-
-- (BOOL)application:(UIApplication*)application
-    didFinishLaunchingWithOptions:(NSDictionary*)launchOptions {
-    self.window = [[UIWindow alloc] initWithFrame:[[UIScreen mainScreen] bounds]];
-    self.window.rootViewController = [[OnlyChessViewController alloc] init];
-    [self.window makeKeyAndVisible];
-    return YES;
-}
-
-@end
-
+// #43 section B: the delegate, the autorelease pool, UIApplicationMain and the MoltenVK
+// pre-instance configuration all live in LurIosMain. Chess never set
+// MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 (RPS learned it in #103); adopting the shared entry point
+// is what gives it that, and it is the one behaviour change here — see IosApp.mm.
 int main(int argc, char* argv[]) {
-    @autoreleasepool {
-        return UIApplicationMain(argc, argv, nil,
-                                 NSStringFromClass([OnlyChessAppDelegate class]));
-    }
+    return LurIosMain(argc, argv, [OnlyChessViewController class]);
 }

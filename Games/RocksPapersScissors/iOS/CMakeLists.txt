@@ -42,7 +42,10 @@ add_executable(OnlyRps MACOSX_BUNDLE
     # #43 section B: engine log sink + the MoltenVK stdio guard, written once per platform.
     ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
     # #43 section B: the shared UIKit half of the #73 reattach heal.
-    ${LUR_ROOT}/Modules/App/Platform/Ios/IosViewHost.mm)
+    ${LUR_ROOT}/Modules/App/Platform/Ios/IosViewHost.mm
+    # #43 section B: the entry point itself — LurMetalView, the app delegate, and the main()
+    # that configures MoltenVK before the first vkCreateInstance.
+    ${LUR_ROOT}/Modules/App/Platform/Ios/IosApp.mm)
 
 target_include_directories(OnlyRps PRIVATE ${MVK_INCLUDE})
 
@@ -89,6 +92,7 @@ set_source_files_properties(
     ${LUR_ROOT}/Modules/Transport/Platform/Ios/BleTransport.mm
     ${LUR_ROOT}/Modules/App/Platform/Ios/AppPlatform.mm
     ${LUR_ROOT}/Modules/App/Platform/Ios/IosViewHost.mm
+    ${LUR_ROOT}/Modules/App/Platform/Ios/IosApp.mm
     PROPERTIES COMPILE_FLAGS "-fobjc-arc")
 
 target_link_libraries(OnlyRps PRIVATE
