@@ -47,6 +47,12 @@ Thumbs.db
 # Transient build logs from scripts/
 scripts/*.log
 
+# Device log captures. `ios.txt` is the filename CLAUDE.md's iOS recipe writes to
+# (`pymobiledevice3 syslog live -pn <proc> -o ios.txt`), so it reappears at the repo root every
+# time anyone debugs the iPhone — unanchored, since the capture lands wherever the shell is.
+# It is a throwaway snapshot of one session, never evidence anyone should read from the tree.
+ios.txt
+
 # Downloaded build artifacts (e.g. the sideloadable .ipa).
 # ANCHORED and UNANCHORED both, on purpose: `/dist/` alone let a 1.8 MB .ipa be committed at
 # Games/Chess/Android/dist/ on 2026-08-12, because `gh run download -D dist` inherited a shell
