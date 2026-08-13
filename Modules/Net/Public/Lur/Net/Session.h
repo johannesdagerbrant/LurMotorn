@@ -265,6 +265,13 @@ private:
     void SendKeepalive();
     void OnDatagram(const uint8_t* Data, std::size_t Size);
     void OnHello(const uint8_t* Payload, std::size_t Size);
+
+    // Arm the #71 resync gate — UNLESS the peer's Sync has already landed on this link, in which
+    // case the reconciliation the gate waits for has happened and holding moves only stalls the
+    // game (#205). One function because both arming sites — going Ready, and the reconnect edge —
+    // are reachable with a Sync already in hand, and the two must not drift apart. `Why` names the
+    // occasion for the log.
+    void ArmResyncGate(const char* Why);
     void Logf(const char* Fmt, ...);
 
     // One past the HIGHEST enumerator. This must cover every EMsgType: the value indexes the
@@ -339,6 +346,11 @@ private:
     bool     PrevConnected      = false;  // edge-detect reconnects for the resync hook
     bool     AwaitingResync     = false;  // hold moves until the link-time Sync lands (#71)
     uint64_t ResyncWaitNs       = 0;      // ns spent awaiting the peer's Sync (fallback timeout)
+    // #205: has the peer's Sync already landed on THIS link? The gate is armed when we go Ready,
+    // but the peer sends on ITS adopt and our Ready waits for its next ~500ms Hello — so the Sync
+    // routinely arrives FIRST, and arming then waits for something that already happened. Cleared
+    // whenever the transport is seen disconnected, so a genuine reconnect still gates.
+    bool     SyncSinceLink      = false;
     uint64_t LastPeerHash       = 0;      // peer's previous keepalive hash (#72 desync detect)
     bool     HavePeerHash       = false;  // have we seen a peer keepalive hash yet?
 

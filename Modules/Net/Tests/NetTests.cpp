@@ -467,6 +467,54 @@ static void TestResyncGateTimeoutFallback() {
     CHECK(!S.IsAwaitingResync());                // fallback lifted the gate
 }
 
+// #205: the peer's Sync can arrive BEFORE we go Ready, and routinely does. The peer sends on ITS
+// adopt, while our Ready waits for its next Hello (~500 ms cadence) — measured at 436 ms apart on
+// hardware 2026-08-13. The gate used to be armed unconditionally at Ready, i.e. for a
+// reconciliation that had already been applied, so it rode out the full 3 s fallback and the board
+// sat dead at the start of every session where the peer was already up (the normal case: one phone
+// always launches first).
+//
+// This is the ordering the two tests above never covered — they both deliver Hello first — which is
+// exactly how it survived.
+static void TestSyncBeforeReadyDoesNotArmTheGate() {
+    SilentTransport T; Session S;
+    S.Start(&T, Guid('a'));
+    const uint8_t Sync[2] = { static_cast<uint8_t>(EMsgType::Sync), 0x00 };
+    T.Deliver(Sync, sizeof(Sync));               // peer's record lands FIRST
+    CHECK(!S.IsReady());
+    uint8_t H[35]; MakeHello(H, 'b', /*ready*/ true);
+    T.Deliver(H, sizeof(H));                     // ...and only now do we go Ready
+    CHECK(S.IsReady());
+    CHECK(!S.IsAwaitingResync());                // reconciled already: nothing to wait for
+    // And it must be enabled IMMEDIATELY, not merely by the fallback: one tick is nowhere near the
+    // 3 s timeout, so a gate that were still armed here would fail the check above and this one
+    // guards against a future change that "fixes" it by shortening the timeout instead.
+    S.Tick(FrameNs);
+    CHECK(!S.IsAwaitingResync());
+}
+
+// The latch is per-LINK, not per-session: a genuine reconnect must still gate, because the state
+// may have moved on either side while the link was down. Without this, the #205 fix would quietly
+// disable the #71 gate for the rest of the process.
+static void TestReconnectStillGatesAfterAnEarlySync() {
+    SilentTransport T; Session S;
+    S.Start(&T, Guid('a'));
+    const uint8_t Sync[2] = { static_cast<uint8_t>(EMsgType::Sync), 0x00 };
+    T.Deliver(Sync, sizeof(Sync));
+    uint8_t H[35]; MakeHello(H, 'b', true);
+    T.Deliver(H, sizeof(H));
+    CHECK(S.IsReady());
+    CHECK(!S.IsAwaitingResync());                // #205 path, as above
+
+    T.Connected = false;                         // the link drops...
+    S.Tick(FrameNs);
+    T.Connected = true;                          // ...and comes back
+    S.Tick(FrameNs);
+    CHECK(S.IsAwaitingResync());                 // the NEW link owes us a NEW Sync
+    T.Deliver(Sync, sizeof(Sync));
+    CHECK(!S.IsAwaitingResync());                // which lifts it
+}
+
 // --- issue #72: mid-game desync detection + resync recovery --------------------------
 
 // A keepalive carries the sender's state hash; a mismatch means the boards diverged on a
@@ -548,6 +596,8 @@ int main() {
     TestOversizedFramedSendRefused();
     TestResyncGateHoldsThenLiftsOnSync();
     TestResyncGateTimeoutFallback();
+    TestSyncBeforeReadyDoesNotArmTheGate();          // #205: Sync beats Ready — don't gate
+    TestReconnectStillGatesAfterAnEarlySync();       // #205: ...but a real reconnect still does
     TestKeepaliveHashMismatchTriggersResync();
 
     if (GFailures == 0) {

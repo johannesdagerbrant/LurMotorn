@@ -45,13 +45,20 @@ void Session::Tick(uint64_t ElapsedNs) {
     // Also arm the resync gate: hold moves until the peer's Sync reconciles boards (#71).
     if (Ready && Connected && !PrevConnected) {
         Logf("reconnected — requesting resync");
-        AwaitingResync = true; ResyncWaitNs = 0;
+        ArmResyncGate("reconnected");
         if (ResyncHandler) ResyncHandler();
     }
     PrevConnected = Connected;
 
-    if (Connected) EverConnected = true;  // latch, so a later drop reads as Disconnected
-    else AwaitingResync = false;          // offline: not awaiting a resync (offline moves ok, #19)
+    if (Connected) {
+        EverConnected = true;  // latch, so a later drop reads as Disconnected
+    } else {
+        AwaitingResync = false;  // offline: not awaiting a resync (offline moves ok, #19)
+        // #205: a new link owes us a NEW Sync. Clearing here — on the observed disconnect rather
+        // than on the reconnect edge — is what keeps a genuine reconnect gated, and it is why the
+        // latch cannot simply be "have we ever seen a Sync".
+        SyncSinceLink = false;
+    }
 
     if (Ready && Connected) {
         // Resync-gate fallback: if the peer's Sync never arrives, stop blocking moves
@@ -232,12 +239,36 @@ void Session::OnDatagram(const uint8_t* Data, std::size_t Size) {
     Logf("recv msg type=%u size=%zu", static_cast<unsigned>(Data[0]), PayloadSize);
     // The peer's link-time Sync reconciles both boards: lift the resync gate so live
     // moves may flow again (#71). The handler below applies the reconciling payload.
-    if (Type == EMsgType::Sync && AwaitingResync) {
-        AwaitingResync = false;
-        Logf("resync received — moves enabled");
+    if (Type == EMsgType::Sync) {
+        // #205: remember it EVEN IF the gate isn't armed yet. This is the whole fix — the Sync
+        // routinely beats our own Ready, and without this latch the gate is armed a moment later
+        // for a reconciliation that has already been applied, then rides out the 3s fallback.
+        //
+        // The handler dispatch below runs regardless of Ready, and SyncManager::OnSync merges into
+        // the live state independently of the peer key (its OnLink documents the reconciliation as
+        // order-independent and monotonic), so "reconciled" is true at this point whether or not we
+        // are Ready — which is what makes skipping the gate correct rather than merely convenient.
+        SyncSinceLink = true;
+        if (AwaitingResync) {
+            AwaitingResync = false;
+            Logf("resync received — moves enabled");
+        }
     }
     const int Idx = static_cast<int>(Type);
     if (Idx >= 0 && Idx < MaxMsgTypes && Handlers[Idx]) Handlers[Idx](Payload, PayloadSize);
+}
+
+// See the header. The gate exists to stop a move being decoded against an unreconciled board
+// (#71); when the peer's Sync has already landed, the board IS reconciled, and gating buys nothing
+// but a dead board for the length of the fallback.
+void Session::ArmResyncGate(const char* Why) {
+    if (SyncSinceLink) {
+        AwaitingResync = false;
+        Logf("%s — the peer's Sync already landed, moves stay enabled", Why);
+        return;
+    }
+    AwaitingResync = true;
+    ResyncWaitNs = 0;
 }
 
 void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
@@ -266,7 +297,7 @@ void Session::OnHello(const uint8_t* Payload, std::size_t Size) {
     }
 
     Ready = true;
-    AwaitingResync = true; ResyncWaitNs = 0;  // hold moves until the peer's Sync lands (#71)
+    ArmResyncGate("READY");  // hold moves until the peer's Sync lands (#71) — unless it already did
     // Latch the connected state as ALREADY SEEN, so Tick's reconnect edge below cannot mistake this
     // handshake for a link coming back. Tick drains the inbox first (#40), so we may be running
     // inside the very tick that will go on to evaluate `Ready && Connected && !PrevConnected` — and
