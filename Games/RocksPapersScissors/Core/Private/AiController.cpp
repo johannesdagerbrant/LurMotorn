@@ -460,6 +460,143 @@ bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
     return false;
 }
 
+// The deposit OUR OWN CARTS ARE ALREADY WORKING that most needs another drop-off. This is where a
+// camp goes once AiBestMineTarget has nothing left to CLAIM — which, in a real match, is most of
+// them (owner's note 2026-08-14: "spawn mine camps at the gold rows its carts is mining from").
+//
+// Read out of his 2026-08-13/14 recordings of wins over hard. In a typical match hard placed 17
+// camps: the first five were ring-placed against its two starter rows (y=225..230, gold at
+// y=235/239) and the other TWELVE landed exactly on the AiPlaceSpot ladder — 224, 221, 218, 215,
+// 212, 206, 203, 200 — marching steadily into empty ground while every cart it owned still worked
+// the rows behind them. His own camps sat at y=9..28 against gold at y=1/5, and the moment his
+// frontier reached the y=60 row he opened a LINE of five more at y=54..56, right on it.
+//
+// Why the lattice is the wrong answer but "place fewer camps" is a WORSE one — measured, 12 matches
+// vs OwnerBot, and it is the whole reason this function exists rather than a refusal:
+//
+//     lattice fallback (old)      owner 0 : 12 hard    ai wrk 654, bld 20
+//     refuse to place at all      owner 12 : 0 hard    ai wrk  10, bld 10
+//
+// Production is FLAT PER BUILDING (#132), so a mining camp is not just a drop-off — it is the cart
+// FACTORY, and camp count IS economic throughput. Capping camps at one per unclaimed deposit capped
+// cart production and the economy collapsed outright. So keep placing as many camps as the tier
+// wants; only fix WHERE they land. A camp beside a deposit its carts already work shortens every one
+// of those round trips (carts deposit at the nearest own camp, Sim §12.4) instead of lengthening
+// them, and it still adds its full share of production.
+//
+// Scored carts x haul: the total travel a new drop-off there would save per cycle, which is the
+// quantity actually being minimised. A deposit no cart visits scores zero and is skipped — this
+// never invents an expansion, that is AiBestMineTarget's job. Strict > keeps the lowest index on a
+// tie, and everything is integer world units, so the choice is deterministic and hash-safe.
+bool AiWorkedMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
+    const Fixed Limit = Team == 0 ? S.FrontierT0 : S.FrontierT1;
+    // Carts per deposit. A miner's Target IS its mine index for the whole cycle (WorkerSeek clears it
+    // only on deposit), so this counts the carts committed to each one, not merely those stood on it.
+    int32_t Carts[NumMines] = {};
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || S.IsBuilding(I)) continue;
+        if (S.Team[I] != Team || S.Type[I] != UnitMiner) continue;
+        const int32_t M = S.Target[I];
+        if (M >= 0 && M < NumMines) ++Carts[M];
+    }
+    // Bounded like AiBestMineTarget: a deposit whose neighbourhood is full (its near ring is already
+    // camps) is struck off and the next-best tried, rather than costing one ring search per deposit.
+    constexpr int32_t MaxTries = 8;
+    uint64_t Tried = 0;
+    for (int32_t Try = 0; Try < MaxTries; ++Try) {
+        int32_t Best = -1;
+        int64_t BestScore = 0;
+        for (int32_t M = 0; M < NumMines; ++M) {
+            if (S.MineGold[M] <= 0 || Carts[M] <= 0) continue;
+            if ((Tried >> M) & 1ull) continue;
+            // Outside our buildable depth the placement can only ever be refused.
+            if (Team == 0 ? S.MineY[M] > Limit : S.MineY[M] < Limit) continue;
+            // Current haul: Chebyshev to the nearest own camp — the trip this deposit's carts make
+            // today, and the trip a camp here would shorten. Chebyshev to match the grid/steering.
+            int32_t Haul = -1;
+            for (int32_t B = 0; B < S.Count; ++B) {
+                if (!S.IsAlive(B) || !S.IsBuilding(B) || S.Team[B] != Team) continue;
+                if (S.Type[B] != UnitMiner || S.IsHomeBase(B)) continue;
+                const int32_t Ddx = (S.PosX[B] - S.MineX[M]).ToInt();
+                const int32_t Ddy = (S.PosY[B] - S.MineY[M]).ToInt();
+                const int32_t Adx = Ddx < 0 ? -Ddx : Ddx, Ady = Ddy < 0 ? -Ddy : Ddy;
+                const int32_t D = Adx > Ady ? Adx : Ady;
+                if (Haul < 0 || D < Haul) Haul = D;
+            }
+            if (Haul <= 0) continue;   // no camp at all yet (the opening path owns that case)
+            const int64_t Score = static_cast<int64_t>(Carts[M]) * Haul;
+            if (Score > BestScore) { BestScore = Score; Best = M; }
+        }
+        if (Best < 0) return false;
+        Fixed Px, Py;
+        if (AiPlaceNear(S, Team, UnitMiner, S.MineX[Best], S.MineY[Best], Px, Py)) {
+            OX = S.MineX[Best];
+            OY = S.MineY[Best];
+            return true;
+        }
+        Tried |= 1ull << Best;
+    }
+    return false;
+}
+
+// LAST RESORT FOR A CAMP: the legal spot NEAREST LIVE ORE, rather than the first one a sweep hits.
+//
+// Same candidate set as AiPlaceSpot — identical passes, steps and bounds, so it can only ever choose
+// ground AiPlaceSpot would also have accepted — but it keeps the best instead of returning early.
+// That difference is the whole point. AiPlaceSpot sweeps in rows marching AWAY from the baseline and
+// takes the first hit, so once the band around the worked rows is legally full (clearance plus
+// footprint saturates it at ~7 camps) every later camp lands further out than the one before, in a
+// straight line away from the gold. Traced on a mirror Hard match: camps at y=21, 25, 25, 28, 31, 34,
+// 37, 37, 40, 43 against ore at y=1/5 — nearest-live-deposit distance climbing 16, 20, 20, 23, 26.
+//
+// It cannot fix the real ceiling, which is the FRONTIER: the same trace sat at frontier=40 for the
+// whole match, so the y=60 row was never buildable and there was genuinely no ore-adjacent ground
+// left. What it can do is stop the AI from choosing the WORST of the legal spots — and when the
+// frontier does roll forward onto a new row, the nearest-ore rule puts the next camp on that row
+// immediately instead of crawling to it three units per placement.
+//
+// Ties keep the first candidate in sweep order, so the choice stays deterministic and hash-safe.
+bool AiPlaceNearestOre(const Sim& S, uint8_t Team, uint8_t Type, Fixed& OX, Fixed& OY) {
+    const int32_t Fp = S.Cv.BuildingFootprint.ToInt();
+    const int32_t Edge = (3 * Fp + 1) / 2;
+    const int32_t Dir = Team == 0 ? 1 : -1;
+    const int32_t MaxX = WorldWidth.ToInt() - Edge;
+    bool Found = false;
+    int32_t BestD = 0;
+    for (int32_t Pass = 0; Pass < 2; ++Pass) {
+        const int32_t XStart = Pass == 0 ? 2 * Fp + 2 : Edge;
+        const int32_t XStep = Pass == 0 ? 2 * Fp : 2;
+        const int32_t RowStep = Pass == 0 ? Fp + 1 : 2;
+        const int32_t Base = Team == 0 ? (Pass == 0 ? Fp + 2 : Edge)
+                                       : WorldHeight.ToInt() - (Pass == 0 ? Fp + 2 : Edge);
+        const int32_t Rows = Pass == 0 ? (S.Cv.InitialFrontier.ToInt() + 21) / RowStep
+                                       : WorldHeight.ToInt() / RowStep + 2;
+        for (int32_t R = 0; R < Rows; ++R) {
+            const int32_t Y = Base + Dir * R * RowStep;
+            if (Y < 0 || Y > WorldHeight.ToInt()) break;
+            for (int32_t X = XStart; X <= MaxX; X += XStep) {
+                if (!S.CanPlaceBuilding(Team, Type, F(X), F(Y))) continue;
+                int32_t D = -1;
+                for (int32_t M = 0; M < NumMines; ++M) {
+                    if (S.MineGold[M] <= 0) continue;
+                    const int32_t Ddx = X - S.MineX[M].ToInt();
+                    const int32_t Ddy = Y - S.MineY[M].ToInt();
+                    const int32_t Adx = Ddx < 0 ? -Ddx : Ddx, Ady = Ddy < 0 ? -Ddy : Ddy;
+                    const int32_t C = Adx > Ady ? Adx : Ady;
+                    if (D < 0 || C < D) D = C;
+                }
+                if (D < 0) return false;                 // no live ore anywhere: nothing to be near
+                if (!Found || D < BestD) { Found = true; BestD = D; OX = F(X); OY = F(Y); }
+            }
+        }
+        // Pass 2 exists only to rescue a map where pass 1 finds nothing at all (AiPlaceSpot's note);
+        // running it as well when pass 1 succeeded would widen the candidate set that the measured
+        // layout depends on, so stop as soon as a pass has produced a spot.
+        if (Found) break;
+    }
+    return Found;
+}
+
 // Where to build for the fight: JUST BEHIND our own leading edge, on the flank the enemy army is
 // coming down. Not at the enemy's centroid — aiming there plants buildings inside their army and
 // they are razed as fast as they go up (measured: the AI's building count fell over a match instead
@@ -791,6 +928,20 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // build a single soldier against an early rush, which is a much worse failure.
     const int32_t EconFloor = (PeakMiners_ < K.WorkerTarget ? PeakMiners_ : K.WorkerTarget) *
                               S.Cv.AiEconFloorPct / 100;
+    // A CART IS ONLY WORTH BUYING WHILE THERE IS GOLD TO DIG. Mines are finite (#84), so a match
+    // runs out of ore long before it runs out of time — and every knob that asks for miners
+    // (WorkerTarget, OpenWorkers, the EconFloor rebuy) is a COUNT, blind to whether there is
+    // anything left to count against. Once the map is dug out those knobs keep buying carts that
+    // walk to nothing, out of the same purse the army is fought with. The owner's recordings show
+    // the tail of it plainly: the AI carried 500+ carts into the endgame against ~250 of his, and
+    // the surplus bought him the match rather than it.
+    //
+    // Checked EVERY tick and not latched: it can only ever flip live->dead (mines never refill), so
+    // there is no flapping to guard against, and reading it fresh means a razed-then-rebuilt economy
+    // still gets the right answer. Cheap — NumMines is 48, against the O(units) scan just above.
+    bool GoldLeft = false;
+    for (int32_t M = 0; M < NumMines && !GoldLeft; ++M)
+        if (S.MineGold[M] > 0) GoldLeft = true;
     uint8_t Want = UnitMiner;
     switch (State_) {
         case EState::Opening: Want = UnitMiner; break;
@@ -833,6 +984,12 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             break;
         }
     }
+    // ...and with the map dug out, every "I want a miner" above becomes "I want a soldier". Applied
+    // once, here, rather than inside each of the four states: the states disagree about WHY they
+    // want a cart, but none of them has a reason that survives there being no ore. Soldier is always
+    // a legal want — the placement code below falls through to queueing units when it cannot place —
+    // so this can never deadlock the tier the way an outright "produce nothing" would.
+    if (!GoldLeft && Want == UnitMiner) Want = Soldier;
 
     // --- Translate the desired unit type into building EVENTS (#137). ---
     if (Cap < 1) return;
@@ -852,6 +1009,9 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     for (int32_t J = 0; J < S.Count; ++J)
         if (S.IsAlive(J) && S.IsBuilding(J) && !S.IsHomeBase(J) && S.Team[J] == MyTeam_)
             ++MyBuildings;
+    // Top rung only, like the mix knobs: the lower rungs' ordering was measured with the home-lattice
+    // camp fallback live. Read once here, used by both placement sites below.
+    const bool CampOnGold = S.Cv.AiCampOnGold != 0 && Tier_ == EAiTier::Hard;
 
     // 1b. BUILD CLUSTER (player strategy, adopted). A standing intent to finish several buildings of
     // ONE type before queueing anything at them — one placement per tick, never several, so the
@@ -877,6 +1037,12 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
                 AiFrontTarget(S, MyTeam_, Tx, Ty);
                 Have = AiPlaceNear(S, MyTeam_, ClusterType_, Tx, Ty, X, Y);
             }
+            // Same on-gold rule as the main placement below — clusters are combat-only in practice
+            // (the commit sets ClusterType_ only for Want != UnitMiner), so this is here to keep the
+            // two placement sites saying the same thing rather than because it fires.
+            if (!Have && CampOnGold && ClusterType_ == UnitMiner &&
+                AiWorkedMineTarget(S, MyTeam_, Tx, Ty))
+                Have = AiPlaceNear(S, MyTeam_, ClusterType_, Tx, Ty, X, Y);
             if (!Have) Have = AiPlaceSpot(S, MyTeam_, ClusterType_, X, Y);
             if (Have) {
                 Out[Count++] = InputEvent::Place(MyTeam_, ClusterType_, X, Y);
@@ -1005,6 +1171,18 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             AiFrontTarget(S, MyTeam_, Tx, Ty);
             Have = AiPlaceNear(S, MyTeam_, Want, Tx, Ty, X, Y);
         }
+        // A CAMP tries two more things before it will take the home lattice (rps.ai.camp_on_gold):
+        // reinforce a deposit our carts already work, then — if even that has no ring spot left —
+        // take the legal cell NEAREST live ore instead of the first cell of a sweep that marches
+        // away from it. Traced over a mirror Hard match, the two together move the last four camps
+        // from y=31/34/37/40 (20-26 units from the nearest deposit) to y=46 and three at y=55, which
+        // is the y=60 gold row itself — the same line the owner opens when his frontier reaches it.
+        // Mean camp-to-ore distance over the match: 16.1 -> 12.0.
+        if (!Have && CampOnGold && Want == UnitMiner) {
+            if (AiWorkedMineTarget(S, MyTeam_, Tx, Ty))
+                Have = AiPlaceNear(S, MyTeam_, Want, Tx, Ty, X, Y);
+            if (!Have) Have = AiPlaceNearestOre(S, MyTeam_, Want, X, Y);
+        }
         if (!Have) Have = AiPlaceSpot(S, MyTeam_, Want, X, Y);
         if (Have) {
             Out[Count++] = InputEvent::Place(MyTeam_, Want, X, Y);
@@ -1114,7 +1292,11 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
             if (N > 0) Out[Count++] = InputEvent::Queue(MyTeam_, Slot, N);
         }
     }
-    if (Count == 0 && Want != UnitMiner) {
+    // GoldLeft gates this too, and it is the branch that most needed it: this is the never-stand-idle
+    // hatch, so with the map dug out it was the one place guaranteed to keep converting the whole bank
+    // into carts every tick it could not afford a soldier. "Cheapest thing on the board" stops being
+    // an argument once the thing it buys cannot earn.
+    if (Count == 0 && Want != UnitMiner && GoldLeft) {
         const TypeCapacity Camps = SurveyType(S, MyTeam_, UnitMiner);
         if (Camps.Slot >= 0 && Camps.Queue < MinerDepth) {
             int32_t N = MinerDepth - Camps.Queue;

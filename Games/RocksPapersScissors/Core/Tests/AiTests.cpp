@@ -400,6 +400,49 @@ static void TestCapReservesASlotForCombat() {
     CHECK(Camps == 3);   // 4 - 1 reserved for combat; it was 4 (and then nothing, forever)
 }
 
+// ---- A DUG-OUT MAP MUST STOP THE CART FACTORY (owner, 2026-08-14) ----
+// Mines are finite (#84), but every knob that asks for miners is a COUNT — WorkerTarget, OpenWorkers,
+// the peak-economy rebuy floor — and a count cannot tell that there is nothing left to dig. Without
+// the gate the AI keeps converting its bank into carts that walk to no ore, out of the purse the army
+// is fought with; the owner's recordings show it carrying 500+ carts into an endgame against ~250 of
+// his. Same board twice, differing only in whether any deposit still holds gold.
+static void TestNoCartsOnceTheMapIsDugOut() {
+    auto CartsAskedFor = [](bool Empty) {
+        Sim S;
+        S.Init(0x1234);
+        if (Empty)
+            for (int32_t M = 0; M < NumMines; ++M) S.MineGold[M] = 0;
+        Inject(S, 1, UnitMiner, 2);                      // below worker_target -> it wants miners
+        // AT THE BUILDING CAP ALREADY (easy's max_buildings is 4), because expansion RETURNS as soon
+        // as it places: with room to build, every decision is a placement and the cart queue below it
+        // is never reached — the control reads zero and the test proves nothing. Capped, queueing
+        // carts IS the live decision, which is the one the gate has to suppress.
+        for (int32_t K = 0; K < 4; ++K)
+            InjectBuilding(S, 1, UnitMiner, F(4 + 6 * K), F(230));
+        S.Teams[1].Gold = 100000;                        // never gold-bound, so the gate is the only cause
+        // EASY, not Hard, and the tier is not incidental either: the gate lives in the shared Want
+        // switch, but Hard has defence_floor 5 and no building cap, so with an unbounded purse it
+        // spends its early decisions on combat buildings instead of carts.
+        AiController Ai;
+        Ai.Init(0x1234, 1, EAiTier::Easy);
+        int32_t Carts = 0;
+        for (uint32_t T = 0; T < 512; ++T) {
+            InputEvent E[MaxEventsPerTick];
+            const int C = AiTick(Ai, S, T, E);
+            for (int I = 0; I < C; ++I) {
+                // A cart order is a QUEUE at a miner building; a camp is a PLACE of one.
+                if (E[I].Kind == EventQueueUnits && E[I].X >= 0 && E[I].X < S.Count &&
+                    S.IsBuilding(static_cast<int32_t>(E[I].X)) &&
+                    S.Type[static_cast<int32_t>(E[I].X)] == UnitMiner)
+                    Carts += E[I].Y;
+            }
+        }
+        return Carts;
+    };
+    CHECK(CartsAskedFor(/*Empty*/ false) > 0);   // the control: with ore it does buy carts
+    CHECK(CartsAskedFor(/*Empty*/ true) == 0);   // dug out: not one more
+}
+
 #if LUR_INTERNAL
 // ---- #144: a recording must replay to a BIT-IDENTICAL match, or it is not evidence ----
 // The whole value of the flight recorder is that the file IS the match: seed + latched CVar set +
@@ -456,6 +499,7 @@ int main() {
     TestTopTierHoldsAMixedComposition();
     TestCapYieldsForAFirstCombatBuilding();
     TestCapReservesASlotForCombat();
+    TestNoCartsOnceTheMapIsDugOut();
 #if LUR_INTERNAL
     TestMatchRecordingReplaysIdentically();
 #endif

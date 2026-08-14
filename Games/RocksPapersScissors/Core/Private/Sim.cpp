@@ -710,8 +710,23 @@ inline void AccumFlockCore(const Sim& S, const ThreatSet& Threat,
         return;
     }
     if (JTeam == ITeam) {
-        AddRepel(Dx, Dy, Cheb, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
+        // A soldier WALKS THROUGH ITS OWN CARTS (playtest 2026-08-14). Separation, cohesion and
+        // alignment are all warrior-to-warrior affinities now; a friendly cart contributes nothing
+        // but the interpose note below.
+        //
+        // This makes the relationship SYMMETRIC, which it was not before: a cart already feels
+        // nothing from a soldier — miners take no flock gather at all (#162 above), only the
+        // mine-repel ring — so the push was one-way, soldier-side only. And it was a big one-way
+        // push: a mature economy parks 200+ carts in a block a few units deep around the camps, and
+        // every raid leaving home had to plough through the lot of them, arriving late and smeared
+        // sideways. Costing the ATTACKER for the defender's cart density is backwards — the carts
+        // are the thing being defended, not a wall.
+        //
+        // Cheap, too, in the direction that matters: carts are the units a stress field is made of,
+        // so a soldier standing in the mining block used to sum a separation term per cart in
+        // SepRadius and now sums none.
         if (JType != UnitMiner) {  // cohesion/alignment are WARRIOR affinities (miners never blob)
+            AddRepel(Dx, Dy, Cheb, S.Cv.SepRadius, S.Cv.SeparationStrength, A.SepX, A.SepY);
             AddCohesion(Dx, Dy, Cheb, S.Cv.CohAllRadius, A.AllX, A.AllY, A.AllN);
             if (JType == IType) {
                 AddCohesion(Dx, Dy, Cheb, S.Cv.CohSameRadius, A.SameX, A.SameY, A.SameN);

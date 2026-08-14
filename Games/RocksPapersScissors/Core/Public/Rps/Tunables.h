@@ -82,7 +82,10 @@ constexpr UnitStats UnitTable[UnitCount] = {
     {  50,   50,  45, F(5, 10),      7, F(2),       6, UnitPaper  }, // Scissor cutter
 };
 
-LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 3, CVarFlagAffectsGameplay,
+// 4, promoted from the phone 2026-08-14 (was 3). With the re-shaped triangle below the units are
+// tankier, so a fight between the wrong two types lasts longer; a sharper multiplier keeps
+// "brought the right counter" decisive rather than merely favourable.
+LUR_CVAR(CvCounterMultiplier, "rps.combat.counter_mult", 4, CVarFlagAffectsGameplay,
          "Damage multiplier when attacking the type you beat (the RPS triangle)");
 constexpr int32_t CheapestCost = 30;       // = Miner; the win-rule rebuy floor
 
@@ -105,19 +108,31 @@ LUR_CVAR(CvMinerHp,        "rps.unit.miner.hp",        40,       CVarFlagAffects
 LUR_CVAR(CvMinerSpeed,     "rps.unit.miner.speed",     F(4, 10), CVarFlagAffectsGameplay, "Miner move speed (world units/tick)");
 LUR_CVAR(CvMinerDamage,    "rps.unit.miner.damage",    2,        CVarFlagAffectsGameplay, "Miner attack damage per hit");
 LUR_CVAR(CvMinerBuild,     "rps.unit.miner.build_time",50,       CVarFlagAffectsGameplay, "Miner build time (ticks, 10/s)");
-LUR_CVAR(CvRockCost,       "rps.unit.rock.cost",       50,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
-LUR_CVAR(CvRockHp,         "rps.unit.rock.hp",         100,      CVarFlagAffectsGameplay, "Rock hit points");
+// 2026-08-14: promoted from the Galaxy's persisted rps-cvars.cfg — the values actually being
+// PLAYED, as with the 2026-07-26 batch below. The soldier triangle was re-shaped wholesale in the
+// process, so read the three types together rather than line by line:
+//   * ROCK is the cheap line infantry (60 for 300 hp) — the thing you can always afford;
+//   * PAPER is the durable brawler (120 for 200 hp, damage 10) and is now SLOW (0.75, was 1.25);
+//   * SCISSOR is the raider (200 for 250 hp) and is now the FAST one (1.5, was 0.75).
+// Paper and scissor SWAPPED speeds. That is the substantive change, not a nudge: the fragile
+// fast-flanker role moved from paper to scissor, which is what makes a scissor raid on carts a
+// real threat and paper a wall that has to be walked into. Costs roughly tripled across the board
+// (50 -> 60/120/200) against a 1900 opening purse, so a soldier is a considered purchase.
+// Anything measured against the old triangle — the AI tier ladder above all — is measured against
+// a different game.
+LUR_CVAR(CvRockCost,       "rps.unit.rock.cost",       60,       CVarFlagAffectsGameplay, "Gold to queue a Rock");
+LUR_CVAR(CvRockHp,         "rps.unit.rock.hp",         300,      CVarFlagAffectsGameplay, "Rock hit points");
 LUR_CVAR(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
 LUR_CVAR(CvRockDamage,     "rps.unit.rock.damage",     6,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
 LUR_CVAR(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
-LUR_CVAR(CvPaperCost,      "rps.unit.paper.cost",      50,       CVarFlagAffectsGameplay, "Gold to queue a Paper");
-LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        40,       CVarFlagAffectsGameplay, "Paper hit points");
-LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     FRound(125, 100),     CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
-LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    8,        CVarFlagAffectsGameplay, "Paper attack damage per hit");
-LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",15,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
-LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    50,       CVarFlagAffectsGameplay, "Gold to queue a Scissor");
-LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      60,       CVarFlagAffectsGameplay, "Scissor hit points");
-LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 4),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
+LUR_CVAR(CvPaperCost,      "rps.unit.paper.cost",      120,      CVarFlagAffectsGameplay, "Gold to queue a Paper");
+LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        200,      CVarFlagAffectsGameplay, "Paper hit points");
+LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     F(3, 4),  CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    10,       CVarFlagAffectsGameplay, "Paper attack damage per hit");
+LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",10,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
+LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    200,      CVarFlagAffectsGameplay, "Gold to queue a Scissor");
+LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      250,      CVarFlagAffectsGameplay, "Scissor hit points");
+LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 2),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
 LUR_CVAR(CvScissorDamage,  "rps.unit.scissor.damage",  15,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
 LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 
@@ -142,12 +157,16 @@ LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffects
 // against a different game. ----
 LUR_CVAR(CvMinerBuildingHp,     "rps.unit.miner.building_hp",     200, CVarFlagAffectsGameplay, "Mining-camp building hit points");
 LUR_CVAR(CvMinerBuildingCost,   "rps.unit.miner.building_cost",   600, CVarFlagAffectsGameplay, "Gold to place a mining camp");
-LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",      500, CVarFlagAffectsGameplay, "Rock building hit points");
-LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",   1000, CVarFlagAffectsGameplay, "Gold to place a Rock building");
-LUR_CVAR(CvPaperBuildingHp,     "rps.unit.paper.building_hp",     350, CVarFlagAffectsGameplay, "Paper building hit points");
-LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  2500, CVarFlagAffectsGameplay, "Gold to place a Paper building");
-LUR_CVAR(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",   250, CVarFlagAffectsGameplay, "Scissor building hit points");
-LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",4000, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
+// 2026-08-14, promoted from the phone again. Combat buildings became far TOUGHER (500/350/250 ->
+// 2000/1250/1500) while the camp stayed at 200: a soldier building is now a structure you have to
+// commit an army to removing, and the camp is still the soft thing a raid can delete. That is the
+// asymmetry the raiding game needs — economy is raidable, production is not.
+LUR_CVAR(CvRockBuildingHp,      "rps.unit.rock.building_hp",     2000, CVarFlagAffectsGameplay, "Rock building hit points");
+LUR_CVAR(CvRockBuildingCost,    "rps.unit.rock.building_cost",   1200, CVarFlagAffectsGameplay, "Gold to place a Rock building");
+LUR_CVAR(CvPaperBuildingHp,     "rps.unit.paper.building_hp",    1250, CVarFlagAffectsGameplay, "Paper building hit points");
+LUR_CVAR(CvPaperBuildingCost,   "rps.unit.paper.building_cost",  3500, CVarFlagAffectsGameplay, "Gold to place a Paper building");
+LUR_CVAR(CvScissorBuildingHp,   "rps.unit.scissor.building_hp",  1500, CVarFlagAffectsGameplay, "Scissor building hit points");
+LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",6000, CVarFlagAffectsGameplay, "Gold to place a Scissor building");
 // Home base (#146, the HQ): one per team, auto-placed at the baseline. Inert (no production, no
 // gathering, no attacking) — it just sits and soaks damage. Every enemy soldier treats it as prey
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
@@ -156,9 +175,15 @@ LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",4000, CVarFlagA
 LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
 LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     20,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
-LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     F(3),     CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
-LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(4),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
-LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
+// Footprint/repulsion, promoted from the phone 2026-08-14. The repulsion was pulled IN and DOWN
+// (radius 4 -> 2.5, strength 2 -> 1) so it barely exceeds the footprint: buildings still refuse to
+// be walked through, but they no longer shove a passing army sideways for a unit and a half beyond
+// their own edge. With camps packed a few units apart, the old wide/strong field turned a mining
+// block into a wall the army had to flow around. FRound, not F, on 2.9 — a truncated default cannot
+// round-trip its own console (see FRound above).
+LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     FRound(29, 10), CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
+LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(5, 2),  CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
+LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(1),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // How far a building must sit from a LIVE mine (#157). Was the footprint (3), which only kept the
 // mine POINT outside the footprint — but the icons are much bigger than the footprint, so a camp
 // drawn at radius 3.45 completely covered a mine drawn at radius 1.1, and the carts working that
@@ -178,16 +203,31 @@ LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(2),     CVarFlagA
 //
 // It also sets how far the end mine rows must sit from the map edge to be unbuildable-behind
 // (BuildMap asserts that invariant).
-LUR_CVAR(CvMineClearance,         "rps.build.mine_clearance",F(6),     CVarFlagAffectsGameplay, "Min building-centre distance from a live mine (world units)");
+//
+// 2026-08-14: promoted DOWN to 5 from the phone. The warning above is about RAISING it, and that
+// still stands; 5 moves the other way — every camp may sit one unit nearer its deposit, which
+// shortens every cart trip on the map and is exactly the direction the owner plays in. The visibility
+// argument that derived 6 is the cost: at 5 the camp icon (3.45) plus the working spread crowds the
+// deposit, so a busy mine reads as slightly more cluttered. The ladder numbers quoted above were
+// measured at 6 and against the pre-2026-08-14 unit costs, so they no longer describe this build —
+// treat them as history, not as the current balance.
+LUR_CVAR(CvMineClearance,         "rps.build.mine_clearance",F(5),     CVarFlagAffectsGameplay, "Min building-centre distance from a live mine (world units)");
 // World-space starting buildable depth from a team's baseline (§5.3). NOT pixel-derived —
 // tuned to CORRESPOND to the locked bottom camera band, never computed from screen size.
 LUR_CVAR(CvInitialFrontier,       "rps.build.initial_frontier", F(40), CVarFlagAffectsGameplay, "Starting buildable depth from baseline (world units)");
-// Opening gold (§12.6): sized to buy the forced opening and nothing else — one mining camp
-// (MinerBuildingCost 600) + six miner carts (6 x MinerCost 100) = 1200 exactly. A combat building
-// is gated on the first miner unit anyway (ApplyPlace) AND now costs more than the whole opening
-// purse, so a player cannot open with military under any spend order. Keep this in step with those
-// two costs if they change — the "exactly one camp + N carts" property is the point, not the number.
-LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  800,     CVarFlagAffectsGameplay, "Opening gold: one mining camp (600) + 6 miner carts (100 ea)");
+// Opening gold (§12.6), promoted from the phone 2026-08-14: 1900. It used to be sized so the purse
+// ITSELF made a military opening impossible (800 < the cheapest combat building). That is no longer
+// what holds — 1900 buys a camp (600) plus a cart (50) and still clears a Rock building (1200) —
+// so the forced economic opening now rests entirely on the ApplyPlace GATE, which refuses any combat
+// building until the team owns a miner UNIT. The gate is the real rule; the purse was only ever a
+// second lock on the same door.
+//
+// What 1900 buys instead is a WIDER opening: a camp and roughly a dozen carts, or two camps and a
+// handful. Two camps on two deposits from the first seconds is the shape the owner actually opens
+// with, and at 800 it was unaffordable — the opening was one camp, always, and therefore not a
+// decision. Keep it in step with MinerBuildingCost/MinerCost: "how many camps can I open with" is
+// the property being tuned, not the number.
+LUR_CVAR(CvStartingGold,          "rps.econ.starting_gold",  1900,    CVarFlagAffectsGameplay, "Opening gold: a camp (600) plus a dozen carts, or two camps and a few");
 
 // ---- Economy (spec §3, gold/miner + finite mines per #84) ----
 // There is NO cap on carts per deposit. There used to be (WorkersPerMine = 6, a "room around
@@ -254,13 +294,18 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // Separation must WIN at short range so units stay visibly spaced (playtest 2026-07-20:
 // weak separation let cohesion compress the blob into an unreadable mush). Strong push +
 // wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
-LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(24, 10), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
+// 3, promoted from the phone 2026-08-14 (was 2.4): armies read as a wider lattice.
+LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(3), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
 LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3), CVarFlagAffectsGameplay,
          "Same-team push-apart strength; must beat cohesion at contact or the blob turns to mush");
 // Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
 // fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
-LUR_CVAR(CvEnemySepRadius, "rps.boid.enemy_sep_radius", F(3, 2), CVarFlagAffectsGameplay, "Enemy keep-apart radius (world units)");
-LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFlagAffectsGameplay,
+// Both halved from the phone 2026-08-14 (1.5/1 -> 0.5/0.5). Enemy separation now barely exists:
+// with same-team separation raised to 3, keeping enemies at arm's length as well held the two
+// armies apart in a no-man's-land instead of letting them interpenetrate and fight. Contact should
+// be decided by the RPS triangle, not by a steering force.
+LUR_CVAR(CvEnemySepRadius, "rps.boid.enemy_sep_radius", F(1, 2), CVarFlagAffectsGameplay, "Enemy keep-apart radius (world units)");
+LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1, 2), CVarFlagAffectsGameplay,
          "Push-apart strength against enemies; un-piles a melee into arcs instead of a pixel-pile");
 // Two-tier cohesion (soldiers only) — THE readability mechanism. Toward the same-type
 // centroid (tight: papers blob with papers) plus a weaker pull toward the whole army's
@@ -275,7 +320,7 @@ LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1), CVarFla
 // across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
 // lone spawn drifts toward its type over distance without the group compressing to mush.
 LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(10), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
-LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", F(1, 3), CVarFlagAffectsGameplay,
+LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", FRound(4, 10), CVarFlagAffectsGameplay,
          "Pull toward your OWN type's centre: keep it gentle, a soft wide gather not a hard clump");
 LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(5), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
 // Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
@@ -293,8 +338,12 @@ LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
 // weight cut from 0.25 to 0.1 — flee EARLIER but far more GENTLY. The strong short-range version
 // read as units flinching on contact; a wide soft drift instead bends approach paths, so armies
 // slide around their counter rather than bouncing off it.
-LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(12), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", FRound(1, 10), CVarFlagAffectsGameplay,
+// 2026-08-14 (promoted again): the pendulum came back the other way — radius 12 -> 6, weight
+// 0.1 -> 0.75. Flee LATE but hard. With counter_mult at 4 a bad matchup is close to lethal, so a
+// wide gentle drift was not enough to keep a unit out of one; a short, decisive shove at contact
+// range is, and it leaves the approach paths straight instead of permanently bent.
+LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(6), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(3, 4), CVarFlagAffectsGameplay,
          "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
@@ -306,8 +355,11 @@ LUR_CVAR(CvWNoise, "rps.boid.w_noise", FRound(6, 10), CVarFlagAffectsGameplay, "
 // the frequency and Gain x the amplitude, normalized. Octaves=1 is exactly the single-octave
 // wander above (bit-identical default) — turn it up for richer, less repetitive drift.
 LUR_CVAR(CvNoiseOctaves,     "rps.boid.noise_octaves",     1,       CVarFlagAffectsGameplay, "Noise octaves (1 = smooth; more = detailed)");
-LUR_CVAR(CvNoiseGain,        "rps.boid.noise_gain",        F(2),    CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
-LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(2),    CVarFlagAffectsGameplay, "Frequency multiply per octave");
+// Promoted from the phone 2026-08-14. Both only bite at Octaves > 1, which is still the default, so
+// these are inert today — carried over so the phone's set and the code's agree exactly (a stray
+// difference here would show up as a StateHash mismatch and nothing else).
+LUR_CVAR(CvNoiseGain,        "rps.boid.noise_gain",        F(5),    CVarFlagAffectsGameplay, "Amplitude falloff per octave (persistence)");
+LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(1),    CVarFlagAffectsGameplay, "Frequency multiply per octave");
 // Slice B (#97) — FLOW: momentum via implicit velocity Δ = Pos − Prev (fixed tick, so
 // last tick's displacement IS the velocity — no VelX/VelY arrays). The finalize does
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
@@ -327,7 +379,9 @@ LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsG
 // InterposeR steers to the point BETWEEN them — screening the cart (even from a predator it
 // wouldn't attack). Positioning, not targeting: it keeps raiders off the economy by body.
 constexpr Fixed GuardAlertR = F(6);                // raider = enemy soldier this close to a cart
-LUR_CVAR(CvInterposeRadius, "rps.boid.interpose_radius", F(12), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
+// 6, promoted from the phone 2026-08-14 (was 12): a defender screens a cart it is genuinely next to
+// rather than being pulled off its line by a raid half a screen away.
+LUR_CVAR(CvInterposeRadius, "rps.boid.interpose_radius", F(6), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
 LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay,
          "Pull toward the point between a raider and your cart — screening by body, not targeting");
 // The single flock GATHER radius = the LARGEST force radius. One widened neighbour walk feeds
@@ -816,6 +870,22 @@ LUR_CVAR(CvAiMixCapPct, "rps.ai.mix_cap", 50, CVarFlagAffectsGameplay,
 LUR_CVAR(CvAiMixTiltPct, "rps.ai.mix_tilt", 0, CVarFlagAffectsGameplay,
          "Percent of the target mix taken from exploiting the enemy's DEVIATION from equilibrium");
 
+// A MINING CAMP GOES WHERE THE CARTS ALREADY DIG (owner's note, 2026-08-14: "make the hard AI spawn
+// mine camps at the gold rows its carts is mining from" — he wins by minimising cart travel).
+//
+// The expansion path already TARGETS deposits (AiBestMineTarget -> AiPlaceNear). The defect was the
+// fallback under it: with no deposit left to CLAIM, the camp still got placed — by AiPlaceSpot, on
+// the home lattice, which sweeps away from the baseline in fixed rows and knows nothing about where
+// the ore is. This knob inserts a step between the two: reinforce a deposit our carts are already
+// working, and only reach for the lattice if even that has no legal spot. AiWorkedMineTarget carries
+// the reasoning and the measurements, including why the obvious "then don't place it" is much worse.
+//
+// Shared CVar gated on EAiTier::Hard in code, and appended at the END of the list, for the same two
+// reasons as the mix knobs above: the lower rungs were measured with the lattice fallback live, and
+// LUR_AI_TIER_IDS expands mid-list so a per-tier knob would renumber every wire id below it.
+LUR_CVAR(CvAiCampOnGold, "rps.ai.camp_on_gold", 1, CVarFlagAffectsGameplay,
+         "Top tier sites an unclaimed-deposit-less camp against a deposit its carts work (0 = straight to the home grid)");
+
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
 // into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
 // LUR_RPS_GAMEPLAY_CVARS X-list below. They change what the BUILD does, not what the SIM computes,
@@ -961,7 +1031,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiChestFloorUnits,       CvAiChestFloorUnits)       \
     IX(AiMixEnable,             CvAiMixEnable)             \
     IX(AiMixCapPct,             CvAiMixCapPct)             \
-    IX(AiMixTiltPct,            CvAiMixTiltPct)
+    IX(AiMixTiltPct,            CvAiMixTiltPct)            \
+    IX(AiCampOnGold,            CvAiCampOnGold)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries

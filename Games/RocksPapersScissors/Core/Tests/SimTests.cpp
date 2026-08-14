@@ -110,7 +110,13 @@ static void TestDeterminism() {
 // everything freshly built. The law it needs: a serial identifies one entity for the life of the
 // process and is NEVER reused, across recycling, rollback rewinds, or a match restart. ----
 static void TestSlotSerialNeverReused() {
-    constexpr int Ticks = 400;
+    // The run has to reach a DEATH before a slot can be recycled, and how long that takes is a
+    // function of the live unit stats — the two armies leave y=20/y=220 and have to close ~200 units
+    // before anyone trades at all. 400 was enough at rock 100hp/6dmg; the 2026-08-14 promotion tripled
+    // rock to 300hp with damage unchanged, which tripled time-to-first-kill and made this test pass
+    // vacuously (Recycled == 0 — caught by the CHECK below, which exists for exactly this). Sized with
+    // margin rather than to the edge, since it is a lower bound that unit tuning moves.
+    constexpr int Ticks = 900;
     static Sim S;
     S.Init(0xA11CE);   FundForArmyScript(S);
 
@@ -177,12 +183,17 @@ static void TestSlotSerialNeverReused() {
 static void TestStateHashGoldenValues() {
     constexpr uint64_t Seed = 0xFEEDBEEFu;
     static Sim S;
+    // RE-PINNED 2026-08-14: the Galaxy's played CVar set was promoted to the compile-time defaults
+    // (unit costs/HP/speeds, counter_mult, starting gold, footprint/clearance, the boid weights), and
+    // CvSnapshot folds into StateHash — so the fresh-sim hash moves on the tunables alone. The
+    // 300-tick hash moves for that AND for the sim change in the same batch (a soldier no longer takes
+    // friendly separation from a cart). Both are build-locked wire changes: ship both phones together.
     S.Init(Seed);
-    CHECK(S.StateHash() == 0xba5b7041cc851843ull);   // fresh sim, tick 0
+    CHECK(S.StateHash() == 0xd3c8839b21f87a51ull);   // fresh sim, tick 0
 
     FundForArmyScript(S);
     for (int I = 0; I < 300; ++I) ArmyStep(S, static_cast<uint32_t>(I));
-    CHECK(S.StateHash() == 0xec58aac6d9f3d598ull);   // after the 300-tick army script
+    CHECK(S.StateHash() == 0xe4fadb482c0a8497ull);   // after the 300-tick army script
 }
 
 // A fresh sim replaying the same stream must reach the same final hash — the
