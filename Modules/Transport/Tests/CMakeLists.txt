@@ -50,3 +50,11 @@ add_executable(ble_radio_state_tests BleRadioStateTests.cpp)
 target_link_libraries(ble_radio_state_tests PRIVATE lur::transport)
 target_compile_features(ble_radio_state_tests PRIVATE cxx_std_20)
 add_test(NAME ble_radio_state_tests COMMAND ble_radio_state_tests)
+
+# The whole unlinked-radio policy behind one object (#197). Both drivers were hand-composing four
+# policy objects, and the two compositions had already begun to differ — in platform files, where
+# nothing can test them. A driver now holds one controller, reports facts, and applies Actions.
+add_executable(ble_link_controller_tests BleLinkControllerTests.cpp)
+target_link_libraries(ble_link_controller_tests PRIVATE lur::transport)
+target_compile_features(ble_link_controller_tests PRIVATE cxx_std_20)
+add_test(NAME ble_link_controller_tests COMMAND ble_link_controller_tests)

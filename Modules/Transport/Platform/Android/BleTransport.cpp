@@ -23,9 +23,7 @@
 
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleSendQueue.h"
-#include "Lur/Transport/BleStartRetry.h"
-#include "Lur/Transport/BleDiscoveryTimers.h"
-#include "Lur/Transport/BleRadioState.h"
+#include "Lur/Transport/BleLinkController.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
@@ -207,13 +205,10 @@ void DropOutboundBacklog() { g_SendQueue.OnLinkLost(); }
 // what happens next; Pump() applies the answer. That is what makes the behaviour reachable from a
 // host test — and it is why RPS could silently never advertise after a failed first attempt while
 // chess healed (#194): the logic lived where nothing could test it, so it existed in one game only.
-BleStartRetry      g_AdvRetry;
-BleStartRetry      g_ScanRetry;
-BleDiscoveryTimers g_Timers;
-// What the radio is actually doing. Owns the idempotence guard #194 added, which used to be a
-// Kotlin bool that an adapter power cycle could strand true — see BleRadioState.h for the hardware
-// finding. Asking it before every start is what makes the recovery possible.
-BleRadioState      g_Radio_State;
+// ONE object, not four hand-composed ones. The composition is itself a decision — a link cancels
+// the backoffs, a power cycle forgets the started-state — and hand-composing it per platform is how
+// the two drivers had already begun to differ. See BleLinkController.h.
+BleLinkController  g_Link;
 
 // Call one of BleShim's radio verbs. Safe from the engine thread because the Kotlin side posts the
 // body onto the main looper — see the note on those methods. We only cross JNI here.
@@ -234,69 +229,48 @@ void OnOutboundLinkLost()     { g_SendQueue.OnLinkLost(); }
 // Radio events, reported by Kotlin. Each is a fact about what the radio DID; none of them decide
 // anything. The bool returns answer "is this worth a loud log line" so a retry storm cannot bury
 // the first failure, which is the one that matters.
-bool OnAdvertiseStartFailed() {
-    g_Radio_State.OnAdvertiseStopped();   // we are NOT advertising: let the retry through
-    return g_AdvRetry.OnStartFailed();
-}
-bool OnScanStartFailed() {
-    g_Radio_State.OnScanStopped();
-    return g_ScanRetry.OnStartFailed();
-}
-void OnAdvertiseStarted()     { g_Radio_State.OnAdvertising(); g_AdvRetry.OnStarted(); }
-void OnScanStarted()          { g_Radio_State.OnScanning();    g_ScanRetry.OnStarted(); }
-void OnServing()              { g_Radio_State.OnServing(); }
+bool OnAdvertiseStartFailed() { return g_Link.OnAdvertiseStartFailed(); }
+bool OnScanStartFailed()      { return g_Link.OnScanStartFailed(); }
+void OnAdvertiseStarted()     { g_Link.OnAdvertiseStarted(); }
+void OnScanStarted()          { g_Link.OnScanStarted(); }
+void OnServing()              { g_Link.OnServing(); }
 // "We asked and have not been told otherwise" — the state the idempotence guard reads. Reported at
 // REQUEST time, not at confirmation: the old Kotlin bool was set the same moment, and it has to be,
 // or the 8 s watchdog double-starts into the gap before the success callback lands.
-void OnAdvertising()          { g_Radio_State.OnAdvertising(); }
-void OnScanning()             { g_Radio_State.OnScanning(); }
-void OnAdvertiseStopped()     { g_Radio_State.OnAdvertiseStopped(); }
-void OnScanStopped()          { g_Radio_State.OnScanStopped(); }
+void OnAdvertising()          { g_Link.OnAdvertising(); }
+void OnScanning()             { g_Link.OnScanning(); }
+void OnAdvertiseStopped()     { g_Link.OnAdvertiseStopped(); }
+void OnScanStopped()          { g_Link.OnScanStopped(); }
 
 // May we start? The driver asks before touching the radio, instead of consulting a bool it owns.
-bool ShouldStartAdvertising() { return g_Radio_State.ShouldStartAdvertising(); }
-bool ShouldStartScanning()    { return g_Radio_State.ShouldStartScanning(); }
+bool ShouldStartAdvertising() { return g_Link.ShouldStartAdvertising(); }
+bool ShouldStartScanning()    { return g_Link.ShouldStartScanning(); }
 
 // The adapter came or went. THE POWER CYCLE IS THE POINT: everything the radio was holding —
 // advertise registration, scan registration, the GATT service — went with it, so every
 // started-state has to be forgotten or #194's idempotence guard suppresses the recovery forever.
 // Nothing listened for this at all before (2026-08-15 hardware finding).
 void OnAdapterOn() {
-    g_Radio_State.OnAdapterOn();
-    g_Timers.OnUnlinked();      // re-arm discovery from zero; the watchdog does the restarting
+    g_Link.OnAdapterOn();
     LOGI("BLE adapter ON — every started-state was cleared, discovery re-armed");
 }
 void OnAdapterOff() {
-    g_Radio_State.OnAdapterOff();
-    g_AdvRetry.Cancel();        // retrying into a dead adapter earns errors and leaves registrations
-    g_ScanRetry.Cancel();
+    g_Link.OnAdapterOff();
     LOGE("BLE adapter OFF — radio gone; not advertising, not scanning, not serving");
 }
-void OnConnectStarted()       { g_Timers.OnConnectStarted(); }
-void OnConnectResolved()      { g_Timers.OnConnectResolved(); }
-void RequestRescan()          { g_Timers.ScheduleRescan(); }
+void OnConnectStarted()       { g_Link.OnConnectStarted(); }
+void OnConnectResolved()      { g_Link.OnConnectResolved(); }
+void RequestRescan()          { g_Link.ScheduleRescan(); }
 
 // Link state drives every deadline at once: retrying or scanning into a live link is pure churn,
 // and churn is what degraded the radio in #163/#194.
-void OnRadioLinked() {
-    g_Timers.OnLinked();
-    g_Radio_State.OnLinked();
-    g_AdvRetry.Cancel();
-    g_ScanRetry.Cancel();
-}
-void OnRadioUnlinked() {
-    g_Timers.OnUnlinked();
-    g_Radio_State.OnUnlinked();
-}
+void OnRadioLinked()   { g_Link.OnLinked(); }
+void OnRadioUnlinked() { g_Link.OnUnlinked(); }
 
 // Shutting down. Same quiescing as a link-up — every deadline off, both backoffs abandoned — but it
 // gets its own name because "linked" would be a lie at the one moment someone reading a shutdown
 // log can least afford one.
-void OnRadioStopped() {
-    g_Timers.OnLinked();     // the "no deadline is armed" state
-    g_AdvRetry.Cancel();
-    g_ScanRetry.Cancel();
-}
+void OnRadioStopped() { g_Link.OnStopped(); }
 
 namespace {
 
@@ -315,14 +289,12 @@ void TickPolicies() {
 
     g_SendQueue.Tick(ElapsedNs);
 
-    // A fast retry came due. The Kotlin verb releases our own stale registration before starting,
-    // which is the ALREADY_STARTED remedy the policy deliberately does not own.
-    if (g_AdvRetry.Tick(ElapsedNs))  CallShimVerb(g_StartAdvertisingMethod);
-    if (g_ScanRetry.Tick(ElapsedNs)) CallShimVerb(g_StartScanningMethod);
-
     // Several can be due at once after a long stall (an app suspended and resumed), so each is
-    // handled rather than only the first.
-    const BleDiscoveryTimers::Actions Act = g_Timers.Tick(ElapsedNs);
+    // handled rather than only the first. The Kotlin verbs release our own stale registration
+    // before starting, which is the ALREADY_STARTED remedy the policy deliberately does not own.
+    const BleLinkController::Actions Act = g_Link.Tick(ElapsedNs);
+    if (Act.StartAdvertising) CallShimVerb(g_StartAdvertisingMethod);
+    if (Act.StartScanning)    CallShimVerb(g_StartScanningMethod);
     if (Act.AbortConnect) {
         LOGI("connect watchdog: attempt neither linked nor resolved in 6s — tearing it down");
         CallShimVerb(g_AbortConnectMethod);

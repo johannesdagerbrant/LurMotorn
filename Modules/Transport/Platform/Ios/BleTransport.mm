@@ -49,8 +49,7 @@
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleProtocol.h"
 #include "Lur/Transport/BleSendQueue.h"
-#include "Lur/Transport/BleDiscoveryTimers.h"
-#include "Lur/Transport/BleRadioState.h"
+#include "Lur/Transport/BleLinkController.h"
 #include <chrono>
 
 // Every line this driver logs is prefixed with the APP's tag — the string an iOS syslog capture
@@ -171,16 +170,12 @@ public:
     // drives (#197). It replaced an NSTimer holding a hardcoded 8.0 that had to agree, by
     // hand, with the Kotlin's hardcoded 8000. Both games carried both copies. Note it is
     // PERIODIC, so the fired handler must NOT re-arm it.
-    Lur::Transport::BleDiscoveryTimers _Timers;
+    // ONE object, not several hand-composed ones — the composition (a link cancels the backoffs, a
+    // power cycle forgets the started-state) is itself a decision, and hand-composing it per
+    // platform is how these two drivers had already begun to differ. See BleLinkController.h.
+    Lur::Transport::BleLinkController _Link;
     bool _TimersStarted;
     std::chrono::steady_clock::time_point _TimersLast;
-
-    // What the radio is actually doing (#197). Android found the bug this closes — a Bluetooth
-    // off/on left the phone invisible for the life of the process — and iOS had the identical hole:
-    // BOTH didUpdateState handlers below used to read `if (state != PoweredOn) return;`, so a
-    // power-off invalidated nothing we track. CoreBluetooth self-corrects its own `isAdvertising`,
-    // but _HaveCachedRole / _DecidedPeripheral / _Connecting / _Linked are ours and do not.
-    Lur::Transport::BleRadioState _RadioState;
 
     // Central-side state (we connected OUT to a peer's GATT server).
     CBPeripheral*     _PeerDevice;
@@ -384,8 +379,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
     _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
-    _Timers.OnLinked();    // every deadline off: firing into a live link is churn
-    _RadioState.OnLinked();
+    _Link.OnLinked();      // every deadline off, both backoffs cancelled: churn on a live link is what degraded the radio in #163
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
     // The net Session sends the first Hello once it sees the link up — no demo ping
@@ -395,7 +389,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 // #79: while unlinked, one-sided cached-role behaviour may only last one watchdog period. Arms the
 // shared policy from zero, so time spent linked is never banked against the next unlinked stretch.
 - (void)armDiscoveryWatchdog {
-    _Timers.OnUnlinked();
+    _Link.OnUnlinked();
 }
 
 // The deadline elapsed — decided by BleDiscoveryTimers on the engine thread, dispatched here so the
@@ -424,8 +418,8 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     const auto Delta = std::chrono::duration_cast<std::chrono::nanoseconds>(Now - _TimersLast).count();
     _TimersLast = Now;
 
-    const Lur::Transport::BleDiscoveryTimers::Actions Act =
-        _Timers.Tick(static_cast<uint64_t>(Delta));
+    const Lur::Transport::BleLinkController::Actions Act =
+        _Link.Tick(static_cast<uint64_t>(Delta));
     // Several can be due at once after a long stall (an app suspended and resumed), so each is
     // handled rather than only the first. Order matches Android's: tear a stalled attempt down
     // before the symmetric reset lands on top of it.
@@ -457,7 +451,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 - (void)onLinkLost {
     if (!_Linked) return;
     _Linked = _Connected = _Connecting = false;
-    _RadioState.OnUnlinked();
+    _Link.OnUnlinked();
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
     _SendQueue.OnLinkLost();                                      // drop stale send backlog (#72)
     _Subscriber = nil;
@@ -481,7 +475,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 // ===========================================================================
 - (void)centralManagerDidUpdateState:(CBCentralManager*)central {
     if (central.state != CBManagerStatePoweredOn) { [self onRadioPoweredOff]; return; }
-    _RadioState.OnAdapterOn();
+    _Link.OnAdapterOn();
     if ([self shouldScan]) {
         BLE_LOG(@"central powered on, scanning");
         [central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
@@ -505,7 +499,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     // fix, which is the drift this phase exists to end. CoreBluetooth's connectPeripheral has no
     // timeout of its own and will happily wait forever, so a connect the stack never completes
     // pinned _Connecting true and blocked every later attempt at the line above.
-    _Timers.OnConnectStarted();
+    _Link.OnConnectStarted();
 }
 
 - (void)centralManager:(CBCentralManager*)central
@@ -529,7 +523,7 @@ didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
     _Connecting = false;
     _RemoteDatagram = nil;
     _PeerDevice = nil;
-    _Timers.OnConnectResolved();   // the attempt is over, however it ended
+    _Link.OnConnectResolved();   // the attempt is over, however it ended
     // #17 / #197: DELAYED, not immediate. Android has waited 1.5 s here for a long time and iOS
     // never did — another one-sided fix. The delay is the point: the peer is running its own
     // exploratory connect and needs a moment to settle into peripheral-only, and the shared LE link
@@ -542,7 +536,7 @@ didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
 // Re-requesting supersedes a pending rescan rather than queueing a second, so a burst of failed
 // connects cannot produce a burst of scan starts.
 - (void)scheduleRescan {
-    _Timers.ScheduleRescan();
+    _Link.ScheduleRescan();
 }
 
 // The rescan delay elapsed (BleDiscoveryTimers). Main queue: CoreBluetooth lives there.
@@ -654,7 +648,7 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 // ===========================================================================
 - (void)peripheralManagerDidUpdateState:(CBPeripheralManager*)peripheral {
     if (peripheral.state != CBManagerStatePoweredOn) { [self onRadioPoweredOff]; return; }
-    _RadioState.OnAdapterOn();
+    _Link.OnAdapterOn();
     BLE_LOG(@"peripheral powered on, publishing service");
     [self publishService];
 }
@@ -666,15 +660,15 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 // CoreBluetooth resets its own isAdvertising, but every piece of state WE keep survives, and a
 // cached role or a half-finished connect surviving a power cycle is what leaves both phones deaf.
 - (void)onRadioPoweredOff {
-    if (!_RadioState.IsAdapterOn()) return;   // already handled; both managers report separately
+    if (!_Link.IsAdapterOn()) return;   // already handled; both managers report separately
     BLE_LOG(@"BLE radio powered OFF - dropping cached role, connect state and any link");
-    _RadioState.OnAdapterOff();
+    _Link.OnAdapterOff();
     _Connecting = false;
     _HaveCachedRole = _CachedPeripheral = _DecidedPeripheral = false;
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
     _RemoteDatagram = nil;
     if (_Linked) [self onLinkLost];
-    _Timers.OnUnlinked();   // re-arm discovery so the return to power-on resumes the dance
+    _Link.OnUnlinked();   // re-arm discovery so the return to power-on resumes the dance
 }
 
 // Build + add the GATT service (datagram + device-id characteristics). Factored out of
