@@ -23,6 +23,8 @@
 
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleSendQueue.h"
+#include "Lur/Transport/BleStartRetry.h"
+#include "Lur/Transport/BleDiscoveryTimers.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
@@ -36,9 +38,10 @@
 namespace Lur::Transport {
 namespace {
 
-// The engine send queue lives further down, next to the JNI helpers it needs. These are declared
-// here because the transport class comes first in the file and drives both.
-void TickSendQueue();                                                    // advance its watchdog
+// The engine send queue and the discovery/retry policies live further down, next to the JNI helpers
+// they need. These are declared here because the transport class comes first in the file and drives
+// all of them.
+void TickPolicies();                                                     // advance every deadline
 void EnqueueOutbound(const uint8_t* Data, std::size_t Size, bool Expedited);
 void DropOutboundBacklog();                                              // link lost
 
@@ -61,7 +64,7 @@ public:
     void ResetLink() override;
     void Pump() override {
         Inbox.Drain(*this);   // engine thread: dispatch queued events
-        TickSendQueue();      // ...and advance the send watchdog on the same cadence
+        TickPolicies();       // ...and advance every deadline on the same cadence
     }
 
     // EventInbox::Sink — invoked by Drain() on the engine thread, in arrival order.
@@ -85,6 +88,12 @@ jobject   g_Shim       = nullptr;  // global ref to the Kotlin BleShim
 jmethodID g_WriteMethod = nullptr; // BleShim.writeRaw([B)Z — one datagram, "did it take it"
 jmethodID g_RestartMethod = nullptr;  // BleShim.restartRadio()V (#182 hard reset)
 jmethodID g_ResetMethod = nullptr; // BleShim.resetLink()V
+// The four radio VERBS the policies below drive. Each is a bare platform action with no decision
+// in it — "start advertising", not "start advertising if it seems like a good idea".
+jmethodID g_StartAdvertisingMethod = nullptr;  // BleShim.startAdvertising()V
+jmethodID g_StartScanningMethod    = nullptr;  // BleShim.startScanning()V
+jmethodID g_GoSymmetricMethod      = nullptr;  // BleShim.goSymmetric()V   — drop cached-role gates
+jmethodID g_AbortConnectMethod     = nullptr;  // BleShim.abortConnect()V  — tear a stalled attempt
 
 // Get a JNIEnv for the calling thread, attaching it if necessary. android_main
 // runs on a native thread the JVM doesn't know about, so Send() may need attach.
@@ -189,6 +198,27 @@ void EnqueueOutbound(const uint8_t* Data, std::size_t Size, bool Expedited) {
 
 void DropOutboundBacklog() { g_SendQueue.OnLinkLost(); }
 
+// The discovery deadlines and the start-failure backoff, both host-tested, both previously
+// hand-rolled in Kotlin with Handler.postDelayed and manual cancellation.
+//
+// This is the control INVERSION the send-queue cutover did not need: the driver no longer decides
+// when to retry or when to go symmetric, it ASKS. Kotlin reports what the radio did; these decide
+// what happens next; Pump() applies the answer. That is what makes the behaviour reachable from a
+// host test — and it is why RPS could silently never advertise after a failed first attempt while
+// chess healed (#194): the logic lived where nothing could test it, so it existed in one game only.
+BleStartRetry      g_AdvRetry;
+BleStartRetry      g_ScanRetry;
+BleDiscoveryTimers g_Timers;
+
+// Call one of BleShim's radio verbs. Safe from the engine thread because the Kotlin side posts the
+// body onto the main looper — see the note on those methods. We only cross JNI here.
+void CallShimVerb(jmethodID Method) {
+    if (g_Shim == nullptr || Method == nullptr) return;
+    JNIEnv* Env = EnvForThisThread();
+    if (Env == nullptr) return;
+    Env->CallVoidMethod(g_Shim, Method);
+}
+
 }  // namespace
 
 // Named entry points for the JNI thunks, which live at global scope and cannot see the anonymous
@@ -196,16 +226,71 @@ void DropOutboundBacklog() { g_SendQueue.OnLinkLost(); }
 void OnOutboundSendComplete() { g_SendQueue.OnSendComplete(); }
 void OnOutboundLinkLost()     { g_SendQueue.OnLinkLost(); }
 
+// Radio events, reported by Kotlin. Each is a fact about what the radio DID; none of them decide
+// anything. The bool returns answer "is this worth a loud log line" so a retry storm cannot bury
+// the first failure, which is the one that matters.
+bool OnAdvertiseStartFailed() { return g_AdvRetry.OnStartFailed(); }
+bool OnScanStartFailed()      { return g_ScanRetry.OnStartFailed(); }
+void OnAdvertiseStarted()     { g_AdvRetry.OnStarted(); }
+void OnScanStarted()          { g_ScanRetry.OnStarted(); }
+void OnConnectStarted()       { g_Timers.OnConnectStarted(); }
+void OnConnectResolved()      { g_Timers.OnConnectResolved(); }
+void RequestRescan()          { g_Timers.ScheduleRescan(); }
+
+// Link state drives every deadline at once: retrying or scanning into a live link is pure churn,
+// and churn is what degraded the radio in #163/#194.
+void OnRadioLinked() {
+    g_Timers.OnLinked();
+    g_AdvRetry.Cancel();
+    g_ScanRetry.Cancel();
+}
+void OnRadioUnlinked() {
+    g_Timers.OnUnlinked();
+}
+
+// Shutting down. Same quiescing as a link-up — every deadline off, both backoffs abandoned — but it
+// gets its own name because "linked" would be a lie at the one moment someone reading a shutdown
+// log can least afford one.
+void OnRadioStopped() {
+    g_Timers.OnLinked();     // the "no deadline is armed" state
+    g_AdvRetry.Cancel();
+    g_ScanRetry.Cancel();
+}
+
 namespace {
 
-void TickSendQueue() {
+void TickPolicies() {
+    // ONE clock for every deadline. Pump() is called once per Session::Tick, which is the cadence
+    // all of these want; measuring here rather than threading time through ITransport::Pump() keeps
+    // that signature unchanged for every other backend. Three separate statics would be three
+    // clocks that could disagree after a stall.
     static bool Started = false;
     static std::chrono::steady_clock::time_point Last;
     const auto Now = std::chrono::steady_clock::now();
     if (!Started) { Started = true; Last = Now; return; }   // first call establishes the baseline
     const auto Delta = std::chrono::duration_cast<std::chrono::nanoseconds>(Now - Last).count();
     Last = Now;
-    g_SendQueue.Tick(static_cast<uint64_t>(Delta));
+    const auto ElapsedNs = static_cast<uint64_t>(Delta);
+
+    g_SendQueue.Tick(ElapsedNs);
+
+    // A fast retry came due. The Kotlin verb releases our own stale registration before starting,
+    // which is the ALREADY_STARTED remedy the policy deliberately does not own.
+    if (g_AdvRetry.Tick(ElapsedNs))  CallShimVerb(g_StartAdvertisingMethod);
+    if (g_ScanRetry.Tick(ElapsedNs)) CallShimVerb(g_StartScanningMethod);
+
+    // Several can be due at once after a long stall (an app suspended and resumed), so each is
+    // handled rather than only the first.
+    const BleDiscoveryTimers::Actions Act = g_Timers.Tick(ElapsedNs);
+    if (Act.AbortConnect) {
+        LOGI("connect watchdog: attempt neither linked nor resolved in 6s — tearing it down");
+        CallShimVerb(g_AbortConnectMethod);
+    }
+    if (Act.GoSymmetric) {
+        LOGI("discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)");
+        CallShimVerb(g_GoSymmetricMethod);
+    }
+    if (Act.Rescan) CallShimVerb(g_StartScanningMethod);
 }
 
 }  // namespace
@@ -234,6 +319,26 @@ static void Ble_nativeOnLinkLost(JNIEnv*, jobject) {
     Lur::Transport::OnOutboundLinkLost();
 }
 
+// --- JNI: radio events feeding the C++ discovery/retry policies (#194, #197). ---
+//
+// Kotlin says what the radio DID; C++ decides what follows. The two *StartFailed thunks return
+// whether this failure deserves a loud line — first of a run yes, repeats no — so the retry loop
+// cannot bury the message that matters.
+static jboolean Ble_nativeOnAdvertiseStartFailed(JNIEnv*, jobject) {
+    return Lur::Transport::OnAdvertiseStartFailed() ? JNI_TRUE : JNI_FALSE;
+}
+static jboolean Ble_nativeOnScanStartFailed(JNIEnv*, jobject) {
+    return Lur::Transport::OnScanStartFailed() ? JNI_TRUE : JNI_FALSE;
+}
+static void Ble_nativeOnAdvertiseStarted(JNIEnv*, jobject) { Lur::Transport::OnAdvertiseStarted(); }
+static void Ble_nativeOnScanStarted(JNIEnv*, jobject)      { Lur::Transport::OnScanStarted(); }
+static void Ble_nativeOnConnectStarted(JNIEnv*, jobject)   { Lur::Transport::OnConnectStarted(); }
+static void Ble_nativeOnConnectResolved(JNIEnv*, jobject)  { Lur::Transport::OnConnectResolved(); }
+static void Ble_nativeScheduleRescan(JNIEnv*, jobject)     { Lur::Transport::RequestRescan(); }
+static void Ble_nativeOnRadioLinked(JNIEnv*, jobject)      { Lur::Transport::OnRadioLinked(); }
+static void Ble_nativeOnRadioUnlinked(JNIEnv*, jobject)    { Lur::Transport::OnRadioUnlinked(); }
+static void Ble_nativeOnRadioStopped(JNIEnv*, jobject)     { Lur::Transport::OnRadioStopped(); }
+
 static jboolean Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject, jbyteArray Id) {
     const jsize Len = Env->GetArrayLength(Id);
     std::string S(static_cast<std::size_t>(Len), 0);
@@ -260,6 +365,31 @@ static void JNICALL Ble_nativeSetShim(JNIEnv* Env, jobject Self) {
     g_WriteMethod = Env->GetMethodID(Cls, "writeRaw", "([B)Z");  // dumb write; queue is C++
     g_RestartMethod = Env->GetMethodID(Cls, "restartRadio", "()V");  // #182
     g_ResetMethod = Env->GetMethodID(Cls, "resetLink", "()V");
+    // Radio verbs driven by the C++ discovery/retry policies. Dumb actions; the deciding is ours.
+    //
+    // GetMethodID FAILS SILENTLY from our side: a mismatch leaves the id null, CallShimVerb returns
+    // early, and the phone simply never retries or never goes symmetric — invisible, and shaped
+    // exactly like the #194 bug this cutover exists to kill. RegisterNatives guards the Kotlin->C++
+    // direction by refusing the library load; nothing guards this direction, so check it by hand and
+    // say so LOUDLY. The classic way to trip it is a Kotlin verb that returns something: an
+    // expression body over Handler.post infers Boolean, making the real signature ()Z.
+    struct Verb { const char* Name; jmethodID* Out; };
+    const Verb Verbs[] = {
+        {"startAdvertising", &g_StartAdvertisingMethod},
+        {"startScanning",    &g_StartScanningMethod},
+        {"goSymmetric",      &g_GoSymmetricMethod},
+        {"abortConnect",     &g_AbortConnectMethod},
+    };
+    for (const Verb& V : Verbs) {
+        *V.Out = Env->GetMethodID(Cls, V.Name, "()V");
+        if (*V.Out == nullptr) {
+            // GetMethodID raised NoSuchMethodError; clear it or the next JNI call misbehaves.
+            if (Env->ExceptionCheck()) Env->ExceptionClear();
+            LOGE("JNI: BleShim.%s()V not found — the BLE discovery/retry policy cannot drive the "
+                 "radio. Advertise/scan will NOT be retried and the 8s watchdog will do nothing. "
+                 "Check the Kotlin returns Unit, not Boolean.", V.Name);
+        }
+    }
 }
 
 // --- JNI: the shared, cross-platform role tie-break (single source of truth). ---
@@ -439,6 +569,16 @@ static const JNINativeMethod kBleShimMethods[] = {
     {"nativeIsValidDeviceId", "([B)Z", reinterpret_cast<void*>(Ble_nativeIsValidDeviceId)},
     {"nativeOnSendComplete", "()V", reinterpret_cast<void*>(Ble_nativeOnSendComplete)},
     {"nativeOnLinkLost",     "()V", reinterpret_cast<void*>(Ble_nativeOnLinkLost)},
+    {"nativeOnAdvertiseStartFailed", "()Z", reinterpret_cast<void*>(Ble_nativeOnAdvertiseStartFailed)},
+    {"nativeOnScanStartFailed",      "()Z", reinterpret_cast<void*>(Ble_nativeOnScanStartFailed)},
+    {"nativeOnAdvertiseStarted", "()V", reinterpret_cast<void*>(Ble_nativeOnAdvertiseStarted)},
+    {"nativeOnScanStarted",      "()V", reinterpret_cast<void*>(Ble_nativeOnScanStarted)},
+    {"nativeOnConnectStarted",   "()V", reinterpret_cast<void*>(Ble_nativeOnConnectStarted)},
+    {"nativeOnConnectResolved",  "()V", reinterpret_cast<void*>(Ble_nativeOnConnectResolved)},
+    {"nativeScheduleRescan",     "()V", reinterpret_cast<void*>(Ble_nativeScheduleRescan)},
+    {"nativeOnRadioLinked",      "()V", reinterpret_cast<void*>(Ble_nativeOnRadioLinked)},
+    {"nativeOnRadioUnlinked",    "()V", reinterpret_cast<void*>(Ble_nativeOnRadioUnlinked)},
+    {"nativeOnRadioStopped",     "()V", reinterpret_cast<void*>(Ble_nativeOnRadioStopped)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},

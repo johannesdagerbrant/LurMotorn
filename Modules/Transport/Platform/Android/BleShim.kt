@@ -115,6 +115,19 @@ class BleShim(private val context: Context, private val TAG: String) {
     private external fun nativeOnDisconnected()
     /** A queued write finished; the engine's send queue releases the next one. */
     private external fun nativeOnSendComplete()
+    // Radio events -> the C++ discovery/retry policies (BleStartRetry, BleDiscoveryTimers).
+    // We report what the radio DID; C++ decides what happens next and calls the verbs below.
+    // The two *StartFailed calls answer "is this failure worth a loud line" (first of a run, yes).
+    private external fun nativeOnAdvertiseStartFailed(): Boolean
+    private external fun nativeOnScanStartFailed(): Boolean
+    private external fun nativeOnAdvertiseStarted()
+    private external fun nativeOnScanStarted()
+    private external fun nativeOnConnectStarted()
+    private external fun nativeOnConnectResolved()
+    private external fun nativeScheduleRescan()
+    private external fun nativeOnRadioLinked()
+    private external fun nativeOnRadioUnlinked()
+    private external fun nativeOnRadioStopped()
     /** The link is gone: the engine drops the send backlog, which is only meaningful to a peer
      *  that received the earlier datagrams. */
     private external fun nativeOnLinkLost()
@@ -188,10 +201,9 @@ class BleShim(private val context: Context, private val TAG: String) {
     // advertiser-slot limit. Those DO wedge the radio for real.
     private var advertising = false
     private var scanning = false
-    private var advRetries = 0
-    private var scanRetries = 0
-    private var advFailLogged = false      // rate-limit: the retry loop must not bury the log
-    private var scanFailLogged = false
+    // Start-failure backoff, discovery/connect/rescan deadlines and their log rate-limiting all
+    // moved to C++ (BleStartRetry, BleDiscoveryTimers) in #197 — they are decisions, and living
+    // here is why they drifted between the two games.
     // #203: is our GATT service actually published? Confirmed by onServiceAdded, not assumed from
     // addService() returning. Nothing tracked this before, yet the startup log asserted "serving".
     private var serving = false
@@ -220,8 +232,6 @@ class BleShim(private val context: Context, private val TAG: String) {
     // (reset/reinstall), advertise-only leaves BOTH phones deaf forever. Any unlinked
     // stretch longer than the watchdog drops the gates and resumes the symmetric
     // dance; the fresh in-band tie-break then re-caches the true role.
-    private val watchdogHandler = Handler(Looper.getMainLooper())
-    private val discoveryWatchdog = Runnable { onDiscoveryWatchdog() }
 
     init {
         nativeSetShim()
@@ -321,41 +331,64 @@ class BleShim(private val context: Context, private val TAG: String) {
             if (nativeDecideRole(deviceId, peerId, fruitlessDefers) == ROLE_PERIPHERAL) {
                 decidedPeripheral = true          // known peripheral: never connect out
                 Log.i(TAG, "cached role: PERIPHERAL — advertise + serve, no scan")
-                startAdvertising()
+                startAdvertisingNow()
             } else {
                 decidedPeripheral = false
                 Log.i(TAG, "cached role: CENTRAL — scan + connect, no advertise")
-                startScanning()
+                startScanningNow()
             }
         } else {
             Log.i(TAG, "no cached peer — full discovery (advertise + scan)")
-            startAdvertising()
-            startScanning()
+            startAdvertisingNow()
+            startScanningNow()
         }
-        armDiscoveryWatchdog()  // #79: one-sidedness may not outlive the watchdog
+        nativeOnRadioUnlinked()  // #79: arms the discovery watchdog in C++
     }
 
-    private fun armDiscoveryWatchdog() {
-        watchdogHandler.removeCallbacks(discoveryWatchdog)
-        if (!linked) watchdogHandler.postDelayed(discoveryWatchdog, 8000)
+    /**
+     * The discovery watchdog fired in C++ (BleDiscoveryTimers): no link in 8 s, so drop the
+     * cached-role gates and resume the symmetric advertise+scan dance (#79).
+     *
+     * A VERB, not a decision — the deciding happened in tested C++. Posted to the main looper
+     * because C++ calls it from the engine thread during Pump(), and every other mutation of the
+     * radio flags happens on the looper. Keeping them all on one thread is deliberate: the last
+     * regression in this subsystem was a data race that presented purely as latency.
+     *
+     * #194: idempotent. Before, this pair fired every 8 s against an already-running
+     * advertise+scan and earned ALREADY_STARTED on both, every time — the churn behind the
+     * wedged radio. It starts only what is actually stopped.
+     */
+    // NOTE the explicit Unit bodies on all four verbs. `fun f() = handler.post { }` would infer
+    // Boolean (Handler.post returns one), the JNI signature would be ()Z, and the C++
+    // GetMethodID(…, "()V") would quietly return null — a verb that never fires, with nothing
+    // logged. RegisterNatives catches a Kotlin->C++ signature mismatch; this direction has no such
+    // guard, so it has to be right by construction.
+    fun goSymmetric() {
+        handler.post {
+            if (linked) return@post
+            decidedPeripheral = false
+            connecting = false
+            startAdvertisingNow()
+            startScanningNow()
+        }
     }
 
-    @Synchronized
-    private fun onDiscoveryWatchdog() {
-        if (linked) return
-        Log.i(TAG, "discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)")
-        decidedPeripheral = false
-        connecting = false
-        // #194: idempotent now. Before, this pair fired every 8 s against an already-running
-        // advertise+scan and earned ALREADY_STARTED on both, every time - the churn behind
-        // the wedged radio. It now starts only what is actually stopped, which also makes it
-        // the long-cadence retry for a start that keeps failing.
-        startAdvertising()
-        startScanning()
-        armDiscoveryWatchdog()  // keep watching until a link forms
+    /** Tear down a stalled outgoing central attempt — the connect watchdog fired in C++. */
+    fun abortConnect() {
+        handler.post {
+            val g = gattClient
+            if (!linked && !decidedPeripheral && g != null) {
+                Log.i(TAG, "central: connect watchdog -> tearing down and retrying")
+                dropClient(g, rescan = true)
+            }
+        }
     }
 
-    private fun startAdvertising() {
+    /** Radio verbs the C++ retry policy drives. Posted to the looper — see goSymmetric. */
+    fun startAdvertising() { handler.post { if (started && !linked) startAdvertisingNow() } }
+    fun startScanning()    { handler.post { if (started && !linked) startScanningNow() } }
+
+    private fun startAdvertisingNow() {
         if (advertising) return          // #194: idempotent - asking twice earns ALREADY_STARTED
         val adv = adapter?.bluetoothLeAdvertiser ?: run { Log.e(TAG, "no BLE advertiser"); return }
         advertiser = adv
@@ -377,7 +410,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         }
     }
 
-    private fun startScanning() {
+    private fun startScanningNow() {
         if (scanning) return             // #194: idempotent - see startAdvertising
         val sc = adapter?.bluetoothLeScanner ?: run { Log.e(TAG, "no BLE scanner"); return }
         scanner = sc
@@ -418,30 +451,22 @@ class BleShim(private val context: Context, private val TAG: String) {
 
     private fun stopAdvertising() {
         advertising = false
-        advRetries = 0
-        advFailLogged = false
-        handler.removeCallbacks(advRetry)
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
     }
 
     private fun stopScanning() {
         scanning = false
-        scanRetries = 0
-        scanFailLogged = false
-        handler.removeCallbacks(scanRetry)
         try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
     }
 
-    // #194: a failed start used to be permanent - one Log.e and the process stayed
-    // invisible/deaf for the rest of its life. Retry on a capped backoff while we are still
-    // trying to link, so a transient failure heals in about a second instead of needing a
-    // human to toggle Bluetooth. The fast retries are capped and then handed back to the 8 s
-    // discovery watchdog (#79), which keeps trying for as long as we are unlinked - so there
-    // is no give-up state, just a slower cadence.
-    private val advRetry = Runnable { if (started && !linked) startAdvertising() }
-    private val scanRetry = Runnable { if (started && !linked) startScanning() }
-
-    private fun retryDelayMs(attempt: Int): Long = 400L shl minOf(attempt, 3)   // 0.4 - 3.2 s
+    // #194: a failed start used to be permanent - one Log.e and the process stayed invisible/deaf
+    // for the rest of its life. The retry that fixes it is now Lur::Transport::BleStartRetry, in
+    // C++ and under host tests, because THAT is the reason this fix existed in chess and not in
+    // RPS: living in Kotlin, nothing could test it and nothing forced the two games to agree.
+    //
+    // What stays here is the part that is genuinely a platform verb: releasing our own stale
+    // registration before a retry. Without it the retry earns the same ALREADY_STARTED forever,
+    // which was #194's actual bug — so the policy deliberately does not own it.
 
     private fun onAdvertiseStartFailed(errorCode: Int) {
         advertising = false
@@ -451,14 +476,10 @@ class BleShim(private val context: Context, private val TAG: String) {
         if (errorCode == AdvertiseCallback.ADVERTISE_FAILED_ALREADY_STARTED) {
             try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
         }
-        if (!advFailLogged) {
-            advFailLogged = true
+        if (nativeOnAdvertiseStartFailed()) {
             Log.e(TAG, "advertise failed: $errorCode - retrying (repeats quiet until one succeeds)")
         }
         reportRadioState("advertise failed $errorCode")   // #203: say what we now ARE, not just why
-        if (advRetries < 5 && started && !linked) {
-            handler.postDelayed(advRetry, retryDelayMs(advRetries++))
-        }
     }
 
     private fun onScanStartFailed(errorCode: Int) {
@@ -466,14 +487,10 @@ class BleShim(private val context: Context, private val TAG: String) {
         if (errorCode == ScanCallback.SCAN_FAILED_ALREADY_STARTED) {
             try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
         }
-        if (!scanFailLogged) {
-            scanFailLogged = true
+        if (nativeOnScanStartFailed()) {
             Log.e(TAG, "scan failed: $errorCode - retrying (repeats quiet until one succeeds)")
         }
         reportRadioState("scan failed $errorCode")        // #203: say what we now ARE, not just why
-        if (scanRetries < 5 && started && !linked) {
-            handler.postDelayed(scanRetry, retryDelayMs(scanRetries++))
-        }
     }
 
     /**
@@ -545,7 +562,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         handler.post {
             if (!started) return@post
             started = false
-            watchdogHandler.removeCallbacks(discoveryWatchdog)
+            nativeOnRadioStopped()  // every deadline off, both backoffs abandoned
             stopScanning()
             stopAdvertising()
             try { gattClient?.close() } catch (_: SecurityException) {}
@@ -563,7 +580,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         if (linked) return
         linked = true
         fruitlessDefers = 0   // #146: a defer that produced a link was not fruitless
-        watchdogHandler.removeCallbacks(discoveryWatchdog)  // #79: link up, stop watching
+        nativeOnRadioLinked()   // #79: link up — stop every deadline and cancel the backoffs
         stopScanning()
         stopAdvertising()
         nativeOnConnected(asPeripheral)
@@ -588,8 +605,7 @@ class BleShim(private val context: Context, private val TAG: String) {
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
             advertising = true
-            advRetries = 0
-            advFailLogged = false        // a later failure is news again
+            nativeOnAdvertiseStarted()   // clears the backoff; a failure later starts from the top
             reportRadioState("advertise confirmed")   // #203: the callback IS the confirmation
         }
         override fun onStartFailure(errorCode: Int) { onAdvertiseStartFailed(errorCode) }
@@ -597,8 +613,7 @@ class BleShim(private val context: Context, private val TAG: String) {
 
     private val scanCallback = object : ScanCallback() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
-            scanRetries = 0
-            scanFailLogged = false       // the scanner is demonstrably alive
+            nativeOnScanStarted()        // the scanner is demonstrably alive: clear the backoff
             // #203: Android has no onScanSuccess, so a delivered result is the ONLY positive proof
             // that scanning works. If a previous failure had cleared the flag, this is the recovery —
             // and it must be reported, or the log keeps the last thing it said, which was a failure.
@@ -748,19 +763,15 @@ class BleShim(private val context: Context, private val TAG: String) {
             Log.i(TAG, "central: connectGatt -> ${device.address}")
             val g = device.connectGatt(context, false, gattClientCallback, BluetoothDevice.TRANSPORT_LE)
             gattClient = g
-            // Watchdog: Android can silently never call back (a hung connect). If this
-            // attempt hasn't linked or been resolved within a few seconds, tear it down
-            // and retry cleanly.
-            handler.postDelayed({
-                if (!linked && !decidedPeripheral && gattClient === g) {
-                    Log.i(TAG, "central: connect watchdog -> tearing down and retrying")
-                    dropClient(g, rescan = false)
-                    scheduleRescan()
-                }
-            }, 6000L)
+            // Android can silently never call back (a hung connect). The watchdog that catches it
+            // is BleDiscoveryTimers::ConnectWatchdogNs in C++; it calls abortConnect() when the
+            // attempt has neither linked nor resolved. Deliberately shorter than the discovery
+            // watchdog, so a stalled attempt is cleaned up before the symmetric reset lands on it.
+            nativeOnConnectStarted()
         } catch (e: SecurityException) {
             Log.e(TAG, "connectGatt: missing BLE permission", e)
             connecting = false
+            nativeOnConnectResolved()
             scheduleRescan()
         }
     }
@@ -768,12 +779,12 @@ class BleShim(private val context: Context, private val TAG: String) {
     /** Resume scanning after a short delay. A collided/failed connect must NOT be
      *  retried immediately: the peer (doing its own exploratory connect) needs a
      *  moment to settle into peripheral-only, and the shared LE link needs to finish
-     *  tearing down, or the retry collides again / hangs (issue #17 reconnect). */
-    private fun scheduleRescan() {
-        handler.postDelayed({
-            if (started && !linked && !decidedPeripheral && !connecting) startScanning()
-        }, 1500L)
-    }
+     *  tearing down, or the retry collides again / hangs (issue #17 reconnect).
+     *
+     *  The delay itself is BleDiscoveryTimers::RescanDelayNs — re-requesting supersedes a pending
+     *  one rather than queueing a second, so a burst of failures cannot produce a burst of scan
+     *  starts (the ALREADY_STARTED shape from #194). The old Handler.postDelayed could. */
+    private fun scheduleRescan() = nativeScheduleRescan()
 
     /** Tear down a client connection. Always closes (a leaked gatt makes the NEXT
      *  connectGatt fail with 133). Resumes discovery unless we're deliberately idle. */
@@ -781,6 +792,9 @@ class BleShim(private val context: Context, private val TAG: String) {
         try { gatt.disconnect(); gatt.close() } catch (_: SecurityException) {}
         if (gattClient == gatt) { gattClient = null; clientDatagram = null }
         connecting = false
+        // The attempt is over however it ended — linked, refused, or torn down. Disarm the connect
+        // watchdog so a link that just formed is not ripped out moments later.
+        nativeOnConnectResolved()
         if (rescan) scheduleRescan()
     }
 
@@ -870,7 +884,7 @@ class BleShim(private val context: Context, private val TAG: String) {
                 startAdvertising()  // ensure findable even if we began in cached-central mode
                 dropClient(gatt, rescan = false)  // we're peripheral now; wait for the peer
                 Log.i(TAG, "central attempt -> we are peripheral; deferring to peer")
-                armDiscoveryWatchdog()  // #79: if the peer never comes, go symmetric again
+                nativeOnRadioUnlinked()  // #79: re-arm from zero — if the peer never comes, go symmetric
             }
         }
 
