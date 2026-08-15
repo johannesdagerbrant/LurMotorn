@@ -132,6 +132,12 @@ struct Snapshot {
     // #139/#146: any static structure (producing building OR the home base) — matches Sim::IsBuilding.
     bool IsBuilding(int32_t I) const { return Kind[I] != KindUnit; }
     bool IsHomeBase(int32_t I) const { return Kind[I] == KindHomeBase; }  // #146 the HQ
+    // Has the match started? Mirrors Sim::IsPreMatch — the clock is held until the opening camp, so
+    // the first tick IS the start. Use this, not HasMinerCamp, for anything meaning "before the match
+    // begins": a player who loses every camp mid-match still owns none, and keying the camera lock on
+    // that yanked the view back to the baseline the moment a raid took their last one. Same mistake
+    // froze the sim outright (see Sim::IsPreMatch).
+    bool IsPreMatch() const { return Tick == 0; }
     // Has this team placed its first mining CAMP (not the HQ)? The mains lock the camera at the
     // baseline until the local team commits its first camp (mirrors Sim::HasMinerCamp).
     bool HasMinerCamp(uint8_t T) const {

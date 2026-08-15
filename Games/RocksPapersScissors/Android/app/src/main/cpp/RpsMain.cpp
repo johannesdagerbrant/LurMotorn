@@ -866,7 +866,7 @@ void android_main(android_app* App) {
             // has happened yet, so there is nothing to throw away. Same seed, so only the edited
             // knobs move. Re-latches Cv through Init, which is what rebuilds the mine field.
             if (State.RebuildPreMatch.exchange(false, std::memory_order_acq_rel) && SoloRunning &&
-                !State.SoloSim.HasMinerCamp(0) && State.SoloSim.Result == Rps::ResultOngoing) {
+                State.SoloSim.IsPreMatch() && State.SoloSim.Result == Rps::ResultOngoing) {
                 State.SoloSim.Init(kMatchSeed);
                 State.SoloAi.Init(kMatchSeed, /*AI team*/ 1,
                                   static_cast<Rps::EAiTier>(SoloTier_ < 0 ? 0 : SoloTier_));
@@ -919,7 +919,7 @@ void android_main(android_app* App) {
             // flag is only cleared when the switch actually happens, or when there is nothing left to
             // switch out of.
             const bool ManualPick = State.SwitchToLinked.load(std::memory_order_acquire);
-            const bool AutoSwitch = LinkEdge && !State.SoloSim.HasMinerCamp(0);  // unstarted AI match only
+            const bool AutoSwitch = LinkEdge && State.SoloSim.IsPreMatch();  // unstarted AI match only
             if (SoloRunning && PeerReady && (AutoSwitch || ManualPick)) {
                 SoloRunning = false;
                 State.SwitchToLinked.store(false, std::memory_order_release);
@@ -992,7 +992,7 @@ void android_main(android_app* App) {
                 // effectively started on however long you deliberated, and the timer counted time you
                 // had not played. Elapsed time is DROPPED here, not banked, so no catch-up burst
                 // follows the placement.
-                if (!State.SoloSim.HasMinerCamp(0)) {
+                if (State.SoloSim.IsPreMatch()) {
                     SoloAccumNs = 0;
                     Rps::InputEvent Evs[Rps::MaxEventsPerTick];
                     const int Drained = State.SoloIn.Drain(Evs, Rps::MaxEventsPerTick);

@@ -484,6 +484,25 @@ bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
 // of those round trips (carts deposit at the nearest own camp, Sim §12.4) instead of lengthening
 // them, and it still adds its full share of production.
 //
+// WHY THIS IS REACTIVE AND CANNOT BE MADE PROACTIVE (asked 2026-08-15: "prevent all their carts from
+// having to travel the entire way back to the last row the first time they reach a new row"). The
+// honest answer is that placing a camp on a row before the carts get there is not available to
+// ANYONE, AI or human: §5.3 makes a team's buildable depth its FRONTMOST LIVE UNIT, so a row you have
+// not physically reached is not buildable, and the frontier only advances once a cart has walked
+// there. The first wave onto a new row therefore eats one full-length round trip by construction.
+//
+// It was tried, twice, and both are worth not repeating. Claiming the next unclaimed row whenever
+// rich cost hard 60s and a third of its army vs OwnerBot (295s/239 soldiers against 236s/352), because
+// a claim spends the tick's one action and it claimed every deposit on the map. Gating that on the
+// worked row running down, one row ahead at a time, was near-neutral on strength but did NOT remove
+// the transition spike — measured mean haul still hit 47 at the row change — for exactly the frontier
+// reason above: at the moment the cue fires, the next row is still unbuildable.
+//
+// So the trigger below is the earliest one that exists: a cart's Target is set when it RETARGETS, not
+// when it arrives, so the camp goes up while the first cart is still crossing. Genuinely pre-empting
+// the move would need the AI to send a unit ahead to extend its frontier first — a real strategy, and
+// a much bigger change than a placement rule.
+//
 // Scored carts x haul: the total travel a new drop-off there would save per cycle, which is the
 // quantity actually being minimised. A deposit no cart visits scores zero and is skipped — this
 // never invents an expansion, that is AiBestMineTarget's job. Strict > keeps the lowest index on a
@@ -1133,6 +1152,10 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // Deliberately placed after the build cluster (a committed counter wave still completes first) and
     // before the Want-driven purchase, so it outranks ordinary expansion but never an emergency.
     // Cap-respecting and affordability-checked like any other placement; one event, then return.
+    // It fires the moment a cart COMMITS to a deposit — Target is set when it retargets, before it has
+    // walked there — so the camp is usually going up while the first cart is still crossing. It cannot
+    // do better than that: see AiWorkedMineTarget on why claiming a row BEFORE reaching it is not
+    // available to the AI at all.
     if (CampOnGold && S.Cv.AiCampHaulMax > 0 &&
         (K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings) &&
         S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, UnitMiner)) {

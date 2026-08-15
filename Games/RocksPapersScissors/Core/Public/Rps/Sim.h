@@ -236,6 +236,21 @@ struct Sim {
     // Has this team placed its first mining CAMP (a miner building that isn't the HQ)? Solo gates
     // the AI on the human's opening — the AI holds until the player commits their first camp.
     bool HasMinerCamp(uint8_t TeamId) const;
+    // #139/#149 PRE-MATCH HOLD: has this match started? The clock does not run until the player
+    // commits their opening camp, so the FIRST tick is the start and Tick == 0 is the whole test.
+    //
+    // It exists because the mains used to ask `!HasMinerCamp(0)` instead, and that is a different
+    // question with the same answer only at the beginning. Lose every camp to a raid mid-match — which
+    // is what losing LOOKS like — and it goes false again, so the sim dropped back into the
+    // "waiting for your opening camp" hold and stopped ticking, in a match that was still running and
+    // still winnable. From the outside the game simply froze: the renderer kept presenting, the tick
+    // stood still, and nothing was logged because the match had no result to report. Seen on the
+    // Galaxy 2026-08-15 at tick 2582 with team 0 on 0 workers, 5 buildings and no camp.
+    //
+    // A latch in each main would have worked and been wrong: there are two of them plus the desktop,
+    // they have drifted before, and the view asks the same question to decide whether to show the
+    // "drag your camp" prompt and lock the camera. One predicate on the state everyone already has.
+    bool IsPreMatch() const { return Tick == 0; }
     static Fixed CampY(uint8_t TeamId) { return TeamId == 0 ? Camp0Y : Camp1Y; }
 };
 

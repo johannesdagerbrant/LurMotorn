@@ -1126,7 +1126,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
             _PeerDrawsA.store(static_cast<int>(T.Draws), std::memory_order_relaxed);
         }
         const bool ManualPick = _SwitchToLinkedAtomic.load(std::memory_order_acquire);
-        const bool AutoSwitch = LinkEdge && !_SoloSim.HasMinerCamp(0);   // unstarted AI match only
+        const bool AutoSwitch = LinkEdge && _SoloSim.IsPreMatch();   // unstarted AI match only
         const bool SoloActiveNow = _SoloActiveAtomic.load(std::memory_order_acquire);
         if (SoloActiveNow && PeerReady && (AutoSwitch || ManualPick)) {
             _SoloActiveAtomic.store(false, std::memory_order_release);
@@ -1141,7 +1141,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 
         if (_SoloActiveAtomic.load(std::memory_order_acquire)) {
             // ---- SOLO path (#139/#149 pre-match hold; parity with the single-threaded original) ----
-            if (_SoloSim.Result == Rps::ResultOngoing && !_SoloSim.HasMinerCamp(0)) {
+            if (_SoloSim.Result == Rps::ResultOngoing && _SoloSim.IsPreMatch()) {
                 SoloAccumNs = 0;
                 Rps::InputEvent Evs[Rps::MaxEventsPerTick];
                 const int Drained = _SoloIn.Drain(Evs, Rps::MaxEventsPerTick);

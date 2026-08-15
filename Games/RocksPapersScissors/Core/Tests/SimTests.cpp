@@ -428,6 +428,38 @@ static void TestCartPriorityOverMirror() {
 
 // Interpose (#98): a defender with a friendly cart AND a flagged raider nearby is pulled
 // toward the point BETWEEN them (screening the cart), even while its ATTACK target is a
+// ---- LOSING YOUR LAST CAMP IS NOT "THE MATCH HASN'T STARTED" (the 2026-08-15 freeze) ----
+// The mains hold the clock before the opening camp, and both asked `!HasMinerCamp(0)` to decide that.
+// It is the right answer only at tick 0: get raided down to no camps and it goes false AGAIN, so the
+// sim fell back into the pre-match hold and stopped ticking a match that was still live — a hard
+// freeze with the renderer still running and nothing logged, because there was no result to report.
+// Pin the distinction on the predicate itself; the mains are not host-testable, so this is the guard.
+static void TestPreMatchIsTickZeroNotCampOwnership() {
+    static Sim S;
+    S.Init(0x5EED);
+    CHECK(S.IsPreMatch());                      // fresh sim: genuinely pre-match
+    CHECK(!S.HasMinerCamp(0));                  // ...and the old predicate agrees, at tick 0 only
+
+    // Start the match the way the mains do: the opening camp, then a tick.
+    const InputEvent Open = InputEvent::Place(0, UnitMiner, F(17), F(10));
+    S.StepEvents(&Open, 1);
+    CHECK(S.HasMinerCamp(0));
+    CHECK(!S.IsPreMatch());                     // ticked once: started, and it can never un-start
+
+    // Now raze every camp team 0 owns — what losing looks like.
+    for (int32_t I = 0; I < S.Count; ++I)
+        if (S.IsAlive(I) && S.IsBuilding(I) && !S.IsHomeBase(I) && S.Team[I] == 0 &&
+            S.Type[I] == UnitMiner)
+            S.AliveBits[I >> 6] &= ~(1ull << (I & 63));
+    CHECK(!S.HasMinerCamp(0));                  // the old test flips back — this is the trap
+    CHECK(!S.IsPreMatch());                     // ...and the new one does not. The match is running.
+
+    // And it still ticks, which is the property that actually broke.
+    const uint32_t Before = S.Tick;
+    S.StepEvents(nullptr, 0);
+    CHECK(S.Tick == Before + 1);
+}
+
 // ---- A SOLDIER GOES AROUND A BUILDING, AND THROUGH A CART (owner, 2026-08-14/15) ----
 // Two halves of one rule, tested together because the pair is the actual requirement: a raider may
 // walk through its own carts, and must NOT walk through buildings.
@@ -1243,6 +1275,7 @@ int main() {
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
     TestCartPriorityOverMirror();
+    TestPreMatchIsTickZeroNotCampOwnership();
     TestSoldiersRoundBuildingsButThroughCarts();
     TestInterposeScreensCart();
     TestBuildingSoaHashedAndCopyable();
