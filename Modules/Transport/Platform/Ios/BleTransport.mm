@@ -426,12 +426,12 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 
     const Lur::Transport::BleDiscoveryTimers::Actions Act =
         _Timers.Tick(static_cast<uint64_t>(Delta));
-    // AbortConnect and Rescan are not wired on iOS: this driver has no connect watchdog, and its
-    // rescan (resetClientAndRescan) is immediate rather than delayed. Both are one-sided gaps
-    // against Android, NOT a decision that iOS does not need them — see the note on #197.
-    if (Act.GoSymmetric) {
-        dispatch_async(dispatch_get_main_queue(), ^{ [self discoveryWatchdogFired]; });
-    }
+    // Several can be due at once after a long stall (an app suspended and resumed), so each is
+    // handled rather than only the first. Order matches Android's: tear a stalled attempt down
+    // before the symmetric reset lands on top of it.
+    if (Act.AbortConnect) dispatch_async(dispatch_get_main_queue(), ^{ [self abortConnect]; });
+    if (Act.GoSymmetric)  dispatch_async(dispatch_get_main_queue(), ^{ [self discoveryWatchdogFired]; });
+    if (Act.Rescan)       dispatch_async(dispatch_get_main_queue(), ^{ [self rescanNow]; });
 }
 
 - (void)advertiseService {
@@ -501,6 +501,11 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     peripheral.delegate = self;
     [central stopScan];
     [central connectPeripheral:peripheral options:nil];
+    // #197: iOS had NO connect watchdog where Android has had one for a long time — a one-sided
+    // fix, which is the drift this phase exists to end. CoreBluetooth's connectPeripheral has no
+    // timeout of its own and will happily wait forever, so a connect the stack never completes
+    // pinned _Connecting true and blocked every later attempt at the line above.
+    _Timers.OnConnectStarted();
 }
 
 - (void)centralManager:(CBCentralManager*)central
@@ -524,9 +529,36 @@ didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
     _Connecting = false;
     _RemoteDatagram = nil;
     _PeerDevice = nil;
-    if (!_Linked && !_DecidedPeripheral && _Central.state == CBManagerStatePoweredOn) {
+    _Timers.OnConnectResolved();   // the attempt is over, however it ended
+    // #17 / #197: DELAYED, not immediate. Android has waited 1.5 s here for a long time and iOS
+    // never did — another one-sided fix. The delay is the point: the peer is running its own
+    // exploratory connect and needs a moment to settle into peripheral-only, and the shared LE link
+    // needs to finish tearing down, or the retry collides again or hangs. Rescanning instantly is
+    // how both ends keep re-colliding, which is visible as the role tie-break needing several
+    // fruitless defers before #146's breaker resolves it (measured at 33 s on 2026-08-15).
+    if (!_Linked && !_DecidedPeripheral) [self scheduleRescan];
+}
+
+// Re-requesting supersedes a pending rescan rather than queueing a second, so a burst of failed
+// connects cannot produce a burst of scan starts.
+- (void)scheduleRescan {
+    _Timers.ScheduleRescan();
+}
+
+// The rescan delay elapsed (BleDiscoveryTimers). Main queue: CoreBluetooth lives there.
+- (void)rescanNow {
+    if (_Linked || _DecidedPeripheral) return;
+    if (_Central.state == CBManagerStatePoweredOn)
         [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
-    }
+}
+
+// The connect watchdog elapsed: this attempt neither linked nor resolved. Tear it down rather than
+// leaving _Connecting pinned true forever.
+- (void)abortConnect {
+    if (_Linked || !_Connecting) return;
+    BLE_LOG(@"central: connect watchdog - attempt neither linked nor resolved, tearing it down");
+    if (_PeerDevice) [_Central cancelPeripheralConnection:_PeerDevice];
+    [self resetClientAndRescan];
 }
 
 // ---- CBPeripheralDelegate (the peer's server we connected to as central) ----
