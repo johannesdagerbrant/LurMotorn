@@ -50,6 +50,7 @@
 #include "Lur/Transport/BleProtocol.h"
 #include "Lur/Transport/BleSendQueue.h"
 #include "Lur/Transport/BleDiscoveryTimers.h"
+#include "Lur/Transport/BleRadioState.h"
 #include <chrono>
 
 // Every line this driver logs is prefixed with the APP's tag — the string an iOS syslog capture
@@ -173,6 +174,13 @@ public:
     Lur::Transport::BleDiscoveryTimers _Timers;
     bool _TimersStarted;
     std::chrono::steady_clock::time_point _TimersLast;
+
+    // What the radio is actually doing (#197). Android found the bug this closes — a Bluetooth
+    // off/on left the phone invisible for the life of the process — and iOS had the identical hole:
+    // BOTH didUpdateState handlers below used to read `if (state != PoweredOn) return;`, so a
+    // power-off invalidated nothing we track. CoreBluetooth self-corrects its own `isAdvertising`,
+    // but _HaveCachedRole / _DecidedPeripheral / _Connecting / _Linked are ours and do not.
+    Lur::Transport::BleRadioState _RadioState;
 
     // Central-side state (we connected OUT to a peer's GATT server).
     CBPeripheral*     _PeerDevice;
@@ -377,6 +385,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
     _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
     _Timers.OnLinked();    // every deadline off: firing into a live link is churn
+    _RadioState.OnLinked();
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
     // The net Session sends the first Hello once it sees the link up — no demo ping
@@ -448,6 +457,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 - (void)onLinkLost {
     if (!_Linked) return;
     _Linked = _Connected = _Connecting = false;
+    _RadioState.OnUnlinked();
     _DecidedPeripheral = (_HaveCachedRole && _CachedPeripheral);  // known peripheral stays one-sided
     _SendQueue.OnLinkLost();                                      // drop stale send backlog (#72)
     _Subscriber = nil;
@@ -470,7 +480,8 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 // CBCentralManagerDelegate — scan, connect out, read the peer's device id.
 // ===========================================================================
 - (void)centralManagerDidUpdateState:(CBCentralManager*)central {
-    if (central.state != CBManagerStatePoweredOn) return;
+    if (central.state != CBManagerStatePoweredOn) { [self onRadioPoweredOff]; return; }
+    _RadioState.OnAdapterOn();
     if ([self shouldScan]) {
         BLE_LOG(@"central powered on, scanning");
         [central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
@@ -610,9 +621,28 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
 // CBPeripheralManagerDelegate — advertise + host the service.
 // ===========================================================================
 - (void)peripheralManagerDidUpdateState:(CBPeripheralManager*)peripheral {
-    if (peripheral.state != CBManagerStatePoweredOn) return;
+    if (peripheral.state != CBManagerStatePoweredOn) { [self onRadioPoweredOff]; return; }
+    _RadioState.OnAdapterOn();
     BLE_LOG(@"peripheral powered on, publishing service");
     [self publishService];
+}
+
+// The radio went away — Bluetooth switched off, or the app lost the hardware. Both didUpdateState
+// handlers used to just `return` here, invalidating nothing, which on Android was a phone that
+// stayed invisible for the life of the process (#197, found on the Galaxy 2026-08-15).
+//
+// CoreBluetooth resets its own isAdvertising, but every piece of state WE keep survives, and a
+// cached role or a half-finished connect surviving a power cycle is what leaves both phones deaf.
+- (void)onRadioPoweredOff {
+    if (!_RadioState.IsAdapterOn()) return;   // already handled; both managers report separately
+    BLE_LOG(@"BLE radio powered OFF - dropping cached role, connect state and any link");
+    _RadioState.OnAdapterOff();
+    _Connecting = false;
+    _HaveCachedRole = _CachedPeripheral = _DecidedPeripheral = false;
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    _RemoteDatagram = nil;
+    if (_Linked) [self onLinkLost];
+    _Timers.OnUnlinked();   // re-arm discovery so the return to power-on resumes the dance
 }
 
 // Build + add the GATT service (datagram + device-id characteristics). Factored out of
