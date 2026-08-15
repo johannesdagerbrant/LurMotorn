@@ -110,3 +110,44 @@ place. `FakeBleRadio` exists but is private to the send-queue tests; with one co
 would be the speculative-engine-facility mistake the repo's own rule forbids. And the iOS
 power-cycle fix is reasoned symmetry with Android's, **not device-verified** — toggling Bluetooth on
 the iPhone needs a hand on the phone.
+
+---
+
+## 7. Addendum — the controller, and the result that overturned §5
+
+Written later the same evening, after `86d56aa`.
+
+### BleLinkController
+
+The cutover left both drivers holding four policy objects and composing them by hand, and the two
+compositions had already begun to differ (Android cancelled the start-retries on link; iOS did not).
+Both defensible — iOS has no start-failure edge — but that is a judgement being re-made in a
+platform file, which is the drift mechanism this phase exists to end. The controller owns all four
+policies; drivers report facts and apply `Actions`. Android's policy block went from ~60 lines of
+forwarding to one member and a `Tick`.
+
+Device-verified behaviour-preserving: 2 matches, `sameFrame=99/99` and `636/637`, `gate=0`, and
+radio-cycle recovery unchanged.
+
+### §5's hypothesis is dead, and the finding is bigger
+
+Five cycles on one build with roles alternating naturally between them — a cleaner A/B than pinning,
+because no agent override was involved:
+
+| cycle | Android's role | adapter-on → linked |
+|---:|---|---|
+| 1 | CENTRAL | 2.01 s |
+| 2 | PERIPHERAL | none in 90 s |
+| 3 | CENTRAL | 4.53 s |
+| 4 | PERIPHERAL | none in 90 s |
+| 5 | CENTRAL | 4.33 s |
+
+Perfect correlation with role, 5/5. **The delayed rescan is not the fix and the 1.9 s figure was not
+a win** — those five fast cycles all happened to land CENTRAL. And the peripheral case is worse than
+§4 recorded: not a slow resolve but *deterministic non-recovery*, which means roughly half of all
+radio-cycle recoveries fail, because the pair alternates.
+
+The lesson is the one this repo keeps re-learning from the other direction. A measurement that
+agrees with your hypothesis is the one to distrust: 1.9 s across five cycles looked like proof, and
+the variable was never controlled. What made it decidable was not more cycles — it was recording the
+role alongside the timing, i.e. instrumenting the thing that could explain the result away.
