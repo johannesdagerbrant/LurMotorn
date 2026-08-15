@@ -338,7 +338,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
         Lur::App::GameHost::Config HostCfg;
         HostCfg.SaveDir = _SaveDir;
         HostCfg.Log = [](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyRps: %{public}s", M); };
-        HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
+        HostCfg.Transport = Lur::Transport::CreateBleTransport();
         _Transport = HostCfg.Transport;
         _Host.Init(HostCfg);
     }

@@ -1,18 +1,24 @@
 # OnlyChess — Android app
 
-The Android shell for the chess game. It's deliberately thin: `NativeActivity`
-hands control to C++ (`android_main` in `libonlychess.so`), which wires the
-platform window to the renderer and runs the shared engine. The only Kotlin is
-`BleShim` (the Bluetooth Low Energy radio shim) reached from C++ over JNI.
+The Android shell for the chess game. It's deliberately thin: an activity hands
+control to C++ (`android_main` in `libonlychess.so`), which wires the platform
+window to the renderer and runs the shared engine. The only Kotlin in *this folder*
+is `OnlyChessActivity.kt`; the BLE radio shim it loads
+(`Modules/Transport/Platform/Android/BleShim.kt`) lives in the engine and is shared
+with RPS, bound from C++ via a `RegisterNatives` table at `JNI_OnLoad`.
 
-## What the skeleton does today
+## What it is today
 
-- Builds `libonlychess.so` from the **shared C++ core** (pulled in via CMake from
-  the repo root) plus the Android glue.
-- On launch, brings up a **stub** Vulkan renderer and runs a smoke test of the
-  engine (logs "20 legal moves from the start position" via `logcat`).
-- BLE transport + Vulkan rendering are **stubs with TODOs** — full implementations
-  are tasks #8 (BLE) and #9 (Vulkan).
+A complete, playable chess app: full Vulkan rendering, a real BLE link to an
+iPhone, per-opponent persistence, and the dev console. The platform layer it used
+to own — BLE radio, Vulkan surface, audio device, entry point — now lives under
+`Modules/*/Platform/Android/` and is shared with RPS.
+
+Because the app target is out-of-tree, `app/src/main/cpp/CMakeLists.txt` re-applies
+the derived `LUR_*` cache vars to its own target and sets the two required per-app
+definitions, `LUR_LOG_TAG` (`OnlyChess`) and `LUR_BLE_SERVICE_UUID`. A new `LUR_*`
+macro must be added here by hand — there is one such block per game per platform
+(issue #198).
 
 ## Prerequisites
 
@@ -43,7 +49,7 @@ single dial, `LUR_CONFIG` (Unreal-style ladder). Gradle forwards it to CMake, an
 `installDebug` ships **optimized** native code, not `-O0`. Select it with
 `-PlurConfig=<config>`:
 
-| `-PlurConfig=` | `LUR_INTERNAL` (bots/soak) | `LUR_ASSERTS` | `LUR_SLOW` | Native opt (`CMAKE_BUILD_TYPE`) |
+| `-PlurConfig=` | `LUR_INTERNAL` (console, CVars) | `LUR_ASSERTS` | `LUR_SLOW` | Native opt (`CMAKE_BUILD_TYPE`) |
 |---|---|---|---|---|
 | `Development` *(default)* | on | on | off | `RelWithDebInfo` (**-O2 -g**) |
 | `Debugging` | on | on | on | `Debug` (**-O0 -g**) |

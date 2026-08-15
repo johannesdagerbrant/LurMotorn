@@ -139,7 +139,7 @@ void AndroidBleTransport::ResetLink() {
 
 } // namespace
 
-ITransport* CreateBleTransport(EBleRole /*Role*/) { return &g_Transport; }
+ITransport* CreateBleTransport() { return &g_Transport; }
 
 } // namespace Lur::Transport
 

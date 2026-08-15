@@ -1,8 +1,10 @@
 # LurMotorn
 
 A from-scratch, near-dependency-free engine for **ultra-low-latency local multiplayer games**, and
-its first game, **Chess**. Two phones — Android *or* iPhone — pair over Bluetooth Low Energy and
-play locally, with the smallest possible data crossing the wire.
+the two games built on it: **Chess** (turn-based, the first) and **RocksPapersScissors** (a
+real-time RTS, which forced the deterministic sim and the rollback netcode). Two phones — Android
+*or* iPhone — pair over Bluetooth Low Energy and play locally, with the smallest possible data
+crossing the wire.
 
 > Design north star: the most responsive local-multiplayer experience possible, built almost
 > entirely ourselves — only the unavoidable OS frameworks (Android SDK / NDK, Apple SDK) and a
@@ -14,25 +16,37 @@ play locally, with the smallest possible data crossing the wire.
 ```
 LurMotorn/                      ← the engine (this repo root)
   Modules/                      ← game-agnostic engine modules
+    Core/            ✅ pure C++  — asserts, logging, CVars, hashing, flight recorder
     Serialization/   ✅ pure C++  — BitWriter/BitReader/Varint  (the "slim bytes" toolkit)
     Sim/             ✅ pure C++  — deterministic fixed-tick loop + fixed-point math (gameplay)
-    Math/            ✅ pure C++  — vec/mat/quat for render + scene transforms (float)
-    Net/             ✅ pure C++  — session lifecycle, clock-sync (rollback netcode later)
-    Transport/       ⚙  C++ interface + BLE backend  (Android: JNI→Kotlin · iOS: CoreBluetooth)
-    Pairing/         ⚙  C++ interface + BLE discovery (no NFC — iOS can't peer-NFC with Android)
-    Render/          ⚙  C++ interface + single Vulkan backend (MoltenVK on iOS), 3D-capable
-    Input/           ⚙  per-platform touch glue
+    Math/            ✅ pure C++  — Vec/Mat4/Spring for render + scene transforms (float)
+    Net/             ✅ pure C++  — Session: handshake, framing, resync
+    Save/            ✅ pure C++  — device id, save store, per-opponent sync
+    Transport/       ⚙  ITransport + BLE: shared policy over per-OS radios (JNI→Kotlin · CoreBluetooth)
+    Render/          ⚙  IRenderer + single Vulkan backend (MoltenVK on iOS), 3D-capable
+    Audio/           ⚙  IAudioDevice + mixer + PCM codec
+    App/             ⚙  GameHost (session/persistence choreography) + per-OS entry points
+    Platform/        ⚙  desktop window + surface + input seam
+    Input/           ⚙  touch events, gesture recognizers
+    Text/            ✅ MSDF glyph rendering + layout (atlases cooked offline)
+    Hud/ DevGui/     ✅ HUD widgets · dev-console widget set
+    Trace/           ✅ scoped CPU timing
   Games/
-    Chess/
-      Core/          ✅ pure C++  — rules, legal move-gen, move codec  (shared verbatim)
-      Android/       Android Studio project (Kotlin shim + C++ + Vulkan)
-      iOS/           Xcode project (Swift shim + C++ + Vulkan via MoltenVK)
+    Chess/  RocksPapersScissors/
+      Core/          ✅ pure C++  — rules + codec  (shared verbatim by every platform)
+      View/          rendering + input handling
+      Desktop/       two instances in one process (loopback or real BLE) — the fast loop
+      Android/       Android Studio project (thin Kotlin activity + C++ main)
+      iOS/           Xcode project (ObjC++ main + C++ + Vulkan via MoltenVK)
 ```
+
+Per-OS backends live in the engine, under `Modules/<Module>/Platform/{Android,Ios,Windows}/` —
+never in a game folder.
 
 **The rule that keeps the engine reusable:** `Games/*` may depend on `Modules/*`; `Modules/*`
 may **never** depend on `Games/*`. Everything that *can* be pure C++ is shared verbatim across
-host, Android, and iOS; only the three things that touch hardware — radio, GPU, screen — get
-per-OS backends behind a common C++ interface.
+host, Android, and iOS; only what touches hardware — radio, GPU, screen, speaker, the OS entry
+point — gets a per-OS backend behind a common C++ interface.
 
 The renderer is **3D-capable by design** (meshes + depth + camera + materials); the 2D chess board
 is the orthographic special case (`Render/Sprite2D.h`). Each module is laid out Unreal-style: public
@@ -66,6 +80,7 @@ winget install Ninja-build.Ninja
 winget install BrechtSanders.WinLibs.POSIX.UCRT   # MinGW-w64 GCC (UCRT)
 ```
 
-The Android and iOS apps are built from `Games/Chess/Android` (Gradle) and `Games/Chess/iOS`
+The Android and iOS apps are built from `Games/<Game>/Android` (Gradle) and `Games/<Game>/iOS`
 (Xcode, linking MoltenVK) respectively; those wire the same C++ core in via each platform's native
-build.
+build. Each game also has a desktop harness (`scripts/desktop-build.ps1`,
+`scripts/rps-desktop-build.ps1`) that runs both peers in one process — the loop to iterate in.

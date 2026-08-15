@@ -162,7 +162,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         HostCfg.Log = [](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyChess: %{public}s", M); };
         // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs,
         // not from the radio role.
-        _Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Peripheral);
+        _Transport = Lur::Transport::CreateBleTransport();
         HostCfg.Transport = _Transport;
         _Host.Init(HostCfg);
     }

@@ -27,7 +27,7 @@ single dial, `LUR_CONFIG` (Unreal-style ladder). Gradle forwards it to CMake, an
 phone was previously benchmarking an unoptimized build). Select it with
 `-PlurConfig=<config>`:
 
-| `-PlurConfig=` | `LUR_INTERNAL` (bots/soak) | `LUR_ASSERTS` | `LUR_SLOW` | Native opt (`CMAKE_BUILD_TYPE`) |
+| `-PlurConfig=` | `LUR_INTERNAL` (console, CVars) | `LUR_ASSERTS` | `LUR_SLOW` | Native opt (`CMAKE_BUILD_TYPE`) |
 |---|---|---|---|---|
 | `Development` *(default)* | on | on | off | `RelWithDebInfo` (**-O2 -g**) |
 | `Debugging` | on | on | on | `Debug` (**-O0 -g**) |

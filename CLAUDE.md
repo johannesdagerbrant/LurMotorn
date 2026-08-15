@@ -4,9 +4,17 @@ Guidance for Claude Code (and humans) working in the **LurMotorn** repo. Read th
 
 ## What this is
 
-LurMotorn is a from-scratch engine for ultra-low-latency **local** multiplayer games. Chess
-(`Games/Chess`) is the first game and the proving ground. Two phones — Android *or* iPhone — pair
-over Bluetooth Low Energy and play locally, sending the smallest possible payload across the wire.
+LurMotorn is a from-scratch engine for ultra-low-latency **local** multiplayer games. Two phones —
+Android *or* iPhone — pair over Bluetooth Low Energy and play locally, sending the smallest possible
+payload across the wire.
+
+Two games ship from this tree, and each proves a different half of the engine. **Chess**
+(`Games/Chess`) came first: turn-based, the original proving ground for the transport, the wire
+codec and per-opponent persistence. **RocksPapersScissors** (`Games/RocksPapersScissors`, "RPS") is
+the real-time RTS that forced the hard parts — a deterministic fixed-point sim on its own tick
+thread, rollback netcode, and the dev-console/CVar tooling. Where the two disagree about how
+something should work, that difference is usually the specification for an engine facility neither
+one should own.
 
 ## Non-negotiable constraints
 
@@ -33,26 +41,44 @@ Do not violate these without explicit confirmation from the user:
 
 ## Architecture
 
-One shared, pure-C++ core compiles identically on host, Android (NDK), and iOS. Only three things
-touch hardware and get per-OS backends behind a common C++ interface: **transport** (BLE),
-**render** (Vulkan, via MoltenVK on iOS), and **input**.
+One shared, pure-C++ core compiles identically on host, Android (NDK), and iOS. Everything that
+touches hardware gets a per-OS backend behind a common C++ interface, and those backends live in the
+engine under `Modules/<Module>/Platform/{Android,Ios,Windows}/` — **never** in a game folder.
 
 Dependency rule, enforced by CMake: `Games/*` may depend on `Modules/*`; `Modules/*` must **never**
-depend on `Games/*`. That wall is what keeps the engine reusable for future games.
+depend on `Games/*`. That wall is what keeps the engine reusable for future games. Its cost is a
+**one-way ratchet** — a facility built in whichever game needed it first cannot come back on its
+own — so see the promotion rule under *Working style*.
 
 ```
+Modules/Core           pure C++  asserts, logging, CVars, hashing, build fingerprint, flight recorder
 Modules/Serialization  pure C++  slim-bytes codec (BitWriter/BitReader/Varint)
 Modules/Sim            pure C++  deterministic fixed-point + fixed-timestep (gameplay)
-Modules/Math           pure C++  vec/mat/quat for render + scene transforms (FLOAT, not sim)
-Modules/Net            pure C++  session, clock-sync (rollback netcode later)
-Modules/Transport      interface + BLE backend (Android JNI->Kotlin, iOS CoreBluetooth)
-Modules/Pairing        interface + BLE discovery (no NFC)
-Modules/Render         interface + single Vulkan backend (MoltenVK on iOS), 3D-capable
-Modules/Input          per-platform touch glue
-Games/Chess/Core       pure C++  rules + move codec (shared verbatim)
-Games/Chess/Android    Android Studio project (Kotlin shim + C++ + Vulkan)
-Games/Chess/iOS        Xcode project (Swift shim + C++ + Vulkan via MoltenVK)
+Modules/Math           pure C++  Vec/Mat4/Spring for render + scene transforms (FLOAT, not sim)
+Modules/Net            pure C++  Session: handshake, framing, resync
+Modules/Save           pure C++  device id, save store, per-opponent sync
+Modules/Transport      ITransport + BLE: shared policy (send queue, start retry, discovery timers)
+                                 over per-OS radios (Android JNI->Kotlin, iOS CoreBluetooth)
+Modules/Render         IRenderer + single Vulkan backend (MoltenVK on iOS), 3D-capable
+Modules/Audio          IAudioDevice + mixer + PCM codec, per-OS device backends
+Modules/App            GameHost (session/persistence choreography) + per-OS entry points
+Modules/Platform       desktop window + surface + input seam
+Modules/Input          touch events, gesture recognizers
+Modules/Text           MSDF glyph rendering + layout (atlases cooked offline)
+Modules/Hud            debug overlay, dropdown, text field — game-facing HUD widgets
+Modules/DevGui         dev-console widget set: category tree, colour picker, numpad, popover
+Modules/Trace          scoped CPU timing
+
+Games/<Game>/Core      pure C++  rules + codec (shared verbatim by every platform)
+Games/<Game>/View      rendering + input handling for that game
+Games/<Game>/Desktop   desktop harness: two instances in one process, loopback or real BLE
+Games/<Game>/Android   Android Studio project (thin Kotlin activity + C++ main)
+Games/<Game>/iOS       Xcode project (ObjC++ main + C++ + Vulkan via MoltenVK)
 ```
+
+There is **no Swift** anywhere in the tree — the iOS side is ObjC++ (`.mm`) so it can call the C++
+core directly. `Modules/Pairing` and `Modules/DevConsole` were deleted; if you find a reference to
+either, it is stale.
 
 The renderer is **3D-capable by design** (meshes + depth + camera + materials); 2D (the chess board)
 is the orthographic special case via `Render/Sprite2D.h`. 3D model loading, when a game needs it,
@@ -96,8 +122,10 @@ with `-DLUR_CONFIG=`:
 | `Debugging` | ✓ | ✓ | ✓ | `Debug` (-O0 -g) |
 
 `cmake/EngineFlags.cmake` derives four **capability macros** from the config —
-`LUR_SHIPPING`, `LUR_INTERNAL` (dev-only tooling: bots, `BoardView::PlayMove`, the soak/autoplayer),
-`LUR_ASSERTS` (drives `LUR_ASSERT`), `LUR_SLOW` (expensive validation). **Gate code on the
+`LUR_SHIPPING`, `LUR_INTERNAL` (dev-only tooling a player still gets: the dev console, tunable
+CVars, the flight recorder), `LUR_ASSERTS` (drives `LUR_ASSERT`), `LUR_SLOW` (expensive
+validation). Anything that *drives* the app rather than observing it is `LUR_AGENT` instead — see
+the next section. **Gate code on the
 capability, never on the config name** (`#if LUR_INTERNAL`, not `#if <config>`), so a future off-ladder
 build (e.g. profiling = shipping + stats) never forces a call-site rewrite — same discipline as
 Unreal's `WITH_EDITOR`/`DO_CHECK` and Casey's `HANDMADE_INTERNAL`/`HANDMADE_SLOW`.
@@ -109,7 +137,14 @@ anything a player shouldn't reach (autoplayers, cheats, direct move injection) i
 compiled out of `Shipping`, not merely a runtime toggle. Default config is `Development`; a release
 pipeline passes `-DLUR_CONFIG=Shipping`. Out-of-tree app targets (the Android/iOS mains) can't see the
 engine tree's `add_compile_definitions`, so they re-apply the derived `LUR_*` cache vars to their own
-target — see `Games/Chess/Android/app/src/main/cpp/CMakeLists.txt`.
+target — see `Games/Chess/Android/app/src/main/cpp/CMakeLists.txt`. There is one such block **per
+game per platform** and they are hand-copied, so a new `LUR_*` macro must be added to all of them;
+`LUR_AGENT` was silently missing from one for a while. Unifying them is issue #198.
+
+**Two per-app values are required compile definitions with NO default**, so a game that forgets
+fails to build rather than inheriting another game's identity: `LUR_LOG_TAG` (the platform log tag)
+and `LUR_BLE_SERVICE_UUID`. This is deliberate — the UUID once defaulted to chess's, so a forgetful
+game inherited chess's *identity*, which fails silently as two phones that never see each other.
 
 ### `LUR_AGENT` — assistant-only instrumentation, never in a build someone plays
 
@@ -206,14 +241,24 @@ Clang and Apple's Clang, so the host compiler is only for the unit tests — a *
 here is a feature (extra portability coverage). The core is host-buildable on purpose — a fast,
 always-green correctness loop before touching the apps.
 
+### Desktop harnesses (the fast loop)
+
+Each game has a `Desktop/` target that runs **two instances in one process** over loopback or a real
+BLE radio — the correctness and balance loop, and the only place a change compiles fast enough to
+iterate on. `scripts/desktop-build.ps1` (chess) and `scripts/rps-desktop-build.ps1` (RPS); during
+playtest tuning build these rather than the full `build.ps1` suite. Kill the old exe before
+relinking.
+
 ### Android app
 
-Built from `Games/Chess/Android` with Gradle (externalNativeBuild drives CMake). Needs Android
-Studio + NDK. `minSdk` targets BLE + Vulkan support.
+Built from `Games/<Game>/Android` with Gradle (externalNativeBuild drives CMake). Needs Android
+Studio + NDK. `minSdk` targets BLE + Vulkan support. Note `scripts/android-build.bat` is
+**chess-only**; RPS builds via its own Gradle wrapper. An Android build doubles as the compile check
+for every platform file the host suite never touches — see the trap below.
 
 ### iOS app
 
-Built from `Games/Chess/iOS` with Xcode, linking **MoltenVK** for the Vulkan-on-Metal layer.
+Built from `Games/<Game>/iOS` with Xcode, linking **MoltenVK** for the Vulkan-on-Metal layer.
 **Requires a Mac** — iOS cannot be built on Windows. The current dev machine is Windows 11, so the
 iOS half is Mac-only (local Mac or a cloud Mac). In practice the iPhone build comes from the free
 macOS CI, not a local Mac: the `ios-ipa` job produces an unsigned device `.ipa` artifact.
@@ -239,11 +284,12 @@ Device logs are firehoses — a raw dump is ~95% render/system spam (`BLASTBuffe
 nothing. **Never** run an unfiltered `adb logcat -d -t N`. Always filter to our tag/prefix at the
 source, and pipe through `grep` (or `Select-String`) so only relevant lines reach the model.
 
-**Android** — everything we emit uses the log tag `OnlyChess` (native `__android_log_print` and
-Kotlin `Log.i(TAG=…)` alike), so the tag filter alone kills the noise:
+**Android** — everything we emit uses that app's `LUR_LOG_TAG` (native `__android_log_print` and
+Kotlin `Log.i(TAG=…)` alike), so the tag filter alone kills the noise. The tag is **`OnlyChess` for
+chess and `OnlyRps` for RPS** — grepping the wrong one reads as a dead app:
 
 ```
-adb -s <serial> logcat -d -s OnlyChess:*
+adb -s <serial> logcat -d -s OnlyChess:*      # or OnlyRps:*
 ```
 
 Two wireless transports (`<ip>:<port>` and `adb-<serial>._adb-tls-connect._tcp`) can point at the
@@ -270,8 +316,14 @@ the expected cadence — the RPS diagnostic line prints every 2 s, so a 30 s cap
 **BLE log vocabulary to grep for** (both platforms): `BLE up` / `powered on` (radio started),
 `role decided` (tie-break ran), `central: linked` / `peripheral: central linked` (handshake done),
 `central attempt -> we are peripheral` (self-correction), `disconnected` / `link lost`. iOS BLE
-lines carry the prefix `OnlyChess BLE:` (note the space — NOT `OnlyChess:`). Absence of `role
-decided`/`linked` after `BLE up` on both phones = discovery/handshake is failing, not a crash.
+lines carry the prefix `<LogTag> BLE:` — `OnlyChess BLE:`, note the **space**, NOT `OnlyChess:`.
+Absence of `role decided`/`linked` after `BLE up` on both phones = discovery/handshake is failing,
+not a crash.
+
+**A locked phone fakes a half-open link.** A locked Galaxy stalls the app loop, so the peer sees a
+connected-but-silent link — indistinguishable from a real radio fault, and it will burn the hard
+restart ladder. The tell is a wake-up burst of `hello RECV` sharing one millisecond. **Screenshot
+the phone before believing any BLE verdict**; injected input cannot unlock it.
 
 ## Folder layout & file naming (Unreal-style)
 
@@ -298,7 +350,7 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
 - **Constants:** plain PascalCase, no `k` prefix (`MaxMoves`, `ProtocolVersion`, `NoSquare`).
 - **Unscoped bitmask enum values** carry the concept prefix to avoid namespace collisions
   (`MoveFlagDoublePush`, `CastleWhiteKing`).
-- Keep the per-platform Kotlin/Swift shims as thin as possible — bytes and a GPU surface only. All
+- Keep the per-platform Kotlin/ObjC++ shims as thin as possible — bytes and a GPU surface only. All
   real logic lives in C++.
 - Fixed-capacity containers in the hot path (e.g. `Chess::MoveList`), not heap allocation.
 
@@ -317,6 +369,14 @@ alone tells you the origin (`Lur::Serialization::BitWriter` vs `std::vector`).
 - **BLE is the only cross-platform link.** Do not reach for Bluetooth Classic/RFCOMM (iOS-locked) or
   NFC peer handover (unavailable to iOS apps). Wi-Fi Aware (iOS 26+) is a possible *future* faster
   transport but isn't production-ready cross-vendor yet — keep it behind the `ITransport` seam.
+- **`build.ps1` green says nothing about the platform layer.** `Modules/*/Platform/*`,
+  `Modules/Render/Private/VulkanBackend.cpp` and every `.mm` compile only in app builds. After
+  touching any of them, compile-check Android (`./gradlew assembleDebug`) — and if the code is
+  behind `#if LUR_AGENT`, with `-PlurAgent=ON`, because a check that doesn't compile the code under
+  test is not a check.
+- **The renderer INTERPOLATES, never PREDICTS.** Unit motion is `mix(Prev, Pos, alpha)` over the
+  sim's Verlet integration. Render-side extrapolation was built and reverted twice: it overshoots
+  at every velocity discontinuity. Input immediacy is won in the sim/net path, never in the view.
 - **CodeViewer anchors are regex** — avoid parentheses in `anchor_start`/`anchor_end` strings.
 
 ## Planning & project state
@@ -325,9 +385,14 @@ Two homes, split by whether the content **moves**:
 
 - **GitHub issues own everything living** — WORK (tasks, bugs, epics, roadmap, sequencing, priority,
   current state) *and* the design rationale that evolves with the code (specs, wire formats, the
-  "why"). Start at the roadmap tracker issue **#12** (issues are labelled `phase-0 … phase-5`). File or
-  update an issue for any plan or decision that must stay current; don't record planning or
-  current-state in `CLAUDE.md` (keep this file to durable, always-true guidance).
+  "why"). Start at the roadmap tracker issue **#12**. File or update an issue for any plan or
+  decision that must stay current; don't record planning or current-state in `CLAUDE.md` (keep this
+  file to durable, always-true guidance).
+
+  **"Phase N" is ambiguous — always say which ladder.** Two unrelated numbering schemes are both
+  live: the **roadmap** phases (the `phase-0 … phase-5` labels, tracker #12) and the **engine
+  extraction** phases 0–7 (epic #39). Extraction Phase 2 is BLE unification; roadmap Phase 2 is
+  "RTS on phones". They are not the same thing and never were.
 - **`Docs/Journal/<YYYY-MM-DD>/` holds frozen snapshots** — every `.md`/`.html` under `Docs/` is a
   timestamped artifact capturing the thinking against the repo *at that date* (a design synthesis, a
   review, an execution plan, a decision sheet). A batch is **never amended in place**: new thinking
@@ -368,6 +433,29 @@ push to get a fresh `.ipa` for a real device test is fine. Keep `master` green: 
 
 Favor explaining the C++/systems reasoning rather than only handing over code. When the user wants a
 completed phase reviewed, they ask for a focused CodeViewer walkthrough (see Documentation).
+
+### Where code lives — the three rules that decide it
+
+- **Platform files hold API verbs; engine C++ holds decisions.** If a line *chooses* — retry or
+  not? which role? what order? how long to wait? — it belongs in engine C++, not in Kotlin or
+  ObjC++. The test: *could this be unit-tested on the host against a fake?* If yes and it isn't
+  there, it is in the wrong place. This is not style: ~40% of the Kotlin BLE shim was decision
+  logic no host test could reach, and that fraction is exactly where 299 lines of drift between the
+  two games accumulated.
+- **Build it in the game that needs it; promote to the engine on the SECOND consumer.** Speculative
+  engine facilities with one user are dead code. The corollary is that the **promotion pass is
+  load-bearing** — the `Modules`↛`Games` wall means nothing comes back on its own.
+- **Delete dead code, even when it looks useful.** Git remembers. A tested module that nothing
+  calls is worse than absent: it reads as covered.
+
+### Evidence
+
+**A success-shaped signal is not evidence.** This codebase's failures are overwhelmingly silent and
+they point somewhere other than their cause — a MATCH END tally that printed while nothing
+persisted; a test green on a count the bug itself produced; three logged radio restarts against a
+transport with no restart implementation; "BLE is unstable" that was the lock screen. Before
+believing a green result, confirm the check could actually have failed. When you cannot verify
+something, say so plainly rather than reporting the nearest thing you did verify.
 
 ## Scripts
 

@@ -8,8 +8,12 @@ link, autoplay, datagram, same-frame, match) and parses only engine log lines
 (`AUTOPLAY …`, `MATCH END …`). A different game reuses it verbatim by editing the `$App`
 block at the top of `device-rig.ps1`.
 
-The autoplayer + same-frame instrumentation are `#if LUR_INTERNAL` in the app (a
-Development build). This rig only toggles and observes them.
+**The autoplayer and the BLE role override are `#if LUR_AGENT`** (#195, #196) — they are remote
+control, so they are *absent* from an ordinary build, not merely idle. An APK or `.ipa` built
+without the flag has no autoplayer, and this rig will wait forever at `matches ended=0`. Build
+`./gradlew assembleDebug -PlurAgent=ON` for Android and `gh workflow run "macOS CI" -f agent=true`
+for iOS. The same-frame instrumentation is `#if LUR_INTERNAL` and is present in any Development
+build. This rig only toggles and observes them.
 
 ## One command
 

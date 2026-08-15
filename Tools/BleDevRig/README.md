@@ -58,14 +58,17 @@ build-desktop\Games\Chess\Desktop\onlychess_desktop.exe --ble Tools\BleDevRig\Bl
 ## Fully automated play (both ends autoplay — dev builds only)
 
 Both ends play a random legal move the **same frame** they receive the opponent's move (so the only
-per-move delay is the radio RTT). All of this is `#if LUR_INTERNAL` — compiled out of a `Shipping` build.
+per-move delay is the radio RTT).
 
 - **PC endpoint:** `onlychess_desktop --ble <radio> --auto [--games N]` — `--auto` autoplays our colour;
   `--games N` stops (draining the link first so the peer gets the deciding move + resets) after N
   completed matches. `--script f2f3,e7e5,...` instead plays a fixed line (e.g. a Fool's mate).
-- **Android endpoint:** the app autoplays when the runtime prop is set — the app must be a Development
-  build (`LUR_INTERNAL=1`, the Gradle default):
+  Desktop-only, so `#if LUR_INTERNAL` — a player never runs it.
+- **Android endpoint:** the app autoplays when the runtime prop is set. On-device autoplay is
+  **remote control, so it is `#if LUR_AGENT`** (#195) and is *absent* from an ordinary build — the
+  prop does nothing unless the APK was built with `-PlurAgent=ON`:
   ```
+  ./gradlew assembleDebug -PlurAgent=ON
   adb shell setprop debug.lur.autoplay 1   # arm BEFORE launch; set 0 to disarm
   ```
   Each end logs a same-frame tally: `sameFrame=<answered>/<peer moves> ... delayed=<should be 0>`.

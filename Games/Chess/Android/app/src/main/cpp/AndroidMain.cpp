@@ -184,7 +184,7 @@ void android_main(android_app* App) {
     HostCfg.SaveDir = State.Plat.SaveDir();
     // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs, not
     // from the radio role.
-    HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
+    HostCfg.Transport = Lur::Transport::CreateBleTransport();
     HostCfg.Log = [](const char* M) { LOGI("%s", M); };
     // Init before the view is attached: the view is handed Store/Sync/DeviceId, and it must hold
     // them before a peer can go ready (the ready handler calls back into the view's adopt rule).

@@ -536,7 +536,7 @@ void android_main(android_app* App) {
     {
         Lur::App::GameHost::Config HostCfg;
         HostCfg.SaveDir = State.DataDir;
-        HostCfg.Transport = Lur::Transport::CreateBleTransport(Lur::Transport::EBleRole::Central);
+        HostCfg.Transport = Lur::Transport::CreateBleTransport();
         HostCfg.Log = [](const char* M) { LOGI("%s", M); };
         State.Host.Init(HostCfg);
     }

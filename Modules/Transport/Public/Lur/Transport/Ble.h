@@ -9,20 +9,28 @@ namespace Lur::Transport {
 //
 // One device hosts a GATT *peripheral* exposing a LurMotorn service with a single
 // writable + notifiable characteristic that acts as the datagram channel; the
-// other connects as *central*. After the pairing module selects roles, the link
-// presents itself through the platform-neutral ITransport above.
+// other connects as *central*. The link then presents itself through the
+// platform-neutral ITransport above.
 //
-// The concrete classes that implement this contract live in the app builds:
-//   - Android: a C++ shim over a Kotlin BluetoothGatt* layer, bridged via JNI.
-//   - iOS:     a C++/Obj-C++ shim over CoreBluetooth (CBPeripheralManager/CBCentralManager).
+// The concrete drivers live in the ENGINE, one per platform:
+//   - Modules/Transport/Platform/Android — a C++ shim over a Kotlin BluetoothGatt*
+//     layer, bridged via JNI.
+//   - Modules/Transport/Platform/Ios     — C++/Obj-C++ over CoreBluetooth
+//     (CBPeripheralManager / CBCentralManager).
 //
 // This header is the seam they share. The factory is declared here and defined
 // per platform so engine code can obtain a transport without naming a backend.
 
+// WHO IS PERIPHERAL IS DECIDED AT RUNTIME, NOT AT CONSTRUCTION. Both peers run the
+// same tie-break over the two device GUIDs (DecideBleRole in BleProtocol.h), which is
+// what keeps the design symmetric: the peripheral/central split is a radio mechanic
+// only and confers no authority. Do not reintroduce a role parameter here — the old
+// one was ignored by both backends while the mains passed contradictory values
+// (Android "Central", iOS "Peripheral"), which read as if the platform chose (#47).
 enum class EBleRole { Peripheral, Central };
 
-// Defined once per PLATFORM in the app build — a link-time seam, not an interface, because
+// Defined once per PLATFORM in the engine — a link-time seam, not an interface, because
 // there is one implementation per platform and never two at runtime.
-ITransport* CreateBleTransport(EBleRole Role);
+ITransport* CreateBleTransport();
 
 } // namespace Lur::Transport

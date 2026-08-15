@@ -8,8 +8,10 @@
 # only engine log lines (AUTOPLAY ..., MATCH END ...). Point it at an app via the $App
 # block; a different game reuses it verbatim with a different $App.
 #
-# Autoplay + same-frame instrumentation are #if LUR_INTERNAL in the app (a Development
-# build); this rig just toggles and observes them. See Tools/DeviceRig/README.md.
+# Autoplay and the BLE role override are #if LUR_AGENT (#195, #196) — ABSENT from an ordinary
+# build, so a non-agent APK/.ipa has no autoplayer and this rig waits forever at
+# `matches ended=0`. Same-frame instrumentation is #if LUR_INTERNAL (any Development build).
+# This rig just toggles and observes them. See Tools/DeviceRig/README.md.
 #
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action run -Matches 3
 #   powershell -File Tools\DeviceRig\device-rig.ps1 -Action tail  -Peer ios
@@ -20,7 +22,7 @@ param(
     [ValidateSet('run','cycle','arm','disarm','reset','clearhistory','install','uninstall','launch','tail','shot','status','pullrec')]
     [string]$Action = 'run',
     [ValidateSet('auto','central','peripheral')]
-    [string]$AndroidRole = 'auto',  # dev BLE role override (LUR_INTERNAL): pin this peer's role
+    [string]$AndroidRole = 'auto',  # dev BLE role override (LUR_AGENT): pin this peer's role
     [ValidateSet('auto','central','peripheral')]
     [string]$IosRole = 'auto',      # set the two COMPLEMENTARY (or both auto) or they never link
     [ValidateSet('android','ios','both')]

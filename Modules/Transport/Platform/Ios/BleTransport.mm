@@ -779,7 +779,7 @@ IosBleTransport g_Transport;  // one link to one peer — strictly 1:1
 
 } // namespace
 
-ITransport* CreateBleTransport(EBleRole /*Role*/) {
+ITransport* CreateBleTransport() {
     g_Transport.EnsureDriver();
     return &g_Transport;
 }

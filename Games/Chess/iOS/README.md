@@ -1,22 +1,25 @@
 # OnlyChess — iOS app
 
 The iOS shell for the chess game, sibling to `Games/Chess/Android`. Deliberately
-thin: a single UIKit view controller (Obj-C++) hands all real work to the shared
-C++ engine. **Requires a Mac to build** (iOS cannot be built on Windows) — so in
-practice it is built on the **GitHub Actions macOS runner**, never opened in Xcode
-locally.
+thin: an Obj-C++ entry point hands all real work to the shared C++ engine.
+**Requires a Mac to build** (iOS cannot be built on Windows) — so in practice it is
+built on the **GitHub Actions macOS runner**, never opened in Xcode locally.
 
-## What the skeleton does today
+## What it is today
 
-- Builds an `OnlyChess.app` from the **shared C++ core** (pulled in via CMake from
-  the repo root, exactly like the Android app) plus a thin Obj-C++ shim.
-- On launch, runs a smoke test of the engine and logs / shows
-  **"20 legal moves from the start position"** — proving the shared, perft-verified
-  chess core compiles and runs on iOS.
-- Brings up the **CoreBluetooth** BLE backend of `Lur::Transport::ITransport`
-  (`IosBleTransport.mm`), advertising + scanning for the SHARED service/UUIDs in
-  `BleProtocol.h` so it can later do a cross-platform BLE test against Android.
-- **No renderer / Vulkan / MoltenVK** yet — graphics are deferred (issue #9).
+A complete, playable chess app: full Vulkan rendering through **MoltenVK**, a real
+BLE link to an Android phone, per-opponent persistence, and the dev console.
+
+The shell itself is now only `Sources/AppMain.mm`. Everything that used to live here
+has moved into the engine and is shared with RPS:
+
+| Was here | Now |
+| --- | --- |
+| `Sources/IosBleTransport.mm` | `Modules/Transport/Platform/Ios/BleTransport.mm` |
+| Vulkan surface creation | `Modules/Render/Platform/Ios/VulkanSurface.mm` |
+| Audio device | `Modules/Audio/Platform/Ios/AudioDevice.mm` |
+| `UIApplicationMain`, the app delegate, the Metal view, the #73 reattach heal | `Modules/App/Platform/Ios/` (`IosApp.mm`, `IosViewHost.mm`, `AppPlatform.mm`) |
+| Session + persistence choreography | `Lur::App::GameHost` (`Modules/App`) |
 
 ## Why CMake (not XcodeGen / SwiftPM / a hand-written pbxproj)
 
@@ -30,34 +33,42 @@ doesn't produce an app bundle. CMake is the minimal, reproducible, consistent ch
 
 ## How it's built (CI, macOS runner, no signing)
 
+The real recipe is `.github/workflows/macos-ci.yml` — it targets a **device**
+(`iphoneos`, `generic/platform=iOS`), downloads MoltenVK, and packages an unsigned
+`.ipa`. In outline:
+
 ```sh
-# 1. Generate the Xcode project for the iOS Simulator (arm64), signing disabled.
 cmake -S Games/Chess/iOS -B Games/Chess/iOS/build -G Xcode \
   -DCMAKE_SYSTEM_NAME=iOS \
-  -DCMAKE_OSX_SYSROOT=iphonesimulator \
+  -DCMAKE_OSX_SYSROOT=iphoneos \
   -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DMOLTENVK_DIR=<path to MoltenVK> \
   -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
 
-# 2. Build the generated project for the simulator (no cert needed).
 xcodebuild -project Games/Chess/iOS/build/OnlyChess.xcodeproj \
-  -scheme OnlyChess \
-  -configuration Debug \
-  -sdk iphonesimulator \
-  CODE_SIGNING_ALLOWED=NO \
-  build
+  -scheme OnlyChess -configuration Debug \
+  -sdk iphoneos -destination 'generic/platform=iOS' \
+  CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
 ```
 
-`CMAKE_OSX_ARCHITECTURES=arm64` targets Apple-silicon simulators (GitHub's
-`macos-latest` runners are arm64). To also cover Intel simulators, use
-`arm64;x86_64`.
+**`-configuration Debug` means `-O0`.** The Xcode generator is multi-config, so it
+ignores the `LUR_CONFIG` → `CMAKE_BUILD_TYPE` coupling that gives Android its `-O2`.
+Never compare perf against an Android build without fixing this first — it once
+produced a 20× `sim.step` gap that was purely the build. Issue **#198** owns the fix.
+
+An **agent** build (`-DLUR_AGENT=ON`, for the harness) comes from a
+manual-dispatch-only job so it can never sit next to the player artifact:
+
+```sh
+gh workflow run "macOS CI" -f agent=true
+```
 
 ## Files
 
 | File | Purpose |
 | --- | --- |
-| `CMakeLists.txt` | Builds the `.app`, pulls in the shared core, links Apple frameworks. |
+| `CMakeLists.txt` | Builds the `.app`, pulls in the shared core + engine platform layer, links Apple frameworks and MoltenVK. Sets the required `LUR_LOG_TAG` and `LUR_BLE_SERVICE_UUID`. |
 | `Info.plist.in` | Bundle metadata + the mandatory `NSBluetooth*UsageDescription` strings. |
-| `Sources/AppMain.mm` | UIKit entry point; runs the chess-core smoke test. |
-| `Sources/IosBleTransport.mm` | CoreBluetooth backend of `Lur::Transport::ITransport`. |
+| `Sources/AppMain.mm` | Entry point: builds the game, hands the lifecycle to `Lur::App`. |
 
 > Android is the sibling target (`Games/Chess/Android`). See repo-root `CLAUDE.md`.

@@ -1,9 +1,14 @@
 # RocksPapersScissors (RPS)
 
-Durable orientation for the RTS that is LurMotorn's Phase-2 proving ground — namespace `Rps`,
-Android log tag **`OnlyRps`**, package / iOS bundle `com.lurmotorn.onlyrps` (sideload appends
-`.L5XBWVZ7N3`). It runs in **bit-perfect lockstep across a real Android↔iPhone BLE link**: two
-independent sims (NDK Clang native-Vulkan ↔ Apple Clang MoltenVK) agree at every anchor.
+Durable orientation for LurMotorn's real-time proving ground — namespace `Rps`, Android log tag
+**`OnlyRps`**, package / iOS bundle `com.lurmotorn.onlyrps` (sideload appends `.L5XBWVZ7N3`). It
+runs **bit-perfect across a real Android↔iPhone BLE link**: two independent sims (NDK Clang
+native-Vulkan ↔ Apple Clang MoltenVK) agree at every anchor.
+
+**The netcode is ROLLBACK, not lockstep** — delay-based lockstep was replaced in 2026-08 (#8):
+local input applies at the head immediately, the peer is speculated forward, and a misprediction
+rolls back and re-simulates. The class is still called `LockstepPeer` for historical reasons; do
+not read the name as the model.
 
 This file is **orientation only — it holds no live status.** It versions with the code, so it can't
 drift from HEAD the way a snapshot issue does. Do **not** paste any issue's open/closed status here;
@@ -82,8 +87,9 @@ Log-reading recipes and their traps (never dump unfiltered logcat; never pipe iO
    with no platform `#ifdef` — both phones run it). To compare, build the `.ipa` with
    `xcodebuild -configuration RelWithDebInfo` (`-O2 -g -DNDEBUG`, matches Android `Development`), or
    build **both** at `-DLUR_CONFIG=Shipping` for true ship-perf. See CLAUDE.md's "keep the Xcode
-   scheme in sync with `LUR_CONFIG` by hand" caveat / the unfinished iOS tail of #89. (If
-   `macos-ci.yml` has since been switched off `-configuration Debug`, this trap is closed — verify.)
+   scheme in sync with `LUR_CONFIG` by hand" caveat. To check whether the trap is still live, grep
+   `.github/workflows/macos-ci.yml` for `-configuration`: while it reads `Debug`, every CI `.ipa`
+   is `-O0`. Issue **#198** owns the fix (multi-config generator expressions).
 
 ## RPS-specific HARD RULES
 
@@ -115,5 +121,6 @@ gh issue list --state open --label rps --label P1   # + a priority filter
 ```
 
 Sequencing / priority / phase is the roadmap tracker **#12**. Engine-extraction work that RPS
-motivated but that is cross-cutting (platform layer, `GameHost`, de-chess `Modules/Net`, `IGame`)
-lives under epic **#39**, not the `rps` label.
+motivated but that is cross-cutting (platform layer, `GameHost`, BLE unification, `IGame`) lives
+under epic **#39**, not the `rps` label. Note "Phase N" is ambiguous in this repo — the roadmap
+phases (`phase-*` labels, #12) and the extraction phases 0–7 (#39) are different ladders.
