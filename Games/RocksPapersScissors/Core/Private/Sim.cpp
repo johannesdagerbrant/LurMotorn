@@ -701,7 +701,19 @@ inline void AccumFlockCore(const Sim& S, const ThreatSet& Threat,
     // #133/§5.2: a BUILDING is a big static separation source — units flow AROUND it. Reuse the
     // corrected separation falloff; buildings carry no cohesion/alignment/cart semantics, so short-circuit.
     if (JBuilding) {
-        AddRepel(Dx, Dy, Cheb, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength, A.SepX, A.SepY);
+        // ...EXCEPT the one you are attacking. A repulsion strong enough to keep a soldier OUT of a
+        // building (equilibrium beyond the 2.9 footprint) is necessarily stronger than the 2-unit
+        // attack range, so with it on every building a besieger is shoved to ~3.3, falls out of
+        // range, re-seeks, and oscillates there forever — buildings become unkillable by anything.
+        // Caught by TestScissorDestroysPaperBuildingWithCounter the moment the radius went up, and it
+        // is exactly why the old radius/strength sat too low to be solid: 4/2 settled at d = 2, which
+        // is attack range, so the pair had been tuned to "reachable" at the cost of "solid".
+        //
+        // Splitting the two by TARGET gets both: an attacker ignores its own target's field and walks
+        // in to hit it, everyone else still flows around. A pure per-pair predicate, so brute and grid
+        // sum the identical set (TestGridEqualsBruteForce is the guard).
+        if (J != S.Target[I])
+            AddRepel(Dx, Dy, Cheb, S.Cv.BuildingRepelRadius, S.Cv.BuildingRepelStrength, A.SepX, A.SepY);
         // #146: a friendly HOME BASE is a protected asset like a cart — a defender that also sees a
         // raider steers to screen it (reuses the #98 interpose accumulator).
         if (JHomeBase && JTeam == ITeam && Cheb < S.Cv.InterposeRadius) {

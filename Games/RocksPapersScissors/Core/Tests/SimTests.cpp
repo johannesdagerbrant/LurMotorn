@@ -183,17 +183,22 @@ static void TestSlotSerialNeverReused() {
 static void TestStateHashGoldenValues() {
     constexpr uint64_t Seed = 0xFEEDBEEFu;
     static Sim S;
+    // RE-PINNED AGAIN 2026-08-15: the building repulsion had to change (radius 2.5 -> 5, strength
+    // 1 -> 3) because the promoted pair left the whole field inside the footprint and soldiers walked
+    // through buildings, and a besieger now ignores its own target's field so buildings stay killable.
+    // Both are hashed state. See TestSoldiersRoundBuildingsButThroughCarts for the invariant.
+    //
     // RE-PINNED 2026-08-14: the Galaxy's played CVar set was promoted to the compile-time defaults
     // (unit costs/HP/speeds, counter_mult, starting gold, footprint/clearance, the boid weights), and
     // CvSnapshot folds into StateHash — so the fresh-sim hash moves on the tunables alone. The
     // 300-tick hash moves for that AND for the sim change in the same batch (a soldier no longer takes
     // friendly separation from a cart). Both are build-locked wire changes: ship both phones together.
     S.Init(Seed);
-    CHECK(S.StateHash() == 0xd3c8839b21f87a51ull);   // fresh sim, tick 0
+    CHECK(S.StateHash() == 0x8bc95f23d2500caeull);   // fresh sim, tick 0
 
     FundForArmyScript(S);
     for (int I = 0; I < 300; ++I) ArmyStep(S, static_cast<uint32_t>(I));
-    CHECK(S.StateHash() == 0xe4fadb482c0a8497ull);   // after the 300-tick army script
+    CHECK(S.StateHash() == 0xa6f29255729aa53eull);   // after the 300-tick army script
 }
 
 // A fresh sim replaying the same stream must reach the same final hash — the
@@ -423,6 +428,62 @@ static void TestCartPriorityOverMirror() {
 
 // Interpose (#98): a defender with a friendly cart AND a flagged raider nearby is pulled
 // toward the point BETWEEN them (screening the cart), even while its ATTACK target is a
+// ---- A SOLDIER GOES AROUND A BUILDING, AND THROUGH A CART (owner, 2026-08-14/15) ----
+// Two halves of one rule, tested together because the pair is the actual requirement: a raider may
+// walk through its own carts, and must NOT walk through buildings.
+//
+// The building half is a TUNING INVARIANT with teeth, and it is why this test exists. Repulsion is a
+// soft force — desired velocity is a sum of weighted unit-direction terms, seek contributing WSeek —
+// so a unit penetrates until strength*(R - d)/R balances the seek, i.e. to d = R*(1 - WSeek/strength).
+// Keeping that equilibrium outside the footprint is a JOINT constraint on three CVars
+// (build.repel_radius, build.repel_strength, build.footprint) that nothing was checking. Promoting
+// the phone's set on 2026-08-14 moved footprint to 2.9 while radius went to 2.5 — the entire
+// repulsion field ended up INSIDE the building, equilibrium fell to d = 0, and soldiers walked
+// straight through. The algebra is also why "it used to be fine" is not a safe baseline: at the old
+// 4/2/3 the equilibrium was d = 2 inside a 3 footprint, so buildings were already porous, just less
+// obviously. Assert the property, not the numbers.
+static void TestSoldiersRoundBuildingsButThroughCarts() {
+    // The FASTEST soldier is the hard case: a bigger per-tick step overshoots deeper into the field
+    // before the next tick can push back, so scissor is the type that finds a too-narrow radius.
+    auto MinApproach = [](bool Cart) {
+        Sim S;
+        S.Init(0);
+        ClearField(S);
+        S.DisableCombat = true;                        // isolate movement (no deaths)
+        S.Cv.WNoise = Fixed{0};                        // the wander drifts ~2 units sideways, which
+                                                       // reads as "kept its distance" in a Chebyshev
+                                                       // measurement; off, the march is a straight line
+                                                       // and the distance means what it says.
+        // The obstacle sits dead ahead: the soldier has no target, so it marches on the enemy
+        // baseline (world-centre X, team 0 pushes to +Y) and must pass through F(17), F(30).
+        PlaceUnit(S, 0, F(17), F(10), 0, UnitScissor);
+        S.Count = 1;
+        if (Cart) {
+            PlaceUnit(S, 1, F(17), F(30), 0, UnitMiner);
+            S.Count = 2;
+        } else {
+            const int32_t B = 1;
+            PlaceUnit(S, B, F(17), F(30), 0, UnitRock);
+            S.Kind[B] = KindBuilding;
+            S.Hp[B] = BuildingHpFor(S.Cv, UnitRock);
+            S.Count = 2;
+        }
+        Fixed Closest = F(999);
+        for (int T = 0; T < 400; ++T) {
+            S.StepEvents(nullptr, 0);
+            const Fixed D = Max(Abs(S.PosX[0] - F(17)), Abs(S.PosY[0] - F(30)));
+            if (D < Closest) Closest = D;
+        }
+        return Closest;
+    };
+    Sim Probe;
+    Probe.Init(0);
+    // Through the cart: it must actually reach it — no separation term keeps it off any more.
+    CHECK(MinApproach(/*Cart*/ true) < F(1));
+    // Around the building: never inside the footprint, which is what "solid" means here.
+    CHECK(MinApproach(/*Cart*/ false) >= Probe.Cv.BuildingFootprint);
+}
+
 // prey in the opposite direction. Differential: the same setup WITHOUT the cart has no
 // interpose, so the defender chases the prey freely — it must end up farther that way.
 static void TestInterposeScreensCart() {
@@ -1182,6 +1243,7 @@ int main() {
     TestSameTypeCohesionContracts();
     TestDisableCombatNoDeaths();
     TestCartPriorityOverMirror();
+    TestSoldiersRoundBuildingsButThroughCarts();
     TestInterposeScreensCart();
     TestBuildingSoaHashedAndCopyable();
     TestBuildingProducesFlatCadence();

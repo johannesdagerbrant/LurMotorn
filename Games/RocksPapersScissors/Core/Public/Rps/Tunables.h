@@ -175,15 +175,28 @@ LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",6000, CVarFlagA
 LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
 LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     20,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
-// Footprint/repulsion, promoted from the phone 2026-08-14. The repulsion was pulled IN and DOWN
-// (radius 4 -> 2.5, strength 2 -> 1) so it barely exceeds the footprint: buildings still refuse to
-// be walked through, but they no longer shove a passing army sideways for a unit and a half beyond
-// their own edge. With camps packed a few units apart, the old wide/strong field turned a mining
-// block into a wall the army had to flow around. FRound, not F, on 2.9 — a truncated default cannot
-// round-trip its own console (see FRound above).
+// Footprint promoted from the phone 2026-08-14 (FRound, not F, on 2.9 — a truncated default cannot
+// round-trip its own console; see FRound above).
+//
+// THE REPULSION IS NOT FREELY TUNABLE: these three numbers are ONE constraint, and getting it wrong
+// makes buildings walk-through. Repulsion is a soft force — the desired velocity is a sum of weighted
+// unit-direction terms with seek contributing WSeek — so a unit pushes in until
+// strength*(R - d)/R balances WSeek, settling at about d = R*(1 - WSeek/strength). Keep that
+// equilibrium OUTSIDE BuildingFootprint or soldiers end up inside the building.
+//
+// The phone's promoted pair (radius 2.5, strength 1) put the whole field inside the 2.9 footprint,
+// equilibrium fell to d = 0 and raiders walked clean through buildings (owner, 2026-08-15). Restored
+// to 5 / 3, which is the TIGHTEST pair that actually holds: measured min approach 3.33 against the 2.9
+// footprint, by TestSoldiersRoundBuildingsButThroughCarts sweeping radius 1.5..7 x strength 1..6.
+//
+// Note the old 4 / 2 / 3 was ALREADY porous — equilibrium d = 2 inside a 3 footprint — so "restore
+// what it was" would not have fixed this. And strength alone cannot: at radius 4.5 even strength 6
+// fails, because at scissor's 1.5/tick against MaxAccel 0.2 the unit cannot decelerate inside a
+// narrow field and punches through. The RADIUS is the braking distance; the strength only sets where
+// it settles. Re-tune the pair (and re-run that test) whenever footprint or the unit speeds move.
 LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     FRound(29, 10), CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
-LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(5, 2),  CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units)");
-LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(1),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
+LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(5),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units); MUST leave the equilibrium outside the footprint");
+LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(3),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // How far a building must sit from a LIVE mine (#157). Was the footprint (3), which only kept the
 // mine POINT outside the footprint — but the icons are much bigger than the footprint, so a camp
 // drawn at radius 3.45 completely covered a mine drawn at radius 1.1, and the carts working that
@@ -885,6 +898,19 @@ LUR_CVAR(CvAiMixTiltPct, "rps.ai.mix_tilt", 0, CVarFlagAffectsGameplay,
 // LUR_AI_TIER_IDS expands mid-list so a per-tier knob would renumber every wire id below it.
 LUR_CVAR(CvAiCampOnGold, "rps.ai.camp_on_gold", 1, CVarFlagAffectsGameplay,
          "Top tier sites an unclaimed-deposit-less camp against a deposit its carts work (0 = straight to the home grid)");
+// THE HAUL THAT BUYS A CAMP ON ITS OWN. Every other camp purchase hangs off wanting miners, and the
+// top tier stops wanting miners early — so when its rows run dry and the carts walk on to the next
+// row, nothing follows them and they haul the full distance for the rest of the match. This is the
+// one placement keyed on the TRAVEL rather than on the worker count: a worked deposit further than
+// this from its nearest camp gets one, whatever the AI would rather be buying. 0 = off.
+//
+// 12 is set against the geometry it has to beat, not guessed: rps.ai.mine_served_radius is 7, so an
+// unclaimed deposit is already handled below that, and the mine rows themselves sit ~55 apart. A
+// threshold between those says "you are hauling to the row behind you" without firing on the ordinary
+// spread inside a row. Lower it and the AI buys camps it does not need; raise it past the row spacing
+// and it never fires at all.
+LUR_CVAR(CvAiCampHaulMax, "rps.ai.camp_haul_max", 12, CVarFlagAffectsGameplay,
+         "Cart haul (world units) beyond which the top tier plants a camp at that deposit regardless of what else it wants");
 
 // ---- Dev-only knobs (#156). NOT AffectsGameplay, and that is the whole point: these never latch
 // into CvSnapshot, never enter StateHash, never sync to the peer, and must never appear in the
@@ -1032,7 +1058,8 @@ LUR_CVAR(CvFlightRecorder, "rps.dev.flight_recorder", true, CVarFlagNone,
     IX(AiMixEnable,             CvAiMixEnable)             \
     IX(AiMixCapPct,             CvAiMixCapPct)             \
     IX(AiMixTiltPct,            CvAiMixTiltPct)            \
-    IX(AiCampOnGold,            CvAiCampOnGold)
+    IX(AiCampOnGold,            CvAiCampOnGold)            \
+    IX(AiCampHaulMax,           CvAiCampHaulMax)
 
 // Authoritative gameplay values as POD (memcpy-able, folds into StateHash). Latched from
 // the globals once at Sim::Init, then owned by the Sim and mutated only at tick boundaries

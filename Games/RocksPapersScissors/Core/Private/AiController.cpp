@@ -488,7 +488,11 @@ bool AiBestMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
 // quantity actually being minimised. A deposit no cart visits scores zero and is skipped — this
 // never invents an expansion, that is AiBestMineTarget's job. Strict > keeps the lowest index on a
 // tie, and everything is integer world units, so the choice is deterministic and hash-safe.
-bool AiWorkedMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
+// MinHaul is the shortest trip worth answering with a camp. 0 = "any improvement will do", which is
+// the placement FALLBACK's meaning (we already decided to buy a camp; put it somewhere useful).
+// A positive value is the FOLLOW-THE-ORE trigger: only report a deposit whose carts are hauling
+// further than this, so the caller can decide to buy a camp it had no other reason to want.
+bool AiWorkedMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY, int32_t MinHaul = 0) {
     const Fixed Limit = Team == 0 ? S.FrontierT0 : S.FrontierT1;
     // Carts per deposit. A miner's Target IS its mine index for the whole cycle (WorkerSeek clears it
     // only on deposit), so this counts the carts committed to each one, not merely those stood on it.
@@ -523,7 +527,8 @@ bool AiWorkedMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
                 const int32_t D = Adx > Ady ? Adx : Ady;
                 if (Haul < 0 || D < Haul) Haul = D;
             }
-            if (Haul <= 0) continue;   // no camp at all yet (the opening path owns that case)
+            if (Haul <= 0) continue;        // no camp at all yet (the opening path owns that case)
+            if (Haul <= MinHaul) continue;  // close enough already — a camp here would buy nothing
             const int64_t Score = static_cast<int64_t>(Carts[M]) * Haul;
             if (Score > BestScore) { BestScore = Score; Best = M; }
         }
@@ -537,6 +542,64 @@ bool AiWorkedMineTarget(const Sim& S, uint8_t Team, Fixed& OX, Fixed& OY) {
         Tried |= 1ull << Best;
     }
     return false;
+}
+
+// WHICH CAMP TO BUILD THE NEXT CARTS AT (owner, 2026-08-15: "produce new mine carts from the mine
+// camps closest to where there is most gold left, so new carts don't have to travel as long after
+// spawned"). A cart is SPAWNED on a ring around the camp that built it, so the camp choice IS the
+// cart's starting position, and it then walks to the deposit nearest THAT point.
+//
+// SurveyType picks the shortest queue — pure load-balancing, blind to geography — so a fresh cart is
+// as likely to appear at a mined-out corner of the map as beside the ore.
+//
+// The queue rule is kept, though, and not merely as a tie-break: production is FLAT PER BUILDING
+// (#132), so stacking orders at the single best camp does NOT build them faster, it just idles every
+// other camp. So this is a two-level rule — only camps with ROOM (Queue < Depth) are candidates, and
+// among those the nearest to live ore wins. Camps fill up and drop out, which spreads the orders as
+// before while always biasing the next one toward the gold.
+//
+// Owned is counted exactly as SurveyType does, because the placement branch keys on it ("do I own any
+// of these yet"), and a different count there would change when the AI expands.
+TypeCapacity SurveyMinerCampsByGold(const Sim& S, uint8_t Team, int32_t Depth) {
+    TypeCapacity C;
+    int32_t BestDist = -1;
+    int32_t BestGold = -1;
+    for (int32_t I = 0; I < S.Count; ++I) {
+        if (!S.IsAlive(I) || !S.IsBuilding(I) || S.Team[I] != Team || S.Type[I] != UnitMiner) continue;
+        if (S.IsHomeBase(I)) continue;
+        ++C.Owned;
+        if (S.Queue[I] >= Depth) continue;          // no room for this batch — not a candidate
+        // Distance to the nearest LIVE deposit, and how much is left in it. Nearest-first is the
+        // travel term; the gold left is the tie-break, so between two equally close camps the next
+        // carts go to the one whose deposit will still be there when they arrive.
+        int32_t Dist = -1, GoldAt = 0;
+        for (int32_t M = 0; M < NumMines; ++M) {
+            if (S.MineGold[M] <= 0) continue;
+            const int32_t Ddx = (S.PosX[I] - S.MineX[M]).ToInt();
+            const int32_t Ddy = (S.PosY[I] - S.MineY[M]).ToInt();
+            const int32_t Adx = Ddx < 0 ? -Ddx : Ddx, Ady = Ddy < 0 ? -Ddy : Ddy;
+            const int32_t D = Adx > Ady ? Adx : Ady;
+            if (Dist < 0 || D < Dist || (D == Dist && S.MineGold[M] > GoldAt)) {
+                Dist = D;
+                GoldAt = S.MineGold[M];
+            }
+        }
+        if (Dist < 0) continue;                     // no live ore anywhere: leave it to the caller
+        if (BestDist < 0 || Dist < BestDist || (Dist == BestDist && GoldAt > BestGold)) {
+            BestDist = Dist;
+            BestGold = GoldAt;
+            C.Slot = I;
+            C.Queue = S.Queue[I];
+        }
+    }
+    // Nothing with room (or no ore left): fall back to the plain least-queue pick, so the caller's
+    // own "is there room" test decides, exactly as it did before this existed.
+    if (C.Slot < 0) {
+        const TypeCapacity Plain = SurveyType(S, Team, UnitMiner);
+        C.Slot = Plain.Slot;
+        C.Queue = Plain.Queue;
+    }
+    return C;
 }
 
 // LAST RESORT FOR A CAMP: the legal spot NEAREST LIVE ORE, rather than the first one a sweep hits.
@@ -1053,6 +1116,34 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
         }
     }
 
+    // 1c. FOLLOW THE ORE (owner, 2026-08-15: "still no new mine camp gets placed next to every row of
+    // gold their carts mine from"). Independent of Want, and that independence is the entire fix.
+    //
+    // Every other camp placement below hangs off wanting MINERS — WorkerTarget, the econ floor, the
+    // opening. Hard meets WorkerTarget early and then wants soldiers for the rest of the match, so at
+    // exactly the moment its home rows run dry and its carts walk forward to the next row, the one
+    // decision that could give them a local drop-off has switched itself off. The carts keep hauling
+    // the full distance back to camps standing over exhausted ground, for the rest of the game.
+    //
+    // The trigger is the haul itself, which is the thing being complained about: if a deposit our carts
+    // are working is further than rps.ai.camp_haul_max from its nearest camp, buy a camp there — even
+    // while the AI would rather be buying soldiers. That is a 600-gold purchase that pays for itself in
+    // travel, and it is what makes the economy MIGRATE with the ore instead of staying where it opened.
+    //
+    // Deliberately placed after the build cluster (a committed counter wave still completes first) and
+    // before the Want-driven purchase, so it outranks ordinary expansion but never an emergency.
+    // Cap-respecting and affordability-checked like any other placement; one event, then return.
+    if (CampOnGold && S.Cv.AiCampHaulMax > 0 &&
+        (K.MaxBuildings <= 0 || MyBuildings < K.MaxBuildings) &&
+        S.Teams[MyTeam_].Gold >= BuildingCostFor(S.Cv, UnitMiner)) {
+        Fixed X, Y, Tx, Ty;
+        if (AiWorkedMineTarget(S, MyTeam_, Tx, Ty, S.Cv.AiCampHaulMax) &&
+            AiPlaceNear(S, MyTeam_, UnitMiner, Tx, Ty, X, Y)) {
+            Out[Count++] = InputEvent::Place(MyTeam_, UnitMiner, X, Y);
+            return;
+        }
+    }
+
     // 2. Produce Want — spreading the work, and BUYING CAPACITY when it runs out (#144).
     //
     // Two rules, one event per tick (so a rich AI still spends over several ticks rather than in a
@@ -1068,7 +1159,6 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     //
     //   Otherwise QUEUE at the shallowest building of the type, so N buildings do N units per
     //   BuildTicks instead of one building doing all the work with the others idle.
-    const TypeCapacity Cap_ = SurveyType(S, MyTeam_, Want);
     const int32_t Price = BuildingCostFor(S.Cv, Want);
     const int32_t Gold = S.Teams[MyTeam_].Gold;
     // PER-TIER batch size now (K.QueueDepth), not the shared rps.ai.queue_depth. The shared value
@@ -1095,6 +1185,13 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
                                      : K.QueueDepth;
     const int32_t RawDepth = Want == UnitMiner ? MinerDepth : SoldierDepth;
     const int32_t Depth = RawDepth > 0 ? RawDepth : 1;
+    // Which building of this type takes the batch. Soldiers: the shallowest queue, as always. CARTS at
+    // the top tier: the camp with room that sits NEAREST LIVE ORE, because the camp is where the cart
+    // spawns (SurveyMinerCampsByGold). Declared here rather than above the depths because the choice
+    // now depends on Depth — "has room for this batch" is what keeps the work spread.
+    const TypeCapacity Cap_ = (CampOnGold && Want == UnitMiner)
+                                  ? SurveyMinerCampsByGold(S, MyTeam_, Depth)
+                                  : SurveyType(S, MyTeam_, Want);
     const int32_t Factor = S.Cv.AiExpandGoldFactor > 100 ? S.Cv.AiExpandGoldFactor : 100;
     // Below the floor the expansion MARGIN is skipped: buy the building the moment it is affordable
     // rather than waiting to hold ExpandGoldFactor% of its price. A floor that waits for a comfortable
@@ -1297,7 +1394,8 @@ void AiController::DecideEvents(const Sim& S, uint32_t Tick, InputEvent* Out, in
     // into carts every tick it could not afford a soldier. "Cheapest thing on the board" stops being
     // an argument once the thing it buys cannot earn.
     if (Count == 0 && Want != UnitMiner && GoldLeft) {
-        const TypeCapacity Camps = SurveyType(S, MyTeam_, UnitMiner);
+        const TypeCapacity Camps = CampOnGold ? SurveyMinerCampsByGold(S, MyTeam_, MinerDepth)
+                                              : SurveyType(S, MyTeam_, UnitMiner);
         if (Camps.Slot >= 0 && Camps.Queue < MinerDepth) {
             int32_t N = MinerDepth - Camps.Queue;
             const int32_t Room = S.Cv.BuildingQueueMax - Camps.Queue;
