@@ -42,3 +42,11 @@ add_executable(ble_discovery_timers_tests BleDiscoveryTimersTests.cpp)
 target_link_libraries(ble_discovery_timers_tests PRIVATE lur::transport)
 target_compile_features(ble_discovery_timers_tests PRIVATE cxx_std_20)
 add_test(NAME ble_discovery_timers_tests COMMAND ble_discovery_timers_tests)
+
+# What the radio is ACTUALLY doing. Found on hardware: an adapter power cycle left the started-state
+# flags stuck true, so #194's idempotence guard suppressed every recovery attempt and the phone was
+# invisible for the life of the process. Both platforms had the hole.
+add_executable(ble_radio_state_tests BleRadioStateTests.cpp)
+target_link_libraries(ble_radio_state_tests PRIVATE lur::transport)
+target_compile_features(ble_radio_state_tests PRIVATE cxx_std_20)
+add_test(NAME ble_radio_state_tests COMMAND ble_radio_state_tests)

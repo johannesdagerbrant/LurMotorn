@@ -37,7 +37,10 @@ import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -128,6 +131,17 @@ class BleShim(private val context: Context, private val TAG: String) {
     private external fun nativeOnRadioLinked()
     private external fun nativeOnRadioUnlinked()
     private external fun nativeOnRadioStopped()
+    private external fun nativeOnServing()
+    private external fun nativeOnAdvertising()
+    private external fun nativeOnScanning()
+    private external fun nativeOnAdvertiseStopped()
+    private external fun nativeOnScanStopped()
+    private external fun nativeOnAdapterOn()
+    private external fun nativeOnAdapterOff()
+    // The idempotence guard (#194) now lives in C++ BleRadioState, because a Kotlin bool could be
+    // stranded true by an adapter power cycle and then suppress every recovery attempt forever.
+    private external fun nativeShouldStartAdvertising(): Boolean
+    private external fun nativeShouldStartScanning(): Boolean
     /** The link is gone: the engine drops the send backlog, which is only meaningful to a peer
      *  that received the earlier datagrams. */
     private external fun nativeOnLinkLost()
@@ -207,6 +221,7 @@ class BleShim(private val context: Context, private val TAG: String) {
     // #203: is our GATT service actually published? Confirmed by onServiceAdded, not assumed from
     // addService() returning. Nothing tracked this before, yet the startup log asserted "serving".
     private var serving = false
+    private var adapterReceiver: BroadcastReceiver? = null
     // #203: the last radio state we reported, so reporting is EDGE-triggered. The old line was
     // effectively level-triggered on the retry loop: it printed on every start ATTEMPT, so a radio
     // that was failing to scan announced itself healthy six times in twenty seconds while the real
@@ -316,9 +331,58 @@ class BleShim(private val context: Context, private val TAG: String) {
             return
         }
         started = true
+        nativeOnAdapterOn()   // the adapter is up (we just checked isEnabled)
+        registerAdapterStateReceiver()
         Log.i(TAG, "device id: ${deviceId.size}B, cached peer: ${peerId.size}B")
         startGattServer()
         startDiscovery()
+    }
+
+    /**
+     * Watch the adapter itself. NOTHING DID, BEFORE — `isEnabled` was checked once at startup and
+     * never again, so a Bluetooth off/on under a running app was completely invisible to us.
+     *
+     * Verified on the Galaxy (2026-08-15): `svc bluetooth disable` then `enable` and the app never
+     * advertised or scanned again for the life of the process, while a fresh launch seconds later
+     * came up fine. The adapter takes the advertise/scan registrations and the GATT service with
+     * it WITHOUT any callback we were listening to, so our started-state stayed true and #194's
+     * idempotence guard suppressed every recovery. The 8 s discovery watchdog fired forever into
+     * functions that returned immediately.
+     *
+     * The state clearing is BleRadioState's (tested, shared with iOS, which has the same hole via
+     * CBManagerState). This receiver only reports the fact.
+     */
+    private fun registerAdapterStateReceiver() {
+        if (adapterReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                if (intent?.action != BluetoothAdapter.ACTION_STATE_CHANGED) return
+                when (intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)) {
+                    // TURNING_OFF, not OFF: the registrations are already going. Acting at OFF
+                    // leaves a window where we still believe we are advertising.
+                    BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                        advertising = false
+                        scanning = false
+                        serving = false
+                        connecting = false
+                        nativeOnAdapterOff()
+                        if (linked) onLinkLost()
+                        reportRadioState("adapter off")
+                    }
+                    BluetoothAdapter.STATE_ON -> {
+                        nativeOnAdapterOn()
+                        // Republish the service and resume discovery: both died with the adapter.
+                        // startGattServer() re-confirms `serving`; the discovery watchdog, already
+                        // re-armed by nativeOnAdapterOn, keeps trying if this attempt is early.
+                        startGattServer()
+                        startDiscovery()
+                        reportRadioState("adapter on")
+                    }
+                }
+            }
+        }
+        adapterReceiver = r
+        context.registerReceiver(r, IntentFilter(BluetoothAdapter.ACTION_STATE_CHANGED))
     }
 
     /** Begin discovery. If we already know the peer (a prior link), we know our role
@@ -389,7 +453,10 @@ class BleShim(private val context: Context, private val TAG: String) {
     fun startScanning()    { handler.post { if (started && !linked) startScanningNow() } }
 
     private fun startAdvertisingNow() {
-        if (advertising) return          // #194: idempotent - asking twice earns ALREADY_STARTED
+        // #194 idempotence, but asked of BleRadioState rather than a bool we own: an adapter power
+        // cycle strands a local flag true and then suppresses every recovery forever (verified on
+        // the Galaxy, 2026-08-15 — the phone stayed invisible until the process was restarted).
+        if (!nativeShouldStartAdvertising()) return
         val adv = adapter?.bluetoothLeAdvertiser ?: run { Log.e(TAG, "no BLE advertiser"); return }
         advertiser = adv
         val settings = AdvertiseSettings.Builder()
@@ -405,13 +472,14 @@ class BleShim(private val context: Context, private val TAG: String) {
         try {
             adv.startAdvertising(settings, data, advertiseCallback)
             advertising = true           // cleared again by onStartFailure
+            nativeOnAdvertising()        // ...and the guard's copy, set at the same moment
         } catch (e: SecurityException) {
             Log.e(TAG, "startAdvertising: missing BLE permission", e)
         }
     }
 
     private fun startScanningNow() {
-        if (scanning) return             // #194: idempotent - see startAdvertising
+        if (!nativeShouldStartScanning()) return   // #194 idempotence — see startAdvertisingNow
         val sc = adapter?.bluetoothLeScanner ?: run { Log.e(TAG, "no BLE scanner"); return }
         scanner = sc
         val filter = ScanFilter.Builder().setServiceUuid(ParcelUuid(SERVICE_UUID)).build()
@@ -421,6 +489,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         try {
             sc.startScan(listOf(filter), settings, scanCallback)
             scanning = true              // cleared again by onScanFailed
+            nativeOnScanning()
         } catch (e: SecurityException) {
             Log.e(TAG, "startScan: missing BLE permission", e)
         }
@@ -451,11 +520,13 @@ class BleShim(private val context: Context, private val TAG: String) {
 
     private fun stopAdvertising() {
         advertising = false
+        nativeOnAdvertiseStopped()
         try { advertiser?.stopAdvertising(advertiseCallback) } catch (_: SecurityException) {}
     }
 
     private fun stopScanning() {
         scanning = false
+        nativeOnScanStopped()
         try { scanner?.stopScan(scanCallback) } catch (_: SecurityException) {}
     }
 
@@ -563,6 +634,8 @@ class BleShim(private val context: Context, private val TAG: String) {
             if (!started) return@post
             started = false
             nativeOnRadioStopped()  // every deadline off, both backoffs abandoned
+            adapterReceiver?.let { try { context.unregisterReceiver(it) } catch (_: IllegalArgumentException) {} }
+            adapterReceiver = null
             stopScanning()
             stopAdvertising()
             try { gattClient?.close() } catch (_: SecurityException) {}
@@ -672,6 +745,7 @@ class BleShim(private val context: Context, private val TAG: String) {
         override fun onServiceAdded(status: Int, service: BluetoothGattService) {
             if (service.uuid != SERVICE_UUID) return
             serving = status == BluetoothGatt.GATT_SUCCESS
+            if (serving) nativeOnServing()
             if (!serving) {
                 Log.e(TAG, "addService FAILED: status=$status - this device cannot be connected to " +
                     "as a peripheral (a central will never find our service)")

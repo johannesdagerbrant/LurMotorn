@@ -25,6 +25,7 @@
 #include "Lur/Transport/BleSendQueue.h"
 #include "Lur/Transport/BleStartRetry.h"
 #include "Lur/Transport/BleDiscoveryTimers.h"
+#include "Lur/Transport/BleRadioState.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
@@ -209,6 +210,10 @@ void DropOutboundBacklog() { g_SendQueue.OnLinkLost(); }
 BleStartRetry      g_AdvRetry;
 BleStartRetry      g_ScanRetry;
 BleDiscoveryTimers g_Timers;
+// What the radio is actually doing. Owns the idempotence guard #194 added, which used to be a
+// Kotlin bool that an adapter power cycle could strand true — see BleRadioState.h for the hardware
+// finding. Asking it before every start is what makes the recovery possible.
+BleRadioState      g_Radio_State;
 
 // Call one of BleShim's radio verbs. Safe from the engine thread because the Kotlin side posts the
 // body onto the main looper — see the note on those methods. We only cross JNI here.
@@ -229,10 +234,44 @@ void OnOutboundLinkLost()     { g_SendQueue.OnLinkLost(); }
 // Radio events, reported by Kotlin. Each is a fact about what the radio DID; none of them decide
 // anything. The bool returns answer "is this worth a loud log line" so a retry storm cannot bury
 // the first failure, which is the one that matters.
-bool OnAdvertiseStartFailed() { return g_AdvRetry.OnStartFailed(); }
-bool OnScanStartFailed()      { return g_ScanRetry.OnStartFailed(); }
-void OnAdvertiseStarted()     { g_AdvRetry.OnStarted(); }
-void OnScanStarted()          { g_ScanRetry.OnStarted(); }
+bool OnAdvertiseStartFailed() {
+    g_Radio_State.OnAdvertiseStopped();   // we are NOT advertising: let the retry through
+    return g_AdvRetry.OnStartFailed();
+}
+bool OnScanStartFailed() {
+    g_Radio_State.OnScanStopped();
+    return g_ScanRetry.OnStartFailed();
+}
+void OnAdvertiseStarted()     { g_Radio_State.OnAdvertising(); g_AdvRetry.OnStarted(); }
+void OnScanStarted()          { g_Radio_State.OnScanning();    g_ScanRetry.OnStarted(); }
+void OnServing()              { g_Radio_State.OnServing(); }
+// "We asked and have not been told otherwise" — the state the idempotence guard reads. Reported at
+// REQUEST time, not at confirmation: the old Kotlin bool was set the same moment, and it has to be,
+// or the 8 s watchdog double-starts into the gap before the success callback lands.
+void OnAdvertising()          { g_Radio_State.OnAdvertising(); }
+void OnScanning()             { g_Radio_State.OnScanning(); }
+void OnAdvertiseStopped()     { g_Radio_State.OnAdvertiseStopped(); }
+void OnScanStopped()          { g_Radio_State.OnScanStopped(); }
+
+// May we start? The driver asks before touching the radio, instead of consulting a bool it owns.
+bool ShouldStartAdvertising() { return g_Radio_State.ShouldStartAdvertising(); }
+bool ShouldStartScanning()    { return g_Radio_State.ShouldStartScanning(); }
+
+// The adapter came or went. THE POWER CYCLE IS THE POINT: everything the radio was holding —
+// advertise registration, scan registration, the GATT service — went with it, so every
+// started-state has to be forgotten or #194's idempotence guard suppresses the recovery forever.
+// Nothing listened for this at all before (2026-08-15 hardware finding).
+void OnAdapterOn() {
+    g_Radio_State.OnAdapterOn();
+    g_Timers.OnUnlinked();      // re-arm discovery from zero; the watchdog does the restarting
+    LOGI("BLE adapter ON — every started-state was cleared, discovery re-armed");
+}
+void OnAdapterOff() {
+    g_Radio_State.OnAdapterOff();
+    g_AdvRetry.Cancel();        // retrying into a dead adapter earns errors and leaves registrations
+    g_ScanRetry.Cancel();
+    LOGE("BLE adapter OFF — radio gone; not advertising, not scanning, not serving");
+}
 void OnConnectStarted()       { g_Timers.OnConnectStarted(); }
 void OnConnectResolved()      { g_Timers.OnConnectResolved(); }
 void RequestRescan()          { g_Timers.ScheduleRescan(); }
@@ -241,11 +280,13 @@ void RequestRescan()          { g_Timers.ScheduleRescan(); }
 // and churn is what degraded the radio in #163/#194.
 void OnRadioLinked() {
     g_Timers.OnLinked();
+    g_Radio_State.OnLinked();
     g_AdvRetry.Cancel();
     g_ScanRetry.Cancel();
 }
 void OnRadioUnlinked() {
     g_Timers.OnUnlinked();
+    g_Radio_State.OnUnlinked();
 }
 
 // Shutting down. Same quiescing as a link-up — every deadline off, both backoffs abandoned — but it
@@ -338,6 +379,19 @@ static void Ble_nativeScheduleRescan(JNIEnv*, jobject)     { Lur::Transport::Req
 static void Ble_nativeOnRadioLinked(JNIEnv*, jobject)      { Lur::Transport::OnRadioLinked(); }
 static void Ble_nativeOnRadioUnlinked(JNIEnv*, jobject)    { Lur::Transport::OnRadioUnlinked(); }
 static void Ble_nativeOnRadioStopped(JNIEnv*, jobject)     { Lur::Transport::OnRadioStopped(); }
+static void Ble_nativeOnServing(JNIEnv*, jobject)          { Lur::Transport::OnServing(); }
+static void Ble_nativeOnAdvertising(JNIEnv*, jobject)      { Lur::Transport::OnAdvertising(); }
+static void Ble_nativeOnScanning(JNIEnv*, jobject)         { Lur::Transport::OnScanning(); }
+static void Ble_nativeOnAdvertiseStopped(JNIEnv*, jobject) { Lur::Transport::OnAdvertiseStopped(); }
+static void Ble_nativeOnScanStopped(JNIEnv*, jobject)      { Lur::Transport::OnScanStopped(); }
+static void Ble_nativeOnAdapterOn(JNIEnv*, jobject)        { Lur::Transport::OnAdapterOn(); }
+static void Ble_nativeOnAdapterOff(JNIEnv*, jobject)       { Lur::Transport::OnAdapterOff(); }
+static jboolean Ble_nativeShouldStartAdvertising(JNIEnv*, jobject) {
+    return Lur::Transport::ShouldStartAdvertising() ? JNI_TRUE : JNI_FALSE;
+}
+static jboolean Ble_nativeShouldStartScanning(JNIEnv*, jobject) {
+    return Lur::Transport::ShouldStartScanning() ? JNI_TRUE : JNI_FALSE;
+}
 
 static jboolean Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject, jbyteArray Id) {
     const jsize Len = Env->GetArrayLength(Id);
@@ -579,6 +633,15 @@ static const JNINativeMethod kBleShimMethods[] = {
     {"nativeOnRadioLinked",      "()V", reinterpret_cast<void*>(Ble_nativeOnRadioLinked)},
     {"nativeOnRadioUnlinked",    "()V", reinterpret_cast<void*>(Ble_nativeOnRadioUnlinked)},
     {"nativeOnRadioStopped",     "()V", reinterpret_cast<void*>(Ble_nativeOnRadioStopped)},
+    {"nativeOnServing",          "()V", reinterpret_cast<void*>(Ble_nativeOnServing)},
+    {"nativeOnAdvertising",      "()V", reinterpret_cast<void*>(Ble_nativeOnAdvertising)},
+    {"nativeOnScanning",         "()V", reinterpret_cast<void*>(Ble_nativeOnScanning)},
+    {"nativeOnAdvertiseStopped", "()V", reinterpret_cast<void*>(Ble_nativeOnAdvertiseStopped)},
+    {"nativeOnScanStopped",      "()V", reinterpret_cast<void*>(Ble_nativeOnScanStopped)},
+    {"nativeOnAdapterOn",        "()V", reinterpret_cast<void*>(Ble_nativeOnAdapterOn)},
+    {"nativeOnAdapterOff",       "()V", reinterpret_cast<void*>(Ble_nativeOnAdapterOff)},
+    {"nativeShouldStartAdvertising", "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartAdvertising)},
+    {"nativeShouldStartScanning",    "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartScanning)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},
