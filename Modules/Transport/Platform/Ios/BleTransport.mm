@@ -49,6 +49,8 @@
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleProtocol.h"
 #include "Lur/Transport/BleSendQueue.h"
+#include "Lur/Transport/BleDiscoveryTimers.h"
+#include <chrono>
 
 // Every line this driver logs is prefixed with the APP's tag — the string an iOS syslog capture
 // greps for — which is the only per-app value left in this file now that the UUIDs come from
@@ -163,7 +165,14 @@ public:
     // advertise-only while the peer defers to us. Any unlinked stretch longer than
     // this drops the gates and resumes the full symmetric dance; the fresh in-band
     // tie-break then re-caches the true role.
-    NSTimer* _DiscoveryWatchdog;
+    //
+    // The DEADLINE is Lur::Transport::BleDiscoveryTimers — the same tested policy Android
+    // drives (#197). It replaced an NSTimer holding a hardcoded 8.0 that had to agree, by
+    // hand, with the Kotlin's hardcoded 8000. Both games carried both copies. Note it is
+    // PERIODIC, so the fired handler must NOT re-arm it.
+    Lur::Transport::BleDiscoveryTimers _Timers;
+    bool _TimersStarted;
+    std::chrono::steady_clock::time_point _TimersLast;
 
     // Central-side state (we connected OUT to a peer's GATT server).
     CBPeripheral*     _PeerDevice;
@@ -362,30 +371,29 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 - (void)pumpInbox {
     _Sink.R = &_Receiver;
     _Inbox.Drain(_Sink);
+    [self tickTimers];   // ...and advance the discovery deadlines on the same cadence
 }
 
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
     _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
-    [_DiscoveryWatchdog invalidate];
-    _DiscoveryWatchdog = nil;
+    _Timers.OnLinked();    // every deadline off: firing into a live link is churn
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
     // The net Session sends the first Hello once it sees the link up — no demo ping
     // (a bare 1-byte ping would now look like a move).
 }
 
-// #79: while unlinked, one-sided cached-role behaviour may only last one watchdog
-// period. Runs on the main runloop (same thread as every CB callback here).
+// #79: while unlinked, one-sided cached-role behaviour may only last one watchdog period. Arms the
+// shared policy from zero, so time spent linked is never banked against the next unlinked stretch.
 - (void)armDiscoveryWatchdog {
-    [_DiscoveryWatchdog invalidate];
-    if (_Linked) return;
-    _DiscoveryWatchdog = [NSTimer scheduledTimerWithTimeInterval:8.0
-                                                          target:self
-                                                        selector:@selector(discoveryWatchdogFired)
-                                                        userInfo:nil
-                                                         repeats:NO];
+    _Timers.OnUnlinked();
 }
 
+// The deadline elapsed — decided by BleDiscoveryTimers on the engine thread, dispatched here so the
+// CoreBluetooth calls stay on the main runloop like every other CB touch in this file.
+//
+// Does NOT re-arm: the policy's discovery watchdog is periodic. The NSTimer this replaced was
+// one-shot and re-armed itself here; doing both would run it at twice the rate.
 - (void)discoveryWatchdogFired {
     if (_Linked) return;
     BLE_LOG(@"discovery watchdog: no link in 8s - dropping cached-role "
@@ -396,7 +404,25 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     if (_Central.state == CBManagerStatePoweredOn)
         [_Central scanForPeripheralsWithServices:@[_ServiceUuid] options:nil];
     [self advertiseService];
-    [self armDiscoveryWatchdog];  // keep watching until a link forms
+}
+
+// Advance the discovery deadlines. Called from pumpInbox, i.e. once per Session::Tick on the engine
+// thread — the same cadence and the same measure-here approach Android uses, so the two platforms
+// share the policy AND its clocking rather than only the constants.
+- (void)tickTimers {
+    const auto Now = std::chrono::steady_clock::now();
+    if (!_TimersStarted) { _TimersStarted = true; _TimersLast = Now; return; }
+    const auto Delta = std::chrono::duration_cast<std::chrono::nanoseconds>(Now - _TimersLast).count();
+    _TimersLast = Now;
+
+    const Lur::Transport::BleDiscoveryTimers::Actions Act =
+        _Timers.Tick(static_cast<uint64_t>(Delta));
+    // AbortConnect and Rescan are not wired on iOS: this driver has no connect watchdog, and its
+    // rescan (resetClientAndRescan) is immediate rather than delayed. Both are one-sided gaps
+    // against Android, NOT a decision that iOS does not need them — see the note on #197.
+    if (Act.GoSymmetric) {
+        dispatch_async(dispatch_get_main_queue(), ^{ [self discoveryWatchdogFired]; });
+    }
 }
 
 - (void)advertiseService {
