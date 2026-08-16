@@ -193,15 +193,26 @@ endif()
 # deliberate later step that needs on-device verification.
 #
 # Exceptions / RTTI decision (recorded here on purpose):
-#   * RTTI is OFF now — nothing uses dynamic_cast / typeid (verified).
-#   * Exceptions stay ON for now: Lur::Save leans on std::filesystem's throwing API.
-#     -fno-exceptions is deferred to the std::filesystem replacement (Review #2 §3.1,
-#     roadmap Phase 5); exceptions go off in the same change.
+#   * RTTI is OFF — nothing uses dynamic_cast / typeid (verified).
+#   * Exceptions are OFF as of #43 section F. They were held open by exactly one thing —
+#     Lur::Save leaning on std::filesystem's throwing API — and that went to stdio in the
+#     same section, so the blocker named in the old note here is gone.
+#
+#     WHAT THIS DOES AND DOES NOT BUY. It is top-level-only, like the rest of this block,
+#     so the phones do NOT inherit it and the binary-size / unwind-table win is not
+#     realised yet. What it does buy is a real guard: the shared core and every unit test
+#     compile with exceptions disabled, so a `throw`, `try` or `catch` added to engine C++
+#     now fails the host build rather than being discovered when a phone aborts. Verified
+#     by adding a throw to Lur::Save and watching it fail ("exception handling disabled").
+#
+#     Extending it to the app builds is the remaining half and needs on-device
+#     verification, for the reason stated above: their platform translation units are not
+#     compiled here at all.
 if(PROJECT_IS_TOP_LEVEL)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        add_compile_options(-Wall -Wextra -Werror -fno-rtti)
+        add_compile_options(-Wall -Wextra -Werror -fno-rtti -fno-exceptions)
     elseif(MSVC)
-        add_compile_options(/W4 /WX /GR-)
+        add_compile_options(/W4 /WX /GR- /EHs-c-)
     endif()
 endif()
 
