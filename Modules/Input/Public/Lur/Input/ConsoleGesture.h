@@ -28,7 +28,20 @@ public:
     static constexpr uint64_t TapHoldMaxNs = 350'000'000ull;
     // ...and the taps must be a CHAIN. Three taps spread over a minute of play are an accident;
     // three inside this window each are deliberate.
-    static constexpr uint64_t TapChainMaxNs = 600'000'000ull;
+    //
+    // 1000 ms, MEASURED rather than guessed (2026-08-16, both phones instrumented). The lift-to-lift
+    // gaps a human actually produces fall into two clusters with a wide empty band between them:
+    //
+    //   chained fine   148 150 150 152 166 167 222 251 350 384 ms
+    //   reset          634 685 935 | 1503 1553 2083 2605 ms
+    //
+    // At the old 600 ms the first three failures were NEAR MISSES — 634 ms against a 600 ms window is
+    // a 34 ms miss, and it reads to the player as the gesture being broken rather than as being 34 ms
+    // slow. 1000 ms sits in the empty band: it rescues every near miss without reaching the >1.5 s
+    // gaps, which are genuinely separate taps rather than a chain. No successful gap is anywhere near
+    // the boundary, so widening cannot make an accidental chain more likely — and it still takes
+    // THREE two-finger taps inside ~2 s, in a game played with one finger.
+    static constexpr uint64_t TapChainMaxNs = 1'000'000'000ull;
     static constexpr int      TapsToOpen = 3;
     // How far a finger may travel while the console is open and still count as a tap rather than a
     // scroll. Sized for a finger, not a mouse: this was 12 px on Android and 6 on the desktop, and a
