@@ -6,6 +6,7 @@
 
 #include <string>
 
+#import <Foundation/Foundation.h>   // NSSearchPathForDirectoriesInDomains — see SaveDir below
 #include <os/log.h>
 
 #include <fcntl.h>    // O_NONBLOCK on stdout/stderr — see UnblockStdio
