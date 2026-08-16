@@ -787,6 +787,32 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
     [self advertiseService];
 }
 
+
+// We are definitively the PERIPHERAL for this link: a central has subscribed to us. Any outgoing
+// central attempt we were still holding is now not just useless but ACTIVELY HARMFUL — radioWrite
+// picks its branch by which handles are non-nil and tests the central branch FIRST, so a surviving
+// _PeerDevice/_RemoteDatagram silently captures every send and posts it into a connection the peer
+// is not listening on. Both write paths return YES, so it reports success either way.
+//
+// That is #206's one-way link, caught on the pair 2026-08-16 by the write-path diagnostic:
+//
+//   central subscribed (peripheral) - link ready
+//   write path: central=1 peripheral=1 -> taking CENTRAL(write)
+//   write path AMBIGUOUS (#206): holding BOTH ...
+//
+// and on the Android end, five seconds later, `link timeout - peer silent`. Intermittent, because
+// it needs an outgoing attempt still in flight when the incoming subscribe lands — which is why
+// reading the code could not settle it and one capture appeared to clear it.
+- (void)dropOutgoingCentralAttempt {
+    if (_PeerDevice == nil && _RemoteDatagram == nil) return;
+    BLE_LOG(@"peripheral role settled - dropping our outgoing central attempt so sends cannot "
+             "take the wrong branch (#206)");
+    if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
+    _RemoteDatagram = nil;
+    _Connecting = false;
+    _Link.OnConnectResolved();
+}
+
 - (void)peripheralManager:(CBPeripheralManager*)peripheral
                   central:(CBCentral*)central
 didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
@@ -800,6 +826,7 @@ didSubscribeToCharacteristic:(CBCharacteristic*)characteristic {
             return;
         }
         _Subscriber = central;
+        [self dropOutgoingCentralAttempt];            // #206: we are the peripheral now
         BLE_LOG(@"central subscribed (peripheral) — link ready");
         [self onLinked];                              // peripheral side: link is live
     }
@@ -861,6 +888,7 @@ didUnsubscribeFromCharacteristic:(CBCharacteristic*)characteristic {
                              "callback did not fire for this connection");
                 }
                 _Subscriber = Req.central;
+                [self dropOutgoingCentralAttempt];   // #206: same hazard on the adopt path
                 [self onLinked];   // idempotent (guards on _Linked); publishes the link to the engine
             }
         }
