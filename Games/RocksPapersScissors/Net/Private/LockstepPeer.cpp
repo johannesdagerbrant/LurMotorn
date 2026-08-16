@@ -762,6 +762,30 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     // meant one restart left the next real repair already an attempt down.
     if (GapRecoveries_ >= MaxGapRecoveries) return;
     ++GapRecoveries_;
+
+    // THE SURVIVOR NEVER ADOPTS. Measured on hardware 2026-08-16: this function made the survivor an
+    // adopter like anyone else, so a gap in ITS inbound stream left it Awaiting a history the peer is
+    // forbidden to send — the answer path below only lets the survivor hand one over. Both peers then
+    // sat waiting on each other. The iPhone (survivor) asked 8 times in one match and froze at tick
+    // 3042 while the Galaxy ran on to 3111: two live, divergent games, which is a worse failure than
+    // the draw this exchange exists to avoid (#210).
+    //
+    // A gap here means we are missing the LOSER's input for a tick. The survivor's timeline is the one
+    // that stands, by definition, so the resolution is not to rebuild from the peer — it is to publish
+    // our timeline and let the peer conform. The lost input is dropped. That costs the loser a
+    // placement, and it is the same trade the tie-break already makes everywhere else: consistency,
+    // not fairness (CLAUDE.md), with both players in one room.
+    if (IsRecoverySurvivor()) {
+        MyHash.clear();   // anchors from before the re-base say nothing about the state after it
+        PeerHash.clear();
+        Lur::Log::Info("RPS: input gap at tick %u — we hold the lower device id, so our timeline "
+                       "stands: publishing it for the peer to rebuild from instead of waiting "
+                       "(attempt %d/%d)",
+                       MissingTick, GapRecoveries_, MaxGapRecoveries);
+        OfferHistoryToLoser();
+        return;
+    }
+
     Recovering_ = true;
     RecoveryAdopting_ = true;
     RecoveryNs_ = 0;
@@ -1010,13 +1034,22 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             // already stopped executing, so nothing is racing; hand the timeline over and re-base to
             // the same frontier so its next produced frame lands where we expect it.
             //
-            // If we are ALSO recovering as the adopter (both directions lost frames, or a desync trip
-            // crossed with a gap), the tie-break settles it: only the survivor answers, and the other
-            // keeps waiting rather than the two swapping histories forever.
+            // ONLY THE SURVIVOR ANSWERS, unconditionally. This used to read
+            //     if (RecoveryAdopting_ && !IsRecoverySurvivor()) return;
+            // which enforced the rule only WHILE the loser happened to be mid-adoption; between
+            // rounds it answered anyway. Whether we are currently adopting has nothing to do with
+            // whose timeline is authoritative — only the tie-break does.
+            //
+            // HONESTY NOTE: this tightening is NOT what fixed #210, and no test fails without it. Now
+            // that the survivor answers a gap by offering instead of asking (see RequestRecovery),
+            // only the loser ever SENDS a request, so only the survivor ever receives one and this
+            // guard is unreachable. It is kept because it states the invariant the surrounding
+            // comment already claimed, and it is the line that would have to be right if a future
+            // path ever made the survivor ask again — which is exactly the mistake being fixed here.
             Lur::Serialization::BitReader R(Data + 1, N - 1);
             const uint32_t MissingTick = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
             if (!R.IsOk()) return;
-            if (RecoveryAdopting_ && !IsRecoverySurvivor()) return;
+            if (!IsRecoverySurvivor()) return;
             Lur::Log::Info("RPS: peer lost our frame for tick %u and asked for the history — sending it "
                            "from our frontier %u", MissingTick, TheSim.Tick);
             OfferHistoryToLoser();

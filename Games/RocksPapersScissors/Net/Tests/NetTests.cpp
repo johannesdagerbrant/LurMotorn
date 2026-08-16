@@ -1937,6 +1937,55 @@ static void TestUnconvergeableDesyncNeverDrawsAndKeepsTrying() {
     CHECK(!B.Desynced());
 }
 
+// ---- #210: a gap in BOTH directions at once must not deadlock the exchange ----
+// The failure this pins was measured on hardware (2026-08-16) and is the reason a real match ended
+// as two divergent live games: the iPhone froze at tick 3042 while the Galaxy ran to 3111, both
+// convinced theirs was the match.
+//
+// Cause: RequestRecovery made the SURVIVOR an adopter like anyone else. A gap in its inbound stream
+// left it Awaiting a history the peer is forbidden to send — the answer path only lets the survivor
+// hand one over — so both sides waited on each other. The survivor asked 8 times in one match.
+//
+// Whose timeline is authoritative cannot depend on who happened to lose a frame. That is the
+// invariant here, and a single-direction drop cannot express it: both peers must gap AT ONCE.
+static void TestSimultaneousGapDoesNotDeadlockTheSurvivor() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;                       // A = team 0 = the survivor by the device-id tie-break
+    A.Init(0x2100, 0, Enqueue, &Qa);
+    B.Init(0x2100, 1, Enqueue, &Qb);
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    for (int I = 0; I < 12; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t Before = A.ExecTick();
+    CHECK(Before > 0);
+
+    // Lose a frame in BOTH directions on the same exchange, then keep talking normally.
+    A.Tick(OneTickNs); B.Tick(OneTickNs);
+    DeliverDroppingNthInput(Qa, B, 0);
+    DeliverDroppingNthInput(Qb, A, 0);
+    for (int I = 0; I < 200; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs); Deliver(Qa, B); Deliver(Qb, A);
+    }
+
+    // THE INVARIANT: the survivor never waits. Its timeline is authoritative by definition, so there
+    // is nothing it could legitimately be rebuilding from.
+    CHECK(!A.AwaitingResync());
+
+    // And the pair converges rather than splitting into two live games.
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(B.GetSim().Result == ResultOngoing);
+    CHECK(A.MatchStarted() && B.MatchStarted());
+    CHECK(!A.Desynced());
+    CHECK(!B.Desynced());
+    CHECK(A.ExecTick() > Before);            // both moved ON, neither froze
+    CHECK(B.ExecTick() > Before);
+    // The states must actually AGREE — the hardware failure had both peers healthy-looking and
+    // hundreds of ticks apart, so "still running" alone would have passed there too.
+    CHECK(A.ExecTick() == B.ExecTick());
+    CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
+}
+
 // ---- #161 + #163: a LOST frame recovers without the sims ever diverging at all ----
 // The best outcome available, and the reason the sequence byte was worth a byte per frame: the gap is
 // detected when the NEXT frame arrives, and the ceiling is gated on PeerEvents.size(), so the hole's
@@ -2859,6 +2908,7 @@ int main() {
     TestStarvedCeilingEndsTheMatch();                   // #162
     TestDesyncRecoversToACommonStateAndKeepsPlaying();  // #161
     TestUnconvergeableDesyncNeverDrawsAndKeepsTrying();             // #161
+    TestSimultaneousGapDoesNotDeadlockTheSurvivor();
     TestLostInputRecoversBeforeDiverging();             // #161 + #163
     TestDesyncIsNeverTerminal();
     TestLockstepExecuteCapBounded();
