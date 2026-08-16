@@ -36,6 +36,7 @@
 #include "Lur/Transport/Ble.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
+#include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/AgentControl.h"  // LUR_AGENT: assistant remote-control command grammar
 #include "Rps/AiController.h"
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
@@ -77,18 +78,13 @@ uint64_t NowNs() {
             .count());
 }
 
-float Ppu(float WidthPx) {
-    return WidthPx / (static_cast<float>(Rps::WorldWidth.Raw) / static_cast<float>(Rps::Fixed::One));
-}
-float WorldHeightF() {
-    return static_cast<float>(Rps::WorldHeight.Raw) / static_cast<float>(Rps::Fixed::One);
-}
+// #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx are Rps/ViewMetrics.h now. All
+// three RPS mains had defined them separately, character-for-character.
+using Rps::Ppu;
+using Rps::WorldHeightF;
 // View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
 // over the wire, so no float crosses the determinism boundary — both peers apply the same Fixed.
-Rps::Fixed WorldToFixed(float W) {
-    if (W < 0.0f) W = 0.0f;
-    return Rps::Fixed{static_cast<int32_t>(W * static_cast<float>(Rps::Fixed::One) + 0.5f)};
-}
+using Rps::WorldToFixed;
 
 // Threading (#91): a dedicated SIM thread owns Session + Lp (pumps BLE, ticks the
 // lockstep sim, publishes snapshots); the GLUE thread (android_main) does only input +
@@ -415,8 +411,7 @@ bool HandleInput(AppState* S, AInputEvent* Event) {
     };
     // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb doesn't
     // hide it (the desired point handed to Resolve; snapping refines from there).
-    const float GhostOffPx = (static_cast<float>(S->Snap.Cv.BuildingFootprint.Raw) /
-                              static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu(W);
+    const float GhostOffPx = Rps::GhostOffsetPx(S->Snap.Cv.BuildingFootprint.Raw, Ppu(W));
     const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
 
     switch (Action) {

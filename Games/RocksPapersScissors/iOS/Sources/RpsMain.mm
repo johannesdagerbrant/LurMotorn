@@ -44,6 +44,7 @@
 #include "Rps/AiController.h"
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
+#include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
@@ -63,12 +64,9 @@ uint64_t NowNs() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count());
 }
-float Ppu(float WidthPx) {
-    return WidthPx / (static_cast<float>(Rps::WorldWidth.Raw) / static_cast<float>(Rps::Fixed::One));
-}
-float WorldHeightF() {
-    return static_cast<float>(Rps::WorldHeight.Raw) / static_cast<float>(Rps::Fixed::One);
-}
+// #43 section D: shared with the Android + desktop mains via Rps/ViewMetrics.h.
+using Rps::Ppu;
+using Rps::WorldHeightF;
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
 }
@@ -80,10 +78,7 @@ void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::s
 // which is never our case (see the iOS notes in CLAUDE.md).
 // View-side world (float) -> Fixed for a place event (#139). The raw int travels into the sim /
 // over the wire, so no float crosses the determinism boundary.
-Rps::Fixed WorldToFixed(float Wv) {
-    if (Wv < 0.0f) Wv = 0.0f;
-    return Rps::Fixed{static_cast<int32_t>(Wv * static_cast<float>(Rps::Fixed::One) + 0.5f)};
-}
+using Rps::WorldToFixed;
 // #183: a raw touch packaged on the MAIN (UIKit) thread and drained on the RENDER thread. The UIKit
 // handlers must no longer touch _View/_Cam/_DevGesture (those live on the render thread now), so they
 // capture only what UIKit alone can read — the point in DRAWABLE PIXELS (already ×contentsScale), the
@@ -1351,7 +1346,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // placeLocal (the thread-safe SoloIn inbox / Lp.QueueLocalEvent). Placement is gated on _MatchLive (a
 // live solo or peer match). You play _LinkedTeam (published by the sim thread; 0 in solo).
 - (float)ghostOffPxForWidth:(float)W {
-    return static_cast<float>(_Snap.Cv.BuildingFootprint.Raw) / static_cast<float>(Rps::Fixed::One) * 0.5f * Ppu(W);
+    return Rps::GhostOffsetPx(_Snap.Cv.BuildingFootprint.Raw, Ppu(W));
 }
 // Route a local place/queue event (produced on the MAIN thread by the drag-place UI, or by the agent
 // harness on the sim thread) to whichever match is live: the solo sim's thread-safe SoloIn inbox

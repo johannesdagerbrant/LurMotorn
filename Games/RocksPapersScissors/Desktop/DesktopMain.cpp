@@ -38,6 +38,7 @@
 #include "Rps/MatchRecord.h"   // #144: --replay a device recording
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
+#include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/LockstepPeer.h"
 #include "Rps/SimRunner.h"
 #include "Rps/SoloInput.h"
@@ -60,20 +61,14 @@ int kWinW = 360;   // --winw/--winh: fit small dev screens (portrait phone-ish d
 int kWinH = 780;
 constexpr uint64_t kStepNs = 1'000'000'000ull / Rps::TickRateHz;  // 10 Hz
 
-float Ppu() {
-    return static_cast<float>(kWinW) /
-           (static_cast<float>(Rps::WorldWidth.Raw) / static_cast<float>(Rps::Fixed::One));
-}
-float WorldHeightF() {
-    return static_cast<float>(Rps::WorldHeight.Raw) / static_cast<float>(Rps::Fixed::One);
-}
+// #43 section D: the arithmetic lives in Rps/ViewMetrics.h now — this stayed a nullary wrapper only
+// because the desktop window width is a global here and ~30 call sites read Ppu() with no argument.
+float Ppu() { return Rps::Ppu(static_cast<float>(kWinW)); }
+using Rps::WorldHeightF;
 // View-side world (float) -> Fixed for a place event. Only the placing peer computes this; the
 // resulting Fixed travels over the wire, so both peers apply the identical position (no float
 // crosses into the sim's determinism — the event carries the raw int).
-Rps::Fixed WorldToFixed(float W) {
-    if (W < 0.0f) W = 0.0f;
-    return Rps::Fixed{static_cast<int32_t>(W * static_cast<float>(Rps::Fixed::One) + 0.5f)};
-}
+using Rps::WorldToFixed;   // #43 section D: one definition, shared with both phone mains
 
 // ------------------------------------------------------------------ two-window lockstep
 
@@ -1188,8 +1183,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb
         // doesn't hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so
         // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
-        const float GhostOffPx = (static_cast<float>(Snap.Cv.BuildingFootprint.Raw) /
-                                  static_cast<float>(Rps::Fixed::One)) * 0.5f * Ppu();
+        const float GhostOffPx = Rps::GhostOffsetPx(Snap.Cv.BuildingFootprint.Raw, Ppu());
         // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid
         // spot within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where
         // to draw the ghost (Gsx,Gsy — the snapped spot when valid, else the offset point for the red
