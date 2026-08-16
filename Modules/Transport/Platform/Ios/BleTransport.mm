@@ -132,6 +132,40 @@ public:
 };
 }  // namespace
 
+// #206: how far an OUTGOING central attempt got before it died.
+//
+// The connect watchdog reports "neither linked nor resolved", which is true and useless — it cannot
+// say whether CoreBluetooth never called back at all, or called back and we dropped the thread
+// ourselves. Three handlers on this path swallowed their `error` argument and two had silent
+// dead-ends (a service list without ours; characteristics without a device id), so a stall looked
+// identical from the outside whatever caused it.
+//
+// Stages are ordered, so the last one reached names the step that hung.
+enum class EConnectStage {
+    Idle,            // no attempt in flight
+    Connecting,      // connectPeripheral called, no callback yet
+    Connected,       // didConnectPeripheral — the LE link is up
+    ServicesFound,   // our service was present in the discovered list
+    CharsFound,      // datagram + device-id characteristics resolved
+    PeerIdRead,      // the peer's device id came back and the tie-break ran
+    Subscribing,     // we asked to notify and are waiting for confirmation
+    Linked,          // notifications confirmed
+};
+
+static const char* ConnectStageName(EConnectStage S) {
+    switch (S) {
+        case EConnectStage::Idle:          return "Idle";
+        case EConnectStage::Connecting:    return "Connecting(no callback yet)";
+        case EConnectStage::Connected:     return "Connected(LE up)";
+        case EConnectStage::ServicesFound: return "ServicesFound";
+        case EConnectStage::CharsFound:    return "CharsFound";
+        case EConnectStage::PeerIdRead:    return "PeerIdRead";
+        case EConnectStage::Subscribing:   return "Subscribing";
+        case EConnectStage::Linked:        return "Linked";
+    }
+    return "?";
+}
+
 @interface IosBleDriver : NSObject <CBCentralManagerDelegate,
                                     CBPeripheralManagerDelegate,
                                     CBPeripheralDelegate>
@@ -175,7 +209,9 @@ public:
     // platform is how these two drivers had already begun to differ. See BleLinkController.h.
     Lur::Transport::BleLinkController _Link;
     bool _TimersStarted;
-    // #206 diagnostics: one line per link episode, not per write.
+    // #206 diagnostics: how far the current outgoing attempt got, and one write-path line per
+    // link episode (not per write).
+    EConnectStage _ConnectStage;
     bool _WritePathLogged;
     bool _AmbiguousPathLogged;
     std::chrono::steady_clock::time_point _TimersLast;
@@ -532,6 +568,13 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     [self armDiscoveryWatchdog];  // #79: one-sidedness may not outlive the watchdog
 }
 
+// #206: one line per step of an outgoing attempt, so a stall names the step it hung on.
+- (void)setConnectStage:(EConnectStage)Stage {
+    if (_ConnectStage == Stage) return;
+    _ConnectStage = Stage;
+    BLE_LOG(@"central attempt -> %s", ConnectStageName(Stage));
+}
+
 - (void)centralManager:(CBCentralManager*)central
  didDiscoverPeripheral:(CBPeripheral*)peripheral
      advertisementData:(NSDictionary*)advertisementData
@@ -542,6 +585,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     peripheral.delegate = self;
     [central stopScan];
     [central connectPeripheral:peripheral options:nil];
+    [self setConnectStage:EConnectStage::Connecting];
     // #197: iOS had NO connect watchdog where Android has had one for a long time — a one-sided
     // fix, which is the drift this phase exists to end. CoreBluetooth's connectPeripheral has no
     // timeout of its own and will happily wait forever, so a connect the stack never completes
@@ -551,22 +595,32 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 
 - (void)centralManager:(CBCentralManager*)central
   didConnectPeripheral:(CBPeripheral*)peripheral {
+    [self setConnectStage:EConnectStage::Connected];
     [peripheral discoverServices:@[_ServiceUuid]];
 }
 
 - (void)centralManager:(CBCentralManager*)central
 didFailToConnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
-    BLE_LOG(@"connect failed: %@", error);
+    BLE_LOG(@"connect failed at %s: %@", ConnectStageName(_ConnectStage), error);
+    _ConnectStage = EConnectStage::Idle;
     [self resetClientAndRescan];
 }
 
 - (void)centralManager:(CBCentralManager*)central
 didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
+    // #206: a disconnect DURING an attempt is the peer tearing the shared LE link down under us —
+    // name the stage, because "it just stopped" is what made this invisible.
+    if (!_Linked && _ConnectStage != EConnectStage::Idle) {
+        BLE_LOG(@"central attempt died at %s (peer disconnected): %@",
+                ConnectStageName(_ConnectStage), error);
+    }
+    _ConnectStage = EConnectStage::Idle;
     if (_Linked && peripheral == _PeerDevice) { [self onLinkLost]; }
     else { [self resetClientAndRescan]; }
 }
 
 - (void)resetClientAndRescan {
+    _ConnectStage = EConnectStage::Idle;   // #206: the attempt is over, whatever stage it reached
     _Connecting = false;
     _RemoteDatagram = nil;
     _PeerDevice = nil;
@@ -597,29 +651,51 @@ didDisconnectPeripheral:(CBPeripheral*)peripheral error:(NSError*)error {
 // leaving _Connecting pinned true forever.
 - (void)abortConnect {
     if (_Linked || !_Connecting) return;
-    BLE_LOG(@"central: connect watchdog - attempt neither linked nor resolved, tearing it down");
+    // #206: WHICH STEP hung is the whole question. "Neither linked nor resolved" is true and
+    // useless; the stage says whether CoreBluetooth never called back at all (Connecting), the peer
+    // answered without our service (Connected), or we got all the way to a subscribe that was never
+    // confirmed (Subscribing).
+    BLE_LOG(@"central: connect watchdog - stalled at %s, tearing it down",
+            ConnectStageName(_ConnectStage));
+    _ConnectStage = EConnectStage::Idle;
     if (_PeerDevice) [_Central cancelPeripheralConnection:_PeerDevice];
     [self resetClientAndRescan];
 }
 
 // ---- CBPeripheralDelegate (the peer's server we connected to as central) ----
 - (void)peripheral:(CBPeripheral*)peripheral didDiscoverServices:(NSError*)error {
+    if (error) { BLE_LOG(@"service discovery FAILED: %@", error); return; }
+    bool Found = false;
     for (CBService* Service in peripheral.services) {
         if ([Service.UUID isEqual:_ServiceUuid]) {
+            Found = true;
             [peripheral discoverCharacteristics:@[_DatagramUuid, _DeviceIdUuid] forService:Service];
         }
     }
+    // #206: this used to return in silence. A peer whose GATT service has not finished publishing
+    // answers with a list that does not contain ours, and the attempt then hangs to the watchdog
+    // with no line explaining why — which is exactly the stall being hunted.
+    if (Found) [self setConnectStage:EConnectStage::ServicesFound];
+    else       BLE_LOG(@"services discovered but OURS IS ABSENT (%lu present) — peer's GATT server "
+                        "may not have published yet; this attempt will stall",
+                       (unsigned long)peripheral.services.count);
 }
 
 - (void)peripheral:(CBPeripheral*)peripheral
 didDiscoverCharacteristicsForService:(CBService*)service error:(NSError*)error {
+    if (error) { BLE_LOG(@"characteristic discovery FAILED: %@", error); return; }
     CBCharacteristic* DeviceIdChar = nil;
     for (CBCharacteristic* Char in service.characteristics) {
         if ([Char.UUID isEqual:_DatagramUuid]) _RemoteDatagram = Char;
         else if ([Char.UUID isEqual:_DeviceIdUuid]) DeviceIdChar = Char;
     }
-    if (DeviceIdChar) [peripheral readValueForCharacteristic:DeviceIdChar];
-    else [_Central cancelPeripheralConnection:peripheral];  // no device id -> not our peer
+    if (DeviceIdChar) {
+        [self setConnectStage:EConnectStage::CharsFound];
+        [peripheral readValueForCharacteristic:DeviceIdChar];
+    } else {
+        BLE_LOG(@"characteristics found but NO DEVICE-ID characteristic — not our peer, dropping");
+        [_Central cancelPeripheralConnection:peripheral];
+    }
 }
 
 - (void)peripheral:(CBPeripheral*)peripheral
@@ -644,6 +720,7 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
             _CachedPeripheral = (DecideBleRole(_LocalId, _PeerId) == EBleRole::Peripheral);
             SaveIosPeerId(_PeerId);
         }
+        [self setConnectStage:EConnectStage::PeerIdRead];
         const EBleRole Role = DecideBleRoleBreaking(_LocalId, PeerId, _FruitlessDefers);
         // Log both id STRINGS (they're ASCII hex): a both-Peripheral deadlock means the two
         // sides compared DIFFERENT bytes, which is only diagnosable if each side prints what
@@ -658,8 +735,15 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
             if (_FruitlessDefers >= BleMaxPeripheralDefers)
                 BLE_LOG(@"role tie-break BROKEN after %d fruitless defers -> forcing "
                       @"Central (nobody was connecting; #146)", _FruitlessDefers);
+            [self setConnectStage:EConnectStage::Subscribing];
             [peripheral setNotifyValue:YES forCharacteristic:_RemoteDatagram];  // keep this link
         } else {
+            // #206: the tie-break said Central but we have no datagram characteristic, so we defer
+            // anyway. That is a broken peer, not a role decision, and it used to be indistinguishable
+            // in the log from an ordinary defer.
+            if (Role == EBleRole::Central)
+                BLE_LOG(@"tie-break said Central but NO datagram characteristic on the peer — "
+                         "deferring instead; this peer's GATT service is incomplete");
             // We should be the peripheral: drop this connection, let the peer connect to us.
             _DecidedPeripheral = true;
             // #146: cleared by onLinked; counts UNANSWERED defers only — a Central decision that
@@ -677,7 +761,9 @@ didUpdateValueForCharacteristic:(CBCharacteristic*)characteristic error:(NSError
 
 - (void)peripheral:(CBPeripheral*)peripheral
 didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic error:(NSError*)error {
+    if (error) BLE_LOG(@"notify-enable FAILED: %@", error);
     if ([characteristic.UUID isEqual:_DatagramUuid] && characteristic.isNotifying) {
+        [self setConnectStage:EConnectStage::Linked];
         BLE_LOG(@"central linked + notifications on");
         // #83: we are CENTRAL, so our own peripheral manager has no legitimate peer — shut it to
         // everyone. Binding only ever happened in didSubscribeToCharacteristic (the peripheral path),
@@ -810,6 +896,7 @@ didUpdateNotificationStateForCharacteristic:(CBCharacteristic*)characteristic er
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
     _RemoteDatagram = nil;
     _Connecting = false;
+    _ConnectStage = EConnectStage::Idle;
     _Link.OnConnectResolved();
 }
 
