@@ -93,7 +93,7 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     AwaitingNs = 0;
     ReoffersLeft = 0;   // no resync round is in flight in a fresh match (BeginResync arms it)
     // #161: the recovery budget is PER MATCH. A match that needed two repairs should not start the
-    // next one already one attempt from a draw — and a fresh match cannot be mid-recovery.
+    // next one already one attempt into a spent budget — and a fresh match cannot be mid-recovery.
     Recovering_ = false;
     RecoveryAdopting_ = false;
     RecoveryAttempts_ = 0;
@@ -213,8 +213,16 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // end the way that one does. A stalled reconnect resumes on our own state, which is right when our
     // state is merely stale; here our state is the one known to be suspect, so resuming on it would
     // re-establish the divergence and the anchor would trip again immediately. Out of patience means
-    // out of options: take the draw (the last resort), which at least resolves identically on both
-    // screens and lets the session restart.
+    // out of options FOR THIS ROUND, so end the round and back off — never the match.
+    // Between rounds: a spent budget left us desynced and waiting. Count the backoff down and start
+    // the next round the moment it expires. Nothing else re-triggers this — the anchor cross-check
+    // only fires on a fresh hash pair, and a stalled pair may produce none — so without this the
+    // "always recover" rule would hold only when the peer happened to keep talking.
+    if (!Recovering_ && RecoveryRetryNs_ > 0) {
+        RecoveryRetryNs_ = ElapsedNs >= RecoveryRetryNs_ ? 0 : RecoveryRetryNs_ - ElapsedNs;
+        if (RecoveryRetryNs_ == 0 && Desync && TheSim.Result == ResultOngoing)
+            BeginRecovery("retrying after a spent recovery round");
+    }
     if (Recovering_) {
         RecoveryNs_ += ElapsedNs;
         if (RecoveryNs_ >= DesyncRecoveryTimeoutNs) {
@@ -307,12 +315,16 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     if (TheSim.Tick >= WallTicks) return;   // head caught up to our own wall clock — nothing to wait FOR
     StallNs_ += ElapsedNs;
     if (StallNs_ < CeilingStallTimeoutNs) return;
-    Lur::Log::Error("RPS: starved at the ceiling for %llums at tick %u — the peer's input is not coming "
-                    "(it collapsed under load or restarted into another match, #162). Ending the match "
-                    "so both sides return to the camp handshake, which always re-converges.",
+    // Was: end the match as a draw so both sides return to the camp handshake. A draw is not an
+    // acceptable outcome (owner ruling, 2026-08-16), and this case does not even need one — the peer
+    // is ABSENT, not disagreeing, so there is nothing to reconcile and nothing to declare. Hold, keep
+    // saying so, and let the peer rejoin: the #139 cold-rejoin path rebuilds it from our history when
+    // it does, which is the same machinery a recovery uses.
+    Lur::Log::Error("RPS: starved at the ceiling for %llums at tick %u — the peer's input is not "
+                    "coming (it collapsed under load, backgrounded, or restarted, #162). HOLDING the "
+                    "match open: it resumes when the peer rejoins and rebuilds from our timeline.",
                     static_cast<unsigned long long>(StallNs_ / 1'000'000ull), TheSim.Tick);
-    StallNs_ = 0;
-    TheSim.Result = ResultDraw;   // #149's post-match hold + restart takes it from here
+    StallNs_ = 0;   // re-arm so the next bound reports again rather than falling silent
 }
 
 // #139 match-start: pre-match, the clock is held. Capture the local camp (the first miner-place
@@ -691,7 +703,9 @@ void LockstepPeer::EmitAnchor(uint32_t Tick, uint32_t Hash) {
 
 // ---- #161: recovery ----------------------------------------------------------------------------
 // A desync must RECOVER the match, not end it. e6d6abf's draw was a stopgap for a worse bug (both
-// phones frozen forever) and threw away a perfectly playable match to escape it.
+// phones frozen forever) and threw away a perfectly playable match to escape it. As of the owner
+// ruling of 2026-08-16 the stopgap is gone entirely: a spent budget starts another round after a
+// backoff, so "recover the match, not end it" is now true without an escape hatch.
 //
 // The survivor is decided by the GUID tie-break, which MyTeam already encodes (Team = MyGuid <
 // PeerGuid ? 0 : 1 on every path), so both peers reach the same verdict with nothing negotiated —
@@ -743,7 +757,7 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     if (Recovering_ || Awaiting) return;
     if (TheSim.Result != ResultOngoing) return;  // the match is over; the peer's later frames are noise
     // #167: charge the GAP budget, not the desync one. A lost frame is not worth ending a match, and
-    // it must not push the match toward the draw that spending MaxDesyncRecoveries declares — an
+    // it must not burn the budget that spending MaxDesyncRecoveries ends a round on — an
     // ordinary app restart takes this path too (it is the cold-rejoin case), so sharing the budget
     // meant one restart left the next real repair already an attempt down.
     if (GapRecoveries_ >= MaxGapRecoveries) return;
@@ -787,22 +801,42 @@ void LockstepPeer::FinishRecovery() {
     Lur::Log::Info("RPS: recovered — resuming from the peer's timeline at tick %u", TheSim.Tick);
 }
 
-// The last resort, and the only legitimate home for a draw. Reached when the attempt budget is spent
-// (input replay cannot fix genuine nondeterminism — it reproduces it) or when the survivor's history
-// never arrives. A draw is the one outcome that can be declared SYMMETRICALLY: awarding the win needs
-// agreement about whose state was right, which is precisely what a desync destroys.
+// A round of recovery ran out of budget or patience. This USED to end the match as a draw, and the
+// reasoning was sound as far as it went: awarding the win needs agreement about whose state was
+// right, which is precisely what a desync destroys, so a draw was the only outcome declarable
+// SYMMETRICALLY.
+//
+// A DRAW IS NOT AN ACCEPTABLE OUTCOME OF RPS (owner ruling, 2026-08-16). A match must always be able
+// to recover and continue until one team wins. And the symmetry argument turns out not to need a
+// draw at all: IsRecoverySurvivor() already decides whose timeline stands, from the device id, with
+// no negotiation and no reference to the diverged state. Both peers reach the same answer. So the
+// honest resolution is not "nobody won", it is "the survivor's timeline is the match" — which is
+// what a successful recovery already does. Giving up was only ever the case where we stopped
+// applying that rule, never a case where the rule failed.
+//
+// So: start a FRESH round after a backoff, and never touch TheSim.Result. The attempt budget still
+// means something — it is what escalates the log — but it no longer decides the match.
+//
+// The backoff is the part that matters in practice. Retrying flat-out is the livelock #210 records
+// (a reconnect/resync cycle every ~11 s for eight minutes, never widening its wait). A pair that
+// genuinely cannot converge should wait quietly and keep trying, not thrash.
 void LockstepPeer::FailRecovery(const char* Why) {
     Recovering_ = false;
     RecoveryAdopting_ = false;
     Awaiting = false;
     RecoveryNs_ = 0;
-    RecoveryCarryNs_ = 0;   // the match is over; there is nothing left to catch up to
+    // Do NOT drop the carry: the match continues, so held wall time is still owed to us.
     Desync = true;
-    Lur::Log::Error("RPS: recovery FAILED (%s) after %d attempt(s) — ending the match as a draw at tick "
-                    "%u. Recovery converges on a lost input and cannot on nondeterminism, so this is "
+    ++RecoveryRounds_;
+    RecoveryAttempts_ = 0;                       // a fresh budget for the new round
+    RecoveryRetryNs_ = RecoveryRetryBackoffNs(RecoveryRounds_);
+    Lur::Log::Error("RPS: recovery round %d exhausted (%s) at tick %u — retrying in %llums. The match "
+                    "is NOT ended: a draw is not an acceptable outcome, and the survivor rule "
+                    "(lower device id) resolves this symmetrically without one. Replay converges on a "
+                    "lost input and CANNOT on nondeterminism, so a round count that keeps climbing is "
                     "the signal to look for the latter (a float in sim state, a compiler difference).",
-                    Why, RecoveryAttempts_, TheSim.Tick);
-    TheSim.Result = ResultDraw;   // #149's post-match hold + restart then clears the latch
+                    RecoveryRounds_, Why, TheSim.Tick,
+                    static_cast<unsigned long long>(RecoveryRetryNs_ / 1'000'000ull));
 }
 
 void LockstepPeer::CrossCheck(uint32_t Tick) {

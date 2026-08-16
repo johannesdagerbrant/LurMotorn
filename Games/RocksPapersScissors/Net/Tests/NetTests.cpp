@@ -1840,17 +1840,21 @@ static void TestStarvedCeilingEndsTheMatch() {
         Qa.Q.clear();       // nothing is delivered to B, and B sends nothing back
         Held += OneTickNs;
     }
-    CHECK(A.Stalled() || A.GetSim().Result != ResultOngoing);
-    CHECK(A.GetSim().Result == ResultDraw);          // it REACHED an outcome instead of hanging
-    CHECK(Held >= LockstepPeer::CeilingStallTimeoutNs);   // and not before the bound
-    CHECK(A.ExecTick() >= Reached);                  // nothing was rewound to get there
+    // A DRAW IS NOT AN ACCEPTABLE OUTCOME (owner ruling, 2026-08-16). An absent peer is not a
+    // disagreement — there is nothing to reconcile and nothing to declare — so the match HOLDS open
+    // and waits, however long the peer is gone.
+    CHECK(A.Stalled());
+    CHECK(A.GetSim().Result == ResultOngoing);       // still a live match, not a draw
+    CHECK(Held >= LockstepPeer::CeilingStallTimeoutNs);
+    CHECK(A.ExecTick() >= Reached);                  // and nothing was rewound while waiting
 
-    // And the session recovers into a fresh match, which is what makes it survivable: both peers end
-    // up back at the camp handshake, the one state that always re-converges.
+    // Holding must SURVIVE, not merely delay: far past the old bound it is still the same match.
     const uint32_t Before = A.MatchIndex();
+    for (int I = 0; I < 200; ++I) { A.Tick(OneTickNs); Qa.Q.clear(); }
     A.Tick(PostMatchHoldNs + OneTickNs);
-    CHECK(A.MatchIndex() == Before + 1);
-    CHECK(!A.MatchStarted());
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(A.MatchIndex() == Before);                 // no restart into a fresh match
+    CHECK(A.MatchStarted());                         // ... and the match we were playing is still on
 
     // A stall that RESOLVES must not be punished: the bound resets when the peer's frames resume, or a
     // busy phone that briefly falls behind would lose matches to a timer.
@@ -1875,9 +1879,18 @@ static void TestStarvedCeilingEndsTheMatch() {
 // ---- #161: recovery must be BOUNDED, and the draw survives as the last resort ----
 // "A recovery loop that never converges is the freeze again by another name." Input-history replay
 // cannot converge if the cause is genuine nondeterminism rather than lost input — it faithfully
-// reproduces the divergence — so the attempt count has to be capped and the terminal outcome defined.
-// That is the one place a draw legitimately lives: after recovery has failed, not instead of trying.
-static void TestDesyncRecoveryIsBoundedThenDraws() {
+// reproduces the divergence.
+//
+// That used to terminate in a draw. A DRAW IS NOT AN ACCEPTABLE OUTCOME OF RPS (owner ruling,
+// 2026-08-16): a match must always be able to recover and continue until one team wins. The symmetry
+// argument that justified the draw does not actually need one — IsRecoverySurvivor() already picks
+// whose timeline stands, from the device id, with no reference to the diverged state and no
+// negotiation. Giving up was the case where we stopped applying that rule, not a case where it
+// failed.
+//
+// So what has to be proved changed shape entirely. Not "it reaches a verdict", but: it never
+// declares one, it never spins, and it still converges the moment the peer can answer.
+static void TestUnconvergeableDesyncNeverDrawsAndKeepsTrying() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
     A.Init(0x1611, 0, Enqueue, &Qa);
@@ -1888,36 +1901,40 @@ static void TestDesyncRecoveryIsBoundedThenDraws() {
     }
 
     // Re-diverge on EVERY delivery, so no recovery can ever succeed — the pathological case.
-    int Rounds = 0;
-    for (; Rounds < 400 && A.GetSim().Result == ResultOngoing; ++Rounds) {
+    for (int Rounds = 0; Rounds < 400; ++Rounds) {
         A.Tick(OneTickNs);
         B.Tick(OneTickNs);
         if (!TamperOneInput(Qa, B, 0)) Deliver(Qa, B);
         Deliver(Qb, A);
     }
-    CHECK(Rounds < 400);                                        // it TERMINATED — no infinite loop
+    // 400 rounds of a divergence that cannot be repaired, and NEITHER peer has declared anything.
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(B.GetSim().Result == ResultOngoing);
+
+    // It also must not have quietly stopped trying. The budget is per ROUND now, and a spent round
+    // starts another after a backoff — so attempts stay within the per-round bound while rounds
+    // accumulate. That pairing is the whole design: bounded effort, unbounded patience.
     CHECK(A.RecoveryAttempts() <= LockstepPeer::MaxDesyncRecoveries);
-    CHECK(A.GetSim().Result == ResultDraw);                     // A hit the bounded last resort first
-    // BOTH peers must reach the SAME verdict (Draw) — one drawing while the other plays on would break
-    // the consistency rule. Under rollback the two exhaust their budgets a beat apart on independent
-    // clocks (the loop above stopped the instant A drew), so drive B alone to its own terminal draw —
-    // ticking A would start its post-match restart. With A drawn and silent, B starves past the
-    // rollback horizon and the #162 ceiling bound turns that into B's draw. Same verdict, reached
-    // independently, which is exactly the consistency the rule demands.
-    uint64_t BHeld = 0;
-    while (B.GetSim().Result == ResultOngoing && BHeld < 3 * LockstepPeer::CeilingStallTimeoutNs) {
-        B.Tick(OneTickNs);
-        BHeld += OneTickNs;
+    CHECK(A.RecoveryRounds() > 0);
+
+    // And the backoff is real: it must reach its cap rather than retrying flat out, which is the
+    // livelock shape #210 records (a cycle every ~11s for eight minutes, never widening).
+    CHECK(LockstepPeer::RecoveryRetryBackoffNs(1) == LockstepPeer::RecoveryRetryBaseNs);
+    CHECK(LockstepPeer::RecoveryRetryBackoffNs(2) > LockstepPeer::RecoveryRetryBackoffNs(1));
+    CHECK(LockstepPeer::RecoveryRetryBackoffNs(99) == LockstepPeer::RecoveryRetryMaxNs);
+
+    // THE POINT OF THE RULING: once the cause goes away, the match is still there to be resumed.
+    // Stop tampering and let them talk — no draw was declared, so there is a live match to converge.
+    for (int I = 0; I < 400; ++I) {
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
     }
-    CHECK(B.GetSim().Result == ResultDraw);
-    // And the draw still recovers the SESSION, which is what e6d6abf bought and must not be lost:
-    // the post-match hold expires, a fresh match begins, and the latch clears.
-    const uint32_t Before = A.MatchIndex();
-    A.Tick(PostMatchHoldNs + OneTickNs);
-    CHECK(A.MatchIndex() == Before + 1);
-    CHECK(!A.Desynced());
-    CHECK(A.RecoveryAttempts() == 0);                           // the budget is per match
-    CHECK(!A.MatchStarted());
+    CHECK(A.GetSim().Result == ResultOngoing);
+    CHECK(B.GetSim().Result == ResultOngoing);
+    CHECK(A.MatchStarted());          // the SAME match, never restarted out from under the players
+    CHECK(B.MatchStarted());
+    CHECK(!A.Desynced());             // and genuinely repaired, not merely un-declared
+    CHECK(!B.Desynced());
 }
 
 // ---- #161 + #163: a LOST frame recovers without the sims ever diverging at all ----
@@ -2010,9 +2027,10 @@ static void TestDesyncIsNeverTerminal() {
     CHECK(A.GetSim().StateHash() == B.GetSim().StateHash());
 
     // The other side of the same coin, and the one that could still freeze: forge the mismatch into the
-    // ADOPTER, whose repair depends on a history the peer has no reason to send. It must reach an
-    // outcome anyway. A permanent hold is the original bug wearing a new hat, so the timeout converts
-    // it into the draw — the bounded last resort — and the session then restarts.
+    // ADOPTER, whose repair depends on a history the peer has no reason to send. The hold must still
+    // be BOUNDED — a permanent freeze is the original bug wearing a new hat — but bounding it no
+    // longer means concluding the match. A DRAW IS NOT AN ACCEPTABLE OUTCOME (owner ruling,
+    // 2026-08-16): the round ends, a backoff starts, and the match stays live for the next attempt.
     Outbox Qc, Qd;
     LockstepPeer C, D;
     C.Init(0x9002, 0, Enqueue, &Qc);
@@ -2038,15 +2056,23 @@ static void TestDesyncIsNeverTerminal() {
         Deliver(Qd, C);
         Held += OneTickNs;
     }
-    CHECK(D.GetSim().Result == ResultDraw);
-    CHECK(Held <= LockstepPeer::DesyncRecoveryTimeoutNs + 4 * OneTickNs);  // bounded, and by THAT bound
+    // The ROUND ends on that bound — proved by the round counter, not by a verdict.
+    uint64_t Waited = 0;
+    while (D.RecoveryRounds() == 0 && Waited < 120 * OneTickNs) {
+        C.Tick(OneTickNs); D.Tick(OneTickNs);
+        Deliver(Qc, D); Deliver(Qd, C);
+        Waited += OneTickNs;
+    }
+    CHECK(D.RecoveryRounds() >= 1);
+    CHECK(Waited <= LockstepPeer::DesyncRecoveryTimeoutNs + 4 * OneTickNs);  // bounded, by THAT bound
+    CHECK(D.GetSim().Result == ResultOngoing);              // bounded, but NOT concluded
+    (void)Held;
 
-    // And the session recovers from that draw, which is what e6d6abf bought and must not regress.
+    // The match is untouched: same match, still started, still ours to finish.
     const uint32_t MatchBefore = D.MatchIndex();
     D.Tick(PostMatchHoldNs + OneTickNs);
-    CHECK(!D.Desynced());
-    CHECK(D.MatchIndex() == MatchBefore + 1);
-    CHECK(!D.MatchStarted());                               // fresh match: awaiting both camps
+    CHECK(D.MatchIndex() == MatchBefore);                   // no restart was forced on the players
+    CHECK(D.MatchStarted());
     CHECK(D.GetSim().Result == ResultOngoing);
 }
 
@@ -2832,7 +2858,7 @@ int main() {
     TestPreMatchStallIsReported();               // #163
     TestStarvedCeilingEndsTheMatch();                   // #162
     TestDesyncRecoversToACommonStateAndKeepsPlaying();  // #161
-    TestDesyncRecoveryIsBoundedThenDraws();             // #161
+    TestUnconvergeableDesyncNeverDrawsAndKeepsTrying();             // #161
     TestLostInputRecoversBeforeDiverging();             // #161 + #163
     TestDesyncIsNeverTerminal();
     TestLockstepExecuteCapBounded();

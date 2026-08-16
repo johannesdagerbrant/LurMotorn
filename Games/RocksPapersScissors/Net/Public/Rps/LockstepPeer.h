@@ -139,6 +139,20 @@ public:
     // end up replaying one identical history; the discarded timeline may have been the more complete
     // one. That is deliberate — consistency, not fairness (CLAUDE.md), and the players share a room.
     static constexpr int MaxDesyncRecoveries = 3;
+    // How long to wait before starting the NEXT recovery round once a budget is spent. Doubles per
+    // round from 1 s and caps at 15 s.
+    //
+    // The cap is the point, not the growth. #210 records the alternative: a reconnect/resync cycle
+    // firing every ~11 s for eight minutes without ever widening, which is a livelock rather than a
+    // retry. A pair that cannot converge should settle into a slow, quiet re-attempt that costs
+    // nothing and still recovers the instant the peer becomes able to answer.
+    static constexpr uint64_t RecoveryRetryBaseNs = 1'000'000'000ull;
+    static constexpr uint64_t RecoveryRetryMaxNs  = 15'000'000'000ull;
+    static uint64_t RecoveryRetryBackoffNs(int Round) {
+        uint64_t Ns = RecoveryRetryBaseNs;
+        for (int I = 1; I < Round && Ns < RecoveryRetryMaxNs; ++I) Ns *= 2;
+        return Ns > RecoveryRetryMaxNs ? RecoveryRetryMaxNs : Ns;
+    }
     // #167: the LOST-FRAME path gets its OWN, more generous bound instead of sharing the one above.
     // The two are not the same kind of event. An anchor mismatch means the sims already disagree and
     // replay may not converge — three attempts and then a draw is right. A lost frame is repaired
@@ -182,6 +196,9 @@ public:
     // Recoveries attempted THIS match (reset by BeginMatch). Reaching MaxDesyncRecoveries is what
     // finally declares the draw — that is the only place a draw legitimately lives.
     int RecoveryAttempts() const { return RecoveryAttempts_; }
+    // How many times a recovery BUDGET has been spent. Effort is bounded per round; rounds are
+    // not, because the match must always be able to recover (owner ruling, 2026-08-16).
+    int RecoveryRounds() const { return RecoveryRounds_; }
     // #167: gap repairs attempted THIS match, bounded separately by MaxGapRecoveries. Split out so a
     // lost frame can never push the match toward the draw that MaxDesyncRecoveries declares.
     int GapRecoveries() const { return GapRecoveries_; }
@@ -452,7 +469,10 @@ private:
     void RequestRecovery(uint32_t MissingTick);
     void OfferHistoryToLoser();   // hand over our timeline and re-base to the same frontier
     void FinishRecovery();        // converged: resume play
-    void FailRecovery(const char* Why);  // budget or patience spent -> the draw, as the LAST resort
+    // Budget or patience spent. This USED to end the match as a draw; it now starts a fresh
+    // recovery round after a backoff instead, and never touches TheSim.Result. See the ruling note
+    // on RecoveryRounds_.
+    void FailRecovery(const char* Why);
     bool IsRecoverySurvivor() const { return MyTeam == 0; }  // lower device GUID keeps its timeline
 
     Sim TheSim;
@@ -506,6 +526,13 @@ private:
     int      DuplicateFrames_ = 0;   // #163: frames arriving BEHIND the expected sequence
     uint64_t RecoveryNs_ = 0;
     uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
+    // A DRAW IS NOT AN ACCEPTABLE OUTCOME OF RPS (owner ruling, 2026-08-16). A match must always be
+    // able to recover and continue until one team wins, so exhausting the budget can no longer end
+    // it. These two carry the retry instead: rounds is how many times the budget has been spent (it
+    // only escalates the log), and the timer spaces the retries so a pair that cannot converge waits
+    // quietly rather than thrashing — the failure shape #210 documents.
+    int      RecoveryRounds_ = 0;
+    uint64_t RecoveryRetryNs_ = 0;   // >0 = counting down to the next forced recovery round
 
     // #162: how long we have been unable to advance while live (not resyncing, not recovering). Reset
     // by any executed tick, so it measures a CONTINUOUS starvation rather than accumulated slowness.
