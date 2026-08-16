@@ -52,16 +52,34 @@ public:
     // candidate is void, so releasing that gesture must not be read as a console tap.
     void Cancel() { TwoFingerActive_ = false; }
 
+    // Why a lift did or did not advance the chain. Populated on every LiftAndShouldOpen so a
+    // "the gesture feels picky" report can become two numbers instead of a theory — feel is not
+    // debuggable, and the two windows below fail in ways that look identical from the outside.
+    struct LiftDiag {
+        bool     WasCandidate = false;  // were two fingers down when this lift happened?
+        uint64_t HoldNs = 0;            // second finger down -> last finger up (vs TapHoldMaxNs)
+        uint64_t SinceLastTapNs = 0;    // previous chain tap -> this one (vs TapChainMaxNs)
+        int      TapCount = 0;          // chain length after this lift
+        bool     Opened = false;
+    };
+    const LiftDiag& LastLift() const { return LastLift_; }
+
     // The last finger lifted. Returns true when the console should OPEN. Resets the chain on opening,
     // so tapping around after closing the panel does not immediately re-summon it.
     bool LiftAndShouldOpen(uint64_t NowNs) {
         const bool WasCandidate = TwoFingerActive_;
         TwoFingerActive_ = false;
+        LastLift_ = LiftDiag{};
+        LastLift_.WasCandidate = WasCandidate;
+        LastLift_.HoldNs = WasCandidate ? NowNs - DownNs_ : 0;
+        LastLift_.SinceLastTapNs = NowNs - LastTapNs_;
         if (!WasCandidate || NowNs - DownNs_ >= TapHoldMaxNs) return false;  // a hold, not a tap
         TapCount_ = (NowNs - LastTapNs_ < TapChainMaxNs) ? TapCount_ + 1 : 1;
         LastTapNs_ = NowNs;
+        LastLift_.TapCount = TapCount_;
         if (TapCount_ < TapsToOpen) return false;
         TapCount_ = 0;
+        LastLift_.Opened = true;
         return true;
     }
 
@@ -93,6 +111,7 @@ private:
     int      TapCount_ = 0;
     float    DragY_ = 0.0f;
     float    DragMoved_ = 0.0f;
+    LiftDiag LastLift_{};
 };
 
 } // namespace Lur::Input

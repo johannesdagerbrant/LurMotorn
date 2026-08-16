@@ -1,6 +1,7 @@
 #pragma once
 #include <functional>
 
+#include "Lur/Core/Log.h"
 #include "Lur/Input/ConsoleGesture.h"
 #include "Lur/Input/Input.h"
 #include "Rps/CameraScroll.h"
@@ -215,7 +216,21 @@ private:
         // Two-finger triple-tap opens the CVar console. Read TwoFingerActive BEFORE the lift: the
         // lift is what clears it, and a tap that was part of the chain must not also hit the HUD.
         const bool WasTwoFinger = Gesture_->TwoFingerActive();
-        if (Gesture_->LiftAndShouldOpen(T.TimeNs)) {
+        const bool Open = Gesture_->LiftAndShouldOpen(T.TimeNs);
+        // Report every two-finger lift with the two numbers that decide it. "The gesture feels
+        // picky" is not debuggable; a hold of 412 ms against a 350 ms window is. Only two-finger
+        // lifts are logged, so ordinary play stays silent.
+        if (WasTwoFinger) {
+            const Lur::Input::ConsoleGesture::LiftDiag& D = Gesture_->LastLift();
+            Lur::Log::Info("console gesture: hold=%llums (max %llu) chain=%llums (max %llu) taps=%d/%d%s",
+                           static_cast<unsigned long long>(D.HoldNs / 1'000'000ull),
+                           static_cast<unsigned long long>(Lur::Input::ConsoleGesture::TapHoldMaxNs / 1'000'000ull),
+                           static_cast<unsigned long long>(D.SinceLastTapNs / 1'000'000ull),
+                           static_cast<unsigned long long>(Lur::Input::ConsoleGesture::TapChainMaxNs / 1'000'000ull),
+                           D.TapCount, Lur::Input::ConsoleGesture::TapsToOpen,
+                           D.Opened ? " -> OPEN" : (D.TapCount == 0 ? " -> REJECTED (hold too long)" : ""));
+        }
+        if (Open) {
             View_->SetDevOverlayOpen(true);
             return true;
         }
