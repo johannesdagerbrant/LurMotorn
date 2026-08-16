@@ -286,6 +286,14 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 
 - (void)loadView {
     self.view = [[LurMetalView alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    // UIKit's DEFAULT IS NO. Without this a view is handed exactly one touch and the second finger
+    // is never delivered, so event.allTouches.count never reaches 2 — which is why the two-finger
+    // triple-tap could not open the console on the iPhone while working first time on the Galaxy.
+    //
+    // Not set on LurMetalView itself, deliberately: chess is a one-finger game whose taps commit
+    // moves, and handing it a second simultaneous touch would be a behaviour change it has no use
+    // for. RPS opts in because RPS is the one with a two-finger gesture.
+    self.view.multipleTouchEnabled = YES;
 }
 - (CAMetalLayer*)metalLayer { return (CAMetalLayer*)self.view.layer; }
 
@@ -1387,8 +1395,34 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     [self pushTouch:Lur::Input::ETouchPhase::Moved touches:touches event:event];
 }
+// Only the LAST finger up is an Ended, mirroring Android — which handles ACTION_UP and deliberately
+// drops the intermediate ACTION_POINTER_UP. UIKit has no such distinction: it calls this once per
+// lifting touch, so a two-finger tap arrives as two separate calls. Forwarding both would run the
+// release path twice, and the second one — with no two-finger candidate left to suppress it — would
+// fall through to the tap hit-test and poke the HUD under wherever that finger happened to be.
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    if ([self remainingTouchesAfter:touches event:event] > 0) return;   // an intermediate lift
     [self pushTouch:Lur::Input::ETouchPhase::Ended touches:touches event:event];
+}
+
+// The platform saying "this gesture did not happen" (a call, a system alert, a control-centre
+// swipe). It was never implemented, so a cancelled placement drag simply hung until the next touch.
+// The router treats Cancelled as end-without-commit, which is the whole point of the phase.
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    if ([self remainingTouchesAfter:touches event:event] > 0) return;
+    [self pushTouch:Lur::Input::ETouchPhase::Cancelled touches:touches event:event];
+}
+
+// How many fingers are still down once `touches` have gone. Counted by PHASE rather than by set
+// arithmetic: allTouches still contains the ending touches at this point, so a plain count
+// difference would be right only when UIKit batches every lift into one call, which it does not.
+- (NSUInteger)remainingTouchesAfter:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
+    NSUInteger Remaining = 0;
+    for (UITouch* T in event.allTouches) {
+        if (T.phase != UITouchPhaseEnded && T.phase != UITouchPhaseCancelled) ++Remaining;
+    }
+    (void)touches;
+    return Remaining;
 }
 
 // #43 section D: the ~90 lines of replay* methods that used to sit here are Rps::TouchRouter now,
