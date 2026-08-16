@@ -45,6 +45,7 @@
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
+#include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with Android + desktop
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
@@ -171,7 +172,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     bool _ViewLinkedApplied;     // one-shot — the peer row + blink is applied once
     Rps::CameraScroll _Cam;
     bool _CamInit;
-    float _DownX, _DownY;        // touch-down point (drawable px) for the tap test — render-thread replay state
     // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It now
     // runs on the RENDER thread (which owns _View), replayed from the touch queue; the MAIN handlers only
     // capture pointer counts + timestamps into TouchEvent. Shared recognizer (Lur::Input::ConsoleGesture).
@@ -256,6 +256,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     std::atomic<int32_t> _InsetTopPx, _InsetBotPx;  // main -> render: safe-area insets (px)
     std::mutex           _TouchMx;         // guards _TouchQ
     std::vector<TouchEvent> _TouchQ;       // main pushes raw touches, the render thread drains once/frame
+    // #43 section D: what a touch MEANS, shared with the Android + desktop mains. RENDER thread only
+    // — it holds _View/_Cam/_DevGesture, which are render-owned since #183, so the router runs where
+    // they live and the ownership rule is unchanged.
+    Rps::TouchRouter _Router;
 #if LUR_INTERNAL
     // #144 SOLO FLIGHT RECORDER — parity with Android, which has had it since #156 made it a dev-build
     // default. Without it an iPhone playtest is unreadable afterwards: you get the score and nothing
@@ -402,6 +406,28 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // waiting for its ack. Declared once here; every call site below is topology-agnostic.
     _RH.Configure(Lur::App::ERenderTopology::Dedicated);
     _RH.Start();
+
+    // #43 section D. Wired on MAIN before the render thread exists, so the render thread never
+    // observes a half-initialised router; after this the object is touched only from there.
+    // placeLocal is deliberately the sink — it is what already knows whether the solo inbox or the
+    // linked peer is the live one, and that decision stays per-main.
+    {
+        Rps::TouchRouterHooks Hooks;
+        __weak RpsViewController* WeakSelf = self;
+        Hooks.Emit = [WeakSelf](const Rps::InputEvent& E) {
+            RpsViewController* Me = WeakSelf;
+            if (Me != nil) [Me placeLocal:E];
+        };
+        Hooks.PickAiTier = [WeakSelf](int Tier) {
+            RpsViewController* Me = WeakSelf;
+            if (Me != nil) Me->_SoloAiTier.store(Tier, std::memory_order_release);
+        };
+        Hooks.PickPeer = [WeakSelf]() {
+            RpsViewController* Me = WeakSelf;
+            if (Me != nil) Me->_SwitchToLinkedAtomic.store(true, std::memory_order_release);
+        };
+        _Router.Init(&_View, &_Cam, &_DevGesture, std::move(Hooks));
+    }
     // pthread (not std::thread) so we can hand it a 4MB stack — see the ivar note. The trampoline just
     // re-enters the ObjC loop; self is passed raw (VC outlives the thread, which -dealloc joins first).
     pthread_attr_t RenderAttr;
@@ -911,23 +937,12 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
         std::lock_guard<std::mutex> Lk(_TouchMx);
         _TouchQ.swap(Batch);
     }
-    for (const TouchEvent& E : Batch) {
-        switch (E.Phase) {
-            case Lur::Input::ETouchPhase::Began: [self replayTouchBegan:E]; break;
-            case Lur::Input::ETouchPhase::Moved: [self replayTouchMoved:E]; break;
-            case Lur::Input::ETouchPhase::Ended: [self replayTouchEnded:E]; break;
-            // Unreachable by construction: this VC does not implement -touchesCancelled:, so nothing
-            // ever pushes it. Kept explicit so the switch is exhaustive over the shared enum rather
-            // than silently relying on that.
-            //
-            // NOT wired to Ended on purpose — a cancelled touch is UIKit saying "this gesture did not
-            // happen" (a system alert, a call), and routing it to Ended would COMMIT the placement the
-            // player never completed. Handling it properly means cancelling the drag, which is a real
-            // behaviour change and wants a device to confirm; it is the same gap as before this change,
-            // now merely visible.
-            case Lur::Input::ETouchPhase::Cancelled: break;
-        }
-    }
+    Rps::TouchFrame F;
+    F.ViewW = static_cast<float>(_RH.Width());
+    F.ViewH = static_cast<float>(_RH.Height());
+    F.Team  = _LinkedTeam.load(std::memory_order_relaxed);   // sim thread publishes it
+    F.Live  = _MatchLive.load(std::memory_order_acquire);    // solo OR peer match live
+    for (const TouchEvent& E : Batch) _Router.Route(E, _Snap, F);
 }
 
 // #183: the MAIN-thread housekeeping tick (0.5 s). Everything that reads UIKit — window/scene/appState —
@@ -1339,15 +1354,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     }
 }
 
-// Touch (#139/#140, mirror of the desktop/Android mains): a touch-down on a build plate starts a
-// drag-to-place (the ghost follows the finger, lifted up-left of it by ~its size so the thumb
-// doesn't hide it; a valid release emits a Place event); any other drag pans the camera; a tap on
-// a building's x1/x5 button queues units. MAIN thread: unit input crosses to the sim thread via
-// placeLocal (the thread-safe SoloIn inbox / Lp.QueueLocalEvent). Placement is gated on _MatchLive (a
-// live solo or peer match). You play _LinkedTeam (published by the sim thread; 0 in solo).
-- (float)ghostOffPxForWidth:(float)W {
-    return Rps::GhostOffsetPx(_Snap.Cv.BuildingFootprint.Raw, Ppu(W));
-}
 // Route a local place/queue event (produced on the MAIN thread by the drag-place UI, or by the agent
 // harness on the sim thread) to whichever match is live: the solo sim's thread-safe SoloIn inbox
 // (drained by the sim thread's solo tick) or the linked peer's own glue->sim inbox. BOTH are
@@ -1385,118 +1391,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     [self pushTouch:Lur::Input::ETouchPhase::Ended touches:touches event:event];
 }
 
-// ---- RENDER-thread replay of the exact hit-test logic (was inline in the UIKit handlers pre-#183). Reads
-// the published drawable size (_RH.Width()/Height()), not the layer, and touches _View/_Cam/_DevGesture/_Snap
-// freely as their owner. Behaviour is verbatim — only the thread and the coordinate source changed. ----
-- (void)replayTouchBegan:(const TouchEvent&)E {
-    const float X = E.XPx, Y = E.YPx;
-    _DownX = X; _DownY = Y;
-#if !LUR_SHIPPING
-    // #151: the SHARED console recognizer (Lur::Input::ConsoleGesture). Pointer count + timestamp came
-    // from the UIKit handler; feed them straight in.
-    _DevGesture.PointersDown(E.PointerCount, E.TimeNs);
-    // While the console is open it OWNS the pointer — a drag scrolls the cvar list and a still release is a
-    // DevTap. Swallowing the gesture is the point: the panel sits over a LIVE match.
-    if (_View.DevOverlayOpen()) { _DevGesture.DragBegin(Y); return; }
-#endif
-    const float W = static_cast<float>(_RH.Width());
-    const float Off = [self ghostOffPxForWidth:W];
-    const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);   // sim thread publishes it
-    const bool Live = _MatchLive.load(std::memory_order_acquire);          // solo OR peer match live
-    const int Plate = Live ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
-    if (Plate >= 0) {
-        _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // sets the ghost type; seed at the offset spot
-        const float H = static_cast<float>(_RH.Height());
-        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
-        // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
-        _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
-    } else {
-        // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for immediacy —
-        // the queue fires the instant you touch the button. A hit on an x1/x5 button enqueues NOW (and
-        // lights up); a miss just primes a pan. Cam.Begin runs regardless, so a drag that starts on a
-        // button still scrolls (harmless — already queued). Drops the old "a press that turns into a
-        // pan queues nothing" guard: a button press IS a queue. (Mirror of the Android main.)
-        int32_t Slot = -1;
-        const int Cnt = Live ? _View.OnProductionButton(X, Y, Slot) : 0;
-        if (Cnt > 0) {
-            [self placeLocal:Rps::InputEvent::Queue(MyTeam, Slot, Cnt)];
-            _View.PressProductionButton(X, Y);  // visual flash on the pressed button
-        }
-        _Cam.Begin(Y);
-    }
-}
-- (void)replayTouchMoved:(const TouchEvent&)E {
-    const float X = E.XPx, Y = E.YPx;
-    const float W = static_cast<float>(_RH.Width());
-    const float H = static_cast<float>(_RH.Height());
-#if !LUR_SHIPPING
-    if (_View.DevOverlayOpen()) { _View.DevScroll(_DevGesture.DragMove(Y)); return; }  // #151
-#endif
-    if (_View.IsPlacing()) {
-        const float Off = [self ghostOffPxForWidth:W];
-        const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
-        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
-        _View.UpdatePlaceDrag(X - Off, Y - Off, Gsx, Gsy, V);
-        _DevGesture.Cancel();  // #151: a placement drag is not a console tap
-    } else {
-        _Cam.Move(Y, Ppu(W));  // content-drag pans the camera
-    }
-}
-- (void)replayTouchEnded:(const TouchEvent&)E {
-    const float X = E.XPx, Y = E.YPx;
-    const float W = static_cast<float>(_RH.Width());
-    const float H = static_cast<float>(_RH.Height());
-#if !LUR_SHIPPING
-    // #151: the console owns the gesture while it is open — a still release is a tap it hit-tests
-    // (rows, numpad, the top-left X that closes it), anything else was a scroll already applied.
-    if (_View.DevOverlayOpen()) {
-        if (_DevGesture.DragEndIsTap()) _View.DevTap(X, Y);
-        return;
-    }
-#endif
-    if (_View.IsPlacing()) {
-        const float Off = [self ghostOffPxForWidth:W];
-        const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
-        bool Placed = false;
-        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-        if (_View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy)) {
-            [self placeLocal:Rps::InputEvent::Place(MyTeam, static_cast<uint8_t>(_View.PlacingType()),
-                                                    WorldToFixed(Wx), WorldToFixed(Wy))];
-            Placed = true;
-        }
-        _View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
-        _DevGesture.Cancel();        // #151
-        return;
-    }
-    _Cam.End();
-#if !LUR_SHIPPING
-    // #151: two-finger triple-tap OPENS the console, with the same windows Android uses because it is the
-    // same recognizer. The lift timestamp is E.TimeNs — the real touch time captured in the UIKit handler.
-    const bool WasTwoFinger = _DevGesture.TwoFingerActive();
-    if (_DevGesture.LiftAndShouldOpen(E.TimeNs)) {
-        _View.SetDevOverlayOpen(true);
-        os_log(OS_LOG_DEFAULT, "OnlyRps: dev console opened (two-finger triple-tap, #151)");
-        return;
-    }
-    if (WasTwoFinger) return;   // a tap in the chain: do not also hit the HUD underneath
-#endif
-    const bool Tap = (X - _DownX) * (X - _DownX) + (Y - _DownY) * (Y - _DownY) < (24.0f * 24.0f);
-    if (Tap) {
-        // The opponent selector consumes its own taps; an AI row (re)starts solo, the linked row
-        // switches to the peer; a plate tap does nothing (drag to place); a world tap may hit a
-        // building's x1/x5 queue button.
-        const int Hit = _View.OnTap(X, Y);
-        const int Tier = _View.TakeAiTier();
-        if (Tier >= 0) {
-            _SoloAiTier.store(Tier, std::memory_order_release);          // (re)start solo at this tier (#2)
-        } else if (_View.TakePeerPick()) {
-            _SwitchToLinkedAtomic.store(true, std::memory_order_release);  // switch to the linked peer (#2)
-        }
-        // (Per-building x1/x5 queue buttons now fire on touch-DOWN — see replayTouchBegan — not here.)
-    }
-}
+// #43 section D: the ~90 lines of replay* methods that used to sit here are Rps::TouchRouter now,
+// shared with the Android and desktop mains. What the render thread still owns is the same as before
+// — _View, _Cam, _DevGesture, _Snap — and the router is handed pointers to exactly those, so the
+// ownership story is unchanged. Only the decisions moved, into somewhere a host test can reach.
 @end
 
 // #43 section B: the delegate, the autorelease pool, UIApplicationMain and the #103 MoltenVK

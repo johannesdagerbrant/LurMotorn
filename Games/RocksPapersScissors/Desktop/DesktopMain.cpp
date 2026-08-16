@@ -38,7 +38,8 @@
 #include "Rps/MatchRecord.h"   // #144: --replay a device recording
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
-#include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
+#include "Rps/ViewMetrics.h"
+#include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with both phone mains   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/LockstepPeer.h"
 #include "Rps/SimRunner.h"
 #include "Rps/SoloInput.h"
@@ -89,29 +90,17 @@ struct Peer {
     Rps::CameraScroll Cam;
     bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     uint8_t Team = 0;
-#if !LUR_SHIPPING
     Lur::Input::ConsoleGesture DevGesture;  // per-window: each peer's console scrolls on its own
-#endif
+    // #43 section D: what a touch MEANS is Rps::TouchRouter now, shared with the solo loop and both
+    // phone mains. This window used to carry the OLDEST of the four copies — no ghost offset, no
+    // magnetic snap, no press flash, no tap slop (#209) — which mattered because the two-window
+    // harness is where placement feel gets judged.
+    Rps::TouchRouter Router;
 };
 
-#if !LUR_SHIPPING
-// Route one pointer event to an OPEN console; returns true if the console consumed it (the
-// caller must then skip the game's own handling — no camera pan or building placed under the
-// overlay). ONE copy, shared by the solo loop and the two-window HandlePeerInput: #151 already
-// warns that a second recognizer with its own slop is how "one console, identical on both"
-// quietly stops being true, and a third would be worse. Drag = scroll the cvar list; a click
-// that barely moved = a tap the overlay hit-tests on the render thread, the same path a
-// phone's touch takes.
-bool RouteConsolePointer(Rps::GameView& View, Lur::Input::ConsoleGesture& Gesture,
-                         const Lur::Input::TouchEvent& T) {
-    if (!View.DevOverlayOpen()) return false;
-    if (T.Phase == Lur::Input::ETouchPhase::Began) Gesture.DragBegin(T.YPx);
-    else if (T.Phase == Lur::Input::ETouchPhase::Moved) View.DevScroll(Gesture.DragMove(T.YPx));
-    else if (T.Phase == Lur::Input::ETouchPhase::Ended && Gesture.DragEndIsTap())
-        View.DevTap(T.XPx, T.YPx);
-    return true;
-}
-#endif
+// #43 section D: RouteConsolePointer is gone — Rps::TouchRouter owns "an open console eats the
+// pointer" for all four mains, which is what its old comment was already asking for ("a second
+// recognizer with its own slop is how one console, identical on both, quietly stops being true").
 
 void SendViaSession(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* D, std::size_t N) {
     static_cast<Lur::Net::Session*>(Ctx)->Send(Type, D, N);
@@ -122,6 +111,11 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
     P.Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
     if (P.Renderer == nullptr || !P.Renderer->Init(P.Win.NativeHandle())) return false;
     P.View.CreateResources(P.Renderer);
+    // #43 section D. No selector hooks: the two-window harness has no opponent selector — each
+    // window IS its peer — so an AI-tier or peer-row pick is not reachable here.
+    Rps::TouchRouterHooks Hooks;
+    Hooks.Emit = [&P](const Rps::InputEvent& E) { P.Lp.QueueLocalEvent(E); };
+    P.Router.Init(&P.View, &P.Cam, &P.DevGesture, std::move(Hooks));
     P.Guid = Guid;
     P.Transport.SetDeferred(true);  // deferred delivery: lockstep replies from a receiver never recurse
     // #147/#112: the workbench must carry the SAME message set as a phone, or a bug in the cvar-sync
@@ -165,16 +159,6 @@ void RenderPeer(Peer& P, uint64_t Now, float DtSec) {
                   static_cast<float>(H), P.Team == 1, DtSec);
 }
 
-// #139 drag-to-place: turn a pointer at (XPx,YPx) into a place-event world position + validity,
-// asking the authoritative sim (WouldAcceptPlace) so the ghost's red/valid blink can never
-// disagree with what the sim will accept. Wx/Wy are the world drop; returns validity.
-bool DragValidity(Peer& P, float XPx, float YPx, int W, int H, float& Wx, float& Wy) {
-    P.View.ScreenToWorld(XPx, YPx, P.Cam.Y, static_cast<float>(W), static_cast<float>(H),
-                         P.Team == 1, Wx, Wy);
-    return P.Lp.GetSim().WouldAcceptPlace(P.Team, static_cast<uint8_t>(P.View.PlacingType()),
-                                          WorldToFixed(Wx), WorldToFixed(Wy));
-}
-
 void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t ElapsedNs,
                      uint64_t& AutoAccumNs) {
     // #139: a pointer-down on a build plate starts a drag-to-place (the ghost follows to the
@@ -192,53 +176,12 @@ void HandlePeerInput(Peer& P, Lur::Sim::SplitMix64& Rng, bool Auto, uint64_t Ela
 #endif
     int W = 0, H = 0;
     P.Win.GetSize(&W, &H);
-    for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) {
-#if !LUR_SHIPPING
-        // An open console eats pointer input, so nothing pans or places underneath it.
-        if (RouteConsolePointer(P.View, P.DevGesture, T)) continue;
-#endif
-        if (T.Phase == Lur::Input::ETouchPhase::Began) {
-            const int Plate = P.View.PlateAt(T.XPx, T.YPx);
-            if (Plate >= 0) {
-                P.View.BeginPlaceDrag(Plate, T.XPx, T.YPx);  // seed at the finger (no frame-1 flash)
-                float Wx = 0, Wy = 0;
-                P.View.UpdatePlaceDrag(T.XPx, T.YPx, DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy));
-            } else {
-                // Units queue on PRESS-DOWN, not release (feedback 2026-08-04) — mirror of the phone mains.
-                int32_t Slot = -1;
-                const int Cnt = P.View.OnProductionButton(T.XPx, T.YPx, Slot);
-                if (Cnt > 0) P.Lp.QueueLocalEvent(Rps::InputEvent::Queue(P.Team, Slot, Cnt));
-                P.Cam.Begin(T.YPx);
-            }
-        } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
-            if (P.View.IsPlacing()) {
-                float Wx = 0, Wy = 0;
-                const bool Valid = DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy);
-                P.View.UpdatePlaceDrag(T.XPx, T.YPx, Valid);
-            } else {
-                P.Cam.Move(T.YPx, Ppu());
-            }
-        } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                   T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-            if (P.View.IsPlacing()) {
-                bool Placed = false;
-                if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                    float Wx = 0, Wy = 0;
-                    if (DragValidity(P, T.XPx, T.YPx, W, H, Wx, Wy)) {
-                        P.Lp.QueueLocalEvent(Rps::InputEvent::Place(
-                            P.Team, static_cast<uint8_t>(P.View.PlacingType()),
-                            WorldToFixed(Wx), WorldToFixed(Wy)));
-                        Placed = true;
-                    }
-                }
-                P.View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
-            } else {
-                P.Cam.End();
-                // Selector/plate taps still resolve on release; the x1/x5 queue now fires on Began.
-                if (T.Phase == Lur::Input::ETouchPhase::Ended) P.View.OnTap(T.XPx, T.YPx);
-            }
-        }
-    }
+    Rps::TouchFrame F;
+    F.ViewW = static_cast<float>(W);
+    F.ViewH = static_cast<float>(H);
+    F.Team  = P.Team;
+    F.Live  = true;   // the loopback harness is only ever driven with a match running
+    for (const Lur::Input::TouchEvent& T : P.Win.TakeTouches()) P.Router.Route(T, P.Snap, F);
     (void)Auto; (void)Rng; (void)ElapsedNs; (void)AutoAccumNs;  // #137b: auto-soak re-wires to events in #140
 }
 
@@ -1150,9 +1093,18 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 
     Rps::CameraScroll Cam;
     bool CamInit = false;
-#if !LUR_SHIPPING
     Lur::Input::ConsoleGesture DevGesture;  // #151: drag-to-scroll the console, shared with the phones
-#endif
+    // #43 section D: one dispatch for all four RPS mains. PickAiTier only LATCHES — the restart it
+    // triggers stops and respawns the sim thread, and doing that from inside a touch handler would
+    // move it off the frame boundary it has always run on.
+    int PendingAiTier = -1;
+    Rps::TouchRouter Router;
+    {
+        Rps::TouchRouterHooks Hooks;
+        Hooks.Emit = [&Human](const Rps::InputEvent& E) { Human.Push(E); };
+        Hooks.PickAiTier = [&PendingAiTier](int Tier) { PendingAiTier = Tier; };
+        Router.Init(&View, &Cam, &DevGesture, std::move(Hooks));
+    }
     uint64_t PrevNs = NowNs();
     static Rps::Snapshot Snap;
     int Frame = 0;
@@ -1180,18 +1132,6 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 #if !LUR_SHIPPING
         if (Win.TakeConsoleToggle()) View.SetDevOverlayOpen(!View.DevOverlayOpen());  // § key
 #endif
-        // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb
-        // doesn't hide it. The SAME offset feeds the ghost draw, the validity read, and the drop, so
-        // the building lands exactly where you SEE it (above-left of the finger), not under the thumb.
-        const float GhostOffPx = Rps::GhostOffsetPx(Snap.Cv.BuildingFootprint.Raw, Ppu());
-        // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid
-        // spot within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where
-        // to draw the ghost (Gsx,Gsy — the snapped spot when valid, else the offset point for the red
-        // blink). You are team 0. One home in GameView so desktop/Android/iOS feel identical.
-        auto Resolve = [&](float DesX, float DesY, float& Wx, float& Wy, float& Gsx, float& Gsy) -> bool {
-            return View.ResolvePlacement(DesX, DesY, Cam.Y, static_cast<float>(W), static_cast<float>(H),
-                                         /*FlipY=*/false, Snap, /*Team*/ 0, Wx, Wy, Gsx, Gsy);
-        };
         // Keys no longer drive units (#137b: events). They go to the console when it is open
         // (#119) and are dropped otherwise — DevKey claims a key only while the console shows,
         // so the game's input path is untouched when it is closed.
@@ -1202,63 +1142,13 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
             (void)Vk;
 #endif
         }
-        for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) {
-#if !LUR_SHIPPING
-            // An open console eats pointer input, so nothing pans or places underneath it.
-            if (RouteConsolePointer(View, DevGesture, T)) continue;
-#endif
-            // #139/#140 mirror of the loopback's HandlePeerInput: a pointer-down on a build plate
-            // starts a drag-to-place (ghost follows, valid release emits a Place event); any other
-            // drag pans the camera; a tap on a building's x1/x5 button queues units.
-            const float GhX = T.XPx - GhostOffPx, GhY = T.YPx - GhostOffPx;  // #1 offset placement point
-            if (T.Phase == Lur::Input::ETouchPhase::Began) {
-                const int Plate = View.PlateAt(T.XPx, T.YPx);  // plate hit-test at the real finger
-                if (Plate >= 0) {
-                    View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
-                    float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-                    const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                    // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
-                    View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
-                } else {
-                    // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for
-                    // immediacy — mirror of the phone mains. A hit on an x1/x5 button enqueues NOW (and
-                    // lights up); a miss just primes a pan.
-                    int32_t Slot = -1;
-                    const int Cnt = View.OnProductionButton(T.XPx, T.YPx, Slot);
-                    if (Cnt > 0) {
-                        Human.Push(Rps::InputEvent::Queue(0, Slot, Cnt));
-                        View.PressProductionButton(T.XPx, T.YPx);  // visual flash on the pressed button
-                    }
-                    Cam.Begin(T.YPx);
-                }
-            } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
-                if (View.IsPlacing()) {
-                    float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-                    const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                    View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
-                } else {
-                    Cam.Move(T.YPx, Ppu());
-                }
-            } else if (T.Phase == Lur::Input::ETouchPhase::Ended ||
-                       T.Phase == Lur::Input::ETouchPhase::Cancelled) {
-                if (View.IsPlacing()) {
-                    bool Placed = false;
-                    if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-                        float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
-                        if (Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy)) {
-                            Human.Push(Rps::InputEvent::Place(0, static_cast<uint8_t>(View.PlacingType()),
-                                                             WorldToFixed(Wx), WorldToFixed(Wy)));
-                            Placed = true;
-                        }
-                    }
-                    View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
-                } else {
-                    Cam.End();
-                    // Selector/plate taps still resolve on release; the x1/x5 queue now fires on Began.
-                    if (T.Phase == Lur::Input::ETouchPhase::Ended) View.OnTap(T.XPx, T.YPx);
-                }
-            }
-        }
+        Rps::TouchFrame TF;
+        TF.ViewW = static_cast<float>(W);
+        TF.ViewH = static_cast<float>(H);
+        TF.Team  = 0;              // you are always team 0 in the solo harness
+        TF.Live  = HaveSnap;       // no snapshot yet = pre-match: nothing to place into
+        for (const Lur::Input::TouchEvent& T : Win.TakeTouches()) Router.Route(T, Snap, TF);
+
         // #157: a cvar was edited and the match hasn't started — rebuild so map knobs
         // (rps.mine.row_*) are visible while you tune. Pre-match ONLY, and gated on having a
         // snapshot to test: mid-match tuning deliberately does not restart the game.
@@ -1275,7 +1165,8 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         }
         // #2: picking an AI tier from the selector (re)starts a fresh match at that difficulty at
         // ANY time; each tier keeps a session W-L-D shown in its row.
-        if (const int NewTier = View.TakeAiTier(); NewTier >= 0) {
+        if (const int NewTier = PendingAiTier; NewTier >= 0) {
+            PendingAiTier = -1;
             CurTier = NewTier; Scored = false;
             Ai.Init(Seed, /*team*/ 1, static_cast<Rps::EAiTier>(NewTier));
             Runner->Stop();

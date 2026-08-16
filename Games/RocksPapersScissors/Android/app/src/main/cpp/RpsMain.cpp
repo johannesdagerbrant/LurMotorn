@@ -37,6 +37,7 @@
 #include "Rps/CameraScroll.h"
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
+#include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with iOS + desktop
 #include "Rps/AgentControl.h"  // LUR_AGENT: assistant remote-control command grammar
 #include "Rps/AiController.h"
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
@@ -140,12 +141,14 @@ struct AppState {
 
     Rps::CameraScroll Cam;                        // glue only
     bool CamInit = false;
-    float DownX = 0.0f, DownY = 0.0f;
     // #151: the console gesture — two-finger triple-tap to open, drag-to-scroll while open — is now
     // ONE shared recognizer (Lur::Input::ConsoleGesture), not a per-platform copy. The three copies
     // had drifted in three different directions: this one could open the panel but not scroll it, the
     // desktop could scroll but used a different slop, and iOS could not open it at all.
     Lur::Input::ConsoleGesture DevGesture;         // glue thread only
+    // #43 section D: the touch DISPATCH is shared too now, not just the recognizer. Same story
+    // one level up — four copies, six drifts, none of them reachable by a host test.
+    Rps::TouchRouter Router;                      // glue thread only
     uint32_t LastConsumedTick = 0xFFFFFFFFu;      // glue only
 
     // Solo AI match (#127): a local Sim + AiController, no peer. The glue sets SoloAiTier when
@@ -371,137 +374,38 @@ bool HandleInput(AppState* S, AInputEvent* Event) {
     // upcoming frame first reveals.
     if (S->PendingTouchNs == 0) S->PendingTouchNs = EventNs;
 
-#if !LUR_SHIPPING
-    // #150: while the console is open it OWNS the pointer — a drag ANYWHERE scrolls the cvar list,
-    // and a release that barely moved is a DevTap the overlay hit-tests (rows + numpad + the
-    // top-left X that closes it). Swallowing the gesture is the whole point: the console sits on
-    // top of a LIVE match, so a scroll must not leak through and pan the camera or start a
-    // building drag. Same gesture model as DesktopMain.cpp, so one console behaves identically on
-    // both — the drag slop is looser here because a finger jitters where a mouse doesn't.
-    if (S->View.DevOverlayOpen()) {
-        switch (Action) {
-            case AMOTION_EVENT_ACTION_DOWN:
-                S->DevGesture.DragBegin(Y);
-                break;
-            case AMOTION_EVENT_ACTION_MOVE:
-                // Thread-safe: DevScroll is an atomic the render thread drains.
-                S->View.DevScroll(S->DevGesture.DragMove(Y));
-                break;
-            case AMOTION_EVENT_ACTION_UP:
-                if (S->DevGesture.DragEndIsTap()) S->View.DevTap(X, Y);
-                break;
-            default:
-                break;  // extra fingers / cancel: consumed, but no gameplay side effect
-        }
-        return true;
-    }
-#endif
-
-    // A match is live once SoloActive (vs AI) or Linked (vs a peer). You play LinkedTeam (0 in
-    // solo). Ghost validity is the render-thread WouldAcceptPlace over the last snapshot (the
-    // mirror of the sim's predicate), so the red/valid blink can't disagree with the sim.
-    const bool Live = S->Linked.load(std::memory_order_acquire);
-    const uint8_t MyTeam = S->LinkedTeam.load(std::memory_order_relaxed);
-    // #148 magnetic drag-to-place: the (thumb-offset) desired point snaps to the nearest valid spot
-    // within ~the icon size. ResolvePlacement returns the snapped world drop (Wx,Wy) + where to draw
-    // the ghost (Gsx,Gsy — snapped when valid, else the offset point for the red blink).
-    auto Resolve = [&](float DesX, float DesY, float& Wx, float& Wy, float& Gsx, float& Gsy) -> bool {
-        return S->View.ResolvePlacement(DesX, DesY, S->Cam.Y, W, H, MyTeam == 1, S->Snap, MyTeam,
-                                        Wx, Wy, Gsx, Gsy);
-    };
-    // #1: lift the dragged ghost UP-LEFT of the finger by ~its footprint size so the thumb doesn't
-    // hide it (the desired point handed to Resolve; snapping refines from there).
-    const float GhostOffPx = Rps::GhostOffsetPx(S->Snap.Cv.BuildingFootprint.Raw, Ppu(W));
-    const float GhX = X - GhostOffPx, GhY = Y - GhostOffPx;
-
+    // #43 section D: NORMALIZE, then route. Everything below this point used to be ~90 lines of
+    // game decisions living in a platform file, where no host test could reach them — which is how
+    // four copies of it drifted six different ways. What is left here is what only Android can say:
+    // which ACTION_* code maps to which phase, and how many pointers are down.
+    Lur::Input::TouchEvent T;
+    T.XPx = X;
+    T.YPx = Y;
+    T.PointerCount = static_cast<int>(Count);
+    // EventTime, not "now": both are CLOCK_MONOTONIC ns (see the trace note above), and the console
+    // recognizer's hold/chain windows should measure the finger, not our dequeue latency.
+    T.TimeNs = EventNs;
     switch (Action) {
-        case AMOTION_EVENT_ACTION_DOWN: {
-            S->DownX = X; S->DownY = Y;
-            S->DevGesture.PointersDown(1, NowNs());
-            const int Plate = Live ? S->View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
-            if (Plate >= 0) {
-                S->View.BeginPlaceDrag(Plate, GhX, GhY);  // sets the ghost type; seed at the offset spot
-                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
-                const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                // Finger point AND snapped point: the ghost sticks to the finger, the snap eases in.
-                S->View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
-            } else {
-                // #107 revised (feedback 2026-08-04): units queue on PRESS-DOWN, not release, for
-                // immediacy — the queue fires the instant you touch the button instead of waiting out
-                // the press. A hit on an x1/x5 button enqueues NOW (and lights up); a miss just primes a
-                // pan. Cam.Begin runs regardless, so a drag that happens to start on a button still
-                // scrolls — harmless, the unit is already queued. (This deliberately drops the old
-                // "a press that turns into a pan queues nothing" guard: a button press IS a queue.)
-                int32_t Slot = -1;
-                const int Cnt = Live ? S->View.OnProductionButton(X, Y, Slot) : 0;
-                if (Cnt > 0) {
-                    RouteLocalEvent(S, Rps::InputEvent::Queue(MyTeam, Slot, Cnt));
-                    S->View.PressProductionButton(X, Y);  // visual flash on the pressed button
-                }
-                S->Cam.Begin(Y);
-            }
-            return true;
-        }
-        case AMOTION_EVENT_ACTION_POINTER_DOWN:  // a second finger landed
-            S->DevGesture.PointersDown(static_cast<int>(Count), NowNs());
-            return true;
-        case AMOTION_EVENT_ACTION_MOVE:
-            if (S->View.IsPlacing()) {
-                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
-                const bool V = Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy);
-                S->View.UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
-            } else if (Count == 1) {
-                S->Cam.Move(Y, Ppu(W));  // one finger = scroll; 2+ = a gesture, no scroll
-            }
-            return true;
-        case AMOTION_EVENT_ACTION_POINTER_UP:
-            return true;  // the whole gesture is decided at ACTION_UP (last finger up)
-        case AMOTION_EVENT_ACTION_UP: {
-            // A placement in progress commits (valid drop -> Place event) or slides back.
-            if (S->View.IsPlacing()) {
-                bool Placed = false;
-                float Wx = 0.0f, Wy = 0.0f, Gsx = 0.0f, Gsy = 0.0f;
-                if (Resolve(GhX, GhY, Wx, Wy, Gsx, Gsy)) {
-                    RouteLocalEvent(S, Rps::InputEvent::Place(MyTeam,
-                                        static_cast<uint8_t>(S->View.PlacingType()),
-                                        WorldToFixed(Wx), WorldToFixed(Wy)));
-                    Placed = true;
-                }
-                S->View.EndPlaceDrag(Placed);  // valid -> the real building takes over; else slide back
-                S->DevGesture.Cancel();        // a placement is not a console tap
-                return true;
-            }
-            S->Cam.End();
-#if !LUR_SHIPPING
-            // Two-finger TRIPLE-tap opens the CVar view (dev-only; won't fire during normal
-            // one-finger play). The in-panel top-left X closes it. #151: the windows and the chaining
-            // live in Lur::Input::ConsoleGesture, shared with the iOS and desktop shims.
-            const bool WasTwoFinger = S->DevGesture.TwoFingerActive();
-            if (S->DevGesture.LiftAndShouldOpen(NowNs())) {
-                S->View.SetDevOverlayOpen(true);
-                return true;
-            }
-            if (WasTwoFinger) return true;   // a tap in the chain: do not also hit the HUD underneath
-#endif
-            const bool Tap = (X - S->DownX) * (X - S->DownX) + (Y - S->DownY) * (Y - S->DownY) < (24.0f * 24.0f);
-            if (Tap && !S->DevGesture.TwoFingerActive()) {
-                // (No DevTap here: an open console returns at the top of HandleInput — #150.)
-                // The opponent selector works pre-match (the AI rows start a solo match, #127).
-                const int Hit = S->View.OnTap(X, Y);     // -2 selector consumed, 0..3 plate, -1 world
-                const int Tier = S->View.TakeAiTier();   // an AI row was picked -> (re)start solo (#127/#2)
-                if (Tier >= 0) {
-                    S->SoloAiTier.store(Tier, std::memory_order_release);
-                } else if (S->View.TakePeerPick()) {     // #2: linked-opponent row -> switch to the peer match
-                    S->SwitchToLinked.store(true, std::memory_order_release);
-                }
-                // (Per-building x1/x5 queue buttons now fire on ACTION_DOWN — see above — not here.)
-            }
-            S->DevGesture.Cancel();   // the gesture is over either way
-            return true;
-        }
-        default:
-            return false;
+        case AMOTION_EVENT_ACTION_DOWN:          T.Phase = Lur::Input::ETouchPhase::Began; break;
+        // A second finger landing is a Began carrying a count >= 2; the router knows that means
+        // "feed the recognizer, do not treat this as a press".
+        case AMOTION_EVENT_ACTION_POINTER_DOWN:  T.Phase = Lur::Input::ETouchPhase::Began; break;
+        case AMOTION_EVENT_ACTION_MOVE:          T.Phase = Lur::Input::ETouchPhase::Moved; break;
+        case AMOTION_EVENT_ACTION_UP:            T.Phase = Lur::Input::ETouchPhase::Ended; break;
+        case AMOTION_EVENT_ACTION_CANCEL:        T.Phase = Lur::Input::ETouchPhase::Cancelled; break;
+        // POINTER_UP is deliberately dropped rather than mapped: the gesture is decided at ACTION_UP
+        // (the LAST finger up), and forwarding an intermediate lift as Ended would commit a
+        // placement while a finger is still down.
+        case AMOTION_EVENT_ACTION_POINTER_UP:    return true;
+        default:                                 return false;
     }
+
+    Rps::TouchFrame F;
+    F.ViewW = W;
+    F.ViewH = H;
+    F.Team  = S->LinkedTeam.load(std::memory_order_relaxed);
+    F.Live  = S->Linked.load(std::memory_order_acquire);
+    return S->Router.Route(T, S->Snap, F);
 }
 
 }  // namespace
@@ -522,6 +426,21 @@ void android_main(android_app* App) {
     Lur::App::AndroidApp::Callbacks Cb;
     Cb.OnSurfaceReady = [&State] { OnSurfaceReady(State); };
     Cb.OnInput = [&State](AInputEvent* E) { return HandleInput(&State, E); };
+
+    // #43 section D. The hooks are the only part of touch handling that is genuinely per-main: where
+    // a produced event goes, and how a selector pick reaches the sim thread (atomics here, because
+    // the pick happens on the glue thread and the sim thread acts on it).
+    {
+        Rps::TouchRouterHooks Hooks;
+        Hooks.Emit = [&State](const Rps::InputEvent& E) { RouteLocalEvent(&State, E); };
+        Hooks.PickAiTier = [&State](int Tier) {
+            State.SoloAiTier.store(Tier, std::memory_order_release);
+        };
+        Hooks.PickPeer = [&State]() {
+            State.SwitchToLinked.store(true, std::memory_order_release);
+        };
+        State.Router.Init(&State.View, &State.Cam, &State.DevGesture, std::move(Hooks));
+    }
     State.Plat.Start(App, std::move(Cb));
 
     State.DataDir = State.Plat.SaveDir();

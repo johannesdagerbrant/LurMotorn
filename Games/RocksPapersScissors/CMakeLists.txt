@@ -41,7 +41,8 @@ add_library(rps_view
     View/Private/GameView.cpp)
 target_include_directories(rps_view PUBLIC View/Public)
 target_link_libraries(rps_view PUBLIC rps::core rps::runtime lur::render lur::hud lur::text lur::math
-                                      lur::devgui)  # #113 Numpad (dev overlay; header-only)
+                                      lur::devgui   # #113 Numpad (dev overlay; header-only)
+                                      lur::input)   # #43 section D: TouchEvent + ConsoleGesture for TouchRouter
 target_compile_features(rps_view PUBLIC cxx_std_20)
 add_library(rps::view ALIAS rps_view)
 
