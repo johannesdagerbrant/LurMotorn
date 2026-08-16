@@ -725,8 +725,46 @@ class BleShim(private val context: Context, private val TAG: String) {
 
     // --- GATT server (every device runs one; the peripheral's is the live link) ---
 
+    /**
+     * #206: WHO is connected to our GATT server, right now, from the STACK's point of view.
+     *
+     * `onMtuChanged` fires twice per incoming iPhone attempt, milliseconds apart on two threads,
+     * which reads as the same phone holding TWO concurrent connections — an earlier attempt that
+     * was never fully torn down alongside the new one. If the read request and our response end up
+     * on different connections that produces exactly the observed signature: the server logs a
+     * clean, in-MTU, complete response and the central never receives it.
+     *
+     * `connectedCentral` is OUR bookkeeping and would not show that; this asks the stack. The
+     * address is the identity that matters — two entries with the SAME address is the smoking gun,
+     * two different addresses is an unrelated third device (#83 territory).
+     */
+    private fun connectedCentralsDesc(): String {
+        val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val devices = try {
+            mgr?.getConnectedDevices(BluetoothProfile.GATT_SERVER) ?: emptyList()
+        } catch (_: SecurityException) { emptyList() }
+        val addrs = devices.joinToString(",") { it.address }
+        return "n=${devices.size}[$addrs] ours=${connectedCentral?.address ?: "none"}"
+    }
+
     private fun startGattServer() {
         val mgr = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        // #206: CLOSE ANY EXISTING SERVER FIRST. openGattServer registers another instance against
+        // the same callback object; overwriting the field leaks the old one, still open and still
+        // delivering. Two live servers means every server callback arrives TWICE (visible as
+        // identical lines on two threads), the service is published twice, and — the part that
+        // actually breaks the link — `gattServer?.sendResponse(...)` only ever answers on the
+        // NEWEST instance. A read that arrived on the older one is answered into the void: this
+        // side logs a clean, complete, in-MTU response and the central never receives it, which is
+        // exactly the `stalled at CharsFound` signature.
+        //
+        // restartRadio (#182) already closed before rebuilding; the adapter-ON path added in
+        // 65595ff did not, so a Bluetooth power cycle left two servers behind. Putting the close
+        // HERE makes it impossible for a fourth caller to forget.
+        try { gattServer?.close() } catch (_: SecurityException) {}
+        gattServer = null
+        serverDatagram = null
+        serving = false
         try {
             val server = mgr.openGattServer(context, gattServerCallback)
             gattServer = server
@@ -781,6 +819,15 @@ class BleShim(private val context: Context, private val TAG: String) {
             // otherwise. Carrying a previous central's negotiated MTU into a new connection is the
             // dangerous direction — it would let us over-fill a response again.
             if (newState == BluetoothProfile.STATE_CONNECTED) serverMtu = 23
+            // #206: every arrival and departure at our server, by address. A stale connection that
+            // is never torn down is invisible in our own bookkeeping but shows up here.
+            val what = when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+                BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+                else -> "state=$newState"
+            }
+            Log.i(TAG, "server: central $what ${device.address} status=$status " +
+                "centrals: ${connectedCentralsDesc()}")
             // #83: only the BOUND peer's departure ends the match. `device == connectedCentral` already
             // said that, and nativeIsBoundPeer is the same answer from the shared policy — kept so both
             // gates agree even if connectedCentral is assigned on some future path that skips binding.
@@ -801,7 +848,11 @@ class BleShim(private val context: Context, private val TAG: String) {
          */
         override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
             serverMtu = mtu
-            Log.i(TAG, "server: central negotiated mtu=$mtu (reads chunk at ${mtu - 1}B)")
+            // #206: the ADDRESS is the point. This line arrives twice per incoming attempt; whether
+            // the two carry the same address decides between "one phone connected twice" and "two
+            // different devices".
+            Log.i(TAG, "server: mtu=$mtu from=${device.address} (reads chunk at ${mtu - 1}B) " +
+                "centrals: ${connectedCentralsDesc()}")
         }
 
         override fun onCharacteristicReadRequest(
@@ -832,8 +883,12 @@ class BleShim(private val context: Context, private val TAG: String) {
             }
             val value = full.copyOfRange(offset, offset + len)
             val more = offset + len < full.size
-            Log.i(TAG, "serve device id: uuid=${characteristic.uuid} offset=$offset -> ${value.size}B " +
-                "(mtu=$serverMtu of ${full.size}B${if (more) ", tail follows" else ", complete"})")
+            // #206: WHICH central asked, and who else is attached. A response is only useful on the
+            // connection the request came in on, and the server has been reporting success while the
+            // central saw nothing.
+            Log.i(TAG, "serve device id: from=${device.address} offset=$offset -> ${value.size}B " +
+                "(mtu=$serverMtu of ${full.size}B${if (more) ", tail follows" else ", complete"}) " +
+                "centrals: ${connectedCentralsDesc()}")
             try {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             } catch (_: SecurityException) {}
