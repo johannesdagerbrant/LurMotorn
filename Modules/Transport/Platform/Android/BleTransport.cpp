@@ -245,6 +245,10 @@ void OnScanStopped()          { g_Link.OnScanStopped(); }
 // May we start? The driver asks before touching the radio, instead of consulting a bool it owns.
 bool ShouldStartAdvertising() { return g_Link.ShouldStartAdvertising(); }
 bool ShouldStartScanning()    { return g_Link.ShouldStartScanning(); }
+// #206: discovery goes symmetric, INITIATION stays one-sided. See BleLinkController::ShouldConnectOut.
+bool ShouldConnectOut(bool HaveCachedPeer, bool TieBreakSaysCentral) {
+    return g_Link.ShouldConnectOut(HaveCachedPeer, TieBreakSaysCentral);
+}
 
 // The adapter came or went. THE POWER CYCLE IS THE POINT: everything the radio was holding —
 // advertise registration, scan registration, the GATT service — went with it, so every
@@ -300,6 +304,7 @@ void TickPolicies() {
         CallShimVerb(g_AbortConnectMethod);
     }
     if (Act.GoSymmetric) {
+        g_Link.OnWentSymmetric();   // counted: trusting the cached peer id forever is what #79 forbids
         LOGI("discovery watchdog: no link in 8s — dropping cached-role gates, going symmetric (#79)");
         CallShimVerb(g_GoSymmetricMethod);
     }
@@ -363,6 +368,11 @@ static jboolean Ble_nativeShouldStartAdvertising(JNIEnv*, jobject) {
 }
 static jboolean Ble_nativeShouldStartScanning(JNIEnv*, jobject) {
     return Lur::Transport::ShouldStartScanning() ? JNI_TRUE : JNI_FALSE;
+}
+static jboolean Ble_nativeShouldConnectOut(JNIEnv*, jobject, jboolean HaveCachedPeer,
+                                           jboolean TieBreakSaysCentral) {
+    return Lur::Transport::ShouldConnectOut(HaveCachedPeer == JNI_TRUE,
+                                            TieBreakSaysCentral == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
 }
 
 static jboolean Ble_nativeIsValidDeviceId(JNIEnv* Env, jobject, jbyteArray Id) {
@@ -614,6 +624,7 @@ static const JNINativeMethod kBleShimMethods[] = {
     {"nativeOnAdapterOff",       "()V", reinterpret_cast<void*>(Ble_nativeOnAdapterOff)},
     {"nativeShouldStartAdvertising", "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartAdvertising)},
     {"nativeShouldStartScanning",    "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartScanning)},
+    {"nativeShouldConnectOut",       "(ZZ)Z", reinterpret_cast<void*>(Ble_nativeShouldConnectOut)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},

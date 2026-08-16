@@ -433,7 +433,19 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     if (_Linked) return;
     BLE_LOG(@"discovery watchdog: no link in 8s - dropping cached-role "
           @"gates, going symmetric (#79)");
-    _HaveCachedRole = _CachedPeripheral = _DecidedPeripheral = false;
+    // #206: DISCOVERY goes symmetric, INITIATION does not. Dropping both gates put this phone and
+    // its peer into connect-out mode on the same 8 s cadence — and two BLE devices share ONE LE
+    // link, so when the elected peripheral defers and disconnects it tears down the peer's in-flight
+    // incoming attempt too. Both sides still advertise + scan (that is what finds a peer at all),
+    // but only the side DecideBleRole elects central actually connects out. After
+    // SymmetricRoundsBeforeDistrust fruitless rounds the cached id stops being trusted and anyone
+    // may initiate — #79's guarantee, kept as an escalation rather than as the default.
+    const bool HaveCached = !_PeerId.empty();
+    const bool TieBreakCentral =
+        HaveCached && (DecideBleRole(_LocalId, _PeerId) == EBleRole::Central);
+    const bool ConnectOut = _Link.ShouldConnectOut(HaveCached, TieBreakCentral);
+    _HaveCachedRole = _CachedPeripheral = false;   // discovery symmetric again
+    _DecidedPeripheral = !ConnectOut;              // ...initiation stays one-sided
     _Connecting = false;
     if (_PeerDevice) { [_Central cancelPeripheralConnection:_PeerDevice]; _PeerDevice = nil; }
     if (_Central.state == CBManagerStatePoweredOn)
@@ -456,7 +468,10 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
     // handled rather than only the first. Order matches Android's: tear a stalled attempt down
     // before the symmetric reset lands on top of it.
     if (Act.AbortConnect) dispatch_async(dispatch_get_main_queue(), ^{ [self abortConnect]; });
-    if (Act.GoSymmetric)  dispatch_async(dispatch_get_main_queue(), ^{ [self discoveryWatchdogFired]; });
+    if (Act.GoSymmetric) {
+        _Link.OnWentSymmetric();   // counted: trusting the cached peer id forever is what #79 forbids
+        dispatch_async(dispatch_get_main_queue(), ^{ [self discoveryWatchdogFired]; });
+    }
     if (Act.Rescan)       dispatch_async(dispatch_get_main_queue(), ^{ [self rescanNow]; });
 }
 

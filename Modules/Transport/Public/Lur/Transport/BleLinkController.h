@@ -61,6 +61,9 @@ public:
         Timers_.OnLinked();
         AdvRetry_.Cancel();
         ScanRetry_.Cancel();
+        // The escalation is per unlinked-stretch. Carrying it across a link would mean every later
+        // reconnect began in the distrusting, mutually-connecting state we are avoiding.
+        SymmetricRounds_ = 0;
     }
 
     // The link dropped. Re-arms discovery FROM ZERO, so time spent linked is never banked against
@@ -102,6 +105,39 @@ public:
     void OnConnectResolved() { Timers_.OnConnectResolved(); }
     void ScheduleRescan()    { Timers_.ScheduleRescan(); }
 
+    // The discovery watchdog fired and we dropped the cached-role gates. Counted, because trusting
+    // the cached peer id forever is what #79 exists to prevent — see ShouldConnectOut.
+    void OnWentSymmetric() { ++SymmetricRounds_; }
+
+    // How many fruitless symmetric rounds before the cached peer id stops being trusted. Three is
+    // ~24 s at the 8 s watchdog cadence: long enough that a healthy pair links first (measured
+    // 2-4.5 s when one side is already central), short enough that a genuinely re-rolled peer is
+    // not left deaf for long.
+    static constexpr int SymmetricRoundsBeforeDistrust = 3;
+
+    // MAY WE CONNECT OUT? This is #206's fix, and it is the one decision the watchdog got wrong.
+    //
+    // #79's gate-drop put BOTH peers into connect-out mode on the same 8 s cadence. Two BLE devices
+    // share ONE LE link, so when the side the tie-break elects peripheral defers and disconnects,
+    // it tears down the peer's in-flight incoming attempt as well. Measured on the pair
+    // (2026-08-16): three wasted rounds per recovery, resolving only when #146's fruitless-defer
+    // breaker fired — while a phone already in the central role recovered in 2-4.5 s because it
+    // never entered the dance.
+    //
+    // So discovery stays symmetric (both advertise, both scan — that is what finds a peer at all),
+    // but INITIATION is one-sided, chosen by the tie-break both phones can compute from the two
+    // ids. No negotiation, no new wire state: DecideBleRole is already symmetric and already
+    // shared.
+    //
+    // #79's guarantee is preserved as an escalation rather than as the default: after enough
+    // fruitless rounds the cached id may belong to a peer that re-rolled its GUID, so it stops
+    // being trusted and anyone may initiate. #146's breaker remains the backstop underneath.
+    bool ShouldConnectOut(bool HaveCachedPeer, bool TieBreakSaysCentral) const {
+        if (!HaveCachedPeer) return true;   // first pairing: no tie-break to apply, both must try
+        if (SymmetricRounds_ >= SymmetricRoundsBeforeDistrust) return true;   // #79 escape hatch
+        return TieBreakSaysCentral;
+    }
+
     // --- Questions the driver asks before touching the radio. ---
     bool ShouldStartAdvertising() const { return Radio_.ShouldStartAdvertising(); }
     bool ShouldStartScanning()    const { return Radio_.ShouldStartScanning(); }
@@ -131,6 +167,7 @@ private:
     // failure modes, and one failing must not delay the other's recovery.
     BleStartRetry      AdvRetry_;
     BleStartRetry      ScanRetry_;
+    int                SymmetricRounds_ = 0;
 };
 
 }  // namespace Lur::Transport

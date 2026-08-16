@@ -142,6 +142,8 @@ class BleShim(private val context: Context, private val TAG: String) {
     // stranded true by an adapter power cycle and then suppress every recovery attempt forever.
     private external fun nativeShouldStartAdvertising(): Boolean
     private external fun nativeShouldStartScanning(): Boolean
+    // #206: may WE initiate the connection this round? Discovery is symmetric; initiation is not.
+    private external fun nativeShouldConnectOut(haveCachedPeer: Boolean, tieBreakSaysCentral: Boolean): Boolean
     /** The link is gone: the engine drops the send backlog, which is only meaningful to a peer
      *  that received the earlier datagrams. */
     private external fun nativeOnLinkLost()
@@ -430,7 +432,20 @@ class BleShim(private val context: Context, private val TAG: String) {
     fun goSymmetric() {
         handler.post {
             if (linked) return@post
-            decidedPeripheral = false
+            // #206: DISCOVERY goes symmetric, INITIATION does not. Dropping both gates put this
+            // phone and its peer into connect-out mode on the same 8 s cadence — and two BLE
+            // devices share ONE LE link, so when the elected peripheral defers and disconnects it
+            // tears down the peer's in-flight incoming attempt too. Measured: three wasted rounds
+            // per recovery, resolving only when #146's breaker fired.
+            //
+            // So both sides still advertise + scan (that is what finds a peer at all), but only the
+            // side DecideBleRole elects central actually connects out. After
+            // SymmetricRoundsBeforeDistrust fruitless rounds the cached id stops being trusted and
+            // anyone may initiate — that is #79's guarantee, kept as an escalation.
+            val haveCached = peerId.isNotEmpty()
+            val tieBreakCentral =
+                haveCached && nativeDecideRole(deviceId, peerId, fruitlessDefers) != ROLE_PERIPHERAL
+            decidedPeripheral = !nativeShouldConnectOut(haveCached, tieBreakCentral)
             connecting = false
             startAdvertisingNow()
             startScanningNow()

@@ -158,6 +158,61 @@ static void TestSeveralActionsCanArriveInOneTick() {
     CHECK(A.StartAdvertising);
 }
 
+
+// ---------------------------------------------------------------------------
+// #206: who connects out when we go symmetric.
+//
+// The discovery watchdog (#79) exists because a cached role keyed to a peer that re-rolled its
+// GUID leaves BOTH phones deaf forever. Its cure was to drop the cached-role gates entirely — but
+// that put both peers into connect-out mode on the same 8 s cadence, which is the #17 mutual-connect
+// collision the cached roles were introduced to prevent.
+//
+// Two BLE devices share ONE LE link, so when the side the tie-break elects peripheral defers and
+// disconnects, it tears down the peer's in-flight incoming attempt too. Measured on the pair
+// (2026-08-16): three wasted rounds per recovery, resolving only when #146's fruitless-defer
+// breaker fired. Central-role recovery, which never enters the dance, took 2-4.5 s.
+//
+// So: advertise+scan on BOTH (discovery must stay symmetric, or a re-rolled peer is never found),
+// but connect out from ONE, chosen by the tie-break both phones can compute. #79's escape hatch is
+// preserved as an escalation — after enough fruitless rounds the cached id is distrusted and
+// anyone may connect.
+
+// With no cached peer there is no tie-break to apply — first pairing, both must try.
+static void TestNoCachedPeerAlwaysConnectsOut() {
+    BleLinkController C = Powered();
+    CHECK(C.ShouldConnectOut(/*HaveCachedPeer=*/false, /*TieBreakSaysCentral=*/false));
+}
+
+// The whole point: with a cached peer, only the elected central initiates.
+static void TestElectedPeripheralDoesNotConnectOut() {
+    BleLinkController C = Powered();
+    C.OnWentSymmetric();
+    CHECK(!C.ShouldConnectOut(true, /*TieBreakSaysCentral=*/false));
+    CHECK(C.ShouldConnectOut(true, /*TieBreakSaysCentral=*/true));
+}
+
+// #79 preserved: after enough fruitless symmetric rounds the cached id is no longer trusted, so a
+// peer that re-rolled its GUID cannot leave us deaf forever.
+static void TestCachedRoleIsDistrustedAfterEnoughFruitlessRounds() {
+    BleLinkController C = Powered();
+    for (int i = 0; i < BleLinkController::SymmetricRoundsBeforeDistrust; ++i) {
+        CHECK(!C.ShouldConnectOut(true, false));   // still deferring to the elected central
+        C.OnWentSymmetric();
+    }
+    CHECK(C.ShouldConnectOut(true, false));        // ...and now we stop trusting it
+}
+
+// A link resets the escalation: the next unlinked stretch starts from trusting the tie-break again,
+// or every later reconnect would begin in the colliding state we are trying to avoid.
+static void TestLinkResetsTheEscalation() {
+    BleLinkController C = Powered();
+    for (int i = 0; i <= BleLinkController::SymmetricRoundsBeforeDistrust; ++i) C.OnWentSymmetric();
+    CHECK(C.ShouldConnectOut(true, false));
+    C.OnLinked();
+    C.OnUnlinked();
+    CHECK(!C.ShouldConnectOut(true, false));
+}
+
 int main() {
     TestLinkQuiescesEverything();
     TestUnlinkReArmsFromZero();
@@ -169,6 +224,10 @@ int main() {
     TestConnectWatchdogPrecedesTheSymmetricReset();
     TestStopQuiescesWithoutClaimingALink();
     TestSeveralActionsCanArriveInOneTick();
+    TestNoCachedPeerAlwaysConnectsOut();
+    TestElectedPeripheralDoesNotConnectOut();
+    TestCachedRoleIsDistrustedAfterEnoughFruitlessRounds();
+    TestLinkResetsTheEscalation();
 
     if (GFailures == 0) std::printf("BleLinkController tests: all passed\n");
     return GFailures == 0 ? 0 : 1;
