@@ -58,3 +58,10 @@ add_executable(ble_link_controller_tests BleLinkControllerTests.cpp)
 target_link_libraries(ble_link_controller_tests PRIVATE lur::transport)
 target_compile_features(ble_link_controller_tests PRIVATE cxx_std_20)
 add_test(NAME ble_link_controller_tests COMMAND ble_link_controller_tests)
+
+# How many bytes one ATT read may return. Five lines of platform arithmetic that broke the
+# cross-platform link twice — #17 (offset ignored) and #206 (MTU ignored) — so it is engine C++ now.
+add_executable(gatt_long_read_tests GattLongReadTests.cpp)
+target_link_libraries(gatt_long_read_tests PRIVATE lur::transport)
+target_compile_features(gatt_long_read_tests PRIVATE cxx_std_20)
+add_test(NAME gatt_long_read_tests COMMAND gatt_long_read_tests)

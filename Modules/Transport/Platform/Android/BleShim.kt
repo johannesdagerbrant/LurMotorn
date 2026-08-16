@@ -144,6 +144,8 @@ class BleShim(private val context: Context, private val TAG: String) {
     private external fun nativeShouldStartScanning(): Boolean
     // #206: may WE initiate the connection this round? Discovery is symmetric; initiation is not.
     private external fun nativeShouldConnectOut(haveCachedPeer: Boolean, tieBreakSaysCentral: Boolean): Boolean
+    /** #206: bytes this ATT read may return. Negative = INVALID_OFFSET. See GattLongRead.h. */
+    private external fun nativeGattReadLength(valueSize: Int, offset: Int, attMtu: Int): Int
     /** The link is gone: the engine drops the send backlog, which is only meaningful to a peer
      *  that received the earlier datagrams. */
     private external fun nativeOnLinkLost()
@@ -224,6 +226,12 @@ class BleShim(private val context: Context, private val TAG: String) {
     // addService() returning. Nothing tracked this before, yet the startup log asserted "serving".
     private var serving = false
     private var adapterReceiver: BroadcastReceiver? = null
+    // #206: the ATT MTU of the INCOMING connection (a central reading from our GATT server).
+    // BluetoothGattServerCallback.onMtuChanged was never implemented, so the server had no idea how
+    // big a response could be and always claimed to have sent the whole value. 23 is the ATT
+    // default and the correct assumption until an exchange says otherwise; it is reset per
+    // connection so a large MTU can never be carried into a fresh one.
+    private var serverMtu = 23
     // #203: the last radio state we reported, so reporting is EDGE-triggered. The old line was
     // effectively level-triggered on the retry loop: it printed on every start ATTEMPT, so a radio
     // that was failing to scan announced itself healthy six times in twenty seconds while the real
@@ -769,6 +777,10 @@ class BleShim(private val context: Context, private val TAG: String) {
         }
 
         override fun onConnectionStateChange(device: BluetoothDevice, status: Int, newState: Int) {
+            // #206: a fresh connection starts at the ATT default until its own exchange says
+            // otherwise. Carrying a previous central's negotiated MTU into a new connection is the
+            // dangerous direction — it would let us over-fill a response again.
+            if (newState == BluetoothProfile.STATE_CONNECTED) serverMtu = 23
             // #83: only the BOUND peer's departure ends the match. `device == connectedCentral` already
             // said that, and nativeIsBoundPeer is the same answer from the shared policy — kept so both
             // gates agree even if connectedCentral is assigned on some future path that skips binding.
@@ -778,18 +790,50 @@ class BleShim(private val context: Context, private val TAG: String) {
             }
         }
 
+        /**
+         * #206: THE SERVER'S MTU, which nothing recorded before.
+         *
+         * BluetoothGattServerCallback has had this callback all along and we never implemented it,
+         * so `onCharacteristicReadRequest` had no idea how large a response could be and always
+         * returned the whole remaining value. For the 32-byte device id on a default-MTU connection
+         * that is a response the link cannot carry, and the central's read never completes — which
+         * is what stalled every incoming iPhone connect at the device-id read.
+         */
+        override fun onMtuChanged(device: BluetoothDevice, mtu: Int) {
+            serverMtu = mtu
+            Log.i(TAG, "server: central negotiated mtu=$mtu (reads chunk at ${mtu - 1}B)")
+        }
+
         override fun onCharacteristicReadRequest(
             device: BluetoothDevice, requestId: Int, offset: Int, characteristic: BluetoothGattCharacteristic,
         ) {
             // Hand the connecting central our device id so it can run the role tie-break.
             val full = if (characteristic.uuid == DEVICE_ID_UUID) deviceId else ByteArray(0)
-            // Honor the read offset: the id (32 bytes) exceeds a default-MTU ATT read
-            // (~22 bytes), so a central that hasn't negotiated a larger MTU issues a
-            // LONG read — a second request at offset>0. We must return only the bytes
-            // from that offset on; returning the full array corrupts the central's
-            // reassembly (this stranded the iOS<->Android role tie-break, issue #17).
-            val value = if (offset in 0..full.size) full.copyOfRange(offset, full.size) else ByteArray(0)
-            Log.i(TAG, "serve device id: uuid=${characteristic.uuid} offset=$offset -> ${value.size}B")
+            // Honour BOTH halves of a long read — the offset AND the length. The 32-byte id does
+            // not fit a default-MTU response (22 bytes), so a central that has not negotiated a
+            // larger MTU must issue a Read Blob for the tail.
+            //
+            // Getting either half wrong has broken the link: #17 ignored the offset and corrupted
+            // reassembly; #206 ignored the MTU and returned every remaining byte, so the central
+            // never learned there WAS a tail, never blob-read it, and the read never completed at
+            // all — no value, no error. On the pair that showed as every outgoing iPhone attempt
+            // stalling at the device-id read while this line logged a confident `offset=0 -> 32B`.
+            //
+            // The arithmetic is Lur::Transport::GattReadLength, in C++ with tests, because five
+            // lines that cost two link outages are a decision, not ceremony.
+            val len = nativeGattReadLength(full.size, offset, serverMtu)
+            if (len < 0) {
+                Log.e(TAG, "read at offset=$offset past end of ${full.size}B value -> INVALID_OFFSET")
+                try {
+                    gattServer?.sendResponse(device, requestId,
+                        BluetoothGatt.GATT_INVALID_OFFSET, offset, ByteArray(0))
+                } catch (_: SecurityException) {}
+                return
+            }
+            val value = full.copyOfRange(offset, offset + len)
+            val more = offset + len < full.size
+            Log.i(TAG, "serve device id: uuid=${characteristic.uuid} offset=$offset -> ${value.size}B " +
+                "(mtu=$serverMtu of ${full.size}B${if (more) ", tail follows" else ", complete"})")
             try {
                 gattServer?.sendResponse(device, requestId, BluetoothGatt.GATT_SUCCESS, offset, value)
             } catch (_: SecurityException) {}

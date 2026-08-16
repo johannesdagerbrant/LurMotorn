@@ -24,6 +24,7 @@
 #include "Lur/Core/LogTag.h"
 #include "Lur/Transport/BleSendQueue.h"
 #include "Lur/Transport/BleLinkController.h"
+#include "Lur/Transport/GattLongRead.h"
 #include "Lur/Save/DeviceId.h"
 #include "Lur/Save/Store.h"
 #include "Lur/Transport/Ble.h"
@@ -245,6 +246,14 @@ void OnScanStopped()          { g_Link.OnScanStopped(); }
 // May we start? The driver asks before touching the radio, instead of consulting a bool it owns.
 bool ShouldStartAdvertising() { return g_Link.ShouldStartAdvertising(); }
 bool ShouldStartScanning()    { return g_Link.ShouldStartScanning(); }
+// #206: how many bytes one ATT read may return. Five lines of arithmetic that broke the link twice
+// (#17 offset ignored, #206 MTU ignored); see GattLongRead.h. Negative = ATT INVALID_OFFSET.
+jint GattReadLengthFor(jint ValueSize, jint Offset, jint AttMtu) {
+    if (ValueSize < 0 || Offset < 0) return GattReadInvalidOffset;
+    return GattReadLength(static_cast<std::size_t>(ValueSize), static_cast<std::size_t>(Offset),
+                          AttMtu > 0 ? static_cast<std::size_t>(AttMtu) : AttDefaultMtu);
+}
+
 // #206: discovery goes symmetric, INITIATION stays one-sided. See BleLinkController::ShouldConnectOut.
 bool ShouldConnectOut(bool HaveCachedPeer, bool TieBreakSaysCentral) {
     return g_Link.ShouldConnectOut(HaveCachedPeer, TieBreakSaysCentral);
@@ -368,6 +377,9 @@ static jboolean Ble_nativeShouldStartAdvertising(JNIEnv*, jobject) {
 }
 static jboolean Ble_nativeShouldStartScanning(JNIEnv*, jobject) {
     return Lur::Transport::ShouldStartScanning() ? JNI_TRUE : JNI_FALSE;
+}
+static jint Ble_nativeGattReadLength(JNIEnv*, jobject, jint ValueSize, jint Offset, jint AttMtu) {
+    return Lur::Transport::GattReadLengthFor(ValueSize, Offset, AttMtu);
 }
 static jboolean Ble_nativeShouldConnectOut(JNIEnv*, jobject, jboolean HaveCachedPeer,
                                            jboolean TieBreakSaysCentral) {
@@ -625,6 +637,7 @@ static const JNINativeMethod kBleShimMethods[] = {
     {"nativeShouldStartAdvertising", "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartAdvertising)},
     {"nativeShouldStartScanning",    "()Z", reinterpret_cast<void*>(Ble_nativeShouldStartScanning)},
     {"nativeShouldConnectOut",       "(ZZ)Z", reinterpret_cast<void*>(Ble_nativeShouldConnectOut)},
+    {"nativeGattReadLength",         "(III)I", reinterpret_cast<void*>(Ble_nativeGattReadLength)},
     {"nativeServiceUuid",  "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeServiceUuid)},
     {"nativeDatagramUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDatagramUuid)},
     {"nativeDeviceIdUuid", "()Ljava/lang/String;", reinterpret_cast<void*>(Ble_nativeDeviceIdUuid)},
