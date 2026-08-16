@@ -26,6 +26,7 @@
 #include "Lur/App/IosApp.h"      // #43 section B: the shared entry point + Metal view + delegate
 #include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
 #include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink
+#include "Lur/App/RenderHandshake.h"  // #43 section C: the platform<->renderer surface/park protocol
 #include "Lur/Save/Store.h"
 #include "Lur/Save/SyncManager.h"
 #include "Lur/Trace/Trace.h"   // touch->present latency (#192)
@@ -59,7 +60,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     double _PrevFrameTime;  // CACurrentMediaTime() at the last renderFrame (0 = first)
     uint64_t _PendingTouchNs;  // oldest touch sample not yet presented (#192)
     uint64_t _TouchDownNs;     // press time of the gesture in progress (#192)
-    bool _Ready;
+    // #43 section C: the same platform<->renderer protocol RPS uses, configured Inline — chess renders
+    // on the CADisplayLink main thread, so it IS the frame loop and a park needs no ack. Chess has no
+    // cross-thread problem to solve here; it adopts the object so the two mains stop expressing the same
+    // events in two shapes (chess resized inline, RPS stored a flag), which is what kept the resize and
+    // pause/resume handling unabsorbable. The topology is now a value, not a difference in the code.
+    Lur::App::RenderHandshake _RH;
     // #73: a DVT launch can initialise the renderer while the app is NOT active — the
     // layer created in that state is never composited (presents "succeed", screen
     // black). Record the state at init; on becoming active, rebuild window+view+layer+
@@ -105,6 +111,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     // no sink on either phone, so engine-side messages went nowhere on device.
     Lur::App::Platform::InstallLogSink();
     Lur::App::Platform::UnblockStdio();   // before the renderer: a full stdio pipe must never freeze the main thread
+
+    // #43 section C: chess renders on the CADisplayLink main thread. Stated rather than left to the
+    // default, because every rule in RenderHandshake keys off it — a wrong value here is a self-deadlock
+    // on the #73 heal, not a subtle behaviour change.
+    _RH.Configure(Lur::App::ERenderTopology::Inline);
+    _RH.Start();
 
     CAMetalLayer* Layer = [self metalLayer];
     Layer.device = MTLCreateSystemDefaultDevice();
@@ -236,18 +248,21 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                                     self.view.bounds.size.height * Scale);
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
 
-    if (!_Ready) {
+    const int DrawW = static_cast<int>(Layer.drawableSize.width);
+    const int DrawH = static_cast<int>(Layer.drawableSize.height);
+
+    if (!_RH.IsReady()) {
+        _RH.PublishSurface((__bridge void*)Layer, DrawW, DrawH);
         _Renderer = Lur::Render::VulkanRenderer::Create("OnlyChess");
-        _Ready = _Renderer && _Renderer->Init((__bridge void*)Layer);
+        const bool Ok = _Renderer && _Renderer->Init(_RH.Surface());
+        _RH.SetReady(Ok);
         // #73 precondition check: a renderer initialised while the app is NOT active
         // ends up presenting into a layer the window server never composites.
         _InitWhileInactive =
             UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
         os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s (drawable %dx%d, appActive=%d)",
-               _Ready ? "ok" : "failed",
-               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height,
-               _InitWhileInactive ? 0 : 1);
-        if (_Ready) {
+               Ok ? "ok" : "failed", DrawW, DrawH, _InitWhileInactive ? 0 : 1);
+        if (Ok) {
             _View.CreateResources(_Renderer);
             // #188: make the frame's idle wait feed the radio — see the Android note. The
             // callback runs on this same thread, inside the wait, so nothing is shared.
@@ -274,8 +289,9 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
             }
         }
     } else {
-        _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
-                          static_cast<int>(Layer.drawableSize.height));
+        // Was an inline _Renderer->Resize here. Deferring it to the top of the next frame is the same
+        // safe point RPS uses, and it is what lets one call site serve both topologies.
+        _RH.RequestResize(DrawW, DrawH);
     }
 }
 
@@ -284,7 +300,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     // no window / no scene (a DVT-relaunch state; never true in health). Precise
     // condition, retried every ~2 s until a scene exists to attach to.
     static uint32_t FramesSinceAttach = 0;
-    if (_Ready && (self.view.window == nil || self.view.window.windowScene == nil)) {
+    if (_RH.IsReady() && (self.view.window == nil || self.view.window.windowScene == nil)) {
         if (++FramesSinceAttach >= 120) {
             FramesSinceAttach = 0;
             [self reattachForActivation];
@@ -294,9 +310,13 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     }
     if (_BecameActive) {
         _BecameActive = false;
-        if (_Ready && _InitWhileInactive) [self reattachForActivation];
+        if (_RH.IsReady() && _InitWhileInactive) [self reattachForActivation];
     }
-    if (!_Ready) return;
+    if (!_RH.IsReady()) return;
+    // The safe point: same place in the frame as RPS's render thread takes it. One TakeWork per frame —
+    // it consumes, so a second call would silently discard whatever the first left behind.
+    const Lur::App::RenderWork Work = _RH.TakeWork();
+    if (Work.Resize) _Renderer->Resize(Work.W, Work.H);
     const double Now = CACurrentMediaTime();  // monotonic seconds
     const uint64_t ElapsedNs =
         _PrevFrameTime > 0.0 ? static_cast<uint64_t>((Now - _PrevFrameTime) * 1e9) : 0;
@@ -422,11 +442,11 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // a swapchain recreate alone was proven insufficient by 898999b).
 - (void)recreateSwapchain {
     _BecameActive = true;  // renderFrame decides whether the full #73 reattach is due
-    if (!_Ready || _Renderer == nullptr) return;
+    if (!_RH.IsReady() || _Renderer == nullptr) return;
     CAMetalLayer* Layer = [self metalLayer];
     os_log(OS_LOG_DEFAULT, "OnlyChess: active -> swapchain recreate (drawable %dx%d)",
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
-    _Renderer->Resize(static_cast<int>(Layer.drawableSize.width),
+    _RH.RequestResize(static_cast<int>(Layer.drawableSize.width),
                       static_cast<int>(Layer.drawableSize.height));
     if (_Audio != nullptr) _Audio->Start(MixThunk, &_Mixer);  // resume audio on foreground
 }
@@ -441,18 +461,40 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // What stays here is the part the two games genuinely disagree on: chess owns its
 // renderer on the main thread, so it can tear down and re-init inline.
 - (void)reattachForActivation {
-    UIView* NewView = LurRebuildViewHost(self, LurMetalView.class);
-    if (NewView == nil) return;  // no connected scene yet — the render loop retries
-    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
+    // Park before touching the layer the renderer holds. Under Inline this returns at once — we ARE the
+    // frame loop, so no frame can be in flight — which is exactly the case where RPS's version blocks on
+    // an ack. Same three lines, both games; the topology supplies the difference.
+    _RH.RequestPark();
+    for (int I = 0; I < 250 && !_RH.IsParked(); ++I)
+        [NSThread sleepForTimeInterval:0.004];  // ~1 s cap; a no-op loop when Inline
 
-    _Renderer->Shutdown();  // full teardown (device, surface, everything)
-    _Ready = _Renderer->Init((__bridge void*)Layer);
+    UIView* NewView = LurRebuildViewHost(self, LurMetalView.class);
+    if (NewView == nil) {  // no connected scene yet — un-park and let the render loop retry
+        _RH.Resume();
+        return;
+    }
+    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
+    _RH.RequestReattach((__bridge void*)Layer, static_cast<int>(Layer.drawableSize.width),
+                        static_cast<int>(Layer.drawableSize.height));
+    _RH.Resume();
+
+    // Chess owns the renderer on this thread, so it applies the rebuild here rather than handing it to a
+    // loop. TakeWork is still the way it is read — the request/consume pairing is identical to RPS's, and
+    // that symmetry is what makes the two reattach bodies mergeable once section D lands.
+    const Lur::App::RenderWork Work = _RH.TakeWork();
+    if (!Work.Reinit) return;   // cannot happen today; not worth a silent Shutdown if it ever does
+    _RH.SetReady(false);
+    _Renderer->Shutdown();      // full teardown (device, surface, everything)
+    const bool Ok = _Renderer->Init(Work.Surface);
+    _RH.SetReady(Ok);
     _InitWhileInactive =
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
     os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: re-init %{public}s (drawable %dx%d, appActive=%d)",
-           _Ready ? "ok" : "FAILED", (int)Layer.drawableSize.width,
-           (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
-    if (_Ready) _View.CreateResources(_Renderer);
+           Ok ? "ok" : "FAILED", Work.W, Work.H, _InitWhileInactive ? 0 : 1);
+    if (Ok) _View.CreateResources(_Renderer);
+    // No SignalReinitDone here: that ack exists to tell another thread's owner it may release the
+    // retiring view, and chess has no retiring view to hold — the rebuild finished before this method
+    // returned. Setting a flag nothing consumes would be dead state dressed as symmetry.
 }
 
 // #192: stamp a touch sample for the latency traces. UITouch.timestamp is seconds on the
@@ -482,14 +524,14 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // the app MORE faithful to over-the-board play, not less. (There is no drag gesture here
 // either, so in practice nothing is lost.)
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready) return;
+    if (!_RH.IsReady()) return;
     UITouch* Touch = touches.anyObject;
     _TouchDownNs = [self stampTouch:Touch];
     [self dispatchTap:Touch];
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    if (!_Ready) return;
+    if (!_RH.IsReady()) return;
     UITouch* Touch = touches.anyObject;
     (void)[self stampTouch:Touch];
     // The move already went out on the press (#187). All that is left here is closing the
