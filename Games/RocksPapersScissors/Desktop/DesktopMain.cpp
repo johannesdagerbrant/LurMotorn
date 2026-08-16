@@ -1366,7 +1366,7 @@ int RunBle(const char* RadioExe, bool Auto, int MaxFrames, uint64_t Seed) {
     Lur::Log::Info("RPS desktop: BLE peer vs phone (radio=%s, auto=%d)", RadioExe, Auto ? 1 : 0);
     // RPS's per-game service UUID (…7371, distinct from chess's …7370) — the radio must
     // scan for THIS or it never discovers the RPS phone (matches the Android CMake).
-    Lur::DevRig::WindowsBleTransport Ble(RadioExe, "4C55524D-4F54-4F52-4E00-5472616E7371");
+    Lur::DevRig::WindowsBleTransport Ble(RadioExe);   // #42: UUID comes from BleServiceUuid now
     Ble.SetLogger([](const char* M) { Lur::Log::Info("%s", M); });
     if (!Ble.Start()) {
         Lur::Log::Error("BLE radio failed to start - build it: "

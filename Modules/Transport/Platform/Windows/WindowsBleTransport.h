@@ -16,8 +16,8 @@ namespace Lur::DevRig {
 //
 // Loopback has no radio and two phones have no debugger; this transport is both. It
 // speaks the engine's existing wire protocol over real Bluetooth to the UNMODIFIED
-// Android app, so a desktop chess instance becomes a live BLE peer — a Hello
-// handshake and moves over the air, with Lur::Log + the flight recorder watching.
+// Android app, so a desktop instance of any game becomes a live BLE peer — a Hello
+// handshake and real traffic over the air, with Lur::Log + the flight recorder watching.
 //
 // Windows' WinRT BLE API can't be consumed from the MinGW C++ toolchain, so the
 // radio itself is a small C# subprocess (Tools/BleDevRig/BleRadio.exe) and this
@@ -33,10 +33,17 @@ namespace Lur::DevRig {
 class WindowsBleTransport : public Lur::Transport::ITransport,
                             private Lur::Transport::EventInbox::Sink {
 public:
-    // RadioExePath is the C# radio subprocess (Tools/BleDevRig/BleRadio.exe). ServiceUuid
-    // (optional) is the per-game GATT service UUID to scan for — RPS and chess differ, so
-    // the radio must be told which (empty = the radio's chess default). #101-E.
-    explicit WindowsBleTransport(std::string RadioExePath, std::string ServiceUuid = "");
+    // RadioExePath is the C# radio subprocess (Tools/BleDevRig/BleRadio.exe).
+    //
+    // The service UUID is NOT a parameter any more. It comes from BleProtocol.h's BleServiceUuid,
+    // i.e. from the app's required LUR_BLE_SERVICE_UUID — the same single source of truth the
+    // Android and iOS radios read. It used to be an optional argument, and the two consequences
+    // were exactly what that invites: chess passed nothing and silently inherited whatever default
+    // the radio binary happened to hold, while RPS pasted the literal
+    // "4C55524D-4F54-4F52-4E00-5472616E7371" at its call site. A UUID duplicated into a call site
+    // is the same duplication-maintained-by-hope the Kotlin shim was cured of (#200), and a wrong
+    // one fails as two devices that never see each other, the hardest BLE symptom to attribute.
+    explicit WindowsBleTransport(std::string RadioExePath);
     ~WindowsBleTransport() override;
 
     // Spawn the radio subprocess + start the reader thread. Returns false if the
@@ -78,7 +85,6 @@ private:
     bool ReadExact(void* Buf, std::size_t N);
 
     std::string RadioExe;
-    std::string ServiceUuid;  // per-game service UUID passed to the radio as argv[0] (#101-E)
     std::function<void(const char*)> Logger;
     Lur::Transport::ITransport::Receiver ReceiverFn;
 
