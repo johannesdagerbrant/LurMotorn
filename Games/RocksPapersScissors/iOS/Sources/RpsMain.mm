@@ -35,6 +35,7 @@
 #include "Lur/App/IosApp.h"        // #43 section B: the shared entry point + Metal view + delegate
 #include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
 #include "Lur/App/Platform.h"     // #43 section B: MoltenVK stdio guard + log sink
+#include "Lur/App/RenderHandshake.h"  // #43 section C: the MAIN<->render surface/park protocol
 #include "Lur/Save/Store.h"
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
@@ -241,9 +242,15 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 #endif
 
     // ---- MAIN <-> RENDER cross-thread surface (#183). The render thread owns all Vulkan; MAIN owns UIKit.
-    //      Init/Shutdown are handed to the render thread (via _ReinitReq) so the renderer is single-threaded
-    //      even across a #73 rebuild. The pause/ack pair parks the render thread at a safe point for BOTH a
-    //      background transition (a free-running loop must not vend drawables off-screen) and a reattach. ----
+    //      Init/Shutdown are handed to the render thread so the renderer is single-threaded even across a
+    //      #73 rebuild, and the park/ack pair stops the loop at a safe point for BOTH a background
+    //      transition (a free-running loop must not vend drawables off-screen) and a reattach. ----
+    // The eleven atomics that used to sit here are now Lur::App::RenderHandshake (#43 section C). They moved
+    // because the rule governing them — when "parked" is true — is the one thing that differs between a
+    // dedicated render thread and a frame loop on the platform thread, and it was unwritten and untestable
+    // while it was eleven loose flags in a .mm file. The object also carries the drawable size, so the
+    // publish/consume pairing is visible instead of implied by two same-named atomics.
+    Lur::App::RenderHandshake _RH;
     // #183: a raw pthread, NOT std::thread — the render call chain (GameView::Render -> Dropdown::Draw ->
     // Text) needs ~1MB of stack, which it got for free while it ran on the MAIN thread. A std::thread gets
     // the OS default secondary-thread stack (512KB on iOS) with NO way to enlarge it, and the chain
@@ -251,16 +258,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // a generous 4MB. The sim thread stays std::thread — its path is shallow.
     pthread_t            _RenderThread;
     bool                 _RenderThreadStarted;
-    std::atomic<bool>    _RenderRunning;   // main -> render: keep looping (cleared + joined on teardown)
-    std::atomic<bool>    _Ready;           // render -> main: renderer inited (main's touch gate + lifecycle read it)
-    std::atomic<bool>    _LayerReady;      // main -> render: the first CAMetalLayer is published; Init may run
-    std::atomic<void*>   _LayerPtr;        // main -> render: the current CAMetalLayer (bridged void*)
-    std::atomic<bool>    _ReinitReq;       // main -> render: #73 reattach — Shutdown + Init against _LayerPtr
-    std::atomic<bool>    _ReinitDone;      // render -> main: reinit finished (main may release _RetiringView)
-    std::atomic<bool>    _RenderPauseReq;  // main -> render: park at a safe point (background OR reattach)
-    std::atomic<bool>    _RenderPausedAck; // render -> main: parked, not touching the renderer
-    std::atomic<bool>    _ResizeReq;       // main -> render: drawable size changed -> call Resize at a safe point
-    std::atomic<int32_t> _DrawW, _DrawH;   // main -> render: drawable size in pixels
     std::atomic<int32_t> _InsetTopPx, _InsetBotPx;  // main -> render: safe-area insets (px)
     std::mutex           _TouchMx;         // guards _TouchQ
     std::vector<TouchEvent> _TouchQ;       // main pushes raw touches, the render thread drains once/frame
@@ -406,7 +403,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // with FIFO as the one vsync clock (the fix for the #103 40fps beat). It waits for MAIN to publish the
     // first sized layer (viewDidLayoutSubviews) before creating the renderer. Same raw-self capture /
     // stop-before-destroy contract as the sim thread. ----
-    _RenderRunning.store(true, std::memory_order_relaxed);
+    // #43 section C: RPS is Dedicated — a real render thread owns the renderer, so parking it means
+    // waiting for its ack. Declared once here; every call site below is topology-agnostic.
+    _RH.Configure(Lur::App::ERenderTopology::Dedicated);
+    _RH.Start();
     // pthread (not std::thread) so we can hand it a 4MB stack — see the ivar note. The trampoline just
     // re-enters the ObjC loop; self is passed raw (VC outlives the thread, which -dealloc joins first).
     pthread_attr_t RenderAttr;
@@ -430,8 +430,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     [_LifecycleTimer invalidate];
     // Render thread FIRST — it owns the renderer, which references the layer/surface the OS is about to
     // tear down. Clear the pause flag too, so a parked thread wakes to observe !running and exits its loop.
-    _RenderRunning.store(false, std::memory_order_release);
-    _RenderPauseReq.store(false, std::memory_order_release);
+    _RH.Stop();
+    _RH.Resume();  // a parked thread wakes, observes !ShouldRun and exits (Stop alone also breaks it)
     if (_RenderThreadStarted) { pthread_join(_RenderThread, nullptr); _RenderThreadStarted = false; }
     _SimRunning.store(false, std::memory_order_release);  // stop the loop, then wait it out
     if (_SimThread.joinable()) _SimThread.join();
@@ -447,13 +447,13 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Scale,
                                     self.view.bounds.size.height * Scale);
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
-    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
-    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
+    const int DrawW = static_cast<int>(Layer.drawableSize.width);
+    const int DrawH = static_cast<int>(Layer.drawableSize.height);
     const UIEdgeInsets Sa = self.view.safeAreaInsets;
     _InsetTopPx.store(static_cast<int32_t>(Sa.top * Scale), std::memory_order_relaxed);
     _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Scale), std::memory_order_relaxed);
 
-    if (!_LayerReady.load(std::memory_order_acquire)) {
+    if (!_RH.HasSurface()) {
         // First valid layout: record the #73 precondition (a renderer born while inactive presents into a
         // layer the window server never composites), publish the layer, then let the render thread Init.
         _InitWhileInactive =
@@ -461,12 +461,11 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 #if !LUR_SHIPPING
         _AppliedRenderScaleRaw = Rps::Fixed::One;  // published at native scale (k=1.0)
 #endif
-        _LayerPtr.store((__bridge void*)Layer, std::memory_order_release);
-        _LayerReady.store(true, std::memory_order_release);
+        _RH.PublishSurface((__bridge void*)Layer, DrawW, DrawH);
         os_log(OS_LOG_DEFAULT, "OnlyRps: layer published %dx%d appActive=%d — render thread will init #183",
-               (int)Layer.drawableSize.width, (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
+               DrawW, DrawH, _InitWhileInactive ? 0 : 1);
     } else {
-        _ResizeReq.store(true, std::memory_order_release);  // render thread calls Resize at a safe point
+        _RH.RequestResize(DrawW, DrawH);  // whoever owns the renderer resizes it at a safe point
     }
 }
 
@@ -474,12 +473,11 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     _BecameActive = true;  // the #73 init-while-inactive reattach is handled by the lifecycle tick
     // Resume a render thread parked on resign/background. If it was inited while inactive, the tick's
     // reattach takes over instead (it re-parks + rebuilds), so don't blindly resume in that case.
-    if (_Ready.load(std::memory_order_acquire) && !_InitWhileInactive)
-        _RenderPauseReq.store(false, std::memory_order_release);
+    if (_RH.IsReady() && !_InitWhileInactive) _RH.Resume();
 }
 
 - (void)onWillResign {
-    if (_Ready.load(std::memory_order_acquire)) _RenderPauseReq.store(true, std::memory_order_release);
+    if (_RH.IsReady()) _RH.RequestPark();
 }
 
 #if LUR_INTERNAL
@@ -672,40 +670,44 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // #183: park the render thread BEFORE touching the layer it renders into. Bounded busy-wait on MAIN —
     // this is a rare heal, not the hot loop; the ack normally lands within one frame (~16 ms). Proceed
     // best-effort if it somehow doesn't park (better than wedging the heal).
-    _RenderPauseReq.store(true, std::memory_order_release);
-    for (int I = 0; I < 250 && !_RenderPausedAck.load(std::memory_order_acquire); ++I)
+    // IsParked() is the topology decision (#43 section C): under Dedicated it is the render thread's ack,
+    // and under Inline it is true at once — so this loop is a wait on a real thread here and a no-op for a
+    // frame loop that IS this thread. Written the same way either way, which is the point.
+    _RH.RequestPark();
+    for (int I = 0; I < 250 && !_RH.IsParked(); ++I)
         [NSThread sleepForTimeInterval:0.004];  // ~1 s cap
-    if (!_RenderPausedAck.load(std::memory_order_acquire))
+    if (!_RH.IsParked())
         os_log_error(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: render thread did not park in time — proceeding");
 
     // Hold the OLD view (and its CAMetalLayer) alive until the render thread finishes Shutdown/Init on it —
     // the old VkSurfaceKHR wraps that layer, and vkDestroySurfaceKHR runs on the render thread AFTER this
-    // method returns. Released on the render thread's _ReinitDone ack (in lifecycleTick), on MAIN, so the
+    // method returns. Released on the render thread's reattach-done ack (in lifecycleTick), on MAIN, so the
     // UIView still deallocs on the main thread. Grabbed BEFORE the rebuild, which reassigns self.view.
     UIView* Retiring = self.view;
     LurMetalView* NewView = (LurMetalView*)LurRebuildViewHost(self, LurMetalView.class);
     if (NewView == nil) {  // no connected scene yet — un-park and let the tick retry
-        _RenderPauseReq.store(false, std::memory_order_release);
+        _RH.Resume();
         return;
     }
     _RetiringView = Retiring;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
 
     // Publish the fresh layer + size + insets, record the precondition, then hand the Shutdown/Init to the
-    // render thread and RESUME it — it re-inits against _LayerPtr and signals _ReinitDone.
-    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
-    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
+    // render thread and RESUME it — it re-inits against the new surface and signals the reattach done.
     const UIEdgeInsets Sa = NewView.safeAreaInsets;
     _InsetTopPx.store(static_cast<int32_t>(Sa.top * Layer.contentsScale), std::memory_order_relaxed);
     _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Layer.contentsScale), std::memory_order_relaxed);
-    _LayerPtr.store((__bridge void*)Layer, std::memory_order_release);
     _InitWhileInactive =
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
 #if !LUR_SHIPPING
     _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: rebuilt at native scale; the tick re-applies any override
 #endif
-    _ReinitReq.store(true, std::memory_order_release);
-    _RenderPauseReq.store(false, std::memory_order_release);
+    // Arm the rebuild against the NEW surface, then release the park. Order matters and the handshake
+    // enforces it: while the park stands, TakeWork() withholds the reinit, so the loop cannot wake early
+    // and rebuild against the layer we are in the middle of replacing.
+    _RH.RequestReattach((__bridge void*)Layer, static_cast<int>(Layer.drawableSize.width),
+                        static_cast<int>(Layer.drawableSize.height));
+    _RH.Resume();
     os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: handed reinit to the render thread (drawable %dx%d, appActive=%d)",
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
 }
@@ -715,9 +717,9 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // the render thread to recreate the swapchain — but ONLY when the value actually changed (a swapchain
 // recreate is not free). Setting contentsScale AND drawableSize together keeps the render extent and the
 // touch-point mapping (touchesBegan/Moved/Ended read contentsScale) in the same coordinate space. Called
-// from the MAIN lifecycle tick; the render thread owns the renderer, so it does the Resize via _ResizeReq.
+// from the MAIN lifecycle tick; the render thread owns the renderer, so RequestResize hands it the size.
 - (void)applyRenderScaleIfChanged {
-    if (!_Ready.load(std::memory_order_acquire)) return;
+    if (!_RH.IsReady()) return;
     const int32_t Raw = CvRenderScale.Get().Raw;
     if (Raw == _AppliedRenderScaleRaw) return;
     const float K = static_cast<float>(Raw) / static_cast<float>(Rps::Fixed::One);
@@ -727,9 +729,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Eff,
                                     self.view.bounds.size.height * Eff);
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;  // not laid out yet — retry next tick
-    _DrawW.store(static_cast<int32_t>(Layer.drawableSize.width), std::memory_order_relaxed);
-    _DrawH.store(static_cast<int32_t>(Layer.drawableSize.height), std::memory_order_relaxed);
-    _ResizeReq.store(true, std::memory_order_release);   // render thread recreates the swapchain
+    _RH.RequestResize(static_cast<int>(Layer.drawableSize.width),
+                      static_cast<int>(Layer.drawableSize.height));   // swapchain recreated at a safe point
     _AppliedRenderScaleRaw = Raw;
     os_log(OS_LOG_DEFAULT, "OnlyRps: render_scale -> %.3f (drawable %dx%d) #103", K,
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height);
@@ -743,70 +744,82 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // an NSThread, so nothing drains the CAMetalDrawable MoltenVK retains per frame otherwise. Raw-self
 // capture / stop-before-destroy contract identical to simThreadLoop.
 - (void)renderThreadLoop {
-    while (_RenderRunning.load(std::memory_order_acquire) &&
-           !_LayerReady.load(std::memory_order_acquire))
+    while (_RH.ShouldRun() && !_RH.HasSurface())
         std::this_thread::sleep_for(std::chrono::milliseconds(4));
-    if (!_RenderRunning.load(std::memory_order_acquire)) return;
+    if (!_RH.ShouldRun()) return;
     @autoreleasepool {
-        void* Layer = _LayerPtr.load(std::memory_order_acquire);
         _Renderer = Lur::Render::VulkanRenderer::Create("OnlyRps");
-        const bool Ok = _Renderer && _Renderer->Init(Layer);
-        _Ready.store(Ok, std::memory_order_release);
+        const bool Ok = _Renderer && _Renderer->Init(_RH.Surface());
+        _RH.SetReady(Ok);
         os_log(OS_LOG_DEFAULT, "OnlyRps: Renderer init: %{public}s (drawable %dx%d) [render thread] #183",
-               Ok ? "ok" : "failed", _DrawW.load(std::memory_order_relaxed),
-               _DrawH.load(std::memory_order_relaxed));
+               Ok ? "ok" : "failed", _RH.Width(), _RH.Height());
         if (Ok) _View.CreateResources(_Renderer);
     }
     double PrevTime = 0.0;
-    while (_RenderRunning.load(std::memory_order_acquire)) {
-        // ---- Pause / reattach handshake. MAIN parks us (background OR #73 reattach) via _RenderPauseReq;
-        // we ack at this SAFE point (no drawable held, renderer idle) and spin until released. On release,
-        // a pending _ReinitReq means MAIN rebuilt the layer -> do the Vulkan Shutdown/Init HERE (renderer
-        // stays single-threaded), then signal _ReinitDone so MAIN can release the retiring view. ----
-        if (_RenderPauseReq.load(std::memory_order_acquire)) {
-            _RenderPausedAck.store(true, std::memory_order_release);
-            while (_RenderPauseReq.load(std::memory_order_acquire) &&
-                   _RenderRunning.load(std::memory_order_acquire))
+    while (_RH.ShouldRun()) {
+        // ---- Park / reattach handshake. MAIN parks us (background OR #73 reattach); we ack at this SAFE
+        // point (no drawable held, renderer idle) and spin until released. TakeWork withholds a pending
+        // reinit for exactly as long as the park stands, so on release we get it against the NEW surface —
+        // do the Vulkan Shutdown/Init HERE (renderer stays single-threaded), then signal done so MAIN can
+        // release the retiring view. ----
+        // ONE TakeWork per iteration: it CONSUMES, so calling it twice (or as a bare predicate) silently
+        // drops whatever the second call would have returned. That is how a rotation goes missing and the
+        // app comes back letterboxed at the old swapchain size.
+        Lur::App::RenderWork Work = _RH.TakeWork();
+        if (Work.Park) {
+            _RH.AckParked(true);
+            while (_RH.ParkRequested() && _RH.ShouldRun())
                 std::this_thread::sleep_for(std::chrono::milliseconds(4));
-            _RenderPausedAck.store(false, std::memory_order_release);
-            if (!_RenderRunning.load(std::memory_order_acquire)) break;
-            if (_ReinitReq.exchange(false, std::memory_order_acq_rel)) {
-                @autoreleasepool {
-                    _Ready.store(false, std::memory_order_release);
+            _RH.AckParked(false);
+            if (!_RH.ShouldRun()) break;
+            Work = _RH.TakeWork();   // now released: the reinit (and any resize raised meanwhile) is ours
+        }
+        // Deliberately OUTSIDE the park branch. MAIN proceeds with the rebuild anyway if we fail to park
+        // within its 1 s cap, and on that path the reinit arrives with no park in front of it — handled
+        // here, it is applied; handled inside the branch, TakeWork would consume and discard it and the
+        // renderer would keep drawing into the dead layer the heal was meant to replace.
+        if (Work.Reinit) {
+            @autoreleasepool {
+                _RH.SetReady(false);
+                if (_Renderer) {
                     _Renderer->Shutdown();  // full teardown (device, surface, everything) of the old layer
-                    void* Layer = _LayerPtr.load(std::memory_order_acquire);
-                    const bool Ok = _Renderer->Init(Layer);
-                    _Ready.store(Ok, std::memory_order_release);
+                    const bool Ok = _Renderer->Init(Work.Surface);
+                    _RH.SetReady(Ok);
                     if (Ok) _View.CreateResources(_Renderer);
                     os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: re-init %{public}s (drawable %dx%d) [render thread]",
-                           Ok ? "ok" : "FAILED", _DrawW.load(std::memory_order_relaxed),
-                           _DrawH.load(std::memory_order_relaxed));
+                           Ok ? "ok" : "FAILED", Work.W, Work.H);
+                } else {
+                    os_log_error(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: no renderer to re-init [render thread]");
                 }
-                _ReinitDone.store(true, std::memory_order_release);  // MAIN releases _RetiringView
-                PrevTime = 0.0;
             }
-            continue;
+            _RH.SignalReinitDone();  // MAIN releases _RetiringView — even on failure; it owns a dead view
+            PrevTime = 0.0;
+            continue;                // Init already built the swapchain at Work.W/H
         }
-        if (!_Ready.load(std::memory_order_acquire)) {  // init failed / mid-reinit — idle, don't spin hot
+        if (!_RH.IsReady()) {  // init failed / mid-reinit — idle, don't spin hot
+            // Re-arm anything we consumed but cannot apply. TakeWork already took it, and dropping it
+            // here would mean a rotation during a failed init never reaches the swapchain — the app comes
+            // back at the wrong size with nothing logged. (Before section C this was accidentally safe:
+            // the flag was only exchanged inside renderOneFrame, which this path never reached.)
+            if (Work.Resize) _RH.RequestResize(Work.W, Work.H);
             std::this_thread::sleep_for(std::chrono::milliseconds(4));
             continue;
         }
-        @autoreleasepool { [self renderOneFrame:&PrevTime]; }
+        @autoreleasepool { [self renderOneFrame:&PrevTime withWork:Work]; }
     }
 }
 
 // One free-running render iteration. RENDER thread only; reads drawable size + insets from the atomics
 // MAIN publishes (never the layer directly), and touches _View/_Cam/_DevGesture/_Snap/_Renderer freely
 // because it is their sole owner.
-- (void)renderOneFrame:(double*)PrevTimePtr {
+- (void)renderOneFrame:(double*)PrevTimePtr withWork:(const Lur::App::RenderWork&)Work {
     const double Now = CACurrentMediaTime();
     const uint64_t ElapsedNs = *PrevTimePtr > 0.0 ? static_cast<uint64_t>((Now - *PrevTimePtr) * 1e9) : 0;
     *PrevTimePtr = Now;
 
     // #103 render_scale (or a rotation/layout): MAIN resized the layer + published the new drawable size;
     // recreate the swapchain here, where we own the renderer.
-    if (_ResizeReq.exchange(false, std::memory_order_acq_rel))
-        _Renderer->Resize(_DrawW.load(std::memory_order_relaxed), _DrawH.load(std::memory_order_relaxed));
+    if (Work.Resize) _Renderer->Resize(Work.W, Work.H);
 
     // Drain the touch queue and replay the exact hit-test/input logic (was in the UIKit handlers pre-#183)
     // at the TOP of the frame, so a placement/tap carries ≤1 frame of added latency.
@@ -882,8 +895,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
         _Snap.PublishNs = NowNs();
     }
 
-    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
-    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
+    const float W = static_cast<float>(_RH.Width());
+    const float H = static_cast<float>(_RH.Height());
     const uint64_t Stamp = NowNs();
     const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);
     const float VisibleH = H / Ppu(W);
@@ -946,12 +959,12 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // window-server surface that is never composited. Rebuild against the live window server.
     if (_BecameActive) {
         _BecameActive = false;
-        if (_Ready.load(std::memory_order_acquire) && _InitWhileInactive) [self reattachForActivation];
+        if (_RH.IsReady() && _InitWhileInactive) [self reattachForActivation];
     }
     // #73 persistent orphan: after a DVT relaunch the view can sit in no window / no scene while we think
     // we are ready (presents "succeed" into the orphan layer; screen black). Heal, retried ~2 s.
     static int OrphanTicks = 0;
-    if (_Ready.load(std::memory_order_acquire) &&
+    if (_RH.IsReady() &&
         (self.view.window == nil || self.view.window.windowScene == nil)) {
         if (++OrphanTicks >= 4) { OrphanTicks = 0; [self reattachForActivation]; }  // ~2 s at 0.5 s/tick
     } else {
@@ -959,7 +972,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     }
     // Release the old view/layer once the render thread finished Shutdown/Init on it — on MAIN, so the
     // UIView deallocs on the main thread.
-    if (_ReinitDone.exchange(false, std::memory_order_acq_rel)) _RetiringView = nil;
+    if (_RH.TakeReattachDone()) _RetiringView = nil;
 
 #if LUR_AGENT
     // #103 A/B AUTOPILOT: iOS has no touch injection and no on-device cvars.cfg, so the render_scale sweep
@@ -1370,7 +1383,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // The timestamp is captured HERE at the real touch time so the console gesture's hold/chain windows stay
 // correct even though the replay runs up to one frame later.
 - (void)pushTouch:(TouchEvent::EPhase)Phase touches:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
-    if (!_Ready.load(std::memory_order_acquire)) return;
+    if (!_RH.IsReady()) return;
     const CGFloat S = [self metalLayer].contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
     TouchEvent E;
@@ -1393,7 +1406,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 }
 
 // ---- RENDER-thread replay of the exact hit-test logic (was inline in the UIKit handlers pre-#183). Reads
-// the published drawable size (_DrawW/_DrawH), not the layer, and touches _View/_Cam/_DevGesture/_Snap
+// the published drawable size (_RH.Width()/Height()), not the layer, and touches _View/_Cam/_DevGesture/_Snap
 // freely as their owner. Behaviour is verbatim — only the thread and the coordinate source changed. ----
 - (void)replayTouchBegan:(const TouchEvent&)E {
     const float X = E.X, Y = E.Y;
@@ -1406,14 +1419,14 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // DevTap. Swallowing the gesture is the point: the panel sits over a LIVE match.
     if (_View.DevOverlayOpen()) { _DevGesture.DragBegin(Y); return; }
 #endif
-    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
+    const float W = static_cast<float>(_RH.Width());
     const float Off = [self ghostOffPxForWidth:W];
     const uint8_t MyTeam = _LinkedTeam.load(std::memory_order_relaxed);   // sim thread publishes it
     const bool Live = _MatchLive.load(std::memory_order_acquire);          // solo OR peer match live
     const int Plate = Live ? _View.PlateAt(X, Y) : -1;  // plate hit-test at the real finger
     if (Plate >= 0) {
         _View.BeginPlaceDrag(Plate, X - Off, Y - Off);  // sets the ghost type; seed at the offset spot
-        const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
+        const float H = static_cast<float>(_RH.Height());
         float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
         const bool V = _View.ResolvePlacement(X - Off, Y - Off, _Cam.Y, W, H, MyTeam == 1, _Snap, MyTeam, Wx, Wy, Gsx, Gsy);
         // Finger point AND snapped point: ghost on the finger, snap eased (visual only).
@@ -1435,8 +1448,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 }
 - (void)replayTouchMoved:(const TouchEvent&)E {
     const float X = E.X, Y = E.Y;
-    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
-    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
+    const float W = static_cast<float>(_RH.Width());
+    const float H = static_cast<float>(_RH.Height());
 #if !LUR_SHIPPING
     if (_View.DevOverlayOpen()) { _View.DevScroll(_DevGesture.DragMove(Y)); return; }  // #151
 #endif
@@ -1453,8 +1466,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 }
 - (void)replayTouchEnded:(const TouchEvent&)E {
     const float X = E.X, Y = E.Y;
-    const float W = static_cast<float>(_DrawW.load(std::memory_order_relaxed));
-    const float H = static_cast<float>(_DrawH.load(std::memory_order_relaxed));
+    const float W = static_cast<float>(_RH.Width());
+    const float H = static_cast<float>(_RH.Height());
 #if !LUR_SHIPPING
     // #151: the console owns the gesture while it is open — a still release is a tap it hit-tests
     // (rows, numpad, the top-left X that closes it), anything else was a scroll already applied.
