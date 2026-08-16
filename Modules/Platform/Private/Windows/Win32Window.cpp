@@ -148,7 +148,10 @@ std::vector<Lur::Input::TouchEvent> Window::TakeTouches() {
 }
 
 void Window::PushTouch(Lur::Input::ETouchPhase Phase, float XPx, float YPx) {
-    Touches.push_back(Lur::Input::TouchEvent{Phase, XPx, YPx, NowNs(), /*PointerId*/ 0});
+    // PointerCount is 1: a mouse is one pointer, and it is down for every phase we push (Began and
+    // Ended included — the button is what generated them). It can never be 2, which is why the
+    // desktop cannot raise the two-finger console gesture and uses the F1 key instead.
+    Touches.push_back(Lur::Input::TouchEvent{Phase, XPx, YPx, NowNs(), /*PointerCount*/ 1});
 }
 
 } // namespace Lur::Platform

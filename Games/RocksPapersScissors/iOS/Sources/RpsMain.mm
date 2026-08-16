@@ -27,6 +27,7 @@
 #include "Lur/Core/CVar.h"   // #147: registry walk for the gameplay-CVar sync seed
 #include "Lur/Core/Log.h"    // the engine logger — routed into os_log below
 #include "Lur/Input/ConsoleGesture.h"  // #151: the ONE dev-console gesture, shared with Android
+#include "Lur/Input/Input.h"           // #43 section D: the shared TouchEvent (was a private near-copy)
 #include "Rps/AgentControl.h"          // LUR_AGENT: assistant remote-control command grammar
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
@@ -88,13 +89,12 @@ Rps::Fixed WorldToFixed(float Wv) {
 // capture only what UIKit alone can read — the point in DRAWABLE PIXELS (already ×contentsScale), the
 // pointer count (event.allTouches.count, for the two-finger console gesture), and a timestamp for the
 // gesture's hold/chain windows — and push it. The render thread replays the exact hit-test logic.
-struct TouchEvent {
-    enum EPhase : uint8_t { Began, Moved, Ended };
-    uint8_t  Phase;
-    float    X, Y;           // drawable pixels
-    int      PointerCount;   // pointers down at this event (drives the dev-console gesture)
-    uint64_t Ns;             // NowNs() at the touch — feeds ConsoleGesture's timing windows
-};
+//
+// #43 section D: the struct itself is Lur::Input::TouchEvent now. This file had a private near-copy
+// that differed from the engine's by one field — the engine carried a PointerId nothing read, and
+// lacked the PointerCount the console gesture needs — so the duplicate existed because the shared
+// type could not say the one thing RPS had to say. It can now.
+using TouchEvent = Lur::Input::TouchEvent;
 }  // namespace
 
 // #103: iOS-ONLY render-resolution knob for the fillrate-vs-encoding A/B. Multiplies the CAMetalLayer
@@ -918,9 +918,19 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     }
     for (const TouchEvent& E : Batch) {
         switch (E.Phase) {
-            case TouchEvent::Began: [self replayTouchBegan:E]; break;
-            case TouchEvent::Moved: [self replayTouchMoved:E]; break;
-            case TouchEvent::Ended: [self replayTouchEnded:E]; break;
+            case Lur::Input::ETouchPhase::Began: [self replayTouchBegan:E]; break;
+            case Lur::Input::ETouchPhase::Moved: [self replayTouchMoved:E]; break;
+            case Lur::Input::ETouchPhase::Ended: [self replayTouchEnded:E]; break;
+            // Unreachable by construction: this VC does not implement -touchesCancelled:, so nothing
+            // ever pushes it. Kept explicit so the switch is exhaustive over the shared enum rather
+            // than silently relying on that.
+            //
+            // NOT wired to Ended on purpose — a cancelled touch is UIKit saying "this gesture did not
+            // happen" (a system alert, a call), and routing it to Ended would COMMIT the placement the
+            // player never completed. Handling it properly means cancelling the drag, which is a real
+            // behaviour change and wants a device to confirm; it is the same gap as before this change,
+            // now merely visible.
+            case Lur::Input::ETouchPhase::Cancelled: break;
         }
     }
 }
@@ -1357,39 +1367,39 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // _Snap/_DevGesture — render-owned now) happens in the replay* methods below, drained once per render frame.
 // The timestamp is captured HERE at the real touch time so the console gesture's hold/chain windows stay
 // correct even though the replay runs up to one frame later.
-- (void)pushTouch:(TouchEvent::EPhase)Phase touches:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
+- (void)pushTouch:(Lur::Input::ETouchPhase)Phase touches:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
     if (!_RH.IsReady()) return;
     const CGFloat S = [self metalLayer].contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
     TouchEvent E;
-    E.Phase = static_cast<uint8_t>(Phase);
-    E.X = static_cast<float>(P.x * S);
-    E.Y = static_cast<float>(P.y * S);
+    E.Phase = Phase;
+    E.XPx = static_cast<float>(P.x * S);
+    E.YPx = static_cast<float>(P.y * S);
     E.PointerCount = static_cast<int>(event.allTouches.count);
-    E.Ns = NowNs();
+    E.TimeNs = NowNs();
     std::lock_guard<std::mutex> Lk(_TouchMx);
     _TouchQ.push_back(E);
 }
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    [self pushTouch:TouchEvent::Began touches:touches event:event];
+    [self pushTouch:Lur::Input::ETouchPhase::Began touches:touches event:event];
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    [self pushTouch:TouchEvent::Moved touches:touches event:event];
+    [self pushTouch:Lur::Input::ETouchPhase::Moved touches:touches event:event];
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-    [self pushTouch:TouchEvent::Ended touches:touches event:event];
+    [self pushTouch:Lur::Input::ETouchPhase::Ended touches:touches event:event];
 }
 
 // ---- RENDER-thread replay of the exact hit-test logic (was inline in the UIKit handlers pre-#183). Reads
 // the published drawable size (_RH.Width()/Height()), not the layer, and touches _View/_Cam/_DevGesture/_Snap
 // freely as their owner. Behaviour is verbatim — only the thread and the coordinate source changed. ----
 - (void)replayTouchBegan:(const TouchEvent&)E {
-    const float X = E.X, Y = E.Y;
+    const float X = E.XPx, Y = E.YPx;
     _DownX = X; _DownY = Y;
 #if !LUR_SHIPPING
     // #151: the SHARED console recognizer (Lur::Input::ConsoleGesture). Pointer count + timestamp came
     // from the UIKit handler; feed them straight in.
-    _DevGesture.PointersDown(E.PointerCount, E.Ns);
+    _DevGesture.PointersDown(E.PointerCount, E.TimeNs);
     // While the console is open it OWNS the pointer — a drag scrolls the cvar list and a still release is a
     // DevTap. Swallowing the gesture is the point: the panel sits over a LIVE match.
     if (_View.DevOverlayOpen()) { _DevGesture.DragBegin(Y); return; }
@@ -1422,7 +1432,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     }
 }
 - (void)replayTouchMoved:(const TouchEvent&)E {
-    const float X = E.X, Y = E.Y;
+    const float X = E.XPx, Y = E.YPx;
     const float W = static_cast<float>(_RH.Width());
     const float H = static_cast<float>(_RH.Height());
 #if !LUR_SHIPPING
@@ -1440,7 +1450,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     }
 }
 - (void)replayTouchEnded:(const TouchEvent&)E {
-    const float X = E.X, Y = E.Y;
+    const float X = E.XPx, Y = E.YPx;
     const float W = static_cast<float>(_RH.Width());
     const float H = static_cast<float>(_RH.Height());
 #if !LUR_SHIPPING
@@ -1468,9 +1478,9 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     _Cam.End();
 #if !LUR_SHIPPING
     // #151: two-finger triple-tap OPENS the console, with the same windows Android uses because it is the
-    // same recognizer. The lift timestamp is E.Ns — the real touch time captured in the UIKit handler.
+    // same recognizer. The lift timestamp is E.TimeNs — the real touch time captured in the UIKit handler.
     const bool WasTwoFinger = _DevGesture.TwoFingerActive();
-    if (_DevGesture.LiftAndShouldOpen(E.Ns)) {
+    if (_DevGesture.LiftAndShouldOpen(E.TimeNs)) {
         _View.SetDevOverlayOpen(true);
         os_log(OS_LOG_DEFAULT, "OnlyRps: dev console opened (two-finger triple-tap, #151)");
         return;
