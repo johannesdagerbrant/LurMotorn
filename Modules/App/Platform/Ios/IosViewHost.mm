@@ -63,7 +63,14 @@ UIView* RebuildViewHost(UIViewController* Vc, Class ViewClass) {
                      Lur::Core::LogTag);
     }
 
+    // Carry the OUTGOING view's touch configuration across. A rebuild replaces the view wholesale,
+    // so anything the game configured on it is silently back at UIKit's defaults afterwards — and
+    // multipleTouchEnabled defaulting to NO means a #73 heal would quietly cost RPS its two-finger
+    // console gesture, with nothing logged and no way to tell it from the gesture "just not working".
+    const BOOL WantsMultiTouch = Vc.view != nil ? Vc.view.multipleTouchEnabled : NO;
+
     UIView* NewView = [[ViewClass alloc] initWithFrame:UIScreen.mainScreen.bounds];
+    NewView.multipleTouchEnabled = WantsMultiTouch;
     Vc.view = NewView;
     // ViewClass must be a UIView subclass whose +layerClass is CAMetalLayer — MoltenVK needs that layer to
     // make a VkSurfaceKHR. Trap rather than cast blindly: the wrong class here yields a plain CALayer, and

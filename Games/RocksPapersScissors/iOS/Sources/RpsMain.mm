@@ -1378,6 +1378,17 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // correct even though the replay runs up to one frame later.
 - (void)pushTouch:(Lur::Input::ETouchPhase)Phase touches:(NSSet<UITouch*>*)touches event:(UIEvent*)event {
     if (!_RH.IsReady()) return;
+#if !LUR_SHIPPING
+    // Report what UIKit actually hands us on every finger DOWN. The console gesture needs a count of
+    // 2 and the iPhone was never producing one; multipleTouchEnabled is printed alongside so the
+    // next read says whether the opt-in took, rather than leaving it to be inferred from silence.
+    // Down-only, so a drag does not spam.
+    if (Phase == Lur::Input::ETouchPhase::Began) {
+        Lur::Log::Info("touch DOWN: allTouches=%d thisSet=%d multiTouch=%d",
+                       static_cast<int>(event.allTouches.count), static_cast<int>(touches.count),
+                       self.view.multipleTouchEnabled ? 1 : 0);
+    }
+#endif
     const CGFloat S = [self metalLayer].contentsScale;
     const CGPoint P = [touches.anyObject locationInView:self.view];
     TouchEvent E;
