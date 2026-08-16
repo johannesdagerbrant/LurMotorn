@@ -840,9 +840,31 @@ int RunRecDiff(const char* PathA, const char* PathB) {
         return Out;
     };
     const uint32_t Last = A.EndTick > B.EndTick ? A.EndTick : B.EndTick;
+    // #208: a recording may START MID-MATCH. A peer that was killed and rejoined resumes at the
+    // resync frontier, so its file legitimately has no tick 0 — and comparing from 0 then reports
+    // "EVENTS differ at tick 0: A has 0, B has 2 ... the WIRE dropped or duplicated a frame" about a
+    // perfectly healthy rejoin. That is the tool inventing a transport bug out of its own choice of
+    // starting point, which is the failure mode this diff exists to avoid.
+    //
+    // Coverage is keyed off the first HASH, not the first event: a from-start recording routinely
+    // has no events for dozens of ticks, so "no events yet" says nothing about whether the file
+    // covers that tick. Hashes are written on a fixed cadence, so the first one marks where the
+    // file's knowledge begins. No hashes at all (solo, or pre-#159) means assume from the top. The
+    // hash comparison below needs no such clamp — it already intersects by tick.
+    auto FirstCovered = [](const Rps::MatchRecording& R) -> uint32_t {
+        return R.Hashes.empty() ? 0u : R.Hashes.front().Tick;
+    };
+    const uint32_t FirstA = FirstCovered(A), FirstB = FirstCovered(B);
+    const uint32_t Begin = FirstA > FirstB ? FirstA : FirstB;
+    if (Begin > 0) {
+        // Say it, rather than quietly comparing less than the reader assumes.
+        Lur::Log::Info("  note: comparing from tick %u — %s starts mid-match (A from %u, B from %u), "
+                       "so ticks below that exist in only one file", Begin,
+                       FirstA > FirstB ? PathA : PathB, FirstA, FirstB);
+    }
     std::size_t Ia = 0, Ib = 0;
     int32_t FirstEventDiff = -1;
-    for (uint32_t T = 0; T <= Last; ++T) {
+    for (uint32_t T = Begin; T <= Last; ++T) {
         while (Ia < A.Events.size() && A.Events[Ia].Tick < T) ++Ia;
         while (Ib < B.Events.size() && B.Events[Ib].Tick < T) ++Ib;
         const std::vector<Rps::InputEvent> Ea = EventsAt(A, Ia, T), Eb = EventsAt(B, Ib, T);
