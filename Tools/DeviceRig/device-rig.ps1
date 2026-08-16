@@ -159,10 +159,23 @@ function Invoke-Bounded {
 $script:TmoAdb    = 30    # any adb round-trip (install has its own, below)
 $script:TmoPmd    = 60    # lockdown-level pymobiledevice3 (usbmux, apps push/rm)
 $script:TmoPmdDev = 45    # `developer dvt` over the userspace tunnel
+$script:TmoRecPull = 600  # pulling a whole app container: grows with every recording ever written
 
 # --- Android peer (adb) ------------------------------------------------------------
 $adb = (Get-Command adb -ErrorAction SilentlyContinue).Source
 function Adb { Invoke-Bounded -What "adb $($args -join ' ')" -TimeoutSec $script:TmoAdb -Exe $adb -CmdArgs $args }
+# Adb returns the WHOLE stdout as ONE string (Invoke-Bounded uses Get-Content -Raw). Piping that
+# straight into ForEach-Object/Where-Object therefore sees a single multi-line blob, not lines, and
+# any per-line filter silently matches nothing. Two callers already knew and split by hand; the
+# third (Pull-Rec-Android) did not, and reported "pulled 0 recording(s)" from a device holding 788
+# of them — then the diff ran on three-week-old files and read as a real result (#207).
+#
+# So the split lives HERE now, once, where a fourth caller cannot forget it.
+function AdbLines {
+    $out = Invoke-Bounded -What "adb $($args -join ' ')" -TimeoutSec $script:TmoAdb -Exe $adb -CmdArgs $args
+    if (-not $out) { return @() }
+    return @($out -split "`r?`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+}
 # For adb calls whose native stderr is benign (monkey/force-stop): PS 5.1 turns ANY native
 # stderr into a fatal NativeCommandError under ErrorActionPreference=Stop, so relax it here.
 function AdbQuiet {
@@ -340,8 +353,13 @@ function ClearHistory-Ios {
 # directory whole and handles the space itself.
 function Pull-Rec-Android($dest) {
     New-Item -ItemType Directory -Force -Path $dest | Out-Null
-    $names = @(Adb shell run-as $App.AndroidPackage ls files/ 2>$null |
-               ForEach-Object { $_.Trim() } | Where-Object { $_ -like $App.RecGlob })
+    $all = @(AdbLines shell run-as $App.AndroidPackage ls files/)
+    $names = @($all | Where-Object { $_ -like $App.RecGlob })
+    if ($all.Count -eq 0) {
+        Warn "android: 'run-as $($App.AndroidPackage) ls files/' returned NOTHING - the app dir could not be listed (wrong/ambiguous serial, or a non-debuggable build). NOT a device with no recordings."
+    } elseif ($names.Count -eq 0) {
+        Warn "android: $($all.Count) file(s) in the app dir but none match '$($App.RecGlob)' - the recorder has never written here."
+    }
     foreach ($n in $names) {
         # cmd's `>` is byte-exact. PowerShell's would re-encode and rewrite the line endings,
         # and the .rec parser reads lines — a stray CR corrupts the trailing `end <r> <tick>`.
@@ -357,7 +375,23 @@ function Pull-Rec-Ios($dest) {
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     # The whole directory in one call — no per-file quoting, and no listing step to get wrong.
-    PmdQuiet apps pull $App.IosBundleId 'Library/Application Support' $stage
+    #
+    # ...but it needs its OWN timeout. This pulls an entire app container, which grows with every
+    # recording ever written; on the test pair it comfortably exceeds the 60 s lockdown default that
+    # PmdQuiet applies. Being killed mid-pull left the staging dir empty, which then reported as
+    # "pulled 0 recording(s)" — indistinguishable from a device that has none (#207).
+    # NOTE THE EMBEDDED QUOTES on the container path. Invoke-Bounded goes through Start-Process
+    # -ArgumentList, which joins its elements with spaces and does NOT quote them — so a bare
+    # 'Library/Application Support' reached pymobiledevice3 as TWO arguments and it pulled nothing.
+    # Measured: unquoted -> 0 files, quoted -> 226 (#207). This was the iOS half of "pulled 0".
+    $before = $script:TimedOut.Count
+    Invoke-Bounded -What "pymobiledevice3 apps pull $($App.IosBundleId) (container)" `
+                   -TimeoutSec $script:TmoRecPull -Exe 'python' `
+                   -CmdArgs (@('-m','pymobiledevice3','apps','pull',$App.IosBundleId,
+                               '"Library/Application Support"',$stage)) -Quiet -NoThrow | Out-Null
+    if ($script:TimedOut.Count -gt $before) {
+        Warn "ios: the container pull TIMED OUT after $($script:TmoRecPull)s - anything below is incomplete, and a count of 0 here means 'not fetched', not 'none exist'."
+    }
     $files = @(Get-ChildItem -Path $stage -Recurse -File -Filter $App.RecGlob -ErrorAction SilentlyContinue)
     foreach ($f in $files) { Copy-Item $f.FullName (Join-Path $dest $f.Name) -Force }
     Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -966,11 +1000,25 @@ switch ($Action) {
         $recRoot = if ($RecDir) { $RecDir } else { Join-Path $root 'dist\rec' }
         $andDir = Join-Path $recRoot 'android'
         $iosDir = Join-Path $recRoot 'ios'
-        if ($doAndroid) { Ensure-Android; [void](Pull-Rec-Android $andDir) }
-        if ($doIos)     { Ensure-Ios;     [void](Pull-Rec-Ios     $iosDir) }
+        $nAnd = 0; $nIos = 0
+        if ($doAndroid) { Ensure-Android; $nAnd = (Pull-Rec-Android $andDir) }
+        if ($doIos)     { Ensure-Ios;     $nIos = (Pull-Rec-Ios     $iosDir) }
         # Diffing is the POINT of pulling both — a pair sitting undiffed on disk is the same
         # dead end as a pair sitting on two phones, so it happens without a second command.
-        if ($doAndroid -and $doIos) { Diff-Rec-Pairs $andDir $iosDir }
+        #
+        # But it must NOT happen when this run fetched nothing. The rec output dir is a persistent
+        # directory, so diffing after a failed pull silently compares whatever was left there by an
+        # earlier session — on 2026-08-16 that was three-week-old captures, and the confident-looking
+        # output was read as a real verdict about a soak that had just run (#207). A pull that
+        # fetched nothing is a TOOL FAILURE and has to read as one.
+        if ($doAndroid -and $doIos) {
+            if ($nAnd -eq 0 -or $nIos -eq 0) {
+                Warn "pullrec: fetched $nAnd android / $nIos ios recording(s) this run - SKIPPING the diff."
+                Warn "pullrec: $recRoot still holds earlier sessions' files; diffing them now would compare the WRONG matches. Fix the pull (see the warnings above) and re-run."
+            } else {
+                Diff-Rec-Pairs $andDir $iosDir
+            }
+        }
     }
     'run'     { Invoke-Run $true }
     'cycle'   {
