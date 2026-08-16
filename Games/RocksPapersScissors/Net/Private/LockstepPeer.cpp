@@ -145,6 +145,7 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     BuildMismatch_ = !PeerFingerprint_.empty() && PeerFingerprint_ != Lur::BuildFingerprint();
     BadBuildLogged_ = false;
 #endif
+    Inited_ = true;   // #208: only now may a match-live edge be announced
     BeginMatch(Seed);
 }
 
@@ -1214,7 +1215,12 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     //
     // Placed after ReseedFrom above, so the sim, the frontier and the event history are all
     // consistent before anyone is invited to open a file describing them.
-    if (!WasStarted && StartSink_ != nullptr) StartSink_(StartSinkCtx_);
+    //
+    // Inited_ is the other half, and it is not paranoia: on the pair the resync arrived 245 ms
+    // BEFORE the main called Init, so this fired from a default-constructed peer and the recording
+    // header was written as `seed 0 / tier -1 human 0`. The file existed and recdiff rejected it —
+    // recorded, still not diffable. The post-Init rebuild announces instead, with a real header.
+    if (Inited_ && !WasStarted && StartSink_ != nullptr) StartSink_(StartSinkCtx_);
 #endif
 }
 

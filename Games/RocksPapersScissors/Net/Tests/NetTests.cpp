@@ -2464,6 +2464,15 @@ struct StartOrderProbe {
     uint32_t FirstTick = 0xFFFFFFFFu;
 };
 void OnStartProbe(void* C) { ++static_cast<StartOrderProbe*>(C)->Starts; }
+// #208: the sink is what makes a main open a recording, and the HEADER it writes is read straight
+// off the sim at that instant. So "was the sink fired at a sane moment" is testable as "what would
+// the header have said". A seed of 0 there means an unpairable file.
+struct StartHeaderProbe { int Starts = 0; uint64_t SeedAtStart = 0; const LockstepPeer* Peer = nullptr; };
+void OnStartHeaderProbe(void* C) {
+    StartHeaderProbe* P = static_cast<StartHeaderProbe*>(C);
+    ++P->Starts;
+    P->SeedAtStart = P->Peer ? P->Peer->GetSim().Seed : 0;
+}
 void OnTickProbe(void* C, uint32_t Tick, const InputEvent*, int, uint64_t) {
     StartOrderProbe* P = static_cast<StartOrderProbe*>(C);
     if (P->Starts == 0) ++P->TicksBeforeFirstStart;
@@ -2558,6 +2567,45 @@ static void TestRejoinAnnouncesTheMatchIsLive() {
 
 // A resync DURING a live match is a repair, not a start. Re-announcing there would open a second
 // recording for a match already being recorded, and would make "match started" mean two things.
+// #208 second half: the sink must not fire on a peer that has not been Init'd for a match.
+//
+// On the device the resync arrived 245 ms BEFORE the main called Lp.Init — logs, in order:
+//   14:14:14.607  REC linked -> rps-vs-...-141414-1.rec
+//   14:14:14.853  linked - lockstep started (team 1, peer ...)
+// so RebuildFromHistory ran on a still-default peer and the recording header was written from it:
+// `seed 0 / tier -1 human 0`. recdiff then refuses the file outright ("is not a valid recording"),
+// so the rejoin was recorded and STILL not diffable. A header is only as good as the moment it is
+// taken, and announcing from an uninitialised peer is the one moment it cannot be.
+static void TestRejoinHeaderCarriesTheRealSeed() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x52505353, 0, Enqueue, &Qa);
+    B.Init(0x52505353, 1, Enqueue, &Qb);
+    for (int I = 0; I < 40; ++I) {
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    CHECK(A.ExecTick() > 20);
+
+    Outbox Qb2;
+    LockstepPeer B2;
+    StartHeaderProbe P;
+    P.Peer = &B2;
+    B2.SetMatchStartSink(OnStartHeaderProbe, &P);
+    B2.Init(0x52505353, 1, Enqueue, &Qb2);
+
+    A.BeginResync();
+    B2.BeginResync();
+    Deliver(Qa, B2);
+    Deliver(Qb2, A);
+
+    CHECK(B2.MatchStarted());
+    CHECK(P.Starts == 1);
+    // The whole point: a header written now must name the match, not zero.
+    CHECK(P.SeedAtStart == 0x52505353);
+}
+
 static void TestMidMatchResyncDoesNotReAnnounce() {
     Outbox Qa, Qb;
     LockstepPeer A, B;
@@ -2794,6 +2842,7 @@ int main() {
     TestLockstepColdRejoinResync();
     TestRejoinAnnouncesTheMatchIsLive();
     TestMidMatchResyncDoesNotReAnnounce();
+    TestRejoinHeaderCarriesTheRealSeed();
     TestResyncStallCannotWedgeSurvivor();
     TestResyncReoffersToBehindPeer();
     TestLockstepOverSessionLoopback();

@@ -532,6 +532,11 @@ private:
     TickSink Sink_ = nullptr;                        // #159: per-tick recording sink (a main's recorder)
     void*    SinkCtx_ = nullptr;
     MatchStartSink StartSink_ = nullptr;             // #180: match-became-live edge (opens the file)
+    // #208: has Init() run for a real match? A resync can reach this object BEFORE the main has
+    // called Init (measured on the pair: the rebuild ran 245 ms before "lockstep started"), and a
+    // match-live edge announced from a still-default peer makes the main write a recording header
+    // off an empty sim — `seed 0 / human 0`, which recdiff refuses outright.
+    bool Inited_ = false;
     void*          StartSinkCtx_ = nullptr;
 #endif
 
