@@ -1175,6 +1175,10 @@ void LockstepPeer::BeginResync() {
 }
 
 void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
+    // #208: was this peer already in a live match? A cold rejoin adopts one that is ALREADY running,
+    // and that transition has to be announced exactly like a match start or the rejoiner records
+    // nothing — see the sink call at the end of this function.
+    const bool WasStarted = MatchStarted_;
     const uint64_t S = TheSim.Seed;
     // #147: ResetSim, NOT TheSim.Init — a rebuild must start from the MERGED cvar set. Re-latching
     // the local globals here silently un-converged an already-synced match on every reconnect (the
@@ -1198,6 +1202,20 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     // history at tick 0), so the ready gate is already satisfied — don't hold the clock.
     MatchStarted_ = true;
     LocalReady_ = PeerReady_ = LocalCampSent_ = true;
+#if LUR_INTERNAL
+    // #208: TWO places make a match live, and for a long time only one said so. StartMatch announces
+    // the edge (#180); this path — the cold rejoin — did not, so a phone that was killed mid-match
+    // and relaunched played on perfectly and recorded NOTHING. Only the survivor had a file for that
+    // window, which made the rejoin the one thing recdiff could never check.
+    //
+    // Fires on the TRANSITION only. A mid-match resync also lands here, and re-announcing there
+    // would claim a start that did not happen — the main's per-match-index guard would absorb it,
+    // but "the match started" has to keep meaning one thing.
+    //
+    // Placed after ReseedFrom above, so the sim, the frontier and the event history are all
+    // consistent before anyone is invited to open a file describing them.
+    if (!WasStarted && StartSink_ != nullptr) StartSink_(StartSinkCtx_);
+#endif
 }
 
 void LockstepPeer::ReseedFrom(uint32_t Frontier) {

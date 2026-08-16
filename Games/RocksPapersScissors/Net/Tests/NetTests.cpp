@@ -2498,6 +2498,92 @@ static void TestMatchStartEdgePrecedesTickZero() {
     CHECK(Pb.FirstTick == 0);
 }
 
+// #208: a peer that REJOINS a running match must be told the match is live, or it records nothing.
+//
+// Found on the pair (2026-08-16): kill one phone mid-match, relaunch it, and it rejoins and plays on
+// perfectly — LOCKSTEP, ticks advancing, desync=0 — while writing no linked recording at all. Only
+// the survivor has a file for that window, so the cold-rejoin path, which is one of the most
+// interesting things this netcode does, is the one window that can never be peer-diffed.
+//
+// The cause is that TWO places make a match live and only one announced it. StartMatch fires the
+// match-start sink (#180); RebuildFromHistory, which is how a cold rejoin resumes an already-running
+// match (#139), just set MatchStarted_ = true and said nothing.
+//
+// The sink must fire on the TRANSITION, not on every rebuild: a mid-match resync also runs
+// RebuildFromHistory, and re-announcing there would be a lie (nothing started) even though the
+// main's own idempotence guard would absorb it.
+static void TestRejoinAnnouncesTheMatchIsLive() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    A.Init(0x208, 0, Enqueue, &Qa);
+    B.Init(0x208, 1, Enqueue, &Qb);
+
+    for (int I = 0; I < 40; ++I) {
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+    const uint32_t F = A.ExecTick();
+    CHECK(F > 20);
+
+    // B dies and relaunches: a brand-new peer that has never started a match.
+    Outbox Qb2;
+    LockstepPeer B2;
+    StartOrderProbe Pb2;
+    B2.Init(0x208, 1, Enqueue, &Qb2);
+    B2.SetMatchStartSink(OnStartProbe, &Pb2);
+    B2.SetTickSink(OnTickProbe, &Pb2);
+    CHECK(Pb2.Starts == 0);
+
+    A.BeginResync();
+    B2.BeginResync();
+    Deliver(Qa, B2);
+    Deliver(Qb2, A);
+
+    // THE POINT: the rejoiner has adopted a live match, so its recorder must have been opened.
+    CHECK(B2.MatchStarted());
+    CHECK(Pb2.Starts == 1);
+
+    // ...and no confirmed tick may reach the recorder before it was told to open, exactly as at a
+    // normal match start — otherwise the first ticks of the rejoin are dropped on the floor.
+    for (int I = 0; I < 30; ++I) {
+        DriveInput(A, 0, I); DriveInput(B2, 1, I);
+        A.Tick(OneTickNs); B2.Tick(OneTickNs);
+        Deliver(Qa, B2); Deliver(Qb2, A);
+    }
+    CHECK(Pb2.TicksBeforeFirstStart == 0);
+    CHECK(Pb2.TicksSeen > 0);
+    CHECK(Pb2.Starts == 1);   // still exactly once: later resyncs must not re-announce
+}
+
+// A resync DURING a live match is a repair, not a start. Re-announcing there would open a second
+// recording for a match already being recorded, and would make "match started" mean two things.
+static void TestMidMatchResyncDoesNotReAnnounce() {
+    Outbox Qa, Qb;
+    LockstepPeer A, B;
+    StartOrderProbe Pb;
+    A.Init(0x209, 0, Enqueue, &Qa);
+    B.Init(0x209, 1, Enqueue, &Qb);
+    B.SetMatchStartSink(OnStartProbe, &Pb);
+
+    PlaceCampsAndStart(A, B, Qa, Qb);
+    CHECK(Pb.Starts == 1);
+
+    for (int I = 0; I < 25; ++I) {
+        DriveInput(A, 0, I); DriveInput(B, 1, I);
+        A.Tick(OneTickNs); B.Tick(OneTickNs);
+        Deliver(Qa, B); Deliver(Qb, A);
+    }
+
+    A.BeginResync();
+    B.BeginResync();
+    Deliver(Qa, B);
+    Deliver(Qb, A);
+
+    CHECK(B.MatchStarted());
+    CHECK(Pb.Starts == 1);   // the match did not start again; it was already live
+}
+
 // ...and again across the #149 post-match restart, since each match gets its own file: an edge that
 // fired only for the first match would leave every later one unrecorded (the shape of the iOS
 // zero-init bug above, arrived at from the other direction).
@@ -2706,6 +2792,8 @@ int main() {
     TestLockstepDetectsDivergence();
     TestRollbackRidesThroughPeerBlipAndResumes();
     TestLockstepColdRejoinResync();
+    TestRejoinAnnouncesTheMatchIsLive();
+    TestMidMatchResyncDoesNotReAnnounce();
     TestResyncStallCannotWedgeSurvivor();
     TestResyncReoffersToBehindPeer();
     TestLockstepOverSessionLoopback();
