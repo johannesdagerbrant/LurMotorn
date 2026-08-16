@@ -41,6 +41,7 @@
 #include "Rps/AgentControl.h"  // LUR_AGENT: assistant remote-control command grammar
 #include "Rps/AiController.h"
 #include "Rps/MatchRecord.h"   // #144 dev-only solo flight recorder
+#include "Rps/AgentCommandRouter.h"  // #43 section E: the shared agent verb table (LUR_AGENT)
 #include "Rps/LockstepPeer.h"
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
 #include "Rps/SessionWiring.h" // the ONE Session->LockstepPeer routing table (#160)
@@ -126,6 +127,11 @@ struct AppState {
     // Agent `gesture`: the console recognizer lives on the GLUE thread (it owns the touch stream), so
     // a sim-thread command hands the request across rather than touching it directly.
     std::atomic<bool>       AgentGestureRequest{false};
+    // -1 = nothing pending, 0/1 = the console should close/open. The GLUE thread applies it, because
+    // it owns View; the sim thread only publishes. `console` used to write View directly from the
+    // sim thread, which is a data race on a plain bool (#43 section E).
+    std::atomic<int>        AgentConsoleReq{-1};
+    Rps::AgentCommandRouter AgentRouter;
 #endif
 
     // #185 touch->photon instrumentation. The EVENT time of the newest touch not yet reflected on
@@ -212,101 +218,23 @@ void RouteLocalEvent(AppState* S, const Rps::InputEvent& E) {
 // on an invalid drop, so a human physically cannot produce a placement whose coordinates equal an
 // existing camp's — which is precisely the #160 collision. Reproducing that bug on hardware requires
 // bypassing the snap, and this is the bypass.
-void ApplyAgentCommand(AppState& S, const Rps::AgentCommand& Cmd) {
-    const uint8_t Team = S.LinkedTeam.load(std::memory_order_relaxed);
-    // #170: name the misroute instead of letting it pass. Input produced while the app is still in its
-    // opening AI match goes to the SOLO sim, so the peer sits at stall=1 waiting for a camp that was
-    // never sent — and every step of that reports success. Session is sim-thread-owned and this runs on
-    // the sim thread, so IsReady() is safe to ask here.
-    auto WarnIfSolo = [&S](const char* What) {
-        if (!S.SoloActive.load(std::memory_order_acquire)) return;
-        if (S.Host.Session().IsReady())
-            LOGE("AGENT %s -> the SOLO sim, not the linked peer (a peer IS linked). The other phone "
-                 "will wait forever. Send `linked` first, then re-send this.", What);
-        else
-            LOGI("AGENT %s -> the solo sim (no peer linked yet)", What);
-    };
-    switch (Cmd.Kind) {
-        case Rps::EAgentCmd::Place: {
-            const Rps::InputEvent E = Rps::InputEvent::Place(
-                Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
-            LOGI("AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A, Cmd.B,
-                 static_cast<unsigned>(Team));
-            WarnIfSolo("place");
-            RouteLocalEvent(&S, E);
-            break;
-        }
-        case Rps::EAgentCmd::Queue:
-            LOGI("AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
-            WarnIfSolo("queue");
-            RouteLocalEvent(&S, Rps::InputEvent::Queue(Team, Cmd.A, Cmd.B));
-            break;
-        case Rps::EAgentCmd::Stress: {
-            // #162's load scenario. Writes the sim directly rather than going through input, because
-            // the point is to reach a unit count the economy would take an hour to fund.
-            //
-            // Whichever sim is live — SOLO is the one to use for a clean PERF measurement, because
-            // filling only this peer diverges a linked pair by construction and the #161 recovery then
-            // fires in the middle of the numbers. Linked is the right one for the COLLAPSE scenario,
-            // where the divergence is part of what is being tested.
-            Rps::Sim& Sm = S.SoloActive.load(std::memory_order_acquire)
-                               ? S.SoloSim
-                               : const_cast<Rps::Sim&>(S.Lp.GetSim());
-            LOGI("AGENT stress %d per team, type %d (solo=%d, count %d -> ...)", Cmd.A, Cmd.B,
-                 S.SoloActive.load(std::memory_order_relaxed) ? 1 : 0, Sm.Count);
-            Sm.StressFill(Cmd.A, static_cast<uint8_t>(Cmd.B));
-            LOGI("AGENT stress done, count=%d", Sm.Count);
-            break;
-        }
-        case Rps::EAgentCmd::Corrupt:
-            LOGI("AGENT corrupt gold %+d — forcing a divergence (#161)", Cmd.A);
-            S.Lp.AgentCorruptState(Cmd.A);
-            break;
-        case Rps::EAgentCmd::DropTx:
-            LOGI("AGENT drop next %d produced frame(s) — simulating #163's half-open link", Cmd.A);
-            S.Lp.AgentDropOutgoing(Cmd.A);
-            break;
-        case Rps::EAgentCmd::Console:
-            LOGI("AGENT console %d", Cmd.A);
-            S.View.SetDevOverlayOpen(Cmd.A != 0);
-            break;
-        case Rps::EAgentCmd::Gesture:
-            // Drives the SHARED recognizer the way a real touch stream would, so it exercises the
-            // #151 wiring (recognizer -> SetDevOverlayOpen) without needing multitouch — which is
-            // unavailable here anyway (SELinux blocks evdev injection on this device).
-            LOGI("AGENT gesture: synthetic two-finger triple-tap");
-            S.AgentGestureRequest.store(true, std::memory_order_release);
-            break;
-        case Rps::EAgentCmd::KillOwn: {
-            // #160 setup: free the ground under our own camp so it can be REBUILT on the same square.
-            // That is the only route by which a produced placement can carry coordinates equal to the
-            // opening camp's, which is what the old payload-sniffing re-send check mistook for a
-            // re-send. Kills via Hp so the sim's own death handling runs.
-            Rps::Sim& Sm = const_cast<Rps::Sim&>(S.Lp.GetSim());
-            for (int32_t I = 0; I < Sm.Count; ++I) {
-                if (!Sm.IsAlive(I) || Sm.Team[I] != Team) continue;
-                if (!Sm.IsBuilding(I) || Sm.IsHomeBase(I)) continue;
-                if (Sm.Type[I] != static_cast<uint8_t>(Cmd.A & 3)) continue;
-                LOGI("AGENT killown slot=%d type=%d at (%d,%d)", I, Sm.Type[I], Sm.PosX[I].ToInt(),
-                     Sm.PosY[I].ToInt());
-                Sm.Hp[I] = 0;
-                break;
-            }
-            break;
-        }
-        case Rps::EAgentCmd::Linked:
-            // #170: the ONE route into the linked session a harness can rely on. It sets the same flag
-            // the selector's "Linked opponent" row sets, and that route is deliberately exempt from the
-            // `!HasMinerCamp(0)` gate the AUTO-switch carries — so it still works after a stray `place`
-            // has put a camp in the solo sim, which is the state the auto-switch can never leave.
-            // The flag is LATCHED (see the switch site): sending this before the link is up is fine,
-            // it takes effect on the frame the peer becomes ready.
-            LOGI("AGENT linked -> requesting the switch to the linked opponent");
-            S.SwitchToLinked.store(true, std::memory_order_release);
-            break;
-        case Rps::EAgentCmd::None:
-            break;
-    }
+// #43 section E: the verb table is Rps::AgentCommandRouter now, shared with the iOS main and
+// host-tested (rps_agent_router_tests, built with LUR_AGENT=1 — the only place this code is
+// reachable by a test at all). What is left here is the wiring only this main can supply.
+void WireAgentRouter(AppState& S) {
+    Rps::AgentHooks H;
+    H.Emit = [&S](const Rps::InputEvent& E) { RouteLocalEvent(&S, E); };
+    H.Team = [&S]() { return S.LinkedTeam.load(std::memory_order_relaxed); };
+    H.SoloActive = [&S]() { return S.SoloActive.load(std::memory_order_acquire); };
+    // Session is sim-thread-owned and the router runs on the sim thread, so this is safe to ask.
+    H.PeerReady = [&S]() { return S.Host.Session().IsReady(); };
+    H.SoloSim = [&S]() { return &S.SoloSim; };
+    // PUBLISHED, not applied: View belongs to the glue thread and DevOverlayOpen_ is a plain bool.
+    // The old code wrote it straight from the sim thread.
+    H.RequestConsole = [&S](bool On) { S.AgentConsoleReq.store(On ? 1 : 0, std::memory_order_release); };
+    H.RequestGesture = [&S]() { S.AgentGestureRequest.store(true, std::memory_order_release); };
+    H.RequestLinked = [&S]() { S.SwitchToLinked.store(true, std::memory_order_release); };
+    S.AgentRouter.Init(&S.Lp, std::move(H));
 }
 #endif
 
@@ -426,6 +354,9 @@ void android_main(android_app* App) {
     Lur::App::AndroidApp::Callbacks Cb;
     Cb.OnSurfaceReady = [&State] { OnSurfaceReady(State); };
     Cb.OnInput = [&State](AInputEvent* E) { return HandleInput(&State, E); };
+#if LUR_AGENT
+    WireAgentRouter(State);
+#endif
 
     // #43 section D. The hooks are the only part of touch handling that is genuinely per-main: where
     // a produced event goes, and how a selector pick reaches the sim thread (atomics here, because
@@ -666,7 +597,7 @@ void android_main(android_app* App) {
                 char CmdV[PROP_VALUE_MAX] = {};
                 Rps::AgentCommand Cmd;
                 if (__system_property_get("debug.lur.agent.cmd", CmdV) > 0 && AgentCtl.Poll(CmdV, Cmd))
-                    ApplyAgentCommand(State, Cmd);
+                    State.AgentRouter.Apply(Cmd);
             }
 #endif
 
@@ -1195,6 +1126,11 @@ void android_main(android_app* App) {
             State.View.SetRecovering(State.Recovering.load(std::memory_order_relaxed));
             State.View.SetLinkHalfOpen(State.LinkHalfOpen.load(std::memory_order_relaxed));  // #163
 #if LUR_AGENT
+            // Agent `console`: applied HERE, on the thread that owns View. The sim thread only
+            // publishes the request (#43 section E) — it used to write DevOverlayOpen_, a plain bool,
+            // straight across the thread boundary.
+            if (const int Want = State.AgentConsoleReq.exchange(-1, std::memory_order_acquire); Want >= 0)
+                State.View.SetDevOverlayOpen(Want != 0);
             // Agent `gesture`: feed the SHARED recognizer a synthetic two-finger triple-tap on the glue
             // thread, which is where it lives. Three taps, each inside the hold window and inside the
             // chain window, exactly as a finger pair would produce — so this proves the recognizer and

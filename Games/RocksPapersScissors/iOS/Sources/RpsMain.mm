@@ -46,6 +46,7 @@
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with Android + desktop
+#include "Rps/AgentCommandRouter.h"  // #43 section E: the shared agent verb table (LUR_AGENT)
 #include "Rps/LockstepPeer.h"
 #include "Rps/MatchRecord.h"   // #144 solo flight recorder (LUR_INTERNAL; parity with Android)
 #include "Rps/ScoreBook.h"     // persistent all-time W-L-D per AI tier / per rival
@@ -234,6 +235,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // Agent `gesture`: the console recognizer lives on the RENDER thread (it owns _DevGesture), so a
     // sim-thread command hands the request across the atomic rather than touching _DevGesture directly.
     std::atomic<bool>     _AgentGestureRequest;
+    // -1 = nothing pending, 0/1 = close/open. The RENDER thread applies it (it owns _View);
+    // the sim thread only publishes. See wireAgentRouter (#43 section E).
+    std::atomic<int>      _AgentConsoleReq;
+    Rps::AgentCommandRouter _AgentRouter;
 #endif
 
     // ---- MAIN <-> RENDER cross-thread surface (#183). The render thread owns all Vulkan; MAIN owns UIKit.
@@ -355,6 +360,8 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
         NSString* D = Docs.firstObject ?: NSTemporaryDirectory();
         _AgentCmdPath = std::string(D.UTF8String) + "/agent.cmd";
         _AgentPollNs = 0;
+        _AgentConsoleReq.store(-1, std::memory_order_relaxed);
+        [self wireAgentRouter];
         os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT CONTROL COMPILED IN (LUR_AGENT=1) — this build must not "
                "be handed to a player. Channel: %{public}s", _AgentCmdPath.c_str());
     }
@@ -546,95 +553,40 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // #170: name the misroute instead of letting it pass. Input produced while the app is still in its
 // opening AI match goes to the SOLO sim, so the peer sits at stall=1 waiting for a camp that was never
 // sent — and every step of that reports success. Mirrors WarnIfSolo in the Android main.
-- (void)warnIfSolo:(const char*)What {
-    if (!_SoloActiveAtomic.load(std::memory_order_acquire)) return;
-    if (_Host.Session().IsReady())
-        os_log_error(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the SOLO sim, not the linked peer "
-                     "(a peer IS linked). The other phone will wait forever. Send `linked` first, "
-                     "then re-send this.", What);
-    else
-        os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT %{public}s -> the solo sim (no peer linked yet)", What);
-}
 
-- (void)applyAgentCommand:(const Rps::AgentCommand&)Cmd {
-    switch (Cmd.Kind) {
-        case Rps::EAgentCmd::Place: {
-            // EXACT coordinates, which the touch UI cannot produce: drag-to-place snaps to the nearest
-            // VALID square and emits nothing on an invalid drop, so a human cannot place onto the
-            // square an existing camp occupies — and that is exactly the #160 collision.
-            const uint8_t Team = _LinkedTeam.load(std::memory_order_relaxed);
-            const Rps::InputEvent E = Rps::InputEvent::Place(
-                Team, static_cast<uint8_t>(Cmd.C & 3), Rps::F(Cmd.A), Rps::F(Cmd.B));
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT place type=%d at (%d,%d) team=%u", Cmd.C, Cmd.A,
-                   Cmd.B, static_cast<unsigned>(Team));
-            [self warnIfSolo:"place"];
-            [self placeLocal:E];
-            break;
-        }
-        case Rps::EAgentCmd::Queue:
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT queue slot=%d count=%d", Cmd.A, Cmd.B);
-            [self warnIfSolo:"queue"];
-            [self placeLocal:Rps::InputEvent::Queue(_LinkedTeam.load(std::memory_order_relaxed),
-                                                    Cmd.A, Cmd.B)];
-            break;
-        case Rps::EAgentCmd::Stress: {
-            Rps::Sim& Sm = _SoloActiveAtomic.load(std::memory_order_acquire)
-                               ? _SoloSim : const_cast<Rps::Sim&>(_Lp.GetSim());
-            Sm.StressFill(Cmd.A, static_cast<uint8_t>(Cmd.B));
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT stress %d/team type %d -> count=%d", Cmd.A, Cmd.B,
-                   Sm.Count);
-            break;
-        }
-        case Rps::EAgentCmd::Corrupt:
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT corrupt gold %+d — forcing a divergence (#161)", Cmd.A);
-            _Lp.AgentCorruptState(Cmd.A);
-            break;
-        case Rps::EAgentCmd::DropTx:
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT drop next %d produced frame(s) (#163)", Cmd.A);
-            _Lp.AgentDropOutgoing(Cmd.A);
-            break;
-        case Rps::EAgentCmd::Console:
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT console %d", Cmd.A);
-            _View.SetDevOverlayOpen(Cmd.A != 0);
-            break;
-        case Rps::EAgentCmd::Gesture:
-            // #151's real subject: drive the SHARED recognizer with a synthetic two-finger triple-tap.
-            // The recognizer lives on the MAIN thread (it owns the touch stream), so this command — on
-            // the SIM thread — hands the request across via the atomic instead of driving _DevGesture
-            // directly, exactly as Android's ApplyAgentCommand does (it can't touch the glue-owned
-            // recognizer either).
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture: synthetic two-finger triple-tap requested");
-            _AgentGestureRequest.store(true, std::memory_order_release);
-            break;
-        case Rps::EAgentCmd::KillOwn: {
-            // #160 setup: free the ground under our own camp so it can be rebuilt on the same square —
-            // the only route to a produced placement whose coordinates equal the opening camp's.
-            const uint8_t Team = _LinkedTeam.load(std::memory_order_relaxed);
-            Rps::Sim& Sm = const_cast<Rps::Sim&>(_Lp.GetSim());
-            for (int32_t I = 0; I < Sm.Count; ++I) {
-                if (!Sm.IsAlive(I) || Sm.Team[I] != Team) continue;
-                if (!Sm.IsBuilding(I) || Sm.IsHomeBase(I)) continue;
-                if (Sm.Type[I] != static_cast<uint8_t>(Cmd.A & 3)) continue;
-                os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT killown slot=%d at (%d,%d)", I,
-                       Sm.PosX[I].ToInt(), Sm.PosY[I].ToInt());
-                Sm.Hp[I] = 0;
-                break;
-            }
-            break;
-        }
-        case Rps::EAgentCmd::Linked:
-            // #170: the ONE route into the linked session a harness can rely on. It sets the same flag
-            // the selector's "Linked opponent" row sets, and that route is deliberately exempt from the
-            // `!HasMinerCamp(0)` gate the AUTO-switch carries — so it still works after a stray `place`
-            // has put a camp in the solo sim, which is the state the auto-switch can never leave.
-            // The flag is LATCHED (see the switch site): sending this before the link is up is fine,
-            // it takes effect on the frame the peer becomes ready.
-            os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT linked -> requesting the switch to the linked opponent");
-            _SwitchToLinkedAtomic.store(true, std::memory_order_release);
-            break;
-        case Rps::EAgentCmd::None:
-            break;
-    }
+// #43 section E: the verb table is Rps::AgentCommandRouter now, shared with the Android main and
+// host-tested (rps_agent_router_tests, built with LUR_AGENT=1 — the only place this code is
+// reachable by a test at all). What is left here is the wiring only this main can supply.
+- (void)wireAgentRouter {
+    Rps::AgentHooks H;
+    __weak RpsViewController* W = self;
+    H.Emit = [W](const Rps::InputEvent& E) { RpsViewController* M = W; if (M) [M placeLocal:E]; };
+    H.Team = [W]() -> uint8_t {
+        RpsViewController* M = W;
+        return M ? M->_LinkedTeam.load(std::memory_order_relaxed) : 0;
+    };
+    H.SoloActive = [W]() {
+        RpsViewController* M = W;
+        return M ? M->_SoloActiveAtomic.load(std::memory_order_acquire) : false;
+    };
+    H.PeerReady = [W]() { RpsViewController* M = W; return M ? M->_Host.Session().IsReady() : false; };
+    H.SoloSim = [W]() -> Rps::Sim* { RpsViewController* M = W; return M ? &M->_SoloSim : nullptr; };
+    // PUBLISHED, not applied: _View belongs to the RENDER thread since #183 and DevOverlayOpen_ is a
+    // plain bool. The old code wrote it straight from the sim thread — the same mistake `gesture`
+    // three cases below it had already been fixed for.
+    H.RequestConsole = [W](bool On) {
+        RpsViewController* M = W;
+        if (M) M->_AgentConsoleReq.store(On ? 1 : 0, std::memory_order_release);
+    };
+    H.RequestGesture = [W]() {
+        RpsViewController* M = W;
+        if (M) M->_AgentGestureRequest.store(true, std::memory_order_release);
+    };
+    H.RequestLinked = [W]() {
+        RpsViewController* M = W;
+        if (M) M->_SwitchToLinkedAtomic.store(true, std::memory_order_release);
+    };
+    _AgentRouter.Init(&_Lp, std::move(H));
 }
 
 // Poll the agent channel ~10x/s. Reads the whole (tiny) file each time; the sequence number in the
@@ -650,7 +602,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     std::fclose(F);
     Buf[N] = '\0';
     Rps::AgentCommand Cmd;
-    if (_AgentCtl.Poll(Buf, Cmd)) [self applyAgentCommand:Cmd];
+    if (_AgentCtl.Poll(Buf, Cmd)) _AgentRouter.Apply(Cmd);
 }
 #endif  // LUR_AGENT
 
@@ -830,6 +782,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     [self drainTouches];
 
 #if LUR_AGENT
+    // Agent `console`: applied HERE, on the thread that owns _View. The sim thread only publishes the
+    // request (#43 section E) — it used to write DevOverlayOpen_, a plain bool, across the boundary.
+    if (const int Want = _AgentConsoleReq.exchange(-1, std::memory_order_acquire); Want >= 0)
+        _View.SetDevOverlayOpen(Want != 0);
     // Agent `gesture`: feed the SHARED recognizer a synthetic two-finger triple-tap. Now on the RENDER
     // thread (it owns _DevGesture); the sim thread hands the request across via the atomic. Mirrors the
     // Android glue thread; unchanged effect, just relocated with the rest of the input state.
