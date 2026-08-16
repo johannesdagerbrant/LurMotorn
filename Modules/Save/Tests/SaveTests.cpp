@@ -108,6 +108,80 @@ static void TestListKeys() {
     CHECK(S.ListKeys().size() == 3);
 }
 
+// A save directory that does not exist yet, several levels deep, is created on first Save.
+//
+// This is the real device case, not a corner: iOS hands back ".../Application Support/OnlyRps" and
+// nothing has made it. It had NO test — I rewrote the recursive mkdir for #43 section F, broke it so
+// that only the leaf level was created, and the whole suite still passed. Every existing test used a
+// directory whose parent (the temp dir) already existed, so one mkdir was always enough.
+static void TestSaveCreatesMissingDirectoryTree() {
+    const std::string Deep = ScratchDir() + "/one/two/three";
+    Store S(Deep);
+    const std::vector<uint8_t> V = Bytes({0x11, 0x22});
+    CHECK(S.Save("k", V.data(), V.size()));   // must create one/, two/ and three/
+    CHECK(S.Load("k") == V);                  // ... and really be readable back from there
+
+    Store Reopened(Deep);                     // a fresh handle proves it is on disk, not cached
+    CHECK(Reopened.Load("k") == V);
+}
+
+// ListKeys must not report the temp file an interrupted Save leaves behind.
+//
+// Also untested until now, and also silently survivable: a stray ".tmp" key comes back as an
+// opponent whose record loads empty, so it shows up as a real peer with no history rather than as an
+// error. Written by hand rather than by crashing a Save, because the point is the LISTING rule.
+static void TestListKeysSkipsTempFiles() {
+    const std::string Root = ScratchDir();
+    Store S(Root);
+    const std::vector<uint8_t> V = Bytes({0x2A});
+    CHECK(S.Save("real", V.data(), V.size()));   // also creates Root
+
+    // "real" is all-safe characters, so its on-disk name is the key verbatim; PathFor is private and
+    // does not need opening up for a test that only needs a file sitting next to a real one.
+    const std::string Stray = (fs::path(Root) / "real.tmp").string();
+    std::FILE* F = std::fopen(Stray.c_str(), "wb");
+    CHECK(F != nullptr);
+    if (F != nullptr) {
+        std::fputc(0x2A, F);
+        std::fclose(F);
+    }
+
+    const std::vector<std::string> Got = S.ListKeys();
+    CHECK(Got.size() == 1);
+    if (Got.size() == 1) CHECK(Got[0] == "real");
+}
+
+// A subdirectory inside the save dir is not a key. Nothing creates one today, but ListKeys is a
+// directory scan and the POSIX branch cannot trust dirent::d_type (several filesystems answer
+// DT_UNKNOWN), so the stat is load-bearing rather than defensive. A directory listed as a key would
+// come back from Load as empty and read as a wiped record.
+static void TestListKeysSkipsDirectories() {
+    const std::string Root = ScratchDir();
+    Store S(Root);
+    const std::vector<uint8_t> V = Bytes({0x2A});
+    CHECK(S.Save("real", V.data(), V.size()));   // also creates Root
+
+    std::error_code Ec;
+    fs::create_directory(fs::path(Root) / "a-subdir", Ec);
+    CHECK(!Ec);
+
+    const std::vector<std::string> Got = S.ListKeys();
+    CHECK(Got.size() == 1);
+    if (Got.size() == 1) CHECK(Got[0] == "real");
+}
+
+// An empty payload round-trips as empty rather than as "absent". Save takes the zero-size branch
+// (no fwrite at all), and Load's ftell==0 path must not be confused with a missing file — they are
+// indistinguishable to a caller, which is exactly why the write path has to actually create it.
+static void TestEmptyPayloadRoundTrips() {
+    Store S(ScratchDir());
+    CHECK(S.Save("empty", nullptr, 0));
+    CHECK(S.Load("empty").empty());
+    const std::vector<std::string> Got = S.ListKeys();
+    CHECK(Got.size() == 1);            // it exists on disk even though it holds nothing
+    if (Got.size() == 1) CHECK(Got[0] == "empty");
+}
+
 // The device id is created on first call and identical on every later call — the
 // stability the stable-BLE-role fix depends on.
 static void TestDeviceIdStableWithinInstance() {
@@ -222,6 +296,10 @@ int main() {
     TestPersistsAcrossInstances();
     TestUnsafeKeys();
     TestListKeys();
+    TestSaveCreatesMissingDirectoryTree();
+    TestListKeysSkipsTempFiles();
+    TestListKeysSkipsDirectories();
+    TestEmptyPayloadRoundTrips();
     TestSyncRebind();
     TestDeviceIdStableWithinInstance();
     TestDeviceIdStableAcrossRestart();

@@ -11,9 +11,13 @@ namespace Lur::Save {
 // engine's persistence primitive (issue #17, Phase A): the device-identity GUID,
 // and later the per-opponent save records, are just blobs it reads and writes.
 //
-// Pure C++ std::filesystem so the SAME code compiles on host, Android (NDK), and
-// iOS. The app supplies the platform save directory (Android filesDir, iOS
-// Application Support); the store is otherwise platform-free.
+// The SAME code compiles on host, Android (NDK) and iOS. The app supplies the
+// platform save directory (Android filesDir, iOS Application Support); the store is
+// otherwise platform-free. Implemented on std::fopen plus a ~40-line opendir /
+// FindFirstFile shim rather than <filesystem> (#43 section F) — that header was the
+// app's largest stdlib dependency for four operations, it throws unless every call
+// site remembers the error_code overload, and on Apple platforms it is what pins the
+// iOS deployment floor at 13.
 //
 // Not thread-safe: drive it from one thread (the engine thread), like the rest of
 // the core. Keys are arbitrary UTF-8; the store maps each to one file, sanitising
