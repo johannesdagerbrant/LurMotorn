@@ -33,7 +33,7 @@
 #include "Lur/Save/DeviceId.h"
 #include "Lur/App/GameHost.h"     // #43: engine-owned identity + session lifecycle
 #include "Lur/App/IosApp.h"        // #43 section B: the shared entry point + Metal view + delegate
-#include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
+#include "Lur/App/IosViewHost.h"  // #43 section C: the whole shared #73 heal, renderer included
 #include "Lur/App/Platform.h"     // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/App/RenderHandshake.h"  // #43 section C: the MAIN<->render surface/park protocol
 #include "Lur/Save/Store.h"
@@ -656,44 +656,25 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 // so on the first activation we rebuild the whole chain against the now-live window
 // server: fresh UIWindow + fresh view/CAMetalLayer + full renderer Shutdown/Init.
 //
-// #43 section B: the UIKit half is LurRebuildViewHost, shared with chess. What stays here is what RPS
-// genuinely does differently: the render thread (#183) owns the renderer, so it must be PARKED across the
-// rebuild and handed the Shutdown/Init afterwards, and the outgoing view must outlive this method.
+// #43 section B took the UIKit half into LurRebuildViewHost; section C took the rest of the sequence into
+// LurReattachRenderHost, including the park that used to be the reason the two games could not share it.
+// What stays here is genuinely per-app: RPS holds the retiring view (its render thread destroys the old
+// VkSurfaceKHR after this returns), republishes safe-area insets, and re-arms the #103 render scale.
 - (void)reattachForActivation {
-    // Cheap check first: with no scene to host into there is nothing to heal yet, and parking the render
-    // thread to find that out would stall rendering for up to a second on every 2 s retry. The nil guard
-    // below still covers the scene vanishing between here and the rebuild.
-    if (!LurHasConnectedWindowScene()) {
-        os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach SKIPPED: no connected UIWindowScene - will retry");
-        return;
-    }
-    // #183: park the render thread BEFORE touching the layer it renders into. Bounded busy-wait on MAIN —
-    // this is a rare heal, not the hot loop; the ack normally lands within one frame (~16 ms). Proceed
-    // best-effort if it somehow doesn't park (better than wedging the heal).
-    // IsParked() is the topology decision (#43 section C): under Dedicated it is the render thread's ack,
-    // and under Inline it is true at once — so this loop is a wait on a real thread here and a no-op for a
-    // frame loop that IS this thread. Written the same way either way, which is the point.
-    _RH.RequestPark();
-    for (int I = 0; I < 250 && !_RH.IsParked(); ++I)
-        [NSThread sleepForTimeInterval:0.004];  // ~1 s cap
-    if (!_RH.IsParked())
-        os_log_error(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: render thread did not park in time — proceeding");
-
-    // Hold the OLD view (and its CAMetalLayer) alive until the render thread finishes Shutdown/Init on it —
-    // the old VkSurfaceKHR wraps that layer, and vkDestroySurfaceKHR runs on the render thread AFTER this
-    // method returns. Released on the render thread's reattach-done ack (in lifecycleTick), on MAIN, so the
-    // UIView still deallocs on the main thread. Grabbed BEFORE the rebuild, which reassigns self.view.
-    UIView* Retiring = self.view;
-    LurMetalView* NewView = (LurMetalView*)LurRebuildViewHost(self, LurMetalView.class);
-    if (NewView == nil) {  // no connected scene yet — un-park and let the tick retry
-        _RH.Resume();
-        return;
-    }
+    // #43 section C: the scene check, the park + ack wait, the outgoing-view grab, the rebuild and the
+    // arm/release are the engine's now — chess's copy of this sequence was the same one. The returned
+    // retiring view is the OLD view whose CAMetalLayer the old VkSurfaceKHR wraps; RPS must hold it,
+    // because vkDestroySurfaceKHR runs on the render thread AFTER this method returns. Released on the
+    // reattach-done ack in lifecycleTick, on MAIN, so the UIView still deallocs on the main thread.
+    UIView* Retiring = LurReattachRenderHost(self, LurMetalView.class, _RH);
+    if (Retiring == nil) return;   // too early (no scene) — the tick retries; the park was released for us
     _RetiringView = Retiring;
-    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
 
-    // Publish the fresh layer + size + insets, record the precondition, then hand the Shutdown/Init to the
-    // render thread and RESUME it — it re-inits against the new surface and signals the reattach done.
+    // Per-app work the engine has no business knowing about. Note this now runs AFTER the reinit is armed
+    // rather than before: the render thread's Shutdown+Init takes far longer than these three stores, so
+    // the new insets land first in practice, and one frame at the old insets is cosmetic either way.
+    LurMetalView* NewView = (LurMetalView*)self.view;
+    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
     const UIEdgeInsets Sa = NewView.safeAreaInsets;
     _InsetTopPx.store(static_cast<int32_t>(Sa.top * Layer.contentsScale), std::memory_order_relaxed);
     _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Layer.contentsScale), std::memory_order_relaxed);
@@ -702,12 +683,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
 #if !LUR_SHIPPING
     _AppliedRenderScaleRaw = Rps::Fixed::One;  // #103: rebuilt at native scale; the tick re-applies any override
 #endif
-    // Arm the rebuild against the NEW surface, then release the park. Order matters and the handshake
-    // enforces it: while the park stands, TakeWork() withholds the reinit, so the loop cannot wake early
-    // and rebuild against the layer we are in the middle of replacing.
-    _RH.RequestReattach((__bridge void*)Layer, static_cast<int>(Layer.drawableSize.width),
-                        static_cast<int>(Layer.drawableSize.height));
-    _RH.Resume();
     os_log(OS_LOG_DEFAULT, "OnlyRps: #73 reattach: handed reinit to the render thread (drawable %dx%d, appActive=%d)",
            (int)Layer.drawableSize.width, (int)Layer.drawableSize.height, _InitWhileInactive ? 0 : 1);
 }

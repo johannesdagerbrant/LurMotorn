@@ -24,7 +24,7 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
 #include "Lur/App/IosApp.h"      // #43 section B: the shared entry point + Metal view + delegate
-#include "Lur/App/IosViewHost.h"  // #43 section B: the shared #73 UIKit rebuild
+#include "Lur/App/IosViewHost.h"  // #43 section C: the whole shared #73 heal, renderer included
 #include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/App/RenderHandshake.h"  // #43 section C: the platform<->renderer surface/park protocol
 #include "Lur/Save/Store.h"
@@ -456,31 +456,19 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // the whole chain against the now-live window server: fresh UIWindow + fresh
 // view/CAMetalLayer + full renderer Shutdown/Init (+ re-created view resources).
 //
-// #43 section B: the UIKit half (scene pick, window/view/layer rebuild, and the two
-// ordering fixes that took rounds to find) is now LurRebuildViewHost, shared with RPS.
-// What stays here is the part the two games genuinely disagree on: chess owns its
-// renderer on the main thread, so it can tear down and re-init inline.
+// #43 section C: the scene pick, the park, the window/view/layer rebuild and the two
+// ordering fixes that took rounds to find are all LurReattachRenderHost now, shared with
+// RPS. What stays here is the one thing the games still disagree on: chess owns its
+// renderer on this thread, so it applies the re-init inline.
 - (void)reattachForActivation {
-    // Park before touching the layer the renderer holds. Under Inline this returns at once — we ARE the
-    // frame loop, so no frame can be in flight — which is exactly the case where RPS's version blocks on
-    // an ack. Same three lines, both games; the topology supplies the difference.
-    _RH.RequestPark();
-    for (int I = 0; I < 250 && !_RH.IsParked(); ++I)
-        [NSThread sleepForTimeInterval:0.004];  // ~1 s cap; a no-op loop when Inline
+    // #43 section C: the scene check, the park, the outgoing-view grab, the rebuild and the arm/release
+    // are the engine's now — the sequence was identical in both games once the topology stopped being
+    // implicit. Chess ignores the returned retiring view: it applies the rebuild before returning, so
+    // there is no window in which the old layer must be kept alive.
+    if (LurReattachRenderHost(self, LurMetalView.class, _RH) == nil) return;  // too early; the loop retries
 
-    UIView* NewView = LurRebuildViewHost(self, LurMetalView.class);
-    if (NewView == nil) {  // no connected scene yet — un-park and let the render loop retry
-        _RH.Resume();
-        return;
-    }
-    CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
-    _RH.RequestReattach((__bridge void*)Layer, static_cast<int>(Layer.drawableSize.width),
-                        static_cast<int>(Layer.drawableSize.height));
-    _RH.Resume();
-
-    // Chess owns the renderer on this thread, so it applies the rebuild here rather than handing it to a
-    // loop. TakeWork is still the way it is read — the request/consume pairing is identical to RPS's, and
-    // that symmetry is what makes the two reattach bodies mergeable once section D lands.
+    // What stays here is the part that genuinely differs: WHO applies the reinit. Chess owns the renderer
+    // on this thread, so it is this thread.
     const Lur::App::RenderWork Work = _RH.TakeWork();
     if (!Work.Reinit) return;   // cannot happen today; not worth a silent Shutdown if it ever does
     _RH.SetReady(false);
