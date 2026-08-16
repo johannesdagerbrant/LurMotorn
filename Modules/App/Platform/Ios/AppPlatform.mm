@@ -4,6 +4,8 @@
 // can include it without dragging Apple headers in.
 #include "Lur/App/Platform.h"
 
+#include <string>
+
 #include <os/log.h>
 
 #include <fcntl.h>    // O_NONBLOCK on stdout/stderr — see UnblockStdio
@@ -39,4 +41,13 @@ void UnblockStdio() {
     }
 }
 
+std::string SaveDir() {
+    NSArray<NSString*>* Dirs =
+        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
+    // NSTemporaryDirectory is a real fallback, not defensive noise: the search path can come back
+    // empty, and returning "" would have the Store write to the process's cwd — which on iOS is
+    // the read-only app bundle, so the save silently does nothing.
+    NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
+    return std::string(Dir.UTF8String);
+}
 } // namespace Lur::App::Platform

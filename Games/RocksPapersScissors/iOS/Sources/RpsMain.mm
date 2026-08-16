@@ -330,10 +330,10 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
                                                  name:UIApplicationWillResignActiveNotification
                                                object:nil];
 
-    NSArray<NSString*>* Dirs =
-        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
-    NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
-    _SaveDir = std::string(Dir.UTF8String);
+    // #43: one answer for where this app writes. It was computed here, in the chess main, and
+    // again inside the CoreBluetooth driver — and the device GUID is written through one and read
+    // back through another, so a drift between them is a phone that forgets who it is.
+    _SaveDir = Lur::App::Platform::SaveDir();
     {
         Lur::App::GameHost::Config HostCfg;
         HostCfg.SaveDir = _SaveDir;

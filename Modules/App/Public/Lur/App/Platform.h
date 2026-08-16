@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 
 // Per-platform app-startup verbs, written ONCE (issue #43, Phase 3 section B).
 //
@@ -47,6 +48,19 @@ void InstallLogSink();
 // verbatim in both iOS mains, INCLUDING all sixteen lines of the postmortem above it. Call before
 // creating the renderer.
 void UnblockStdio();
+
+// Where this app may write: Application Support, created by the Store on first save.
+//
+// It was computed independently in THREE places on iOS — both mains and the CoreBluetooth
+// driver's own IosSaveDir() — and they must agree, because the device GUID is written through
+// one and read back through another. Two paths that drift here do not fail loudly; they fail as
+// a phone that has silently forgotten who it is, which then re-rolls its identity and strands
+// its peer's cached BLE role (#79's deaf-pair shape).
+//
+// Apple-only on purpose. The Android answer needs the activity handle, so it stays
+// AndroidApp::SaveDir(); declaring a uniform one here would only be a link error waiting to
+// happen. The #ifdef makes a wrong-platform call a COMPILE error instead.
+std::string SaveDir();
 #endif
 
 } // namespace Lur::App::Platform

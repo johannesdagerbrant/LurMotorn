@@ -120,9 +120,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 
     // Persistent device identity (issue #17/#18): the same GUID the BLE role uses,
     // from Application Support. Drives colour + the per-opponent stats key.
-    NSArray<NSString*>* Dirs =
-        NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES);
-    NSString* Dir = Dirs.firstObject ?: NSTemporaryDirectory();
+    const std::string SaveDirPath = Lur::App::Platform::SaveDir();   // #43: one answer, shared
 // RIG-PUSHED FORCED STATE, SO LUR_AGENT (issue #196). This one is DESTRUCTIVE: a marker left
 // in a player's container silently deletes their saved games and stats at startup. At
 // LUR_INTERNAL it shipped in every ordinary build, because *the build a player plays IS
@@ -134,6 +132,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     // pairing state for role/matrix tests. The device-id is KEPT (stable identity).
     // One-shot: the marker is consumed. No pm-clear equivalent exists on iOS.
     {
+        NSString* const Dir = @(SaveDirPath.c_str());   // the shared save dir, as an NSString
         NSString* Docs = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
         NSString* Marker = [Docs stringByAppendingPathComponent:@"clearsave"];
         if ([[NSFileManager defaultManager] fileExistsAtPath:Marker]) {
@@ -158,7 +157,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     // the view's adopt rule.
     {
         Lur::App::GameHost::Config HostCfg;
-        HostCfg.SaveDir = std::string(Dir.UTF8String);
+        HostCfg.SaveDir = SaveDirPath;
         HostCfg.Log = [](const char* M) { os_log(OS_LOG_DEFAULT, "OnlyChess: %{public}s", M); };
         // The BLE transport. Hello exchanges the device GUIDs; colour comes from the two GUIDs,
         // not from the radio role.
