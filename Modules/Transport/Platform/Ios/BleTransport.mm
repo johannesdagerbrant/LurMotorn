@@ -175,6 +175,9 @@ public:
     // platform is how these two drivers had already begun to differ. See BleLinkController.h.
     Lur::Transport::BleLinkController _Link;
     bool _TimersStarted;
+    // #206 diagnostics: one line per link episode, not per write.
+    bool _WritePathLogged;
+    bool _AmbiguousPathLogged;
     std::chrono::steady_clock::time_point _TimersLast;
 
     // Central-side state (we connected OUT to a peer's GATT server).
@@ -323,14 +326,42 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 
 - (BOOL)radioWrite:(const uint8_t*)Data size:(std::size_t)Size {
     NSData* Payload = [NSData dataWithBytes:Data length:Size];
-    if (_RemoteDatagram && _PeerDevice) {                // we are central -> write
+
+    // #206 DIAGNOSTIC. Which path a write takes is decided here, and it has never been observable:
+    // both branches return YES, and `updateValue:onSubscribedCentrals:` returns YES even for a DEAD
+    // central handle (noted below). So an iPhone writing into a corpse looks exactly like an iPhone
+    // sending fine, which is precisely the half-open shape #206 shows — Android hears nothing while
+    // this side reports success.
+    //
+    // The ambiguous state is the suspect: `_RemoteDatagram` is set during characteristic discovery
+    // on an OUTGOING central attempt, BEFORE the role tie-break has decided anything. So a phone
+    // that connected out, discovered characteristics, then ended up serving an incoming central can
+    // hold both. The central branch is tested first, so it would win — and write to the wrong peer.
+    // Logged once per link episode (reset in onLinked/onLinkLost) so it cannot become a per-write
+    // firehose.
+    const bool CentralPath    = (_RemoteDatagram != nil && _PeerDevice != nil);
+    const bool PeripheralPath = (_LocalDatagram != nil && _Subscriber != nil);
+    if (!_WritePathLogged) {
+        _WritePathLogged = true;
+        BLE_LOG(@"write path: central=%d peripheral=%d -> taking %s", CentralPath ? 1 : 0,
+                PeripheralPath ? 1 : 0,
+                CentralPath ? "CENTRAL(write)" : (PeripheralPath ? "PERIPHERAL(notify)" : "NONE"));
+    }
+    if (CentralPath && PeripheralPath && !_AmbiguousPathLogged) {
+        _AmbiguousPathLogged = true;
+        BLE_LOG(@"write path AMBIGUOUS (#206): holding BOTH an outgoing central connection and an "
+                 "incoming subscriber. The central branch wins, so if the live link is the incoming "
+                 "one every send goes to the wrong peer and still reports success.");
+    }
+
+    if (CentralPath) {                                   // we are central -> write
         if (!_PeerDevice.canSendWriteWithoutResponse) return NO;   // wait for the ready callback
         [_PeerDevice writeValue:Payload
               forCharacteristic:_RemoteDatagram
                            type:CBCharacteristicWriteWithoutResponse];
         return YES;
     }
-    if (_LocalDatagram && _Subscriber) {                 // we are peripheral -> notify
+    if (PeripheralPath) {                                // we are peripheral -> notify
         return [_Peripheral updateValue:Payload
                       forCharacteristic:_LocalDatagram
                    onSubscribedCentrals:@[_Subscriber]] ? YES : NO;   // NO = queue full
@@ -380,6 +411,7 @@ bool IosRadio::Write(const uint8_t* Data, std::size_t Size) {
 - (void)onLinked { if (_Linked) return; _Linked = _Connected = true;
     _FruitlessDefers = 0;  // #146: a defer that produced a link was not fruitless
     _Link.OnLinked();      // every deadline off, both backoffs cancelled: churn on a live link is what degraded the radio in #163
+    _WritePathLogged = _AmbiguousPathLogged = false;   // #206: a new episode gets a fresh line
     [_Central stopScan];
     if (_Peripheral.isAdvertising) [_Peripheral stopAdvertising];
     // The net Session sends the first Hello once it sees the link up — no demo ping
