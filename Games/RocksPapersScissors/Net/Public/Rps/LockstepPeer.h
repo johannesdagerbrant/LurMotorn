@@ -571,7 +571,12 @@ private:
     uint64_t AwaitingNs = 0;                          // #148: how long we've been holding (stall bound)
     int  ReoffersLeft = 0;                            // #148: re-sends of our history left this round
     std::vector<std::vector<InputEvent>> IncomingHistory;  // reassembled peer combined-batch history
-    void SendResyncOffer();                           // #148: our history + frontier marker
+    // #148: our history + frontier marker. Returns the frontier it published — the caller MUST
+    // re-base to that exact value rather than recomputing it (#212).
+    uint32_t SendResyncOffer();
+    // Ask the survivor for its history (#212). Used by BOTH recovery entry points: the lost-frame path
+    // and the anchor-mismatch path. Only the loser ever sends it; the survivor always answers.
+    void RequestHistoryFromSurvivor(uint32_t Tick);
 
     // #135/#139 match-start ready gate. Pre-match the clock holds; each peer's first miner-camp
     // placement is its "ready", exchanged over MsgInput. Both camps become tick 0's input on both

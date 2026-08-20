@@ -38,12 +38,23 @@
 // bug report nobody can act on.
 //
 // ---- CURRENT STATUS, and do not paper over it ----
-// The gate run is green. `--long` is RED on ONE row: `forge` fails 7 of 41 checkpoints at 8000 ticks
-// (green at 1200), and the failure is a genuine recovery LIVELOCK — exec tick frozen while recovery
-// rounds climb without bound, reproducible, seed independent. Every other row is green at 8000 ticks
-// across four matches. That livelock is the #210 signature, reproduced on the host in seconds, which
-// is the whole reason this harness exists; it is tracked as its own issue and is NOT to be silenced by
-// shortening a run or moving GFaultPeriod.
+// The gate run is green. `--long` (4 seeds x 8000 ticks x 7 rows = 28 runs, ~6 min) has 4 failures,
+// both of them named:
+//
+//   * CONVERGENCE: 27 of the 28 runs are 0/41 checkpoint failures. The exception is `forge` on seed
+//     0x50ac0002, 1/41, "heads never met" — the ceiling deadlock: a frame discarded during an outage
+//     is never re-requested, because the gap detector can only fire when a LATER frame arrives, and a
+//     peer that has itself stalled holds production so no later frame ever comes. Both peers then
+//     report rec=0 awa=0 dsy=0 while neither advances. Reproduce with
+//     `--row silence --ticks 1200 --faultperiod 60 --settletrace`.
+//   * BOOKKEEPING DRIFT: 3 of the 28 (all `forge`). States bit-identical at every tick; MatchIndex and
+//     Seed permanently one apart. See BookkeepingDrift for what that breaks.
+//
+// This file previously recorded a recovery LIVELOCK here — exec tick frozen, recovery rounds climbing
+// without bound, 15-22 of 41 checkpoints failing. That was #212 and it is FIXED (three defects in
+// LockstepPeer: a fabricated anchor hash, a published frontier ahead of execution, and a loser that
+// waited instead of asking). The two items above are what the fix made visible; neither is to be
+// silenced by shortening a run or moving GFaultPeriod.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -101,27 +112,28 @@ static const char* RowName(ERow R) {
 // How often a periodic fault fires, in ticks — one fault every 20 s of play, which is still ~40x the
 // worst rate hardware has actually shown (#163's match lost ONE frame in ~12 000 ticks).
 //
-// ---- READ THIS BEFORE CHANGING IT ----
-// 200 is not a safety margin, it is a measured GREEN POINT, and the failures nearby are real. All
-// seven rows pass at 150, 200, 300, 400 and 5000 across 8 seeds. At 130 and 140 — but NOT 110, 120 or
-// 150 — the forge row LIVELOCKS: exec tick frozen, recovery rounds climbing without bound, seed
-// independent, in half a second. At 50 the two drop rows and the silence row join it. So the boundary
-// is a PHASE interaction between the fault tick and the anchor/recovery cycle, not a rate ceiling, and
-// this constant sits next to values that fail.
-//
-//     ./rps_two_peer_soak --row forge --ticks 1200 --faultperiod 130 --ckptrounds 1200
-//
-// That is the #210 signature reproduced on the host, which is what this harness was built to do.
-// Tracked separately — do not "fix" it by moving this number.
+// Every row passes at 100 and above (measured 50..5000). Below that the ceiling deadlock in the STATUS
+// note starts to bite — at 60 the silence row wedges — so the gate deliberately sits well clear of it
+// rather than at the edge.
 //
 // Overridable with `--faultperiod` so a failure can be bisected down to ONE fault: "does a single
 // injection recover" and "does injection N+1 arriving mid-recovery recover" are different questions
-// with different answers, and a fixed period cannot separate them.
+// with different answers, and a fixed period cannot separate them. Bisecting on this is what showed
+// the #212 livelock was a PHASE interaction (130 and 140 failed while 110, 120 and 150 passed) rather
+// than a rate ceiling — which is what pointed at the anchor/recovery cycle instead of at load.
 static uint32_t GFaultPeriod = 200;
 // How long a Silence row holds the link dark. Must stay well under CeilingStallTimeoutNs (20 s =
 // 200 ticks at TickRateHz), because past that #162 deliberately ENDS the match — that is correct
 // behaviour, not the property this row is testing.
 static constexpr uint32_t SilenceTicks = 30;
+// The dark window must stay a MINORITY of the fault period, or the row stops testing what it says.
+// At --faultperiod 50 the fixed 30 left the link dark 60% of the time — a link that barely functions,
+// not a link with an outage — and the pair could not close the gap between checkpoints. Deriving the
+// window from the period keeps the row meaning "an outage" at every rate.
+static uint32_t DarkTicks(uint32_t Period) {
+    const uint32_t Third = Period / 3;
+    return SilenceTicks < Third ? SilenceTicks : Third;
+}
 // The SilenceThenResume outage: long enough that the peers are far apart and the reconnect path has
 // real work to do, still short of the #162 bound.
 static constexpr uint32_t OutageTicks = 120;
@@ -139,6 +151,7 @@ static constexpr uint32_t CheckpointPhase = 150;
 // stuck": if raising the budget turns a failure green, the bound is wrong; if it does not, the pair is
 // livelocked and the bound was reporting the truth.
 static int GCheckpointRounds = 400;
+static bool GSettleTrace = false;
 
 // Whether the row's fault is supposed to be INVISIBLE to the two sims — not "does it recover", which
 // every row must, but "may the two states differ for even one tick".
@@ -205,6 +218,11 @@ struct SoakResult {
     uint32_t Checkpoints = 0;
     uint32_t CheckpointFailures = 0;
     uint32_t FirstFailedCheckpoint = 0;
+    const char* FirstFailReason = "";
+    // Converged in state but disagreeing about which match this is. Tracked apart from convergence
+    // because it is a different bug with a different fix (see BookkeepingDrift).
+    uint32_t DriftCheckpoints = 0;
+    uint32_t FirstDriftTick = 0;
     uint32_t SettleTicks = 0;   // ticks spent inside checkpoints, excluded from the fault schedule
     // The #210 invariant: the survivor (team 0, lower device GUID) has the authoritative timeline,
     // so there is nothing it could legitimately be rebuilding FROM. If this is ever true the pair is
@@ -295,7 +313,7 @@ static bool ApplyFault(const SoakSpec& Spec, uint32_t T, Outbox& Qa, Outbox& Qb,
             // Drop EVERYTHING both ways for a window. Execution must park at the ceiling and HOLD:
             // #162's bound exists so a peer this far behind eventually ends the match, but 30 ticks
             // is nowhere near it and concluding anything here would be a bug.
-            if ((T % GFaultPeriod) < SilenceTicks && T > GFaultPeriod) {
+            if ((T % GFaultPeriod) < DarkTicks(GFaultPeriod) && T > GFaultPeriod) {
                 Qa.Q.clear();
                 Qb.Q.clear();
                 return false;
@@ -348,16 +366,53 @@ struct MatchCounter {
 //
 // Returns as soon as it sees agreement, so a converged pair costs a couple of rounds. Ticks consumed
 // are added to *SettleTicks — they are real sim progress and must not be silently unaccounted for.
+// CONVERGED = the two peers are simulating the same game: same tick, same state, nothing in flight.
+//
+// Deliberately says nothing about MatchIndex or Seed. Those are per-peer BOOKKEEPING, and conflating
+// them with convergence hid a real distinction: after a transient divergence at a match boundary the
+// pair can be bit-identical at every tick while its match counters sit permanently one apart. That is
+// a defect, but it is a different defect, and asserting it here reported "the peers never converge"
+// about a pair that was in perfect lockstep. Tracked separately below.
 static bool Converged(const LockstepPeer& A, const LockstepPeer& B) {
     return A.ExecTick() == B.ExecTick() && !A.Recovering() && !B.Recovering() &&
            !A.AwaitingResync() && !B.AwaitingResync() && A.MatchStarted() && B.MatchStarted() &&
-           A.MatchIndex() == B.MatchIndex() && A.GetSim().StateHash() == B.GetSim().StateHash();
+           A.GetSim().StateHash() == B.GetSim().StateHash();
 }
 
-static bool SettleAndCompare(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb, int Rounds,
+// Converged in state but disagreeing about WHICH match this is. The sim cannot see it today (Seed is
+// read only by the LUR_INTERNAL StressFill; mines are placed deterministically and there is no
+// gameplay RNG), but two things can: a flight recording's header carries the seed, so a drifted pair
+// writes two files --recdiff cannot pair (#208's "unpairable file" by another route), and the mains
+// latch "already tallied this match" per index, so the two ScoreBooks disagree about how many matches
+// were played. It also stops being latent the moment any real RNG enters the sim.
+static bool BookkeepingDrift(const LockstepPeer& A, const LockstepPeer& B) {
+    return Converged(A, B) &&
+           (A.MatchIndex() != B.MatchIndex() || A.GetSim().Seed != B.GetSim().Seed);
+}
+
+// Which clause blocked convergence. Without this a failed checkpoint says only "not converged", and
+// "the hashes differ" and "the two peers are in different MATCHES" are completely different bugs.
+static const char* WhyNotConverged(const LockstepPeer& A, const LockstepPeer& B) {
+    if (!A.MatchStarted() || !B.MatchStarted()) return "a peer is pre-match";
+    if (A.Recovering() || B.Recovering()) return "still recovering";
+    if (A.AwaitingResync() || B.AwaitingResync()) return "still awaiting history";
+    if (A.ExecTick() != B.ExecTick()) return "heads never met";
+    return "STATE HASH DIFFERS";
+}
+
+static bool SettleAndCompare(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb,
+                             AiController& Ai0, AiController& Ai1, int Rounds,
                              uint32_t* SettleTicks) {
     for (int I = 0; I < Rounds; ++I) {
         if (Converged(A, B)) return true;
+        // A quiet moment means no NEW orders — it does not mean no input at all, because the opening
+        // camp IS input and the match clock does not start until both peers have placed one. A peer
+        // sitting in the pre-match handshake therefore never starts, the settle can never converge, and
+        // no amount of extra rounds helps: the failure count was identical at 400, 2000 and 6000
+        // rounds, which is what gave this away. Feed the AI only while a peer is pre-match, so the
+        // handshake completes and the moment stays quiet for the part that is actually being measured.
+        if (!A.MatchStarted()) FeedAi(A, Ai0);
+        if (!B.MatchStarted()) FeedAi(B, Ai1);
         // SNAPSHOT both heads before ticking either. Reading B's head after A has already ticked is an
         // off-by-one that makes this loop run FOREVER on a pair sitting one tick apart: A catches up to
         // B, the second condition then sees the new equal value and ticks B as well, and the pair
@@ -365,6 +420,11 @@ static bool SettleAndCompare(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbo
         // reading, complete with a plausible mechanism, before the loop itself was suspected.
         const uint32_t Ta = A.ExecTick();
         const uint32_t Tb = B.ExecTick();
+        if (GSettleTrace && (I % 40) == 0)
+            std::printf("      settle I=%d A[t=%u rec=%d awa=%d dsy=%d] B[t=%u rec=%d awa=%d dsy=%d]\n",
+                        I, Ta, A.Recovering() ? 1 : 0, A.AwaitingResync() ? 1 : 0,
+                        A.Desynced() ? 1 : 0, Tb, B.Recovering() ? 1 : 0,
+                        B.AwaitingResync() ? 1 : 0, B.Desynced() ? 1 : 0);
         if (Ta <= Tb) A.Tick(OneTickNs);
         if (Tb <= Ta) B.Tick(OneTickNs);
         Deliver(Qa, B);
@@ -472,9 +532,26 @@ static SoakResult RunSoak(const SoakSpec& Spec) {
         if (Clean && CheckpointDue) {
             CheckpointDue = false;
             ++R.Checkpoints;
-            if (!SettleAndCompare(A, B, Qa, Qb, GCheckpointRounds, &R.SettleTicks)) {
-                if (R.CheckpointFailures == 0) R.FirstFailedCheckpoint = T;
+            if (!SettleAndCompare(A, B, Qa, Qb, Ai0, Ai1, GCheckpointRounds, &R.SettleTicks)) {
+                if (R.CheckpointFailures == 0) {
+                    R.FirstFailedCheckpoint = T;
+                    R.FirstFailReason = WhyNotConverged(A, B);
+                }
                 ++R.CheckpointFailures;
+                if (Spec.TraceTicks)
+                    std::printf(
+                        "    ckpt FAIL T=%u  A[t=%u m=%u seed=%llx h=%08x] B[t=%u m=%u seed=%llx "
+                        "h=%08x]  %s\n",
+                        T, A.ExecTick(), A.MatchIndex(),
+                        static_cast<unsigned long long>(A.GetSim().Seed),
+                        static_cast<uint32_t>(A.GetSim().StateHash()), B.ExecTick(),
+                        B.MatchIndex(), static_cast<unsigned long long>(B.GetSim().Seed),
+                        static_cast<uint32_t>(B.GetSim().StateHash()), WhyNotConverged(A, B));
+            } else if (BookkeepingDrift(A, B)) {
+                // Converged, so the checkpoint PASSES — but the two peers label this match
+                // differently, which is its own defect and must not hide behind a green convergence.
+                if (R.DriftCheckpoints == 0) R.FirstDriftTick = T;
+                ++R.DriftCheckpoints;
             }
             PrevExec = A.ExecTick();
             R.LastProgressTick = T;
@@ -505,7 +582,7 @@ static SoakResult RunSoak(const SoakSpec& Spec) {
     // A final checkpoint, so a run never ends on an unresolved reading — the state the pair is left in
     // is the state that matters, and a run that stopped mid-repair would otherwise report nothing.
     ++R.Checkpoints;
-    if (!SettleAndCompare(A, B, Qa, Qb, GCheckpointRounds, &R.SettleTicks)) {
+    if (!SettleAndCompare(A, B, Qa, Qb, Ai0, Ai1, GCheckpointRounds, &R.SettleTicks)) {
         if (R.CheckpointFailures == 0) R.FirstFailedCheckpoint = R.TicksRun;
         ++R.CheckpointFailures;
     }
@@ -545,11 +622,19 @@ static void CheckRow(const SoakSpec& Spec, const SoakResult& R) {
                     R.FirstDivergentTick, static_cast<unsigned long long>(R.HashA),
                     static_cast<unsigned long long>(R.HashB));
     if (R.CheckpointFailures)
-        std::printf("    NOT CONVERGED at checkpoint, first at tick %u\n", R.FirstFailedCheckpoint);
+        std::printf("    NOT CONVERGED at checkpoint, first at tick %u — %s\n",
+                    R.FirstFailedCheckpoint, R.FirstFailReason);
 
     // The authoritative reading, and it applies to EVERY row without exception. Whatever the fault
     // was, a quiet moment must find the two peers playing the same game.
     CHECK(R.CheckpointFailures == 0);
+
+    // And playing the same NUMBERED game. Bit-identical state with drifted match counters is not a
+    // divergence, but it is not correct either — see BookkeepingDrift for what it breaks.
+    if (R.DriftCheckpoints)
+        std::printf("    MATCH BOOKKEEPING DRIFT from tick %u (%u checkpoints) — states agree, "
+                    "MatchIndex/Seed do not\n", R.FirstDriftTick, R.DriftCheckpoints);
+    CHECK(R.DriftCheckpoints == 0);
 
     // Nothing these rows inject ever reaches an executed tick, so a single disagreeing hash is a bug.
     if (RowMustNeverDiverge(Spec.Row)) CHECK(R.Disagreements == 0);
@@ -583,10 +668,12 @@ static void CheckRow(const SoakSpec& Spec, const SoakResult& R) {
     // deliberately sabotaged implementations. The per-tick floor is per-row because the fault rows
     // spend real time in recovery and inside a silence window, where comparing state is not valid.
     CHECK(R.Checkpoints >= 2);
-    const uint32_t Floor = Spec.Row == ERow::Forge      ? R.TicksRun / 4
-                           : Spec.Row == ERow::Silence  ? R.TicksRun / 2
-                                                        : R.TicksRun * 3 / 4;
-    CHECK(R.Comparisons > Floor);
+    // ONE floor for every row, not a tuned fraction per row. The floor exists to catch a run that
+    // compared NOTHING — the vacuous-green failure mode — and an eighth of the run (plus an absolute
+    // minimum for short debugging runs) is nowhere near vacuous: 1000 comparisons at the soak length.
+    // Per-row fractions were three numbers that had to be re-tuned every time a fault rate changed,
+    // and each re-tune was indistinguishable from tuning the test to pass.
+    CHECK(R.Comparisons > 200 && R.Comparisons > R.TicksRun / 8);
 
     // The match must have MOVED. A pair that converges by both freezing is the #162 failure, and it
     // satisfies every hash comparison above — "alive" was true throughout the 2026-08-16 hardware
@@ -635,6 +722,8 @@ int main(int Argc, char** Argv) {
             GFaultPeriod = static_cast<uint32_t>(std::strtoul(Argv[++I], nullptr, 0));
         } else if (std::strcmp(Arg, "--trace") == 0 && HasNext) {
             TraceTicks = static_cast<uint32_t>(std::strtoul(Argv[++I], nullptr, 0));
+        } else if (std::strcmp(Arg, "--settletrace") == 0) {
+            GSettleTrace = true;
         } else if (std::strcmp(Arg, "--tracefrom") == 0 && HasNext) {
             TraceFrom = static_cast<uint32_t>(std::strtoul(Argv[++I], nullptr, 0));
         } else {

@@ -555,7 +555,17 @@ void LockstepPeer::RollbackTo(uint32_t Tick) {
 // called after every speculate/rollback and every delivered frame, so its snapshot-ring lookups
 // (the confirmed post-state, needed for the sink hash and the anchor) stay inside the ring window.
 void LockstepPeer::AdvanceConfirmed() {
-    const uint32_t Confirmed = ConfirmedFrontier();
+    // #212: confirm no further than we have actually EXECUTED. "Confirmed" only means both peers'
+    // input for that tick is real — it says nothing about whether we have run it, and the two
+    // frontiers move independently: input production follows the wall clock while execution is capped
+    // by the rollback horizon, by MaxExecTicksPerService, and stopped outright while Desync is set. So
+    // ConfirmedFrontier() routinely runs AHEAD of TheSim.Tick, and every tick in that gap used to be
+    // "confirmed" here — anchored and handed to the recorder — before it had been simulated at all.
+    // You cannot produce the post-state of a tick you have not run, and the fallback below duly
+    // invented one. Nothing is lost by waiting: AdvanceConfirmed is called at the end of every
+    // StepTickRange, so each tick confirms the moment execution reaches it.
+    const uint32_t Reached = ConfirmedFrontier();
+    const uint32_t Confirmed = Reached < TheSim.Tick ? Reached : TheSim.Tick;
     while (LastConfirmed_ < Confirmed) {
         const uint32_t T = LastConfirmed_;
         // Rebuild the confirmed combined batch (both sides real here) in the same team0-first order.
@@ -568,10 +578,35 @@ void LockstepPeer::AdvanceConfirmed() {
         for (const InputEvent& E : First)  if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
         for (const InputEvent& E : Second) if (NC < 2 * MaxEventsPerTick) Combined[NC++] = E;
         if (Recording) RecEvents.emplace_back(Combined, Combined + NC);
-        // The confirmed state AFTER tick T = the snapshot at T+1 (Tick == T+1), still in the ring
-        // because prompt processing keeps T+1 within [confirmed, head] ⊂ the window.
+        // The confirmed state AFTER tick T = the state at Tick == T+1: the ring's snapshot, or the live
+        // sim when the head IS T+1 (the ring only holds the state BEFORE each executed tick, so the
+        // head's own tick is never in it).
+        //
+        // #212: this used to fall back to TheSim.StateHash() whenever the snapshot was absent, on the
+        // stated assumption that T+1 always sits within [confirmed, head]. When that assumption broke
+        // — confirmed running ahead of execution, or the ring cleared by a ReseedFrom — the fallback
+        // anchored "the state at T+1" with the hash of a COMPLETELY DIFFERENT TICK, and handed the same
+        // wrong hash to the recorder. Two peers whose heads sat on different ticks then cross-checked
+        // those and found a mismatch that did not exist, which triggered a recovery, which cleared the
+        // ring, which produced more false anchors: the repair machinery manufacturing the divergence
+        // it was trying to repair. That is the #212 livelock, and it is why the fallback is now an
+        // exact condition rather than an assumption.
         const Sim* Post = SnapRing_.Get(T + 1);
-        const uint64_t FullHash = Post != nullptr ? Post->StateHash() : TheSim.StateHash();
+        uint64_t FullHash = 0;
+        if (Post != nullptr) {
+            FullHash = Post->StateHash();
+        } else if (T + 1 == TheSim.Tick) {
+            FullHash = TheSim.StateHash();   // the head IS tick T+1
+        } else {
+            // Genuinely unreachable now that Confirmed is capped at TheSim.Tick and the ring is sized
+            // RollbackHorizon + 2. Stop rather than guess: leaving LastConfirmed_ here re-tries on the
+            // next service call, and a hole in the anchor stream is detectable where a wrong hash is not.
+            Lur::Log::Error("RPS: cannot confirm tick %u — no snapshot at %u and the head is %u. "
+                            "Anchoring is HELD rather than guessed (#212); if this repeats, the "
+                            "snapshot ring is undersized for the current horizon.",
+                            T, T + 1, TheSim.Tick);
+            return;
+        }
 #if LUR_INTERNAL
         if (Sink_ != nullptr) Sink_(SinkCtx_, T, Combined, NC, FullHash);
 #endif
@@ -740,9 +775,16 @@ void LockstepPeer::BeginRecovery(const char* Why) {
     IncomingHistory.clear();
     Awaiting = true;    // hold production AND execution: our state is the one known to be suspect
     AwaitingNs = 0;
-    Lur::Log::Info("RPS: recovering (%s) — peer holds the lower device id, rebuilding from its history "
-                   "(attempt %d/%d, our tick %u)",
+    Lur::Log::Info("RPS: recovering (%s) — peer holds the lower device id, asking for its history to "
+                   "rebuild from (attempt %d/%d, our tick %u)",
                    Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
+    // #212: ASK once waiting has demonstrably not worked. The FIRST attempt still relies on the
+    // symmetric cross-check — that is the common case and it converges (measured: 40 recoveries in an
+    // 8000-tick soak) — because answering a request costs the survivor a re-base, and a re-base
+    // truncates up to RollbackHorizon ticks of its own produced input. Asking on every attempt made
+    // things worse, not better: checkpoint failures went 4/41 -> 22/41 purely from that churn. But a
+    // SECOND attempt means the first wait timed out, and waiting again unchanged is the livelock.
+    if (RecoveryAttempts_ > 1 || RecoveryRounds_ > 0) RequestHistoryFromSurvivor(TheSim.Tick);
 }
 
 // #163's gap detector named a frame that never arrived, so WE know we are the incomplete peer while
@@ -797,8 +839,25 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     Lur::Log::Info("RPS: input gap at tick %u — asking the peer for its history before the hole is "
                    "executed, so nothing diverges (attempt %d/%d)",
                    MissingTick, GapRecoveries_, MaxGapRecoveries);
+    RequestHistoryFromSurvivor(MissingTick);
+}
+
+// Ask the survivor for its input history. The survivor answers this unconditionally (see the
+// ResyncTagRequest handler), so a peer that knows its own state is suspect can always get itself
+// repaired instead of waiting to be noticed.
+//
+// #212: this used to be inline in RequestRecovery and reachable ONLY from the lost-frame path. The
+// anchor-mismatch path (BeginRecovery) just set Awaiting and waited, on the reasoning that "both peers
+// cross-check the SAME anchor tick, so both reach BeginRecovery". That is false whenever the survivor
+// is already handling something: CrossCheck returns early on `if (Desync || Recovering_)`, so a
+// mismatch the loser trips on during the survivor's own in-flight round is never seen by the survivor,
+// and nobody ever offers. The loser then waits out AwaitingResyncTimeout, fails the round, backs off,
+// re-enters the identical silent wait, and repeats forever — the second half of the #212 livelock, logged as
+// "the survivor's history never arrived" at one unchanging tick. Asking is what makes the loser's
+// recovery self-driving rather than dependent on the peer independently noticing.
+void LockstepPeer::RequestHistoryFromSurvivor(uint32_t Tick) {
     Lur::Serialization::BitWriter W;
-    Lur::Serialization::WriteVarUint(W, MissingTick);
+    Lur::Serialization::WriteVarUint(W, Tick);
     const std::vector<uint8_t>& MB = W.Finish();
     std::vector<uint8_t> Req;
     Req.reserve(MB.size() + 1);
@@ -811,8 +870,7 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
 // the same frontier and re-add the delay slack, or the loser's next produced frame lands at an index
 // we no longer expect — which is the same misalignment the recovery exists to repair.
 void LockstepPeer::OfferHistoryToLoser() {
-    SendResyncOffer();
-    ReseedFrom(ConfirmedFrontier());  // re-base to the same confirmed frontier we just published
+    ReseedFrom(SendResyncOffer());  // re-base to the SAME frontier we just published (#212)
 }
 
 void LockstepPeer::FinishRecovery() {
@@ -1161,12 +1219,22 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
 // that is AHEAD can re-send it: a rejoining peer's Lp.Init can wipe an offer that arrived before
 // it (Session::Tick delivers datagrams BEFORE the main reaches its "session ready -> Lp.Init"
 // branch), and then nobody would ever hand it the history again.
-void LockstepPeer::SendResyncOffer() {
+uint32_t LockstepPeer::SendResyncOffer() {
     // Rollback: hand over the CONFIRMED frontier, never the speculative head — ticks beyond it hold
     // predicted (possibly-wrong) peer input, and shipping those as "history" would replay a guess as
     // fact. Both LocalEvents[T] and PeerEvents[T] are real for T < ConfirmedFrontier, so the loop below
     // is also in-bounds (PeerEvents holds only real frames now).
-    const uint32_t F = ConfirmedFrontier();
+    //
+    // #212: and never past a tick we have EXECUTED either. Publishing a frontier is a promise to
+    // re-base our own timeline to it (see OfferHistoryToLoser), and a peer cannot stand on a tick it
+    // has not run: ReseedFrom would look for a snapshot of a FUTURE tick, fail to find one, log a ring
+    // "underflow" that was nothing of the sort, and leave the sim and the timeline permanently out of
+    // step — sim at 531 while the timeline claimed 539, measured. Every anchor after that is computed
+    // at the wrong tick. Returning F rather than recomputing it at the call site is part of the fix:
+    // the published frontier and the re-based frontier MUST be the same number, and they used to be
+    // two independent calls to ConfirmedFrontier() that merely happened to agree.
+    const uint32_t Reached = ConfirmedFrontier();
+    const uint32_t F = Reached < TheSim.Tick ? Reached : TheSim.Tick;
     // Reconstruct the executed COMBINED history (team0-first per tick, the Execute order) so a
     // rejoiner replays it through a fresh sim and both split it back per team.
     std::vector<std::vector<InputEvent>> Hist;
@@ -1198,10 +1266,11 @@ void LockstepPeer::SendResyncOffer() {
     Marker.push_back(ResyncTagMarker);
     Marker.insert(Marker.end(), MB.begin(), MB.end());
     if (Send) Send(Ctx, MsgResyncChunk, Marker.data(), Marker.size());
+    return F;
 }
 
 void LockstepPeer::BeginResync() {
-    SendResyncOffer();
+    const uint32_t Published = SendResyncOffer();
 #if LUR_INTERNAL
     // #169: re-offer the TUNABLES too, not just the input history. This is #148's hole, in the one
     // place #148 didn't look.
@@ -1235,7 +1304,7 @@ void LockstepPeer::BeginResync() {
     // handler compares and never clears), so this cannot blank a real mismatch.
     SendFingerprint();
 #endif
-    ReseedFrom(ConfirmedFrontier());  // re-base to the confirmed frontier (ReseedFrom rolls the sim back to it)
+    ReseedFrom(Published);  // #212: the frontier we PUBLISHED, not a fresh call that may have moved
     IncomingHistory.clear();
     Awaiting = true;    // cleared when we process the peer's marker (or by the stall timeout)
     AwaitingNs = 0;
