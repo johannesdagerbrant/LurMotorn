@@ -21,7 +21,12 @@
 #include "Rps/SnapshotRing.h"  // rollback Phase 1 scaffolding (snapshot ring + peer predictor)
 #include "Rps/SessionWiring.h" // the mains' Session->LockstepPeer routing table, shared verbatim
 
+#include "LockstepHarness.h"   // #211: the two-peer pair + fault helpers, shared with the soak
+
 using namespace Rps;
+// #211: the Outbox/Deliver/fault helpers used to be defined right here. The two-peer soak needed the
+// same pieces, so they moved to LockstepHarness.h on the second consumer rather than being copied.
+using namespace Rps::Harness;
 using Lur::Serialization::BitReader;
 using Lur::Serialization::BitWriter;
 using Lur::Sim::SplitMix64;
@@ -85,17 +90,9 @@ static void TestEventBatchFuzz() {
 // the bottom band, team 1 in the top. #135: the match opens empty (no start-miners), so the camp
 // lands at slot 0 (team 0) / 1 (team 1) — the combined batch applies team 0's place before team 1's.
 
-// ONE definition of the tests' opening-camp spot, because it has to satisfy several map rules at
-// once and a scattered magic coordinate silently rots when any of them moves (#157 did exactly
-// that — the old (17, 14) fell inside the widened mine clearance and every match-start test failed
-// at once, looking like a lockstep bug rather than a stale coordinate). It must be:
-//   * >= Cv.MineClearance (7) from every live mine. X=17 sits midway between the mine columns at
-//     14 and 20, so dx=3 and the end mine row at Y=9 forces dy >= sqrt(49-9) = 6.33 -> Y >= 15.4.
-//   * >= 2 x footprint from the HQ, which auto-places at InitialFrontier x 3/4 = 26.25.
-//   * inside the team's opening frontier (<= 35 from its own end).
-// Y=16 clears all three with margin; mirrored for team 1.
-static const Fixed CampTestX = F(17);
-static Fixed CampTestY(uint8_t Team) { return Team == 0 ? F(16) : F(WorldHeight.ToInt() - 16); }
+// The opening-camp coordinate (CampTestX/CampTestY) now lives in LockstepHarness.h with the rest of
+// the pair setup — it is a map-rule constraint, not a fact about this suite.
+//
 // Slot 2/3 is each team's OPENING CAMP, not 0/1: #146 auto-places the two home bases at slots 0/1
 // before tick 0, and tick 0's two camps land next. This said 0/1 (a comment from before the home bases
 // existed), and ApplyQueue REJECTS the home base — it produces nothing — so every queue event these
@@ -118,33 +115,7 @@ static uint64_t ReplayHashEvents(uint64_t Seed, const std::vector<std::vector<In
     return S.StateHash();
 }
 
-// ---- Lockstep harness: a QUEUED link (models the real deferred delivery / Pump, and
-// avoids the synchronous re-entrancy hazard a naive loopback has). ----
-struct Outbox {
-    std::vector<std::pair<Lur::Net::EMsgType, std::vector<uint8_t>>> Q;
-};
-static void Enqueue(void* Ctx, Lur::Net::EMsgType Type, const uint8_t* Data, std::size_t N) {
-    static_cast<Outbox*>(Ctx)->Q.emplace_back(Type, std::vector<uint8_t>(Data, Data + N));
-}
-static void Deliver(Outbox& From, LockstepPeer& To) {
-    for (auto& M : From.Q) To.OnMessage(M.first, M.second.data(), M.second.size());
-    From.Q.clear();
-}
-static constexpr uint64_t OneTickNs = 100'000'000ull;  // 10 Hz
-
-// Drive both peers to the SAME head so raw head-state hashes are comparable. Under rollback the two
-// run on independent wall clocks and their speculative heads can sit a tick apart (most visibly after
-// a staggered recovery reseed) even though their CONFIRMED timelines already agree — lockstep gave
-// equal heads for free, rollback needs this. Ticks whichever peer is behind (speculating the idle
-// peer forward) until the heads meet, delivering both ways each step.
-static void SettleUntilEqual(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
-    for (int I = 0; I < 64 && A.ExecTick() != B.ExecTick(); ++I) {
-        if (A.ExecTick() <= B.ExecTick()) A.Tick(OneTickNs);
-        if (B.ExecTick() <= A.ExecTick()) B.Tick(OneTickNs);
-        Deliver(Qa, B);
-        Deliver(Qb, A);
-    }
-}
+// The Outbox / Enqueue / Deliver / SettleUntilEqual pair-harness moved to LockstepHarness.h (#211).
 
 // A link that holds each datagram for `Lag` steps before releasing it — models a peer whose frames
 // arrive `Lag` ticks late. This is the harness that separates rollback from lockstep: under lag,
@@ -179,19 +150,7 @@ struct LaggyLink {
     }
 };
 
-// #139: drive both peers through the pre-match placement handshake — each places its mining camp
-// (its "ready"), the camps are exchanged, and the match starts from tick 0 with both camps in.
-// Tests that don't otherwise place a camp call this so the clock actually starts.
-static void PlaceCampsAndStart(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb) {
-    A.QueueLocalEvent(InputEvent::Place(0, UnitMiner, CampTestX, CampTestY(0)));
-    B.QueueLocalEvent(InputEvent::Place(1, UnitMiner, CampTestX, CampTestY(1)));
-    for (int I = 0; I < 4 && !(A.MatchStarted() && B.MatchStarted()); ++I) {
-        A.Tick(OneTickNs);
-        B.Tick(OneTickNs);
-        Deliver(Qa, B);
-        Deliver(Qb, A);
-    }
-}
+// PlaceCampsAndStart moved to LockstepHarness.h (#211) — the soak needs the same handshake.
 
 // ---- Two peers, random inputs, stay bit-identical in lockstep with zero desyncs ----
 static void TestLockstepStaysInSync() {
@@ -1346,31 +1305,7 @@ static void TestRecordingCvarsAreNameKeyedAndSurviveReorder() {
 }
 #endif  // LUR_INTERNAL (MatchRecorder is dev tooling)
 
-// Deliver everything EXCEPT the Nth MsgInput frame — a lost produced tick inside a link that is
-// otherwise working perfectly, which is what #163 observed on hardware (iPhone->Galaxy notifications
-// stopped while writes kept landing, and separately an input the iPhone executed at tick 4528 was
-// simply absent from the Galaxy's stream with no transport complaint at all).
-static void DeliverDroppingNthInput(Outbox& From, LockstepPeer& To, int NthInput) {
-    int Seen = 0;
-    for (auto& M : From.Q) {
-        if (M.first == MsgInput && Seen++ == NthInput) continue;  // the frame that never arrives
-        To.OnMessage(M.first, M.second.data(), M.second.size());
-    }
-    From.Q.clear();
-}
-
-// Deliver every MsgInput frame TWICE — the opposite fault to the one above, and the one actually
-// caught on hardware 2026-08-01: the Android central had established TWO GATT connections to the same
-// iPhone peripheral and subscribed to notifications on both, so every produced frame the peripheral
-// notified arrived at the app twice. Writes (central->peripheral) go out from one place and were
-// clean, which is why the damage was one-directional in exactly the direction #163 documents.
-static void DeliverDuplicatingInputs(Outbox& From, LockstepPeer& To) {
-    for (auto& M : From.Q) {
-        To.OnMessage(M.first, M.second.data(), M.second.size());
-        if (M.first == MsgInput) To.OnMessage(M.first, M.second.data(), M.second.size());
-    }
-    From.Q.clear();
-}
+// DeliverDroppingNthInput / DeliverDuplicatingInputs moved to LockstepHarness.h (#211).
 
 // ---- #163: a DUPLICATED input frame is not a gap, and must not be re-buffered ----
 // The sequence is one byte, so "one frame arriving twice" and "255 frames missing" are the same
@@ -1707,40 +1642,7 @@ static void TestPreMatchAcceptsUnaffordableCampOnLegalGround() {
     CvStartingGold.Set(GoldWas);
 }
 
-// Re-encode ONE of the sender's produced frames with an extra event injected, keeping the sequence
-// byte and appending rather than replacing — so nothing looks lost, no gap is reported, and the two
-// sims genuinely diverge. That is the shape #159 captured on hardware: a long clean match, then one
-// peer's executed stream containing an event the other's does not, with the link reporting nothing.
-// Injecting a real divergence matters — a test that only forges a bad ANCHOR proves the detector
-// fires but cannot prove two different states are brought back together.
-static bool TamperOneInput(Outbox& From, LockstepPeer& To, uint8_t ForgedTeam) {
-    bool Did = false;
-    for (auto& M : From.Q) {
-        if (!Did && M.first == MsgInput) {
-            BitReader R(M.second.data(), M.second.size());
-            const uint32_t Seq = R.ReadBits(8);
-            InputEvent Buf[MaxEventsPerTick];
-            const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
-            if (Cnt >= 0 && Cnt + 1 < MaxEventsPerTick) {
-                // Slot 2/3 is each team's OPENING CAMP: Init auto-places the two home bases at slots
-                // 0/1 (#146) and tick 0's two camps land next. Queueing at the camp really does move
-                // state (gold down, queue up) — queueing at the HOME BASE is rejected, so it would
-                // inject nothing and the test would prove nothing.
-                Buf[Cnt] = InputEvent::Queue(ForgedTeam, ForgedTeam == 0 ? 2 : 3, 4);
-                BitWriter W;
-                W.WriteBits(Seq, 8);
-                EncodeEventBatch(W, Buf, Cnt + 1);
-                const std::vector<uint8_t>& B = W.Finish();
-                To.OnMessage(MsgInput, B.data(), B.size());
-                Did = true;
-                continue;
-            }
-        }
-        To.OnMessage(M.first, M.second.data(), M.second.size());
-    }
-    From.Q.clear();
-    return Did;
-}
+// TamperOneInput moved to LockstepHarness.h (#211) — the soak's forged-input row uses it too.
 
 // ---- #161: A DESYNC MUST RECOVER THE MATCH. Owner direction, replacing e6d6abf's draw ----
 // e6d6abf made a desync end the match as a draw. That was a stopgap for something worse (both phones

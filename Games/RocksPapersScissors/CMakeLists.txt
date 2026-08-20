@@ -47,9 +47,14 @@ target_compile_features(rps_view PUBLIC cxx_std_20)
 add_library(rps::view ALIAS rps_view)
 
 # Net — the RPS lockstep netcode: the input event codec (one codec, three uses) and
-# the lockstep coordinator (production + ceiling + anchor/desync). Pure C++,
-# host-testable — the whole netcode is proven in two windows on one desktop before a
-# phone is in the room (#76).
+# the lockstep coordinator (production + ceiling + anchor/desync). Pure C++, host-testable.
+#
+# This comment used to claim the netcode was "proven in two windows on one desktop before a phone is
+# in the room (#76)". That was false and it cost a day (#211): the desktop's two-window loopback is
+# the only mode with two real LockstepPeers and it cannot drive itself, while every self-driving mode
+# (--aidiag/--aivs/--aibeginner) runs ONE Sim with two AiControllers and no netcode at all. Two
+# lockstep peers through a long match now really do run before a phone is involved — as
+# Net/Tests/TwoPeerSoak.cpp, a host test with no window and no Vulkan device.
 add_library(rps_net
     Net/Private/LockstepPeer.cpp)
 target_include_directories(rps_net PUBLIC Net/Public)
