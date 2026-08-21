@@ -976,51 +976,19 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // this is a no-op — the offset only becomes non-zero when a rollback rewrote the timeline under a
     // unit. Applied to BOTH interpolation endpoints below, so the whole [Prev,Pos] segment slides.
     const bool NewSnap = Snap.PublishNs != LastSmoothPublishNs;
-    for (int32_t I = 0; I < Snap.Count; ++I) {
-        if (NewSnap) {
-            const bool Alive = Snap.IsAlive(I);
-            // IDENTITY, not resemblance: the same slot must still hold the same ENTITY (Sim::Serial,
-            // minted once per creation and never reused). A slot index is not an identity — deaths
-            // recycle it, and a rollback re-runs every allocation made inside the resim window, so a
-            // single extra entity in the corrected timeline shifts every later spawn down one slot.
-            // The old (type, team) test called that shift "the same unit" and eased each new spawn in
-            // from its neighbour's position; with real motion on top, that read as a swinging arc on
-            // everything freshly built. A serial mismatch means NEW OCCUPANT -> snap, never smooth.
-            const bool SameUnit = Alive && LastSnapAlive[I] && LastSnapSerial[I] == Snap.Serial[I];
-            // Discontinuity = where we last had this unit vs where this snapshot says it begins.
-            const float Dx = SameUnit ? LastSnapPosX[I] - FW(Snap.PrevX[I]) : 0.0f;
-            const float Dy = SameUnit ? LastSnapPosY[I] - FW(Snap.PrevY[I]) : 0.0f;
-            // MaxSmoothWorld survives as a pure SANITY cap, no longer the identity guard it was
-            // doing double duty as. A real correction is ~1 world unit (≈1 resim tick of a slow
-            // unit, measured); a same-entity jump bigger than this is something we don't understand,
-            // and snapping is the safe reading — easing a cross-map jump would be a visible fly-in.
-            if (SameUnit && Dx * Dx + Dy * Dy <= MaxSmoothWorld * MaxSmoothWorld) {
-                SmoothErrX[I] += Dx;  // add to the error so the DISPLAYED position doesn't jump; decay eases it
-                SmoothErrY[I] += Dy;
-            } else {
-                SmoothErrX[I] = 0.0f;  // new/replaced entity, or a jump too big to be a correction -> snap
-                SmoothErrY[I] = 0.0f;
-            }
-            // A recycled slot also inherits the DEAD unit's held facing, so a fresh soldier popped in
-            // pointing wherever its predecessor last ran and then swung around to its own heading.
-            // Same identity break, same answer: start upright and take the first real move direction.
-            // LastCarry is the third piece of per-slot view state a new occupant must not inherit:
-            // the deposit "+N" float fires on the carry >0 -> 0 edge, so a loaded cart replaced by a
-            // fresh empty one would bank gold it never mined. (The dead-slot path already clears it;
-            // this covers the slot that stays alive under a different entity.)
-            if (!SameUnit) { LastFaceX[I] = 0.0f; LastFaceY[I] = 0.0f; LastCarry[I] = 0; }
-            LastSnapPosX[I] = FW(Snap.PosX[I]);
-            LastSnapPosY[I] = FW(Snap.PosY[I]);
-            LastSnapSerial[I] = Snap.Serial[I];
-            LastSnapAlive[I] = Alive;
+    if (NewSnap) {
+        for (int32_t I = 0; I < Snap.Count; ++I) {
+            // Observe() returns "this slot's occupant changed", which is the edge on which EVERY piece
+            // of per-slot view state has to be dropped — not just the smoothing offset. LastFace is why
+            // a fresh soldier used to point wherever its predecessor last ran; LastCarry is why a new
+            // cart could bank gold it never mined (the deposit "+N" fires on the carry >0 -> 0 edge).
+            const bool NewOccupant =
+                Smoother.Observe(I, Snap.IsAlive(I), Snap.Serial[I], FW(Snap.PrevX[I]),
+                                 FW(Snap.PrevY[I]), FW(Snap.PosX[I]), FW(Snap.PosY[I]));
+            if (NewOccupant) { LastFaceX[I] = 0.0f; LastFaceY[I] = 0.0f; LastCarry[I] = 0; }
         }
-        // Exponential decay by real render time — frame-rate independent. Snap tiny residues to 0.
-        const float Decay = std::pow(0.5f, DtSec / CorrectionHalflifeSec);
-        SmoothErrX[I] *= Decay;
-        SmoothErrY[I] *= Decay;
-        if (std::fabs(SmoothErrX[I]) < 0.001f) SmoothErrX[I] = 0.0f;
-        if (std::fabs(SmoothErrY[I]) < 0.001f) SmoothErrY[I] = 0.0f;
     }
+    Smoother.Decay(DtSec, Snap.Count);
     if (NewSnap) LastSmoothPublishNs = Snap.PublishNs;
 
     // TWO passes — every building first, then every unit — so units always render ON TOP of
@@ -1051,7 +1019,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // shift is the rollback correction offset, which is exactly 0 in normal play (the snapshot
         // chain Pos_N == Prev_{N+1} holds) and non-zero only for the few render frames after a real
         // rollback, easing that jump instead of popping it.
-        const float Ex = SmoothErrX[I], Ey = SmoothErrY[I];
+        const float Ex = Smoother.ErrX(I), Ey = Smoother.ErrY(I);
         D.PrevX = SX(FW(Snap.PrevX[I]) + Ex); D.PrevY = SY(FW(Snap.PrevY[I]) + Ey);
         D.CurX = SX(FW(Snap.PosX[I]) + Ex);   D.CurY = SY(FW(Snap.PosY[I]) + Ey);
         D.R = C.R; D.G = C.G; D.B = C.B; D.A = C.A;

@@ -10,6 +10,7 @@
 #include "Lur/Hud/TextField.h"
 #include "Lur/Math/Spring.h"   // visual-only smoothing (frontier retraction, ghost obstacle push)
 #include "Lur/Render/Renderer.h"
+#include "Lur/Render/CorrectionSmoother.h"
 #include "Lur/Text/Font.h"
 #include "Rps/AiController.h"   // EAiTier / AiTierCount / AiTierName — the opponent selector's rows
 #include "Rps/Snapshot.h"
@@ -433,33 +434,18 @@ private:
     // its heading on noise. Persists across frames; 0 = upright until the unit first moves.
     float LastFaceX[MaxUnits] = {};
     float LastFaceY[MaxUnits] = {};
-    // ---- Rollback correction smoothing (Docs/Journal/2026-08-03, Phase 3) ----
-    // When the linked sim rolls back and re-simulates, a unit's position can JUMP between published
-    // snapshots: the interpolation endpoints stop chaining (in normal play snapshot N's Pos equals
-    // snapshot N+1's Prev, because the sim sets Prev=Pos each step). We absorb that discontinuity into
-    // a per-slot visual-error offset (world units) and decay it to zero over a few render frames, so a
-    // correction reads as fast motion rather than a teleport. This is the piece that transfers to the
-    // physics game. Cost is nil when nothing rolls back — the discontinuity is then exactly zero.
-    float SmoothErrX[MaxUnits] = {};
-    float SmoothErrY[MaxUnits] = {};
-    float LastSnapPosX[MaxUnits] = {};   // previous snapshot's Pos per slot (world), for the chain test
-    float LastSnapPosY[MaxUnits] = {};
-    // Slot-identity guard: only smooth when the slot still holds THE SAME entity. This is the sim's
-    // per-creation Serial (Sim::Serial), not (type, team) + a distance heuristic — that guess could
-    // not see the case that actually shipped the bug: a rollback re-runs every allocation made in
-    // the resim window, so one extra entity in the corrected timeline slides every later spawn down
-    // one slot, and slot I inherits its neighbour — same team, same type, ~1 world unit away, i.e.
-    // indistinguishable from a real correction. Everything born inside the rollback window then
-    // swung in from its neighbour's spot. 0 = slot empty/never seen.
-    uint32_t LastSnapSerial[MaxUnits] = {};
-    bool  LastSnapAlive[MaxUnits] = {};
+    // ---- Rollback correction smoothing ----
+    // Promoted to Lur::Render::CorrectionSmoother (#201) — including the reason it keys on the sim's
+    // per-creation Serial rather than (type, team) + a distance heuristic, which is the bug that
+    // shipped as a "swinging arc" on everything freshly built. Observe() reports a changed occupant so
+    // LastFace/LastCarry above get dropped on the same edge.
+    Lur::Render::CorrectionSmoother<MaxUnits> Smoother{
+        Lur::Render::CorrectionSmoother<MaxUnits>::Config{
+            /*HalflifeSec*/ 0.07f,   // ~4 frames @60 Hz
+            /*MaxJump*/ 8.0f,        // real corrections are ~1 world unit; bigger is a slot reuse
+            /*Epsilon*/ 0.001f}};
     uint64_t LastSmoothPublishNs = 0;    // absorb the discontinuity once per PUBLISHED snapshot
-    static constexpr float CorrectionHalflifeSec = 0.07f;  // ~4 frames @60 Hz; tune on device (Phase 5)
-    // Max discontinuity (world units) still treated as a smoothable rollback correction. Real
-    // corrections are ~1 unit (≈1 resim tick of a slow unit, measured); a bigger jump is a SLOT REUSE
-    // (a recycled slot's new unit) and must SNAP, not ease in from the dead unit's spot — otherwise a
-    // respawn "flies in from the far corner". Well above any real correction, well below a cross-map jump.
-    static constexpr float MaxSmoothWorld = 8.0f;
+
     // Gold counter animation: the shown value rolls toward the real one and pops on gain.
     float DisplayedGold = -1.0f;
     float GoldPulse = 0.0f;
