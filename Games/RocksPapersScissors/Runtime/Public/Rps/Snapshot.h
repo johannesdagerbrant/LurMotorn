@@ -6,6 +6,7 @@
 #include <mutex>
 
 #include "Lur/Sim/Fixed.h"
+#include "Lur/Math/Projection.h"
 #include "Lur/Sim/Interpolation.h"
 #include "Lur/Sim/SnapshotMailbox.h"
 #include "Rps/Placement.h"   // #157: the ONE shared placement predicate (no more sim/preview mirror)
@@ -186,27 +187,26 @@ struct Snapshot {
         if (Team == 0) Yhi = std::min(Yhi, ToF(FrontierT0) - Eps);   // build no further than your line
         else           Ylo = std::max(Ylo, ToF(FrontierT1) + Eps);
         const float BR = 2.0f * Fpf, MR = ToF(Cv.MineClearance);     // building / mine exclusion radii
+        // The projection loop itself is Lur::Math::ProjectIntoRectMinusDiscs (#201) — clamp into the
+        // rectangle, push out of the single worst-penetrated disc, repeat. What stays here is the walk
+        // over OUR entities, which is the only game-specific part: the callback reports the deepest
+        // exclusion at a point without materialising a disc array.
         float Px = Dx, Py = Dy;
-        for (int It = 0; It < 12; ++It) {
-            Px = std::min(std::max(Px, Xlo), Xhi);         // nearest point of the legal rectangle
-            Py = std::min(std::max(Py, Ylo), Yhi);
-            float WorstPen = 0.0f, Wcx = 0.0f, Wcy = 0.0f, Wr = 0.0f;
+        const Lur::Math::Rect2 Bounds{Xlo, Ylo, Xhi, Yhi};
+        auto WorstAt = [&](float Qx, float Qy) {
+            Lur::Math::WorstDisc W;
             auto Consider = [&](float Cx, float Cy, float R) {
-                const float Dx2 = Px - Cx, Dy2 = Py - Cy;
-                const float Pen = R - std::sqrt(Dx2 * Dx2 + Dy2 * Dy2);
-                if (Pen > WorstPen) { WorstPen = Pen; Wcx = Cx; Wcy = Cy; Wr = R; }
+                const float Ex = Qx - Cx, Ey = Qy - Cy;
+                const float Pen = R - std::sqrt(Ex * Ex + Ey * Ey);
+                if (Pen > W.Penetration) W = Lur::Math::WorstDisc{Cx, Cy, R, Pen};
             };
             for (int32_t J = 0; J < Count; ++J)
                 if (IsAlive(J) && IsBuilding(J)) Consider(ToF(PosX[J]), ToF(PosY[J]), BR);
             for (int M = 0; M < NumMines; ++M)
                 if (MineGold[M] > 0) Consider(ToF(MineX[M]), ToF(MineY[M]), MR);
-            if (WorstPen <= 0.0f) break;                   // inside the rect, outside every disc → done
-            float Ux = Px - Wcx, Uy = Py - Wcy, Ul = std::sqrt(Ux * Ux + Uy * Uy);
-            if (Ul < 1e-4f) { Ux = 0.0f; Uy = 1.0f; Ul = 1.0f; }   // dead-centre: pick a fixed axis
-            const float Target = Wr + Eps;
-            Px = Wcx + Ux / Ul * Target;                   // push radially out to the disc boundary
-            Py = Wcy + Uy / Ul * Target;
-        }
+            return W;
+        };
+        Lur::Math::ProjectIntoRectMinusDiscs(Px, Py, Bounds, WorstAt, 12, Eps);
         // Accept the projected point only if it is genuinely valid (a cramped multi-disc pocket can
         // leave the iteration short of feasible) AND within the magnetic radius. Otherwise fall back to
         // the desired point and blink red — same contract as before.

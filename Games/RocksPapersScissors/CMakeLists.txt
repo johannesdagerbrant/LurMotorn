@@ -30,7 +30,8 @@ find_package(Threads REQUIRED)
 add_library(rps_runtime
     Runtime/Private/SimRunner.cpp)
 target_include_directories(rps_runtime PUBLIC Runtime/Public)
-target_link_libraries(rps_runtime PUBLIC rps::core lur::sim lur::core Threads::Threads)
+target_link_libraries(rps_runtime PUBLIC rps::core lur::sim lur::core Threads::Threads
+                                  lur::math)  # #201: Snapshot's magnetic placement uses Lur::Math::ProjectIntoRectMinusDiscs
 target_compile_features(rps_runtime PUBLIC cxx_std_20)
 add_library(rps::runtime ALIAS rps_runtime)
 
