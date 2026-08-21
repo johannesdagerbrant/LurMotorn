@@ -36,7 +36,7 @@
 #include "Rps/AiController.h"
 #include "OwnerBot.h"   // the scripted owner line the top tier is scored against
 #include "Rps/MatchRecord.h"   // #144: --replay a device recording
-#include "Rps/CameraScroll.h"
+#include "Lur/Input/ScrollCamera.h"
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"
 #include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with both phone mains   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
@@ -87,7 +87,7 @@ struct Peer {
     Rps::Snapshot Snap;
     uint32_t LastTick = 0xFFFFFFFFu;
     uint64_t TickLandedNs = 0;
-    Rps::CameraScroll Cam;
+    Lur::Input::ScrollCamera Cam;
     bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     uint8_t Team = 0;
     Lur::Input::ConsoleGesture DevGesture;  // per-window: each peer's console scrolls on its own
@@ -1091,7 +1091,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
                   UseAi ? static_cast<void*>(&AiCtx) : static_cast<void*>(&Human),
                   static_cast<uint32_t>(Stress < 0 ? 0 : Stress), NoCombat, SoloGate);
 
-    Rps::CameraScroll Cam;
+    Lur::Input::ScrollCamera Cam;
     bool CamInit = false;
     Lur::Input::ConsoleGesture DevGesture;  // #151: drag-to-scroll the console, shared with the phones
     // #43 section D: one dispatch for all four RPS mains. PickAiTier only LATCHES — the restart it

@@ -34,7 +34,7 @@
 #include "Lur/Sim/Random.h"
 #include "Lur/Trace/Trace.h"
 #include "Lur/Transport/Ble.h"
-#include "Rps/CameraScroll.h"
+#include "Lur/Input/ScrollCamera.h"
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with iOS + desktop
@@ -145,7 +145,7 @@ struct AppState {
     // subtraction is meaningful (do not swap either end for a wall clock).
     uint64_t PendingTouchNs = 0;                  // glue only
 
-    Rps::CameraScroll Cam;                        // glue only
+    Lur::Input::ScrollCamera Cam;                        // glue only
     bool CamInit = false;
     // #151: the console gesture — two-finger triple-tap to open, drag-to-scroll while open — is now
     // ONE shared recognizer (Lur::Input::ConsoleGesture), not a per-platform copy. The three copies

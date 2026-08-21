@@ -42,7 +42,7 @@
 #include "Lur/Trace/Trace.h"  // #69: emit the CPU-scope/latency TRACE line (ble.toApply is the target metric)
 #include "Lur/Transport/Ble.h"
 #include "Rps/AiController.h"
-#include "Rps/CameraScroll.h"
+#include "Lur/Input/ScrollCamera.h"
 #include "Rps/GameView.h"
 #include "Rps/ViewMetrics.h"   // #43 section D: Ppu / WorldHeightF / WorldToFixed / GhostOffsetPx
 #include "Rps/TouchRouter.h"   // #43 section D: what a touch MEANS, shared with Android + desktop
@@ -171,7 +171,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     Rps::Snapshot _Snap;         // the render thread's consume target (the latest published snapshot)
     uint32_t _LastConsumedTick;  // consume from the mailbox only when the published tick changes
     bool _ViewLinkedApplied;     // one-shot — the peer row + blink is applied once
-    Rps::CameraScroll _Cam;
+    Lur::Input::ScrollCamera _Cam;
     bool _CamInit;
     // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It now
     // runs on the RENDER thread (which owns _View), replayed from the touch queue; the MAIN handlers only

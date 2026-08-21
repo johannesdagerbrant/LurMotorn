@@ -41,7 +41,7 @@ using Lur::Input::TouchEvent;
 // their drag through BeginPlaceDrag directly.
 struct Rig {
     Rps::GameView              View;
-    Rps::CameraScroll          Cam;
+    Lur::Input::ScrollCamera          Cam;
     Lur::Input::ConsoleGesture Gesture;
     Rps::Snapshot              Snap;
     Rps::TouchRouter           Router;

@@ -4,7 +4,7 @@
 #include "Lur/Core/Log.h"
 #include "Lur/Input/ConsoleGesture.h"
 #include "Lur/Input/Input.h"
-#include "Rps/CameraScroll.h"
+#include "Lur/Input/ScrollCamera.h"
 #include "Rps/GameView.h"
 #include "Rps/Snapshot.h"
 #include "Rps/ViewMetrics.h"
@@ -69,7 +69,7 @@ class TouchRouter {
 public:
     // Non-owning. All four must outlive the router, which every main satisfies trivially: they are
     // sibling members of the same app state.
-    void Init(GameView* View, CameraScroll* Cam, Lur::Input::ConsoleGesture* Gesture,
+    void Init(GameView* View, Lur::Input::ScrollCamera* Cam, Lur::Input::ConsoleGesture* Gesture,
               TouchRouterHooks Hooks) {
         View_ = View;
         Cam_ = Cam;
@@ -263,7 +263,7 @@ private:
     }
 
     GameView*                   View_    = nullptr;
-    CameraScroll*               Cam_     = nullptr;
+    Lur::Input::ScrollCamera*               Cam_     = nullptr;
     Lur::Input::ConsoleGesture* Gesture_ = nullptr;
     TouchRouterHooks            Hooks_;
     float                       DownX_ = 0.0f, DownY_ = 0.0f;
