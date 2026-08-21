@@ -37,24 +37,28 @@
 // Seeds come from a counter, never from the clock: a soak that cannot be replayed from its seed is a
 // bug report nobody can act on.
 //
-// ---- CURRENT STATUS, and do not paper over it ----
-// The gate run is green. `--long` (4 seeds x 8000 ticks x 7 rows = 28 runs, ~6 min) has 4 failures,
-// both of them named:
+// ---- CURRENT STATUS ----
+// Both the gate run and `--long` (4 seeds x 8000 ticks x 7 rows = 28 runs, ~6 min) are GREEN:
+// 0 of 41 checkpoint failures on every one of the 28 runs, 3-5 matches played per run, and the
+// per-tick reading clean on every row except the two that deliberately force divergence.
 //
-//   * CONVERGENCE: 27 of the 28 runs are 0/41 checkpoint failures. The exception is `forge` on seed
-//     0x50ac0002, 1/41, "heads never met" — the ceiling deadlock: a frame discarded during an outage
-//     is never re-requested, because the gap detector can only fire when a LATER frame arrives, and a
-//     peer that has itself stalled holds production so no later frame ever comes. Both peers then
-//     report rec=0 awa=0 dsy=0 while neither advances. Reproduce with
-//     `--row silence --ticks 1200 --faultperiod 60 --settletrace`.
-//   * BOOKKEEPING DRIFT: 3 of the 28 (all `forge`). States bit-identical at every tick; MatchIndex and
-//     Seed permanently one apart. See BookkeepingDrift for what that breaks.
+// Getting here took three bugs in LockstepPeer and three in this file, and the split is worth
+// remembering before trusting any future red result from it:
 //
-// This file previously recorded a recovery LIVELOCK here — exec tick frozen, recovery rounds climbing
-// without bound, 15-22 of 41 checkpoints failing. That was #212 and it is FIXED (three defects in
-// LockstepPeer: a fabricated anchor hash, a published frontier ahead of execution, and a loser that
-// waited instead of asking). The two items above are what the fix made visible; neither is to be
-// silenced by shortening a run or moving GFaultPeriod.
+//   * #212 (netcode): AdvanceConfirmed fabricated anchor hashes from an unrelated tick, the survivor
+//     published resync frontiers ahead of its own executed tick, and the anchor-mismatch recovery
+//     waited to be rescued instead of asking. Together: a livelock at 15-22 of 41 checkpoints.
+//   * #214 (netcode, wire v11): MsgCamp carried no match identity, so a camp from a match the peer
+//     had left read as readiness for the next one. Left the pair bit-identical under permanently
+//     different MatchIndex/Seed. Now transient and self-correcting (BookkeepingDrift asserts it does
+//     not persist, and `--long` shows 3 such windows, all realigned).
+//   * #213 was filed as a netcode deadlock and was NOT ONE — it was this file freezing the ahead peer
+//     during a settle, so the behind peer could never receive the input it was waiting for. Caught by
+//     sabotaging the proposed fix back out and finding the tests still passed.
+//
+// Two of the three harness bugs produced confident, fully-argued false findings before anyone
+// suspected the harness. So: when a row goes red, sabotage the fix and confirm the test still fails
+// before believing the diagnosis.
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -112,15 +116,14 @@ static const char* RowName(ERow R) {
 // How often a periodic fault fires, in ticks — one fault every 20 s of play, which is still ~40x the
 // worst rate hardware has actually shown (#163's match lost ONE frame in ~12 000 ticks).
 //
-// Every row passes at 100 and above (measured 50..5000). Below that the ceiling deadlock in the STATUS
-// note starts to bite — at 60 the silence row wedges — so the gate deliberately sits well clear of it
-// rather than at the edge.
+// Every row passes at every rate measured, 40 through 1000, across 4 seeds — so 200 is a comfortable
+// middle rather than an edge. It was not always: before #212 and #214 the boundary looked like a
+// PHASE effect (130 and 140 failed while 110, 120 and 150 passed), which is what pointed the
+// investigation at the anchor/recovery cycle rather than at load. Worth knowing if it ever returns.
 //
 // Overridable with `--faultperiod` so a failure can be bisected down to ONE fault: "does a single
 // injection recover" and "does injection N+1 arriving mid-recovery recover" are different questions
-// with different answers, and a fixed period cannot separate them. Bisecting on this is what showed
-// the #212 livelock was a PHASE interaction (130 and 140 failed while 110, 120 and 150 passed) rather
-// than a rate ceiling — which is what pointed at the anchor/recovery cycle instead of at load.
+// with different answers, and a fixed period cannot separate them.
 static uint32_t GFaultPeriod = 200;
 // How long a Silence row holds the link dark. Must stay well under CeilingStallTimeoutNs (20 s =
 // 200 ticks at TickRateHz), because past that #162 deliberately ENDS the match — that is correct
