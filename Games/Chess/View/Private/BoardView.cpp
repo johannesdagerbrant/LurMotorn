@@ -14,6 +14,7 @@
 #include "Lur/Hud/GuidLabel.h"   // ShortGuid (shared with RPS's selector)
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Sprite2D.h"
+#include "Lur/Render/Rg8Pack.h"
 #include "Lur/Serialization/BitReader.h"
 #include "Lur/Serialization/BitWriter.h"
 #include "Lur/Text/BuiltinFonts.h"
@@ -112,20 +113,16 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     // for something that has actually happened.
     PeerHighlight = Renderer->CreateMaterial(MaterialDesc{0, Color{0.98f, 0.75f, 0.25f, 0.45f}, false});
 
-    // Pack each piece into an R8G8 texture — R = shade (the source art's tones),
-    // G = coverage (silhouette alpha) — and upload once. The shader multiplies the
-    // material tint by the shade, so the tint supplies the piece colour while the
-    // art's highlights / mid-tones / dark outline survive instead of flattening to
-    // a solid blob (issue #30).
+    // Pack each piece into an R8G8 texture — R = shade, G = coverage — and upload once. The
+    // interleave itself is Lur::Render::PackRg8 (promoted in #201: RPS packs the same primitive into
+    // a side-by-side atlas). Why the layout: the shader multiplies the material tint by the shade,
+    // so the tint supplies the piece colour while the art's highlights / mid-tones / dark outline
+    // survive instead of flattening to a solid blob (issue #30).
     const int N = ChessArt::PieceMaskSize;
     std::vector<uint8_t> Rg(static_cast<size_t>(N) * N * 2);
     for (int Type = 0; Type < 6; ++Type) {
-        const unsigned char* Shade    = ChessArt::PieceShade[Type];
-        const unsigned char* Coverage = ChessArt::PieceCoverage[Type];
-        for (int i = 0; i < N * N; ++i) {
-            Rg[i * 2 + 0] = Shade[i];      // R = shade
-            Rg[i * 2 + 1] = Coverage[i];   // G = coverage
-        }
+        Lur::Render::PackRg8(Rg.data(), N, 0, 0, ChessArt::PieceShade[Type],
+                             ChessArt::PieceCoverage[Type], N, N);
         const TextureHandle Tex = Renderer->LoadTexture(Rg.data(), N, N, ETextureFormat::Rg8);
 
         MaterialDesc Light{Tex, PieceLightTint, false};

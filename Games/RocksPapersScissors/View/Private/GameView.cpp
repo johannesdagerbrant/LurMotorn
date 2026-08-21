@@ -24,6 +24,7 @@
 #include "Lur/DevGui/Widgets.h"   // HitRect / Slider   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
+#include "Lur/Render/Rg8Pack.h"
 #include "Lur/Text/BuiltinFonts.h"
 #include "Lur/Text/TextLayout.h"      // MeasureText — centring the coin+price group in a button
 #include "Lur/Trace/Trace.h"          // #103: sub-scope render.view (world-record / gui-record / submit)
@@ -285,14 +286,12 @@ void GameView::CreateResources(IRenderer* Renderer) {
     {
         constexpr int S = RpsArt::IconSize;
         static uint8_t Rg[GlyphCount * S * S * 2];  // ~256 KB scratch — static, off the stack
+        // One tile per glyph, placed at column G*S of the wide atlas. The destination index used to
+        // be written out here as 2 * (Y * (GlyphCount * S) + G * S + X); it is Lur::Render::PackRg8's
+        // stride parameter now, shared with chess and tested (#201).
         for (int G = 0; G < GlyphCount; ++G)
-            for (int Y = 0; Y < S; ++Y)
-                for (int X = 0; X < S; ++X) {
-                    const size_t Dst = 2 * (static_cast<size_t>(Y) * (GlyphCount * S) + static_cast<size_t>(G) * S + X);
-                    const size_t Src = static_cast<size_t>(Y) * S + X;
-                    Rg[Dst + 0] = RpsArt::IconShade[G][Src];
-                    Rg[Dst + 1] = RpsArt::IconCoverage[G][Src];
-                }
+            Lur::Render::PackRg8(Rg, GlyphCount * S, G * S, 0, RpsArt::IconShade[G],
+                                 RpsArt::IconCoverage[G], S, S);
         IconAtlas = Renderer->LoadTexture(Rg, GlyphCount * S, S, Lur::Render::ETextureFormat::Rg8);
     }
     {
