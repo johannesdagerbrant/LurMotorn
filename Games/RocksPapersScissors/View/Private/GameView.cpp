@@ -24,6 +24,7 @@
 #include "Lur/DevGui/Widgets.h"   // HitRect / Slider   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
+#include "Lur/Render/Mesh2D.h"
 #include "Lur/Render/ColorMath.h"
 #include "Lur/Render/Rg8Pack.h"
 #include "Lur/Text/BuiltinFonts.h"
@@ -101,7 +102,7 @@ LUR_CVAR(CvDrawField, "rps.view.draw_field", true, ::Lur::Core::CVarFlagNone,
 LUR_CVAR(CvDrawGrid, "rps.view.draw_grid", true, ::Lur::Core::CVarFlagNone,
          "DEV A/B (#103): draw the world grid lines");
 
-struct GradStop { float P; Color C; };
+using Lur::Render::GradStop;   // #201: promoted to Lur/Render/Mesh2D.h
 // Field gradient — SCREENSPACE vertical: night-blue enemy horizon (top) through
 // dark earth to the warm umber home ground (bottom). Both players see the same
 // grade because both see the enemy at the top (per-player FlipY).
@@ -121,90 +122,10 @@ constexpr GradStop GridStops[] = {
 constexpr float GridStepWu = 4.0f;   // line spacing, world units
 constexpr float GridAlpha = 0.55f;   // keep the lines a subtle overlay
 
-Color GradSample(const GradStop* S, int N, float T) {
-    if (T <= S[0].P) return S[0].C;
-    for (int I = 1; I < N; ++I) {
-        if (T <= S[I].P) {
-            const float Span = S[I].P - S[I - 1].P;
-            const float K = Span > 0.0f ? (T - S[I - 1].P) / Span : 1.0f;
-            const Color& A = S[I - 1].C;
-            const Color& B = S[I].C;
-            return {A.R + (B.R - A.R) * K, A.G + (B.G - A.G) * K,
-                    A.B + (B.B - A.B) * K, A.A + (B.A - A.A) * K};
-        }
-    }
-    return S[N - 1].C;
-}
 
-// A unit-rect (0,0)-(1,1) vertical strip: one vertex row per stop, the stop colour
-// baked per vertex — the GPU interpolates between stops. Same triangle-list winding
-// as MakeQuad (no fans: MoltenVK).
-Lur::Render::MeshHandle MakeGradientStrip(IRenderer* R, const GradStop* Stops, int N, float Alpha) {
-    Lur::Render::Vertex V[2 * 8];
-    uint32_t Idx[6 * 7];
-    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
-    for (int I = 0; I < N; ++I) {
-        const Color& C = Stops[I].C;
-        const Lur::Math::Vec4 VC{C.R, C.G, C.B, C.A * Alpha};
-        V[2 * I + 0] = {{0.0f, Stops[I].P, 0.0f}, Nrm, {0.0f, Stops[I].P}, VC};
-        V[2 * I + 1] = {{1.0f, Stops[I].P, 0.0f}, Nrm, {1.0f, Stops[I].P}, VC};
-    }
-    uint32_t K = 0;
-    for (int I = 0; I < N - 1; ++I) {
-        const uint32_t A = 2 * I;
-        Idx[K++] = A; Idx[K++] = A + 1; Idx[K++] = A + 3;
-        Idx[K++] = A; Idx[K++] = A + 3; Idx[K++] = A + 2;
-    }
-    return R->CreateMesh(V, static_cast<uint32_t>(2 * N), Idx, K);
-}
-
-// The same idea rotated: a gradient across X instead of down Y (#174's colour picker needs both
-// axes). Kept separate rather than parameterised on an axis — two eight-line functions read
-// better than one with a branch in the vertex loop, and the vertex layout differs only in which
-// coordinate the stop drives.
-Lur::Render::MeshHandle MakeHGradientStrip(IRenderer* R, const GradStop* Stops, int N) {
-    Lur::Render::Vertex V[2 * 8];
-    uint32_t Idx[6 * 7];
-    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
-    for (int I = 0; I < N; ++I) {
-        const Color& C = Stops[I].C;
-        const Lur::Math::Vec4 VC{C.R, C.G, C.B, C.A};
-        V[2 * I + 0] = {{Stops[I].P, 0.0f, 0.0f}, Nrm, {Stops[I].P, 0.0f}, VC};
-        V[2 * I + 1] = {{Stops[I].P, 1.0f, 0.0f}, Nrm, {Stops[I].P, 1.0f}, VC};
-    }
-    uint32_t K = 0;
-    for (int I = 0; I < N - 1; ++I) {
-        const uint32_t A = 2 * I;
-        Idx[K++] = A; Idx[K++] = A + 1; Idx[K++] = A + 3;
-        Idx[K++] = A; Idx[K++] = A + 3; Idx[K++] = A + 2;
-    }
-    return R->CreateMesh(V, static_cast<uint32_t>(2 * N), Idx, K);
-}
-
-// A filled disc inscribed in the unit rect (centre 0.5,0.5, radius 0.5), WHITE like MakeQuad so
-// the material tints it — which is what lets the +1/+5 buttons share the build plates' material
-// handle instead of a look-alike copy of its colour. Expressed as a triangle LIST, not a fan:
-// fans are outside the Vulkan portability subset MoltenVK runs (see CLAUDE.md).
-Lur::Render::MeshHandle MakeDiscMesh(IRenderer* R, int Segments) {
-    Lur::Render::Vertex V[64 + 2];
-    uint32_t Idx[3 * 64];
-    if (Segments > 64) Segments = 64;
-    const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
-    const Lur::Math::Vec4 White{1.0f, 1.0f, 1.0f, 1.0f};
-    V[0] = {{0.5f, 0.5f, 0.0f}, Nrm, {0.5f, 0.5f}, White};   // centre
-    for (int I = 0; I <= Segments; ++I) {
-        const float A = 6.2831853f * static_cast<float>(I) / static_cast<float>(Segments);
-        const float X = 0.5f + 0.5f * std::cos(A), Y = 0.5f + 0.5f * std::sin(A);
-        V[1 + I] = {{X, Y, 0.0f}, Nrm, {X, Y}, White};
-    }
-    uint32_t K = 0;
-    for (int I = 0; I < Segments; ++I) {
-        Idx[K++] = 0;
-        Idx[K++] = static_cast<uint32_t>(1 + I);
-        Idx[K++] = static_cast<uint32_t>(2 + I);
-    }
-    return R->CreateMesh(V, static_cast<uint32_t>(Segments + 2), Idx, K);
-}
+// MakeGradientStrip / MakeHGradientStrip / MakeDiscMesh are Lur::Render::Mesh2D now (#201),
+// with the geometry split from CreateMesh so it is host-testable — including the triangle-LIST
+// winding the disc needs for MoltenVK.
 
 }  // namespace
 
@@ -257,14 +178,14 @@ float GameView::TopHudWorldUnits(float WidthPx) const {
 void GameView::CreateResources(IRenderer* Renderer) {
     const Lur::Render::Quad Q = Lur::Render::MakeQuad();  // white; the material tints it
     Quad = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
-    Disc = MakeDiscMesh(Renderer, 28);   // 28 segments: no straight edge visible at button size
+    Disc = Lur::Render::MakeDiscMesh(Renderer, 28);   // 28 segments: no straight edge visible at button size
 
     // Field backdrop + grid (#85): gradient meshes drawn under everything else.
     WhiteMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 1.0f});
-    FieldGradMesh = MakeGradientStrip(Renderer, FieldStops, NumFieldStops, 1.0f);
-    VLineMesh = MakeGradientStrip(Renderer, GridStops, 2, GridAlpha);
+    FieldGradMesh = Lur::Render::MakeGradientStripV(Renderer, FieldStops, NumFieldStops, 1.0f);
+    VLineMesh = Lur::Render::MakeGradientStripV(Renderer, GridStops, 2, GridAlpha);
     for (int I = 0; I < GridShades; ++I) {
-        Color C = GradSample(GridStops, 2, static_cast<float>(I) / (GridShades - 1));
+        Color C = Lur::Render::GradSample(GridStops, 2, static_cast<float>(I) / (GridShades - 1));
         C.A *= GridAlpha;
         GridLut[I] = FlatMat(Renderer, C);
     }
@@ -405,10 +326,10 @@ void GameView::CreateResources(IRenderer* Renderer) {
     {
         const GradStop SatStops[2] = {{0.0f, {1.0f, 1.0f, 1.0f, 0.0f}},
                                       {1.0f, {1.0f, 1.0f, 1.0f, 1.0f}}};
-        SvSatMesh = MakeHGradientStrip(Renderer, SatStops, 2);
+        SvSatMesh = Lur::Render::MakeGradientStripH(Renderer, SatStops, 2);
         const GradStop ValStops[2] = {{0.0f, {0.0f, 0.0f, 0.0f, 0.0f}},
                                       {1.0f, {0.0f, 0.0f, 0.0f, 1.0f}}};
-        SvValMesh = MakeGradientStrip(Renderer, ValStops, 2, 1.0f);
+        SvValMesh = Lur::Render::MakeGradientStripV(Renderer, ValStops, 2, 1.0f);
         // Hue strip: six segments round the wheel, per-vertex coloured. Seven stops so the last
         // segment closes back on red — a strip ending at magenta reads as a bug.
         GradStop HueStops[7];
@@ -418,7 +339,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
             Lur::DevGui::ColorMath::HueColor(H, R2, G2, B2);
             HueStops[I] = {H, {R2, G2, B2, 1.0f}};
         }
-        HueStripMesh = MakeHGradientStrip(Renderer, HueStops, 7);
+        HueStripMesh = Lur::Render::MakeGradientStripH(Renderer, HueStops, 7);
         PickHueMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 0.0f, 0.0f, 1.0f});
         PickAlphaMat = FlatMat(Renderer, Lur::Render::Color{1.0f, 1.0f, 1.0f, 1.0f});
     }
