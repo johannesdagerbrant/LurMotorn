@@ -223,6 +223,7 @@ struct SoakResult {
     // because it is a different bug with a different fix (see BookkeepingDrift).
     uint32_t DriftCheckpoints = 0;
     uint32_t FirstDriftTick = 0;
+    bool DriftAtEnd = false;
     uint32_t SettleTicks = 0;   // ticks spent inside checkpoints, excluded from the fault schedule
     // The #210 invariant: the survivor (team 0, lower device GUID) has the authoritative timeline,
     // so there is nothing it could legitimately be rebuilding FROM. If this is ever true the pair is
@@ -403,6 +404,7 @@ static const char* WhyNotConverged(const LockstepPeer& A, const LockstepPeer& B)
 static bool SettleAndCompare(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbox& Qb,
                              AiController& Ai0, AiController& Ai1, int Rounds,
                              uint32_t* SettleTicks) {
+    bool Standstill = false;   // neither head moved last round -> release the leader too
     for (int I = 0; I < Rounds; ++I) {
         if (Converged(A, B)) return true;
         // A quiet moment means no NEW orders — it does not mean no input at all, because the opening
@@ -413,22 +415,34 @@ static bool SettleAndCompare(LockstepPeer& A, LockstepPeer& B, Outbox& Qa, Outbo
         // handshake completes and the moment stays quiet for the part that is actually being measured.
         if (!A.MatchStarted()) FeedAi(A, Ai0);
         if (!B.MatchStarted()) FeedAi(B, Ai1);
-        // SNAPSHOT both heads before ticking either. Reading B's head after A has already ticked is an
-        // off-by-one that makes this loop run FOREVER on a pair sitting one tick apart: A catches up to
-        // B, the second condition then sees the new equal value and ticks B as well, and the pair
-        // alternates a tick apart indefinitely. It cost a false "the netcode never reconverges"
-        // reading, complete with a plausible mechanism, before the loop itself was suspected.
-        const uint32_t Ta = A.ExecTick();
-        const uint32_t Tb = B.ExecTick();
         if (GSettleTrace && (I % 40) == 0)
             std::printf("      settle I=%d A[t=%u rec=%d awa=%d dsy=%d] B[t=%u rec=%d awa=%d dsy=%d]\n",
-                        I, Ta, A.Recovering() ? 1 : 0, A.AwaitingResync() ? 1 : 0,
-                        A.Desynced() ? 1 : 0, Tb, B.Recovering() ? 1 : 0,
+                        I, A.ExecTick(), A.Recovering() ? 1 : 0, A.AwaitingResync() ? 1 : 0,
+                        A.Desynced() ? 1 : 0, B.ExecTick(), B.Recovering() ? 1 : 0,
                         B.AwaitingResync() ? 1 : 0, B.Desynced() ? 1 : 0);
-        if (Ta <= Tb) A.Tick(OneTickNs);
-        if (Tb <= Ta) B.Tick(OneTickNs);
+        // Hold the AHEAD peer so the heads can meet — except when the pair made no progress at all last
+        // round, in which case release both. Three earlier versions of these four lines were each wrong
+        // in a way that produced a confident false finding, so the reasoning is worth keeping:
+        //
+        //   * reading the second head AFTER ticking the first is an off-by-one: a pair one tick apart
+        //     alternates forever, which read as "the netcode never reconverges";
+        //   * snapshotting the heads first but still freezing the ahead peer deadlocks by construction —
+        //     a peer stalled at its ceiling waits for the OTHER peer's input, and the other peer only
+        //     produces input when ticked. That reported "both peers wedged for 400 s with a healthy
+        //     link" about a pair that was not wedged;
+        //   * ticking both unconditionally (what two real phones do) fixes that but stops the heads ever
+        //     MEETING: a peer that bursts out of a stall overshoots the other, and the settle's
+        //     equal-tick condition is never satisfied even though the pair is fine.
+        //
+        // So: converge by holding the leader, and break a genuine standstill by releasing it. Only a
+        // pair that stays frozen with both peers running is actually stuck.
+        const uint32_t Ta = A.ExecTick();
+        const uint32_t Tb = B.ExecTick();
+        if (Ta <= Tb || Standstill) A.Tick(OneTickNs);
+        if (Tb <= Ta || Standstill) B.Tick(OneTickNs);
         Deliver(Qa, B);
         Deliver(Qb, A);
+        Standstill = A.ExecTick() == Ta && B.ExecTick() == Tb;
         ++*SettleTicks;
     }
     return Converged(A, B);
@@ -548,6 +562,11 @@ static SoakResult RunSoak(const SoakSpec& Spec) {
                         B.MatchIndex(), static_cast<unsigned long long>(B.GetSim().Seed),
                         static_cast<uint32_t>(B.GetSim().StateHash()), WhyNotConverged(A, B));
             } else if (BookkeepingDrift(A, B)) {
+                if (Spec.TraceTicks)
+                    std::printf("    drift T=%u  A[t=%u m=%u seed=%llx] B[t=%u m=%u seed=%llx]\n", T,
+                                A.ExecTick(), A.MatchIndex(),
+                                static_cast<unsigned long long>(A.GetSim().Seed), B.ExecTick(),
+                                B.MatchIndex(), static_cast<unsigned long long>(B.GetSim().Seed));
                 // Converged, so the checkpoint PASSES — but the two peers label this match
                 // differently, which is its own defect and must not hide behind a green convergence.
                 if (R.DriftCheckpoints == 0) R.FirstDriftTick = T;
@@ -593,6 +612,7 @@ static SoakResult RunSoak(const SoakSpec& Spec) {
     Igp.Sample(static_cast<uint32_t>(A.InputGaps() + B.InputGaps()));
     Dup.Sample(static_cast<uint32_t>(A.DuplicateFrames() + B.DuplicateFrames()));
     Rbk.Sample(static_cast<uint32_t>(A.Rollbacks() + B.Rollbacks()));
+    R.DriftAtEnd = BookkeepingDrift(A, B);
     R.DesyncsSeen = Dsy.Total;
     R.RecoveryRounds = Rnd.Total;
     R.GapRecoveries = Gap.Total;
@@ -629,12 +649,17 @@ static void CheckRow(const SoakSpec& Spec, const SoakResult& R) {
     // was, a quiet moment must find the two peers playing the same game.
     CHECK(R.CheckpointFailures == 0);
 
-    // And playing the same NUMBERED game. Bit-identical state with drifted match counters is not a
-    // divergence, but it is not correct either — see BookkeepingDrift for what it breaks.
+    // And playing the same NUMBERED game — but the assertion is that drift does not PERSIST, not that
+    // it never appears. Two peers whose sims end a match a few ticks apart genuinely ARE in different
+    // matches for that window, and #214's ordinal exchange corrects the label at the next boundary
+    // rather than preventing the window. What breaks recordings and score tallies is a session that
+    // ENDS disagreeing, because nothing realigns it after that. Before #214 that was the normal
+    // outcome — 21 of 41 checkpoints drifted and the seeds never re-converged.
     if (R.DriftCheckpoints)
-        std::printf("    MATCH BOOKKEEPING DRIFT from tick %u (%u checkpoints) — states agree, "
-                    "MatchIndex/Seed do not\n", R.FirstDriftTick, R.DriftCheckpoints);
-    CHECK(R.DriftCheckpoints == 0);
+        std::printf("    match bookkeeping drift from tick %u (%u checkpoints, %s) — states agree, "
+                    "MatchIndex/Seed do not\n", R.FirstDriftTick, R.DriftCheckpoints,
+                    R.DriftAtEnd ? "STILL DRIFTED AT END" : "realigned");
+    CHECK(!R.DriftAtEnd);
 
     // Nothing these rows inject ever reaches an executed tick, so a single disagreeing hash is a bug.
     if (RowMustNeverDiverge(Spec.Row)) CHECK(R.Disagreements == 0);

@@ -587,7 +587,14 @@ private:
     bool LocalCampSent_ = false;   // we've sent our camp to the peer at least once
     uint64_t CampResendNs_ = 0;    // #149 time since that send (pre-match re-send period)
     uint64_t PostMatchNs_ = 0;     // #149 wall time held on the win/lose screen
-    uint32_t MatchIndex_ = 0;      // #149 0-based match counter (restart bumps it)
+    // #149 0-based match counter. #214: it is also EXCHANGED (on MsgCamp) and the seed is derived
+    // from it, so the two peers cannot end up labelling the same game differently — the counter used
+    // to be purely local and a stale camp could give one peer an extra increment for good.
+    uint32_t MatchIndex_ = 0;
+    // The session's base seed, from Init. Match N plays seed InitialSeed_ + N, which is what
+    // `TheSim.Seed + 1` per restart already produced — but derived from the AGREED ordinal rather
+    // than compounded locally, so an extra restart on one peer cannot shift its seed permanently.
+    uint64_t InitialSeed_ = 0;
     InputEvent LocalCamp_{};
     InputEvent PeerCamp_{};
 

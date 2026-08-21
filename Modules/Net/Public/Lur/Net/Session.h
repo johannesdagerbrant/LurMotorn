@@ -89,7 +89,14 @@ enum class EMsgType : uint8_t {
 //     check ran before the type byte was ever read. Chess moves now travel framed on its
 //     own Game1 slot like every other message. A v9 peer would read a framed move as a
 //     2-byte datagram of an unknown type and drop it, so it must not be allowed to link.
-inline constexpr uint8_t ProtocolVersion = 10;
+// v11: the RPS opening-camp message (MsgCamp) carries the sender's MATCH ORDINAL (#214). It had no
+//     match identity at all, so a camp from the peer's PREVIOUS match read as readiness for the
+//     receiver's NEXT one: the peer that restarted first accepted a stale camp, started a match the
+//     other was still finishing, and came out of it one restart ahead. Both peers then played
+//     bit-identical games under different labels and different seeds forever, which makes their
+//     flight recordings unpairable and their score tallies disagree. A v10 peer sends no ordinal, so
+//     a v10<->v11 pair would read the varint off the end of the payload; it must not link.
+inline constexpr uint8_t ProtocolVersion = 11;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {

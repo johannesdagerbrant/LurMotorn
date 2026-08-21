@@ -118,6 +118,7 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     Send = InSend;
     Ctx = InCtx;
     MatchIndex_ = 0;      // a fresh session; the restart path is the only other bump
+    InitialSeed_ = Seed;  // #214: match N is InitialSeed_ + N, derived from the agreed ordinal
 #if LUR_INTERNAL
     // Clear the build-fingerprint verdict HERE and nowhere else, because Init is exactly where the
     // mains re-exchange fingerprints (SendFingerprint sits next to their Lp.Init call). Pairing the
@@ -195,9 +196,12 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     if (MatchStarted_ && TheSim.Result != ResultOngoing) {
         PostMatchNs_ += ElapsedNs;
         if (PostMatchNs_ >= PostMatchHoldNs) {
-            const uint64_t NextSeed = TheSim.Seed + 1;
-            BeginMatch(NextSeed);
+            // #214: derive the seed from the ordinal instead of compounding TheSim.Seed + 1. Same
+            // numbers for a converged pair, but an extra restart on one peer no longer shifts its seed
+            // permanently — and the ordinal itself is now reconciled over the wire.
             ++MatchIndex_;
+            const uint64_t NextSeed = InitialSeed_ + MatchIndex_;
+            BeginMatch(NextSeed);
             Lur::Log::Info("RPS: match %u begins (seed 0x%llx) — awaiting both camps", MatchIndex_,
                            static_cast<unsigned long long>(NextSeed));
         }
@@ -403,6 +407,9 @@ void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
 void LockstepPeer::SendLocalCamp() {
     Lur::Serialization::BitWriter W;
     EncodeEventBatch(W, &LocalCamp_, 1);
+    // #214: which match this camp is FOR. One varint (a byte for any real session), and it is what
+    // stops a camp from a match we have already left being read as readiness for the next one.
+    Lur::Serialization::WriteVarUint(W, MatchIndex_);
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgCamp, B.data(), B.size());
     LocalCampSent_ = true;
@@ -1056,6 +1063,49 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         InputEvent Buf[MaxEventsPerTick];
         const int Cnt = DecodeEventBatch(R, Buf, MaxEventsPerTick);
         if (Cnt < 1) return;
+        // ---- #214: which match is this camp FOR? ----
+        // The camp used to carry no match identity, and that is how the two peers ended up labelling
+        // the same game differently. Sequence, measured: B's match ends a hair before A's (they had
+        // diverged near the end), B restarts and waits pre-match, and A — still finishing its own
+        // match — answers B's camp with a re-send of ITS camp, which belongs to the match B has just
+        // left. B has no way to tell, takes it as readiness, and starts a fresh match alone. When A
+        // finally restarts, the pair re-converges in state and plays on happily, but B is one restart
+        // ahead of A for the rest of the session: different MatchIndex, different Seed, identical
+        // StateHash at every tick. The sim cannot see it (Seed is read only by the LUR_INTERNAL
+        // StressFill) but the recordings and the score tallies can.
+        const uint32_t PeerOrdinal = static_cast<uint32_t>(Lur::Serialization::ReadVarUint(R));
+        if (!R.IsOk()) return;
+        if (PeerOrdinal != MatchIndex_) {
+            if (PeerOrdinal > MatchIndex_ && !MatchStarted_) {
+                // We are BEHIND and free to move, so adopt the peer's ordinal and re-seed to it. This
+                // is the case that would otherwise deadlock: we cannot start our match N without the
+                // peer's camp for N, and it has moved past N. Keep the local camp across the re-base —
+                // BeginMatch clears it, and making the player place again is both bad and enough to
+                // stall the handshake it is trying to complete.
+                const InputEvent HeldCamp = LocalCamp_;
+                const bool HadCamp = LocalReady_;
+                Lur::Log::Info("RPS: the peer's camp is for match %u and we are on %u — adopting its "
+                               "ordinal and re-seeding (#214).", PeerOrdinal, MatchIndex_);
+                MatchIndex_ = PeerOrdinal;
+                BeginMatch(InitialSeed_ + MatchIndex_);
+                if (HadCamp) {
+                    LocalCamp_ = HeldCamp;
+                    LocalReady_ = true;
+                }
+                SendLocalCamp();   // tell it we are with it now, at the ordinal we just adopted
+            } else {
+                // STALE (the peer is behind us), or we are mid-match and cannot move yet. Either way
+                // this is not readiness for the match we are in, so it must not set PeerReady_ —
+                // accepting it is the whole bug.
+                //
+                // Only a STARTED peer answers. It has left the pre-match re-send loop and is otherwise
+                // silent, which is the #149 unstranding this reply was added for. Pre-match, the 500 ms
+                // re-send already covers it, and replying to every message would make a peer that is
+                // one ordinal behind ping-pong with us for as long as the mismatch lasts.
+                if (MatchStarted_) SendLocalCamp();
+                return;
+            }
+        }
         if (!PeerReady_) {
             PeerCamp_ = Buf[0];
             PeerReady_ = true;
