@@ -91,6 +91,38 @@ static void TestCVarFixed() {
     CHECK(CvTestSpeed.Get() == Fixed{Fixed::One / 2} && !CvTestSpeed.Overridden());
 }
 
+// ---- #201: F() / FRound(), promoted here from Rps/Tunables.h ----
+// The reason FRound exists at all is a one-raw-unit bug (#155) that surfaced only as a StateHash
+// difference between two phones, so the contract is pinned here rather than left to the games:
+// F truncates, FRound rounds to nearest, and FRound must agree with what the decimal codec parses.
+static void TestFixedBuilders() {
+    using Lur::Sim::F;
+    using Lur::Sim::FRound;
+    CHECK(F(3).Raw == (3 << 16));
+    CHECK(F(-2).Raw == -(2 << 16));
+    CHECK(F(0).Raw == 0);
+
+    // Exact division: the two agree.
+    CHECK(F(1, 2).Raw == FRound(1, 2).Raw);
+    CHECK(F(1, 2).Raw == (1 << 16) / 2);
+
+    // Inexact: F truncates DOWN, FRound goes to nearest — and FRound is the one that round-trips
+    // through FromString, which is the whole point.
+    CHECK(F(1, 10).Raw == 6553);
+    CHECK(FRound(1, 10).Raw == 6554);
+    Lur::Sim::Fixed Parsed{};
+    CHECK(Lur::Sim::FromString("0.1", Parsed));
+    CHECK(Parsed.Raw == FRound(1, 10).Raw);   // #155: the property that was violated
+    CHECK(Parsed.Raw != F(1, 10).Raw);        // and the one-unit gap that made it invisible
+
+    // Negative rationals: FRound's `+ Den/2` must not turn -0.5 into a positive step.
+    CHECK(F(-1, 10).Raw < 0 && FRound(-1, 10).Raw < 0);
+
+    // constexpr, not just const — these are used as CVar defaults and array sizes.
+    static_assert(F(2).Raw == (2 << 16), "F must be constexpr");
+    static_assert(FRound(1, 10).Raw == F(1, 10).Raw + 1, "FRound must round up on 1/10");
+}
+
 int main() {
     Lur::Core::CVarEnterMain();
 
@@ -99,6 +131,7 @@ int main() {
     TestFixedEdges();
     TestFixedString();
     TestCVarFixed();
+    TestFixedBuilders();
 
     if (GFailures == 0) {
         std::printf("All sim tests passed.\n");

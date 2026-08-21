@@ -22,26 +22,11 @@ using Lur::Sim::Fixed;
 using Lur::Core::CVarFlagAffectsGameplay;  // #112: gameplay-CVar sync boundary
 using Lur::Core::CVarFlagNone;             // #156: dev-only knobs (never latched/hashed/synced)
 
-// Compile-time Fixed builders. F(n) = whole number; F(num,den) = a rational, for
-// sub-integer tunables like a 0.45-units/tick speed, evaluated with an int64
-// intermediate so it's exact and constexpr.
-constexpr Fixed F(int32_t V) { return Fixed::FromInt(V); }
-constexpr Fixed F(int32_t Num, int32_t Den) {
-    return Fixed{static_cast<int32_t>((static_cast<int64_t>(Num) << Fixed::FracBits) / Den)};
-}
-// Rounding counterpart to F(Num, Den) — use it for any default you would naturally WRITE as a
-// decimal, so the compile-time value and the typed/persisted one are the same raw.
-//
-// F truncates; the console + cvars.cfg decimal codec (FixedString.h) rounds to nearest. They agree
-// whenever the division is exact and disagree when it isn't: F(1,10) is raw 6553, but "0.1" parses
-// to 6554. A truncated default therefore can NEVER round-trip through its own console — it persists
-// as "0.09999" — and a hand-edited cvars.cfg saying "0.1" silently differs from it. That is not
-// theoretical: it cost one raw unit of w_predator_flee and showed up as a StateHash difference
-// between the two phones (#155 promotion), visible only because the pre-match LOCKSTEP readout
-// prints the hash.
-constexpr Fixed FRound(int32_t Num, int32_t Den) {
-    return Fixed{static_cast<int32_t>(((static_cast<int64_t>(Num) << Fixed::FracBits) + Den / 2) / Den)};
-}
+// F() / FRound() moved to Lur/Sim/Fixed.h (#201) — they are builders for Fixed, not RPS tunables.
+// Pulled into this namespace so the hundreds of F(...) literals below (and in every other RPS header)
+// read unchanged.
+using Lur::Sim::F;
+using Lur::Sim::FRound;
 
 // ---- Unit types. Declaration order is load-bearing: it indexes UnitTable AND is
 // the bit position in the input mask (bit 0 = Miner ... bit 3 = Scissor). ----

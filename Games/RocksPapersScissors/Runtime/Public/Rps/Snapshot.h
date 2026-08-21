@@ -6,6 +6,8 @@
 #include <mutex>
 
 #include "Lur/Sim/Fixed.h"
+#include "Lur/Sim/Interpolation.h"
+#include "Lur/Sim/SnapshotMailbox.h"
 #include "Rps/Placement.h"   // #157: the ONE shared placement predicate (no more sim/preview mirror)
 #include "Rps/Sim.h"
 #include "Rps/Tunables.h"
@@ -257,52 +259,14 @@ struct Snapshot {
         return PlacementAccepts(*this, Cv.BuildingFootprint, Cv.MineClearance, PlaceTeam, X, Y);
     }
 
-    // Fixed-timestep interpolation factor at render time NowNs. Clamps to [0,1] — no
-    // extrapolation: if the next tick is late (sim stalled), it holds at Pos, which is
-    // exactly the "freeze gracefully" behaviour the netcode wants at the ceiling.
-    float AlphaAt(uint64_t NowNs) const {
-        if (StepNs == 0 || NowNs <= PublishNs) return 0.0f;
-        const uint64_t D = NowNs - PublishNs;
-        if (D >= StepNs) return 1.0f;
-        return static_cast<float>(D) / static_cast<float>(StepNs);
-    }
+    // Fixed-timestep interpolation factor at render time NowNs. The clamp — and the reason it must
+    // never exceed 1 — lives with the primitive now: Lur::Sim::InterpAlpha (#201).
+    float AlphaAt(uint64_t NowNs) const { return Lur::Sim::InterpAlpha(NowNs, PublishNs, StepNs); }
 };
 
-// Double-buffered hand-off, single-producer (tick thread) / single-consumer (render
-// thread). The producer fills the back buffer UNLOCKED (the ~90 KB CaptureFrom must
-// not block the render thread), then Publish() flips the front/back indices under a
-// short lock. The consumer copies the front buffer out under the same lock. Front and
-// back are always different, so the only thing the lock guards is the index swap and
-// the consumer's copy — the same "copy under lock, heavy work outside" shape as
-// EventInbox. A lock-free triple buffer is a drop-in upgrade if the 10 Hz publish ever
-// contends the render thread (it won't).
-class SnapshotMailbox {
-public:
-    // Producer: write here, then Publish().
-    Snapshot& Back() { return Buffers[BackIdx]; }
-
-    void Publish() {
-        std::lock_guard<std::mutex> Lock(Mutex);
-        FrontIdx = BackIdx;
-        BackIdx = 1 - BackIdx;
-        HasPublished = true;
-    }
-
-    // Consumer: copies the latest published snapshot into Out. False until the first
-    // Publish(). Copy is under the lock so Front can't flip mid-copy (2-buffer safe).
-    bool Consume(Snapshot& Out) const {
-        std::lock_guard<std::mutex> Lock(Mutex);
-        if (!HasPublished) return false;
-        Out = Buffers[FrontIdx];
-        return true;
-    }
-
-private:
-    mutable std::mutex Mutex;
-    Snapshot Buffers[2];
-    int FrontIdx = 0;
-    int BackIdx = 0;   // starts equal to Front; first Publish() moves Front onto it and flips
-    bool HasPublished = false;
-};
+// The sim->render hand-off is Lur::Sim::SnapshotMailbox<Snapshot> now (#201) — zero RPS content, so
+// it moved to the engine as a template over the snapshot type. Aliased so the three mains and
+// SimRunner read unchanged.
+using SnapshotMailbox = Lur::Sim::SnapshotMailbox<Snapshot>;
 
 } // namespace Rps
