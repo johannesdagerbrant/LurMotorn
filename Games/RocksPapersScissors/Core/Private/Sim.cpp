@@ -22,6 +22,7 @@
 #include "Lur/Core/Hash.h"   // StateHash mixes with the engine FNV-1a, not a private copy
 #include "Lur/Core/Log.h"      // #157: the starter-row seal is a WARNING, not an abort
 #include "Lur/Sim/Random.h"
+#include "Lur/Sim/CsrBuckets.h"
 #include "Rps/Placement.h"     // #157: the one shared placement predicate (Sim + Snapshot)
 #include "Lur/Trace/Trace.h"  // LUR_TRACE_SCOPE — observational only (compiles out in Shipping)
 
@@ -73,8 +74,10 @@ int32_t CellY(Fixed Y) {
 constexpr int32_t Abs32(int32_t V) { return V < 0 ? -V : V; }
 
 struct Grid {
-    int32_t Start[GridCells + 1];  // CSR: cell c's units are Order[Start[c] .. Start[c+1])
-    int32_t Order[MaxUnits];
+    // #201: the counting sort itself is Lur::Sim::CsrBuckets — same four steps, same determinism
+    // contract (ascending-within-cell is the tie-break), now shared with MineGrid below and tested in
+    // csr_buckets_tests against brute force.
+    Lur::Sim::CsrBuckets<MaxUnits, GridCells> B;
     // #181 cache-local gather: the flock gather reads each neighbour's Pos/Type/Team/flags, and doing
     // that as S.PosX[J], S.Type[J], ... by scattered slot index J touched ~6 SoA cache lines PER
     // neighbour (~183 neighbours/unit at 2050 soldiers). Pack the always-read fields here, in Order
@@ -89,24 +92,18 @@ struct Grid {
     };
     Packed Pk[MaxUnits];
 
+    const int32_t* Start() const { return B.Start; }
+    const int32_t* Order() const { return B.Order; }
+
     void Build(const Sim& S) {
-        for (int32_t C = 0; C <= GridCells; ++C) Start[C] = 0;
-        // Count into Start[cell+1], then prefix-sum -> Start[cell] = bucket offset.
-        for (int32_t I = 0; I < S.Count; ++I)
-            if (S.IsAlive(I)) ++Start[CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]) + 1];
-        for (int32_t C = 1; C <= GridCells; ++C) Start[C] += Start[C - 1];
-        // Scatter in ascending slot order so ids stay ascending within each cell.
-        int32_t Cursor[GridCells];
-        for (int32_t C = 0; C < GridCells; ++C) Cursor[C] = Start[C];
-        for (int32_t I = 0; I < S.Count; ++I)
-            if (S.IsAlive(I)) {
-                const int32_t C = CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]);
-                const int32_t P = Cursor[C]++;
-                Order[P] = I;
-                Pk[P] = { S.PosX[I], S.PosY[I], I, S.Type[I], S.Team[I],
-                          static_cast<uint8_t>((S.IsBuilding(I) ? 1u : 0u) |
-                                               (S.IsHomeBase(I) ? 2u : 0u)), 0 };
-            }
+        B.Build(S.Count, GridCells,
+                [&S](int32_t I) { return CellY(S.PosY[I]) * GridCols + CellX(S.PosX[I]); },
+                [&S](int32_t I) { return S.IsAlive(I); },
+                [&](int32_t P, int32_t I) {
+                    Pk[P] = { S.PosX[I], S.PosY[I], I, S.Type[I], S.Team[I],
+                              static_cast<uint8_t>((S.IsBuilding(I) ? 1u : 0u) |
+                                                   (S.IsHomeBase(I) ? 2u : 0u)), 0 };
+                });
     }
 };
 
@@ -125,21 +122,15 @@ struct Grid {
 // addition — associative and commutative — so the ORDER the survivors are summed in cannot matter
 // either. The determinism tests and TestGridEqualsBruteForce are the guard.
 struct MineGrid {
-    int32_t Start[GridCells + 1];  // CSR: cell c's live mines are Order[Start[c] .. Start[c+1])
-    int32_t Order[NumMines];
+    Lur::Sim::CsrBuckets<NumMines, GridCells> B;
+
+    const int32_t* Start() const { return B.Start; }
+    const int32_t* Order() const { return B.Order; }
 
     void Build(const Sim& S) {
-        for (int32_t C = 0; C <= GridCells; ++C) Start[C] = 0;
-        for (int32_t M = 0; M < NumMines; ++M)
-            if (S.MineGold[M] > 0) ++Start[CellY(S.MineY[M]) * GridCols + CellX(S.MineX[M]) + 1];
-        for (int32_t C = 1; C <= GridCells; ++C) Start[C] += Start[C - 1];
-        int32_t Cursor[GridCells];
-        for (int32_t C = 0; C < GridCells; ++C) Cursor[C] = Start[C];
-        for (int32_t M = 0; M < NumMines; ++M)
-            if (S.MineGold[M] > 0) {
-                const int32_t C = CellY(S.MineY[M]) * GridCols + CellX(S.MineX[M]);
-                Order[Cursor[C]++] = M;
-            }
+        B.Build(NumMines, GridCells,
+                [&S](int32_t M) { return CellY(S.MineY[M]) * GridCols + CellX(S.MineX[M]); },
+                [&S](int32_t M) { return S.MineGold[M] > 0; });
     }
 };
 
@@ -374,8 +365,8 @@ void BuildThreatGrid(const Sim& S, const Grid& G, ThreatSet& T) {
         for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
             for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
                 const int32_t C = Gy * GridCols + Gx;
-                const int32_t End = G.Start[C + 1];
-                for (int32_t P = G.Start[C]; P < End; ++P) {
+                const int32_t End = G.Start()[C + 1];
+                for (int32_t P = G.Start()[C]; P < End; ++P) {
                     const Grid::Packed& Q = G.Pk[P];
                     if (Q.Type == UnitMiner || Q.Team == MTeam) continue;  // only enemy warriors raid
                     int64_t Dx = Mx - Q.PosX.Raw; if (Dx < 0) Dx = -Dx;
@@ -439,8 +430,8 @@ int32_t NearestEnemyGrid(const Sim& S, const Grid& G, int32_t I) {
                 if (!EdgeRow && Gx != X0 && Gx != X1) continue;  // ring K = box perimeter; interior done in earlier K
                 AnyInGrid = true;
                 const int32_t C = Gy * GridCols + Gx;
-                const int32_t End = G.Start[C + 1];
-                for (int32_t P = G.Start[C]; P < End; ++P) {
+                const int32_t End = G.Start()[C + 1];
+                for (int32_t P = G.Start()[C]; P < End; ++P) {
                     const Grid::Packed& Q = G.Pk[P];              // contiguous — no scattered SoA fetch
                     if (Q.Team == ITeam) continue;               // Q is alive by construction
                     int64_t Dx = static_cast<int64_t>(Ix.Raw) - Q.PosX.Raw; if (Dx < 0) Dx = -Dx;
@@ -788,8 +779,8 @@ void GatherGrid(const Sim& S, const Grid& G, int32_t I, const ThreatSet& Threat,
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
-            const int32_t End = G.Start[C + 1];
-            for (int32_t P = G.Start[C]; P < End; ++P) {
+            const int32_t End = G.Start()[C + 1];
+            for (int32_t P = G.Start()[C]; P < End; ++P) {
                 const Grid::Packed& Q = G.Pk[P];
                 AccumFlockCore(S, Threat, Ix, Iy, I, ITeam, IType,
                                Q.PosX, Q.PosY, Q.Idx, Q.Type, Q.Team,
@@ -809,8 +800,8 @@ void AddMineRepel(const Sim& S, const MineGrid& MG, int32_t I, int64_t& Ax, int6
     for (int32_t Gy = Cy0; Gy <= Cy1; ++Gy)
         for (int32_t Gx = Cx0; Gx <= Cx1; ++Gx) {
             const int32_t C = Gy * GridCols + Gx;
-            for (int32_t P = MG.Start[C]; P < MG.Start[C + 1]; ++P) {
-                const int32_t Mn = MG.Order[P];
+            for (int32_t P = MG.Start()[C]; P < MG.Start()[C + 1]; ++P) {
+                const int32_t Mn = MG.Order()[P];
                 const Fixed Dx = S.PosX[I] - S.MineX[Mn], Dy = S.PosY[I] - S.MineY[Mn];
                 AddRepel(Dx, Dy, Max(Abs(Dx), Abs(Dy)), R, S.Cv.SeparationStrength, Ax, Ay);
             }
