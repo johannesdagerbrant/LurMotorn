@@ -13,3 +13,11 @@ add_executable(render_smoother_tests CorrectionSmootherTests.cpp)
 target_link_libraries(render_smoother_tests PRIVATE lur_render)
 target_compile_features(render_smoother_tests PRIVATE cxx_std_20)
 add_test(NAME render_smoother_tests COMMAND render_smoother_tests)
+
+# #201: ColorMath moved here from Modules/DevGui and absorbed RPS's own HSV, which was written in a
+# different convention. The headline test reproduces the old RPS formula and asserts the two agree
+# across the hue circle — without that, consolidating them could shift the team palette invisibly.
+add_executable(render_colormath_tests ColorMathTests.cpp)
+target_link_libraries(render_colormath_tests PRIVATE lur_render)
+target_compile_features(render_colormath_tests PRIVATE cxx_std_20)
+add_test(NAME render_colormath_tests COMMAND render_colormath_tests)

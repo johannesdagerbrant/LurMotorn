@@ -24,6 +24,7 @@
 #include "Lur/DevGui/Widgets.h"   // HitRect / Slider   // #113: the one home for dev-layer colours
 #include "Lur/Render/DevGuiLayer.h"  // #113: BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Sprite2D.h"
+#include "Lur/Render/ColorMath.h"
 #include "Lur/Render/Rg8Pack.h"
 #include "Lur/Text/BuiltinFonts.h"
 #include "Lur/Text/TextLayout.h"      // MeasureText — centring the coin+price group in a button
@@ -57,20 +58,8 @@ float HudScale(float WidthPx) {
     return S < 1.0f ? 1.0f : S;
 }
 
-// #142 team palette: fully-bright/saturated hues (HSV, h in [0,360)) instead of lightness shades.
-Color Hsv(float H, float S, float V) {
-    const float C = V * S;
-    const float X = C * (1.0f - std::fabs(std::fmod(H / 60.0f, 2.0f) - 1.0f));
-    const float M = V - C;
-    float R = 0, G = 0, B = 0;
-    if (H < 60)       { R = C; G = X; }
-    else if (H < 120) { R = X; G = C; }
-    else if (H < 180) { G = C; B = X; }
-    else if (H < 240) { G = X; B = C; }
-    else if (H < 300) { R = X; B = C; }
-    else              { R = C; B = X; }
-    return {R + M, G + M, B + M, 1.0f};
-}
+// Lur::Render::ColorMath::FromHsvDeg() was a second HSV implementation in a third convention; it is Lur::Render::ColorMath now
+// (#201), and render_colormath_tests pins it against the formula that used to live here.
 
 Lur::Render::MaterialHandle FlatMat(IRenderer* R, Color C) {
     MaterialDesc D;
@@ -87,14 +76,14 @@ const char* ResultStr(uint8_t R, int MyTeam) {
 }
 
 // ---- Locked palette (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html) ----
-constexpr float Srgb(int V) { return static_cast<float>(V) / 255.0f; }
+using Lur::Render::ColorMath::Srgb8;   // #201: was a local constexpr copy
 
 // #117's first real CVar<Color>: the invalid-placement red. #142 reserves red for exactly this
 // meaning, which makes it a palette DECISION rather than an arbitrary constant — the kind of
 // thing worth being able to try three shades of without a rebuild. Retinted per frame through
 // SetMaterialTint (never re-created), so the picker's slider moves it live on screen.
 LUR_CVAR(CvGhostInvalidColor, "rps.view.ghost_invalid_color",
-         (Lur::Render::Color{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f}),
+         (Lur::Render::Color{Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 1.0f}),
          ::Lur::Core::CVarFlagNone,
          "Colour of the blinking ghost shown when a building cannot be placed there");
 // #103 A/B: skip the two FULL-SCREEN backdrop layers, so their cost can be measured rather than
@@ -117,17 +106,17 @@ struct GradStop { float P; Color C; };
 // dark earth to the warm umber home ground (bottom). Both players see the same
 // grade because both see the enemy at the top (per-player FlipY).
 constexpr GradStop FieldStops[] = {
-    {0.000f, {Srgb(0x12), Srgb(0x22), Srgb(0x31), 1.0f}},
-    {0.179f, {Srgb(0x11), Srgb(0x1B), Srgb(0x15), 1.0f}},
-    {0.550f, {Srgb(0x10), Srgb(0x17), Srgb(0x07), 1.0f}},
-    {0.795f, {Srgb(0x16), Srgb(0x1A), Srgb(0x09), 1.0f}},
-    {1.000f, {Srgb(0x2E), Srgb(0x27), Srgb(0x0F), 1.0f}},
+    {0.000f, {Srgb8(0x12), Srgb8(0x22), Srgb8(0x31), 1.0f}},
+    {0.179f, {Srgb8(0x11), Srgb8(0x1B), Srgb8(0x15), 1.0f}},
+    {0.550f, {Srgb8(0x10), Srgb8(0x17), Srgb8(0x07), 1.0f}},
+    {0.795f, {Srgb8(0x16), Srgb8(0x1A), Srgb8(0x09), 1.0f}},
+    {1.000f, {Srgb8(0x2E), Srgb8(0x27), Srgb8(0x0F), 1.0f}},
 };
 constexpr int NumFieldStops = 5;
 // Grid colour gradient (screenspace) — lines are world-anchored, colour is not.
 constexpr GradStop GridStops[] = {
-    {0.0f, {Srgb(0x26), Srgb(0x30), Srgb(0x3B), 1.0f}},
-    {1.0f, {Srgb(0x2E), Srgb(0x36), Srgb(0x27), 1.0f}},
+    {0.0f, {Srgb8(0x26), Srgb8(0x30), Srgb8(0x3B), 1.0f}},
+    {1.0f, {Srgb8(0x2E), Srgb8(0x36), Srgb8(0x27), 1.0f}},
 };
 constexpr float GridStepWu = 4.0f;   // line spacing, world units
 constexpr float GridAlpha = 0.55f;   // keep the lines a subtle overlay
@@ -315,8 +304,8 @@ void GameView::CreateResources(IRenderer* Renderer) {
     // 1/3 of the way from the team base toward blue (cyan team) / purple (magenta team). Order = EUnit.
     constexpr float TeamBaseHue[2] = {180.0f, 320.0f};  // cyan, magenta
     constexpr float TeamEndHue[2]  = {200.0f, 290.0f};  // 1/3 toward blue / purple
-    TeamTint[0] = Hsv(TeamBaseHue[0], 1.0f, 1.0f);
-    TeamTint[1] = Hsv(TeamBaseHue[1], 1.0f, 1.0f);
+    TeamTint[0] = Lur::Render::ColorMath::FromHsvDeg(TeamBaseHue[0], 1.0f, 1.0f);
+    TeamTint[1] = Lur::Render::ColorMath::FromHsvDeg(TeamBaseHue[1], 1.0f, 1.0f);
     auto AtlasTinted = [&](Color C) {
         MaterialDesc D;
         D.BaseColor = IconAtlas;
@@ -337,17 +326,17 @@ void GameView::CreateResources(IRenderer* Renderer) {
     // solve the occlusion — recede the art rather than move the UI off it.
     constexpr float BldgSat = 0.42f;   // vs 1.0 for units
     constexpr float BldgVal = 0.55f;   // vs 1.0 for units
-    TeamTintBldg[0] = Hsv(TeamBaseHue[0], BldgSat, BldgVal);
-    TeamTintBldg[1] = Hsv(TeamBaseHue[1], BldgSat, BldgVal);
+    TeamTintBldg[0] = Lur::Render::ColorMath::FromHsvDeg(TeamBaseHue[0], BldgSat, BldgVal);
+    TeamTintBldg[1] = Lur::Render::ColorMath::FromHsvDeg(TeamBaseHue[1], BldgSat, BldgVal);
     for (int Tm = 0; Tm < 2; ++Tm)
         for (int Ty = 0; Ty < UnitCount; ++Ty) {
             const float Frac = static_cast<float>(Ty) / static_cast<float>(UnitCount - 1);  // 0 .. 1
             const float H = TeamBaseHue[Tm] + Frac * (TeamEndHue[Tm] - TeamBaseHue[Tm]);
-            TeamTypeTint[Tm][Ty] = Hsv(H, 1.0f, 1.0f);
+            TeamTypeTint[Tm][Ty] = Lur::Render::ColorMath::FromHsvDeg(H, 1.0f, 1.0f);
             TypeTintMat[Tm][Ty] = AtlasTinted(TeamTypeTint[Tm][Ty]);
             Color Dim = TeamTypeTint[Tm][Ty]; Dim.A = 0.4f;
             TypeTintMatDim[Tm][Ty] = AtlasTinted(Dim);
-            TeamTypeTintBldg[Tm][Ty] = Hsv(H, BldgSat, BldgVal);
+            TeamTypeTintBldg[Tm][Ty] = Lur::Render::ColorMath::FromHsvDeg(H, BldgSat, BldgVal);
             TypeTintMatBldg[Tm][Ty] = AtlasTinted(TeamTypeTintBldg[Tm][Ty]);
             Color BDim = TeamTypeTintBldg[Tm][Ty]; BDim.A = 0.4f;   // unaffordable drag slot (same hue, faded)
             TypeTintMatBldgDim[Tm][Ty] = AtlasTinted(BDim);
@@ -365,20 +354,20 @@ void GameView::CreateResources(IRenderer* Renderer) {
             // THOSE stays on the hue, while scaling RGB drifts off it.
             constexpr float BarKnock = 0.7f;
             ProgressMat[Tm][Ty] =
-                FlatMat(Renderer, Hsv(H, BldgSat * BarKnock, BldgVal * BarKnock));
+                FlatMat(Renderer, Lur::Render::ColorMath::FromHsvDeg(H, BldgSat * BarKnock, BldgVal * BarKnock));
         }
     // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
     // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
     for (int I = 0; I < PulseSteps; ++I) {
         const float F = static_cast<float>(I) / (PulseSteps - 1);
-        PulsePlate[I] = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.40f + 0.58f * F});
-        const Color G{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};  // gold -> white
+        PulsePlate[I] = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.40f + 0.58f * F});
+        const Color G{Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f};  // gold -> white
         CoinGlow[I] = AtlasTinted({G.R + (1.0f - G.R) * F, G.G + (1.0f - G.G) * F, G.B + (1.0f - G.B) * F, 1.0f});
         // #107 press LUT: a press must be unmistakable, so unlike the pulse (which only breathes in
         // opacity on the SAME dark plate) the pressed plate goes LIGHT — the panel-light grey at a
         // rising alpha. Its own LUT, because materials are immutable and the pulse's dark base could
         // never read as "I got your touch" against a dark button.
-        PressPlate[I] = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.30f + 0.65f * F});
+        PressPlate[I] = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.30f + 0.65f * F});
     }
     // #139 placement ghost: a translucent team-tinted silhouette while the drop is valid, and a
     // blinking red one while invalid (two alpha steps the blink alternates — materials are immutable).
@@ -386,12 +375,12 @@ void GameView::CreateResources(IRenderer* Renderer) {
         Color G = TeamTint[Tm]; G.A = 0.5f;
         GhostMat[Tm] = AtlasTinted(G);
     }
-    GhostBadMat[0] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.85f});  // red, bright
-    GhostBadMat[1] = AtlasTinted({Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 0.30f});  // red, dim
-    ProdBtnBg = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x20), Srgb(0x26), 0.62f});  // #140 translucent button
+    GhostBadMat[0] = AtlasTinted({Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 0.85f});  // red, bright
+    GhostBadMat[1] = AtlasTinted({Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 0.30f});  // red, dim
+    ProdBtnBg = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.62f});  // #140 translucent button
     for (int Tm = 0; Tm < 2; ++Tm)  // #141 build-frontier line in each team's colour (semi-transparent)
         FrontierMat[Tm] = FlatMat(Renderer, {TeamTint[Tm].R, TeamTint[Tm].G, TeamTint[Tm].B, 0.6f});
-    MineMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});  // mine stone = gold tone
+    MineMat = AtlasTinted({Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});  // mine stone = gold tone
     HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
     HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
     GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
@@ -440,25 +429,25 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Text.CreateResources(Renderer, &Font);
 
     // ---- HUD (#85): locked panel palette + the engine dropdown + DSEG7 clock ----
-    PanelMat = FlatMat(Renderer, {Srgb(0x1A), Srgb(0x1F), Srgb(0x24), 0.97f});
-    PanelEdge = FlatMat(Renderer, {Srgb(0x39), Srgb(0x42), Srgb(0x4B), 1.0f});
-    PlateBg = FlatMat(Renderer, {Srgb(0x23), Srgb(0x29), Srgb(0x30), 0.97f});
+    PanelMat = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x1F), Srgb8(0x24), 0.97f});
+    PanelEdge = FlatMat(Renderer, {Srgb8(0x39), Srgb8(0x42), Srgb8(0x4B), 1.0f});
+    PlateBg = FlatMat(Renderer, {Srgb8(0x23), Srgb8(0x29), Srgb8(0x30), 0.97f});
     BarBg = FlatMat(Renderer, {0.0f, 0.0f, 0.0f, 0.45f});
-    GoldFlat = FlatMat(Renderer, {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
-    PlateIconMat = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f});
-    PlateIconDim = AtlasTinted({Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.4f});
-    GoldIconMat = AtlasTinted({Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f});
+    GoldFlat = FlatMat(Renderer, {Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});
+    PlateIconMat = AtlasTinted({Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 1.0f});
+    PlateIconDim = AtlasTinted({Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.4f});
+    GoldIconMat = AtlasTinted({Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});
     MiniWinMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 0.12f});
-    MiniWinEdge = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 0.6f});
+    MiniWinEdge = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.6f});
     // First-scroll hint (#85 playtest): alpha-stepped materials (materials are
     // immutable, so the fade walks a LUT) + up/down arrow triangle meshes.
     for (int I = 0; I < HintAlphaSteps; ++I) {
         const float A = static_cast<float>(I + 1) / HintAlphaSteps;
         MaterialDesc DP;
         DP.BaseColor = IconAtlas;
-        DP.Tint = {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), A};
+        DP.Tint = {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), A};
         HintPointer[I] = Renderer->CreateMaterial(DP);
-        HintArrow[I] = FlatMat(Renderer, {Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), A});  // white, like the finger
+        HintArrow[I] = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), A});  // white, like the finger
     }
     {
         const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};
@@ -510,9 +499,9 @@ void GameView::RefreshSelector() {
     // Green / amber / red — a plain traffic light, one colour per rung. The off-the-scale WHITE dot
     // went with the fourth tier when the ladder was re-cut to three (2026-07-30): red is the top of
     // the metaphor again, and it now marks a tier that IS the old "Perhaps Impossible" build.
-    const Color Dots[AiTierCount] = {{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), 1.0f},
-                                     {Srgb(0xE0), Srgb(0xB0), Srgb(0x40), 1.0f},
-                                     {Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f}};
+    const Color Dots[AiTierCount] = {{Srgb8(0x56), Srgb8(0xC1), Srgb8(0x5F), 1.0f},
+                                     {Srgb8(0xE0), Srgb8(0xB0), Srgb8(0x40), 1.0f},
+                                     {Srgb8(0xD9), Srgb8(0x53), Srgb8(0x4F), 1.0f}};
     // ORDER (feedback 2026-07-25): the LINKED opponent sits at the TOP — a human peer is the main
     // event and the AI tiers are the fallback below it — with an "AI OPPONENTS" header between
     // them. The header is non-selectable and the widget draws a divider line above any header that
@@ -538,13 +527,13 @@ void GameView::RefreshSelector() {
             // that has none, and teach two different meanings for one mark. The red fill plus the
             // sublabel already separate this from the red AI tier: that row carries a tier name
             // and no explanation, this one carries a device id and a reason.
-            Items[N].LeadFill = Color{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};
+            Items[N].LeadFill = Color{Srgb8(0xD9), Srgb8(0x53), Srgb8(0x4F), 1.0f};
             Items[N].Sublabel = "different build - rebuild both";
         } else {
             // BLUETOOTH BLUE — a linked human is a different KIND of opponent, not a fourth
             // difficulty, and blue says "radio link, healthy". Green/amber/red stay reserved for
             // the AI tiers (and now for this row's fault state). #0082FC is the Bluetooth SIG blue.
-            Items[N].LeadFill = Color{Srgb(0x00), Srgb(0x82), Srgb(0xFC), 1.0f};
+            Items[N].LeadFill = Color{Srgb8(0x00), Srgb8(0x82), Srgb8(0xFC), 1.0f};
         }
         std::snprintf(Buf, sizeof(Buf), "%d-%d-%d", PeerScoreW_, PeerScoreL_, PeerScoreD_);
         Items[N].Trailing = Buf;
@@ -1047,7 +1036,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         if (!Bldg && Ty == UnitMiner && Snap.Carry[I] > 0 && N < static_cast<uint32_t>(MaxUnits)) {
             Lur::Render::InstanceData& O = Instances[N++];
             O = D;  // same size: the enlarged heap is baked into the mask, seated on the rail
-            O.R = Srgb(0xD9); O.G = Srgb(0xA9); O.B = Srgb(0x3C); O.A = 1.0f;
+            O.R = Srgb8(0xD9); O.G = Srgb8(0xA9); O.B = Srgb8(0x3C); O.A = 1.0f;
             O.U0 = static_cast<float>(GlyphOreLoad) / static_cast<float>(GlyphCount);
             O.U1 = static_cast<float>(GlyphOreLoad + 1) / static_cast<float>(GlyphCount);
         }
@@ -1072,9 +1061,9 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     {
         using Lur::Text::EHAlign;
         using Lur::Text::EVAlign;
-        const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
-        const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
-        const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};
+        const Color Ico{Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 1.0f};
+        const Color GoldC{Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f};
+        const Color DimC{Srgb8(0x6A), Srgb8(0x72), Srgb8(0x78), 1.0f};
         const float Half = BldgPx * 0.5f;
         // Playtest 2026-07-25: the x1/x5 pair is a horizontal row of big squares, not a slim stacked
         // column. ONE width (CtrlW) governs the whole control stack — cost plate, button row, queue
@@ -1371,7 +1360,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         std::snprintf(FB, sizeof(FB), "+%d", F.Value);
         const float Fy = SY(F.Wy) - (14.0f + 30.0f * F.Age) * HS;
         Text.Draw(Renderer, FB, SX(F.Wx) - 60.0f, Fy, 120.0f, 20.0f * HS, 13.0f * HS,
-                  {Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), A}, Lur::Text::EHAlign::Center,
+                  {Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), A}, Lur::Text::EHAlign::Center,
                   Lur::Text::EVAlign::Top, false);
     }
 
@@ -1423,10 +1412,10 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
 
     using Lur::Text::EHAlign;
     using Lur::Text::EVAlign;
-    const Color Ico{Srgb(0xC9), Srgb(0xD3), Srgb(0xDA), 1.0f};
-    const Color GoldC{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
-    const Color BadC{Srgb(0xE1), Srgb(0x4E), Srgb(0x38), 1.0f};
-    const Color DimC{Srgb(0x6A), Srgb(0x72), Srgb(0x78), 1.0f};  // disabled/locked, not "unaffordable"
+    const Color Ico{Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 1.0f};
+    const Color GoldC{Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f};
+    const Color BadC{Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 1.0f};
+    const Color DimC{Srgb8(0x6A), Srgb8(0x72), Srgb8(0x78), 1.0f};  // disabled/locked, not "unaffordable"
     const float Pad = 8.0f * HS;
     char Buf[64];
 
@@ -1747,7 +1736,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         }
         Renderer->DrawInstances(Quad, Instances, M, 0.0f, WhiteMat);
         // Live gold, on top.
-        const Color MiniGold{Srgb(0xD9), Srgb(0xA9), Srgb(0x3C), 1.0f};
+        const Color MiniGold{Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f};
         M = 0;
         for (int T = 0; T < NumMines; ++T)
             if (Snap.MineGold[T] > 0)
@@ -1832,8 +1821,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const bool ShowBuildMismatch = BuildMismatch_ && SelPeer_;
     if (ShowBuildMismatch) {
         const float Throb = 0.6f + 0.4f * std::sin(PulseT_ * 5.0f);   // reuse the #143 animation clock
-        const Color BadC{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), 1.0f};   // the selector's mismatch red
-        const Color BadThrob{Srgb(0xD9), Srgb(0x53), Srgb(0x4F), Throb};
+        const Color BadC{Srgb8(0xD9), Srgb8(0x53), Srgb8(0x4F), 1.0f};   // the selector's mismatch red
+        const Color BadThrob{Srgb8(0xD9), Srgb8(0x53), Srgb8(0x4F), Throb};
         Text.Draw(Renderer, "DIFFERENT BUILD", 0.0f, HeightPx * 0.40f, WidthPx, 34.0f * HS,
                   26.0f * HS, BadThrob, EHAlign::Center, EVAlign::Middle, false);
         Text.Draw(Renderer, "opponent is on a different build - the match cannot start",
@@ -1855,8 +1844,8 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     const bool ShowHalfOpen = LinkHalfOpen_ && SelPeer_ && !ShowBuildMismatch;
     if (ShowHalfOpen) {
         const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 6.0f);
-        const Color AmbC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), 1.0f};
-        const Color AmbThrob{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
+        const Color AmbC{Srgb8(0xE8), Srgb8(0xA5), Srgb8(0x3A), 1.0f};
+        const Color AmbThrob{Srgb8(0xE8), Srgb8(0xA5), Srgb8(0x3A), Throb};
         Text.Draw(Renderer, "LINK STALLED", 0.0f, HeightPx * 0.40f, WidthPx, 30.0f * HS,
                   24.0f * HS, AmbThrob, EHAlign::Center, EVAlign::Middle, false);
         Text.Draw(Renderer, "the opponent's phone went quiet - reconnecting",
@@ -1875,7 +1864,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     if (!ShowBuildMismatch && !ShowHalfOpen && PeerLinkBannerT_ > 0.0f) {
         PeerLinkBannerT_ -= DtSec;
         const float Blink = 0.5f + 0.5f * std::sin(PeerLinkBannerT_ * 8.0f);  // ~1.3 Hz throb
-        const Color LinkC{Srgb(0x56), Srgb(0xC1), Srgb(0x5F), Blink};
+        const Color LinkC{Srgb8(0x56), Srgb8(0xC1), Srgb8(0x5F), Blink};
         Text.Draw(Renderer, "opponent link established", Pad, PanelY + PanelH + 6.0f * HS,
                   WidthPx - 2.0f * Pad, 16.0f * HS, 12.0f * HS, LinkC, EHAlign::Center,
                   EVAlign::Middle, false);
@@ -1888,7 +1877,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
     // the actual state per frame, so it disappears the instant the repair lands rather than on a timer.
     if (!ShowBuildMismatch && !ShowHalfOpen && Recovering_) {
         const float Throb = 0.55f + 0.45f * std::sin(PulseT_ * 7.0f);  // reuse the #143 animation clock
-        const Color WarnC{Srgb(0xE8), Srgb(0xA5), Srgb(0x3A), Throb};
+        const Color WarnC{Srgb8(0xE8), Srgb8(0xA5), Srgb8(0x3A), Throb};
         Text.Draw(Renderer, "resyncing with opponent...", Pad, PanelY + PanelH + 6.0f * HS,
                   WidthPx - 2.0f * Pad, 16.0f * HS, 12.0f * HS, WarnC, EHAlign::Center,
                   EVAlign::Middle, false);
