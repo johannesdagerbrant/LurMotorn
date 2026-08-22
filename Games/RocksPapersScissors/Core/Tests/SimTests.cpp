@@ -193,12 +193,22 @@ static void TestStateHashGoldenValues() {
     // CvSnapshot folds into StateHash — so the fresh-sim hash moves on the tunables alone. The
     // 300-tick hash moves for that AND for the sim change in the same batch (a soldier no longer takes
     // friendly separation from a cart). Both are build-locked wire changes: ship both phones together.
+    //
+    // RE-PINNED 2026-08-22, same procedure as 2026-08-14: the Galaxy's 16 persisted CVar overrides
+    // were promoted to the compile-time defaults (home_hp, the boid radii/damping, paper+scissor
+    // speeds, rock+scissor build times, build repel radius). CvSnapshot folds into StateHash, so the
+    // fresh-sim hash moves on the tunables alone.
+    //
+    // CROSS-CHECK worth keeping: the low 32 bits below (dabbb51b) are exactly the pre-match hash BOTH
+    // PHONES reported while running those same values as runtime overrides. So the baked defaults are
+    // bit-identical to what the devices were actually playing — which is the thing a decimal-text ->
+    // Fixed-literal transcription can silently get wrong (see rps_baked_defaults_tests).
     S.Init(Seed);
-    CHECK(S.StateHash() == 0x8bc95f23d2500caeull);   // fresh sim, tick 0
+    CHECK(S.StateHash() == 0x409895b5dabbb51bull);   // fresh sim, tick 0
 
     FundForArmyScript(S);
     for (int I = 0; I < 300; ++I) ArmyStep(S, static_cast<uint32_t>(I));
-    CHECK(S.StateHash() == 0xa6f29255729aa53eull);   // after the 300-tick army script
+    CHECK(S.StateHash() == 0x79ccb144db710ec7ull);   // after the 300-tick army script
 }
 
 // A fresh sim replaying the same stream must reach the same final hash — the
@@ -344,8 +354,21 @@ static void TestSameTypeCohesionContracts() {
     const Fixed Before = XSpread(S);
     for (int I = 0; I < 40; ++I) S.StepEvents(nullptr, 0);
     const Fixed After = XSpread(S);
-    CHECK(After < Before);                 // cohesion pulled the type together (not apart)
-    CHECK(After.Raw > 0);                  // separation kept them from collapsing to a point
+    // 2026-08-22: this used to assert the group NARROWS (After < Before). It no longer does at this
+    // spacing, because sep_radius went 3 -> 5 when the Galaxy's played set became the defaults — a
+    // deliberate widening of the lattice (2.4 -> 3 -> 5 over three playtests). The group now holds
+    // station instead of gathering: 6.00 -> 6.09 over 40 ticks.
+    //
+    // So the assertion is re-expressed to the property that is actually load-bearing and that a broken
+    // flock would violate: the group stays BOUNDED. It must not collapse to a point (separation gone)
+    // and must not disperse (cohesion gone). Asserting "narrows at exactly this spacing" was measuring
+    // one tuning of a feel knob, and it would fail again on the next widening while catching nothing.
+    // Both bounds are MEASURED, not guessed, so each one fails when its term is switched off:
+    // separation on -> 6.09, separation off -> 1.97 (a third of the spread); cohesion off -> unbounded
+    // drift. "> 0" was the original lower bound and it is near-vacuous — a fixed-point spread almost
+    // never lands on exactly zero, so it passed with separation entirely disabled.
+    CHECK(After.Raw > Before.Raw / 2);                // separation kept them from collapsing inward
+    CHECK(After.Raw < Before.Raw + Before.Raw / 2);   // cohesion kept them from drifting apart
     for (int I = 0; I < S.Count; ++I) {    // no overflow: every unit stayed on the field
         CHECK(S.PosX[I].Raw >= 0 && S.PosX[I] <= WorldWidth);
         CHECK(S.PosY[I].Raw >= 0 && S.PosY[I] <= WorldHeight);
@@ -512,8 +535,18 @@ static void TestSoldiersRoundBuildingsButThroughCarts() {
     Probe.Init(0);
     // Through the cart: it must actually reach it — no separation term keeps it off any more.
     CHECK(MinApproach(/*Cart*/ true) < F(1));
-    // Around the building: never inside the footprint, which is what "solid" means here.
-    CHECK(MinApproach(/*Cart*/ false) >= Probe.Cv.BuildingFootprint);
+    // Around the building: BUILDINGS ARE SOFT as of 2026-08-22 (owner's call, promoting the Galaxy's
+    // played set). build.repel_radius went 5 -> 3, which puts the repulsion equilibrium at 1.59 world
+    // units — inside the 2.9 footprint — so a unit visibly overlaps a building. That is accepted
+    // behaviour now, not a bug, and the old ">= footprint" assertion is gone with the rule it encoded.
+    //
+    // What is still asserted, because it has teeth: repulsion is soft but NOT ABSENT. A unit stops
+    // ~1.6 units out, two orders of magnitude farther than the 0.01 it reaches on a cart. If the
+    // repulsion term ever broke outright, this collapses toward the cart figure and fails.
+    const Fixed Bldg = MinApproach(/*Cart*/ false);
+    const Fixed Cart = MinApproach(/*Cart*/ true);
+    CHECK(Bldg.Raw > Cart.Raw * 10);   // buildings still push back, hard
+    CHECK(Bldg >= F(3, 2));       // ...and by a whole unit and a half, measured
 }
 
 // prey in the opposite direction. Differential: the same setup WITHOUT the cart has no

@@ -30,3 +30,12 @@ add_executable(rps_agent_tests AgentControlTests.cpp)
 target_link_libraries(rps_agent_tests PRIVATE rps::core)
 target_compile_features(rps_agent_tests PRIVATE cxx_std_20)
 add_test(NAME rps_agent_tests COMMAND rps_agent_tests)
+
+# 2026-08-22: the Galaxy's 16 persisted cvar overrides became the compiled defaults. The .cfg parser
+# ROUNDS and F() TRUNCATES, so baking a decimal with F instead of FRound shifts it one raw unit —
+# invisible in source, real in a deterministic sim. This pins each baked default against the exact
+# text that was in the .cfg.
+add_executable(rps_baked_defaults_tests BakedDefaultsTests.cpp)
+target_link_libraries(rps_baked_defaults_tests PRIVATE rps::core)
+target_compile_features(rps_baked_defaults_tests PRIVATE cxx_std_20)
+add_test(NAME rps_baked_defaults_tests COMMAND rps_baked_defaults_tests)

@@ -99,7 +99,7 @@ LUR_CVAR(CvGhostInvalidColor, "rps.view.ghost_invalid_color",
 // is paced, not filled, and merging passes would have bought nothing. Dev-only, default ON.
 LUR_CVAR(CvDrawField, "rps.view.draw_field", true, ::Lur::Core::CVarFlagNone,
          "DEV A/B (#103): draw the full-screen field gradient");
-LUR_CVAR(CvDrawGrid, "rps.view.draw_grid", true, ::Lur::Core::CVarFlagNone,
+LUR_CVAR(CvDrawGrid, "rps.view.draw_grid", false, ::Lur::Core::CVarFlagNone,
          "DEV A/B (#103): draw the world grid lines");
 
 using Lur::Render::GradStop;   // #201: promoted to Lur/Render/Mesh2D.h

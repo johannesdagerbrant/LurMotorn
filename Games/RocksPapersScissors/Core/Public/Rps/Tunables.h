@@ -109,17 +109,17 @@ LUR_CVAR(CvRockCost,       "rps.unit.rock.cost",       60,       CVarFlagAffects
 LUR_CVAR(CvRockHp,         "rps.unit.rock.hp",         300,      CVarFlagAffectsGameplay, "Rock hit points");
 LUR_CVAR(CvRockSpeed,      "rps.unit.rock.speed",      F(5, 10), CVarFlagAffectsGameplay, "Rock move speed (world units/tick)");
 LUR_CVAR(CvRockDamage,     "rps.unit.rock.damage",     6,        CVarFlagAffectsGameplay, "Rock attack damage per hit");
-LUR_CVAR(CvRockBuild,      "rps.unit.rock.build_time", 15,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
+LUR_CVAR(CvRockBuild,      "rps.unit.rock.build_time", 10,       CVarFlagAffectsGameplay, "Rock build time (ticks, 10/s)");
 LUR_CVAR(CvPaperCost,      "rps.unit.paper.cost",      120,      CVarFlagAffectsGameplay, "Gold to queue a Paper");
 LUR_CVAR(CvPaperHp,        "rps.unit.paper.hp",        200,      CVarFlagAffectsGameplay, "Paper hit points");
-LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     F(3, 4),  CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
+LUR_CVAR(CvPaperSpeed,     "rps.unit.paper.speed",     FRound(3, 5), CVarFlagAffectsGameplay, "Paper move speed (world units/tick)");
 LUR_CVAR(CvPaperDamage,    "rps.unit.paper.damage",    10,       CVarFlagAffectsGameplay, "Paper attack damage per hit");
 LUR_CVAR(CvPaperBuild,     "rps.unit.paper.build_time",10,       CVarFlagAffectsGameplay, "Paper build time (ticks, 10/s)");
 LUR_CVAR(CvScissorCost,    "rps.unit.scissor.cost",    200,      CVarFlagAffectsGameplay, "Gold to queue a Scissor");
 LUR_CVAR(CvScissorHp,      "rps.unit.scissor.hp",      250,      CVarFlagAffectsGameplay, "Scissor hit points");
-LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   F(3, 2),  CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
+LUR_CVAR(CvScissorSpeed,   "rps.unit.scissor.speed",   FRound(13, 20), CVarFlagAffectsGameplay, "Scissor move speed (world units/tick)");
 LUR_CVAR(CvScissorDamage,  "rps.unit.scissor.damage",  15,       CVarFlagAffectsGameplay, "Scissor attack damage per hit");
-LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",15,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
+LUR_CVAR(CvScissorBuild,   "rps.unit.scissor.build_time",10,     CVarFlagAffectsGameplay, "Scissor build time (ticks, 10/s)");
 
 // ---- Buildings (#138, spec §8). Buildings are placeable/producing/destroyable entities
 // (#131 SoA). Each building type's health + placement cost is a knob nested UNDER that unit's
@@ -157,7 +157,7 @@ LUR_CVAR(CvScissorBuildingCost, "rps.unit.scissor.building_cost",6000, CVarFlagA
 // (no RPS counter), friendlies defend it like a cart. Destroying the enemy's home base WINS the
 // match — the decisive killing blow that replaced the slow economic-exhaustion win. Tanky by
 // design: HP well above any other building (placeholder ~3x the toughest combat building).
-LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        900,      CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
+LUR_CVAR(CvHomeBaseHp,            "rps.base.home_hp",        2000,     CVarFlagAffectsGameplay, "Home base hit points (destroy to win)");
 // Shared building knobs (one per concept, not per-type) under rps.build.*
 LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     20,       CVarFlagAffectsGameplay, "Max units queued per building (§12.3)");
 // Footprint promoted from the phone 2026-08-14 (FRound, not F, on 2.9 — a truncated default cannot
@@ -180,7 +180,7 @@ LUR_CVAR(CvBuildingQueueMax,      "rps.build.queue_max",     20,       CVarFlagA
 // narrow field and punches through. The RADIUS is the braking distance; the strength only sets where
 // it settles. Re-tune the pair (and re-run that test) whenever footprint or the unit speeds move.
 LUR_CVAR(CvBuildingFootprint,     "rps.build.footprint",     FRound(29, 10), CVarFlagAffectsGameplay, "Building footprint radius, world units (overlap test)");
-LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(5),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units); MUST leave the equilibrium outside the footprint");
+LUR_CVAR(CvBuildingRepelRadius,   "rps.build.repel_radius",  F(3),     CVarFlagAffectsGameplay, "Building movement-repulsion radius (world units); MUST leave the equilibrium outside the footprint");
 LUR_CVAR(CvBuildingRepelStrength, "rps.build.repel_strength",F(3),     CVarFlagAffectsGameplay, "Building movement-repulsion strength");
 // How far a building must sit from a LIVE mine (#157). Was the footprint (3), which only kept the
 // mine POINT outside the footprint — but the icons are much bigger than the footprint, so a camp
@@ -293,8 +293,8 @@ constexpr Fixed Camp1Y = F(WorldHeight.ToInt() - CampInset);
 // weak separation let cohesion compress the blob into an unreadable mush). Strong push +
 // wider radius = a school-of-fish lattice: grouped, but every unit has its own space.
 // 3, promoted from the phone 2026-08-14 (was 2.4): armies read as a wider lattice.
-LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(3), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
-LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(3), CVarFlagAffectsGameplay,
+LUR_CVAR(CvSepRadius, "rps.boid.sep_radius", F(5), CVarFlagAffectsGameplay, "Same-team keep-apart radius (world units)");
+LUR_CVAR(CvSeparationStrength, "rps.boid.sep_strength", F(1), CVarFlagAffectsGameplay,
          "Same-team push-apart strength; must beat cohesion at contact or the blob turns to mush");
 // Enemy separation (new, #96 decision #2): a wider radius / stronger push un-piles engaged
 // fights into arcs instead of cross-team pixel-piles. Soldiers only (miners ignore combat).
@@ -317,10 +317,10 @@ LUR_CVAR(CvEnemySeparationStrength, "rps.boid.enemy_sep_strength", F(1, 2), CVar
 // GROUP-UP pass (2026-07-20 playtest): same-type cohesion reaches FAR to find teammates
 // across the field, but pulls GENTLY (a soft, wide gather rather than a hard clump) — a
 // lone spawn drifts toward its type over distance without the group compressing to mush.
-LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(10), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
+LUR_CVAR(CvCohSameRadius, "rps.boid.coh_same_radius", F(8), CVarFlagAffectsGameplay, "Same-type cohesion radius (world units)");
 LUR_CVAR(CvWCohSame, "rps.boid.w_coh_same", FRound(4, 10), CVarFlagAffectsGameplay,
          "Pull toward your OWN type's centre: keep it gentle, a soft wide gather not a hard clump");
-LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(5), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
+LUR_CVAR(CvCohAllRadius, "rps.boid.coh_all_radius", F(4), CVarFlagAffectsGameplay, "Whole-army cohesion radius (world units)");
 // Cross-type army cohesion is SUPER TINY (2026-07-20 playtest): types shouldn't want to
 // pile onto each other — same-type globs are the readable unit; the whole-army pull is a
 // barely-there nudge so they don't scatter to opposite corners.
@@ -341,7 +341,7 @@ LUR_CVAR(CvWSeek, "rps.boid.w_seek", F(1), CVarFlagAffectsGameplay,
 // wide gentle drift was not enough to keep a unit out of one; a short, decisive shove at contact
 // range is, and it leaves the approach paths straight instead of permanently bent.
 LUR_CVAR(CvPredatorFleeRadius, "rps.boid.predator_flee_radius", F(6), CVarFlagAffectsGameplay, "Flee-your-counter radius (world units)");
-LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", F(3, 4), CVarFlagAffectsGameplay,
+LUR_CVAR(CvWPredatorFlee, "rps.boid.w_predator_flee", FRound(9, 10), CVarFlagAffectsGameplay,
          "Drift away from the type that beats you; keep under w_seek so hunting prey still wins");
 // Organic wander (2026-07-20 playtest): a slow, smooth per-unit noise offset added to the
 // steer — the deterministic fixed-point analog of Simplex/OpenSimplex noise (value noise
@@ -363,14 +363,14 @@ LUR_CVAR(CvNoiseLacunarity,  "rps.boid.noise_lacunarity",  F(1),    CVarFlagAffe
 // NewPos = Pos + Damp·Δ + ChebClamp(desired − Δ, MaxAccel), then clamps the step to
 // Speed. Alignment steers a soldier toward its same-type neighbours' average velocity.
 // Lava-lamp: slower turns (MaxAccel down) + more glide (Damp up) = the viscous feel.
-LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(8), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
+LUR_CVAR(CvAlignRadius, "rps.boid.align_radius", F(15), CVarFlagAffectsGameplay, "Same-type velocity-alignment radius (world units)");
 LUR_CVAR(CvWAlign, "rps.boid.w_align", F(1, 4), CVarFlagAffectsGameplay,
          "Match same-type neighbours' heading — turns a crowd into laminar flow");
 LUR_CVAR(CvMaxAccel, "rps.boid.max_accel", FRound(20, 100), CVarFlagAffectsGameplay,
          "Per-tick turn/accelerate clamp: lower = heavier, gloopier units (~0.7 s to reach speed)");
-LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", F(9, 10), CVarFlagAffectsGameplay,
+LUR_CVAR(CvFlockDamping, "rps.boid.flock_damping", FRound(19, 20), CVarFlagAffectsGameplay,
          "Momentum kept per tick in free flight: higher = more glide (the lava-lamp feel)");
-LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsGameplay,
+LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", FRound(7, 10), CVarFlagAffectsGameplay,
          "Momentum kept once in attack range: low so a unit settles instead of orbiting its target");
 // Slice C (#98) — guard-lite INTERPOSE: an enemy soldier within GuardAlertR of one of MY
 // miners is a RAIDER. A defender that has BOTH a friendly cart and a flagged raider within
@@ -379,7 +379,7 @@ LUR_CVAR(CvInRangeDamping, "rps.boid.inrange_damping", F(1, 2), CVarFlagAffectsG
 constexpr Fixed GuardAlertR = F(6);                // raider = enemy soldier this close to a cart
 // 6, promoted from the phone 2026-08-14 (was 12): a defender screens a cart it is genuinely next to
 // rather than being pulled off its line by a raid half a screen away.
-LUR_CVAR(CvInterposeRadius, "rps.boid.interpose_radius", F(6), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
+LUR_CVAR(CvInterposeRadius, "rps.boid.interpose_radius", F(3), CVarFlagAffectsGameplay, "Cart/raider interpose reaction radius (world units)");
 LUR_CVAR(CvWInterpose, "rps.boid.w_interpose", F(1), CVarFlagAffectsGameplay,
          "Pull toward the point between a raider and your cart — screening by body, not targeting");
 // The single flock GATHER radius = the LARGEST force radius. One widened neighbour walk feeds
