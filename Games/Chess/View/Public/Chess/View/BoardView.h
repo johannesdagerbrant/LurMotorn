@@ -6,6 +6,9 @@
 #include <vector>
 #include "Lur/Render/Renderer.h"
 #include "Lur/Hud/Dropdown.h"
+#include <unordered_set>
+
+#include "Lur/Core/CVar.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Text/Font.h"
 #include "Lur/Save/Store.h"
@@ -34,6 +37,24 @@ public:
 
     void CreateResources(Lur::Render::IRenderer* Renderer);
     void Render(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx);
+
+    // ---- The dev console (#201) --------------------------------------------------------------
+    // Chess's CVars are its board palette, so this is a colour tuner: tap a row, drag the picker,
+    // watch the board change. Desktop opens it with the platform layer's console toggle (the same
+    // key RPS uses); a phone would use Lur::Input::ConsoleGesture.
+    //
+    // Closed, it draws nothing and claims no input — that half of the contract is what lets it ship
+    // in a build someone plays (it is LUR_INTERNAL, not LUR_AGENT: it observes and tunes, it does not
+    // drive the game on the player's behalf).
+    void SetDevOverlayOpen(bool On) { DevOverlayOpen_ = On; if (!On) PickerCvar_ = nullptr; }
+    bool DevOverlayOpen() const { return DevOverlayOpen_; }
+
+    // A tap/click at pixel (X, Y). Returns true when the console consumed it, which the caller must
+    // respect or the same press also moves a piece under the panel.
+    bool DevTap(float XPx, float YPx);
+
+    // Wheel / drag scroll for the console list. Ignored when closed.
+    void DevScroll(float DeltaY) { if (DevOverlayOpen_) ScrollAccum_ += DeltaY; }
     void OnTap(float XPx, float YPx, float WidthPx, float HeightPx);
 
 #if LUR_INTERNAL
@@ -166,6 +187,28 @@ private:
     // over that type's single silhouette texture (the "tint trick").
     Lur::Render::MaterialHandle PieceLight[6] = {};
     Lur::Render::MaterialHandle PieceDark[6] = {};
+
+    // ---- Dev console state (#201) ------------------------------------------------------------
+    void DrawDevConsole(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx);
+
+    bool  DevOverlayOpen_ = false;
+    float ScrollY_ = 0.0f;         // px into the scrollable content
+    float ScrollAccum_ = 0.0f;     // this frame's wheel/drag delta, folded in at draw time
+    // Folded category headers, keyed by FULL path. A set, not a flag per node, because the tree is
+    // rebuilt from the registry every frame and nodes are not stable objects.
+    std::unordered_set<std::string> CollapsedCats_;
+    // The row whose colour picker is open, held as a POINTER: it survives a fold or a scroll, which
+    // an index into the flattened list would not (see Lur::DevGui::FlatList).
+    Lur::Core::ICVar* PickerCvar_ = nullptr;
+    // One pending tap, consumed by the next DrawDevConsole. Input arrives outside the draw, and the
+    // hit-test needs the same row geometry the paint uses — so it is deferred rather than duplicated.
+    bool  TapPending_ = false;
+    float TapX_ = 0.0f, TapY_ = 0.0f;
+
+    Lur::Render::MaterialHandle DevPanelMat = 0;   // charcoal translucent surface
+    Lur::Render::MaterialHandle DevKeyMat = 0;     // raised control face
+    Lur::Render::MaterialHandle DevAccentMat = 0;  // scroll thumb / selection
+    Lur::Render::MaterialHandle DevSwatchMat = 0;  // retinted per row to show a colour value
 };
 
 } // namespace Chess

@@ -15,6 +15,7 @@
 
 #include "Chess/View/BoardView.h"
 #include "Lur/Core/CVar.h"
+#include "Lur/DevGui/CvarTree.h"
 #include "Lur/Render/ColorString.h"
 
 static int GFailures = 0;
@@ -71,7 +72,8 @@ public:
     }
     void BeginFrame(const Lur::Render::Camera&) override {}
     void DrawMesh(Lur::Render::MeshHandle, Lur::Render::MaterialHandle,
-                  const Lur::Math::Mat4&) override {}
+                  const Lur::Math::Mat4&) override { ++Draws; }
+    int Draws = 0;
     void EndFrame() override {}
 
 private:
@@ -180,12 +182,66 @@ static void TestColorCvarRoundTrips() {
     CHECK(C->SetFromString(Was.c_str()));
 }
 
+// ---- The dev console (#201): closed it is invisible and inert; open it paints and eats input ----
+// "Chess demonstrably gains the dev console" is #201's acceptance criterion, and the two halves worth
+// asserting are the two that can silently regress: a console that draws while closed (it would sit on
+// top of the board forever) and one that lets a press through to the board underneath (the same click
+// would edit a CVar AND move a piece).
+static void TestDevConsoleClosedIsInertOpenPaints() {
+    RecordingRenderer R;
+    Chess::BoardView V;
+    V.CreateResources(&R);
+
+    CHECK(!V.DevOverlayOpen());
+    R.Draws = 0;
+    V.Render(&R, 800.0f, 1200.0f);
+    const int ClosedDraws = R.Draws;
+    // Closed, a tap is NOT claimed — it belongs to the board.
+    CHECK(!V.DevTap(400.0f, 600.0f));
+
+    V.SetDevOverlayOpen(true);
+    CHECK(V.DevOverlayOpen());
+    // Open, a tap IS claimed, so the caller must not also route it to the board.
+    CHECK(V.DevTap(400.0f, 600.0f));
+    R.Draws = 0;
+    V.Render(&R, 800.0f, 1200.0f);
+    CHECK(R.Draws > ClosedDraws);   // the panel, its rows and their swatches are extra geometry
+
+    // And closing it goes back to drawing nothing extra and claiming nothing.
+    V.SetDevOverlayOpen(false);
+    CHECK(!V.DevTap(400.0f, 600.0f));
+    R.Draws = 0;
+    V.Render(&R, 800.0f, 1200.0f);
+    CHECK(R.Draws == ClosedDraws);
+}
+
+// ---- The console lists chess's CVars, and its own rows come from the shared registry gather ----
+// If GatherCvars ever stopped finding them the console would render an empty panel — which looks like
+// a broken console rather than a broken registry, so it is worth asserting from this side too.
+static void TestConsoleWouldListThePalette() {
+    const auto Items = Lur::DevGui::GatherCvars('.');
+    int Found = 0;
+    for (const auto& [Cat, C] : Items) {
+        const std::string N = C->Name();
+        if (N.rfind("chess.view.", 0) == 0) {
+            ++Found;
+            CHECK(Cat == "chess.view");   // the dotted name IS the category path
+        }
+    }
+    CHECK(Found == 5);
+    // Sorted by full name, which is what stops the rows reshuffling between builds.
+    for (std::size_t I = 1; I < Items.size(); ++I)
+        CHECK(std::string(Items[I - 1].second->Name()) < std::string(Items[I].second->Name()));
+}
+
 int main() {
     Lur::Core::CVarEnterMain();  // CVars may not be read before main() (spec §1.1)
     TestPaletteCvarsAreViewOnly();
     TestPaletteReachesTheRendererEveryFrame();
     TestEditIsLiveOnTheNextFrame();
     TestColorCvarRoundTrips();
+    TestDevConsoleClosedIsInertOpenPaints();
+    TestConsoleWouldListThePalette();
     if (GFailures == 0) std::printf("chess_palette_tests: ALL PASS\n");
     else std::printf("chess_palette_tests: %d FAILURE(S)\n", GFailures);
     return GFailures == 0 ? 0 : 1;

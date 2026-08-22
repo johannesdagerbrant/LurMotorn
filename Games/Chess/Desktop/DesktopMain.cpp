@@ -143,6 +143,9 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X,
 
 void PumpInput(GameInstance& G, uint64_t TimeNs) {
     if (G.Win.TakeOverlayToggle()) G.ShowOverlay = !G.ShowOverlay;  // F1
+    // #201: the dev console. Same platform toggle RPS uses, so the two games open their console with
+    // the same key rather than each inventing one.
+    if (G.Win.TakeConsoleToggle()) G.View.SetDevOverlayOpen(!G.View.DevOverlayOpen());
     int W = 0, H = 0;
     G.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
@@ -155,8 +158,12 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
         // #187: commit on press, matching both phones. The desktop is the fast iteration
         // loop for chess, so it must agree with the devices about WHEN a move happens —
         // otherwise the interaction being tuned here is not the one that ships.
-        if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0)
-            G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+        if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0) {
+            // An open console EATS the press. Without this the same click both edits a CVar row and
+            // moves a piece on the board underneath the panel.
+            if (!G.View.DevTap(T.XPx, T.YPx))
+                G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+        }
     }
     // #189: drain the inbox once more immediately before drawing, so a peer move that
     // arrived after this frame's Tick is shown NOW rather than one iteration later.

@@ -13,6 +13,7 @@
 
 #include "Lur/Core/Assert.h"          // LUR_ASSERT_MSG — trap a row/tier decode disagreement
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
+#include "Lur/DevGui/CvarTree.h"      // #201: registry -> (category, cvar), name-sorted
 #include "Lur/DevGui/FlatList.h"      // #201: fold-aware row list + scroll clamp
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Hud/GuidLabel.h"    // ShortGuid — the linked row is labelled with the peer id
@@ -506,18 +507,6 @@ namespace {
 // would simply not have appeared. Non-gameplay CVars nest into the same tree by name — they differ
 // only in that a commit takes the local+persist path instead of the lockstep sync, which is decided
 // per-CVar by the commit hook (AffectsGameplay), not by what the console chooses to list.
-std::vector<std::pair<std::string, Lur::Core::ICVar*>> GatherAllCvars() {
-    std::vector<std::pair<std::string, Lur::Core::ICVar*>> Items;
-    Lur::Core::CVarRegistry::ForEach([&](Lur::Core::ICVar* C) {
-        const std::string Name = C->Name();
-        const auto Dot = Name.rfind('.');
-        Items.emplace_back(Dot == std::string::npos ? std::string{} : Name.substr(0, Dot), C);
-    });
-    std::sort(Items.begin(), Items.end(), [](const auto& A, const auto& B) {
-        return std::strcmp(A.second->Name(), B.second->Name()) < 0;
-    });
-    return Items;
-}
 }  // namespace
 
 void GameView::DevTap(float XPx, float YPx) {
@@ -1829,7 +1818,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         const float IndentW = 12.0f * HS;  // per depth level
 
         // Split on '.' — the dotted cvar name IS the category hierarchy (#121).
-        auto Root = Lur::DevGui::BuildCategoryTree(GatherAllCvars(), '.');
+        auto Root = Lur::DevGui::BuildCategoryTree(Lur::DevGui::GatherCvars('.'), '.');
         const int Count = Root.TotalLeaves;
 
         // Fixed panel viewport (the content scrolls inside it, #121). Height is the screen, not
