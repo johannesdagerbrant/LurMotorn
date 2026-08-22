@@ -11,12 +11,8 @@
 #include "Chess/MatchMeta.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/OpponentRegistry.h"
-#include "Lur/DevGui/CvarTree.h"
-#include "Lur/DevGui/DevTheme.h"
-#include "Lur/DevGui/FlatList.h"
-#include "Lur/Render/ColorString.h"
-#include "Lur/Render/DevGuiLayer.h"  // FromString/ToString/== for Color: what makes a Color CVar
-                                    // parse from cvars.cfg and print in the console
+#include "Lur/Render/ColorString.h"  // FromString/ToString/== for Color: what makes a Color
+                                      // CVar parse from cvars.cfg and print in the console
 #include "Lur/Core/CVar.h"       // the board palette is tunable (#201 acceptance: chess CVars)
 #include "Lur/Hud/GuidLabel.h"   // ShortGuid (shared with RPS's selector)
 #include "Lur/Net/Session.h"
@@ -146,14 +142,10 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
     // for something that has actually happened.
     PeerHighlight = Renderer->CreateMaterial(MaterialDesc{0, Color{0.98f, 0.75f, 0.25f, 0.45f}, false});
 
-    // Dev-console surfaces, straight from DevTheme so the tool never shares the game's palette —
-    // you must be able to tell at a glance which pixels are chess and which are the console.
-    namespace Theme = Lur::DevGui::DevTheme;
-    DevPanelMat  = Renderer->CreateMaterial(MaterialDesc{0, Theme::Panel, false});
-    DevKeyMat    = Renderer->CreateMaterial(MaterialDesc{0, Theme::KeyFace, false});
-    DevAccentMat = Renderer->CreateMaterial(MaterialDesc{0, Theme::AccentFill, false});
-    // Retinted per row to show a colour CVar's actual value — one material, not one per row.
-    DevSwatchMat = Renderer->CreateMaterial(MaterialDesc{0, Color{1, 1, 1, 1}, false});
+#if !LUR_SHIPPING
+    // The console builds its own materials, meshes and font — chess supplies nothing but a renderer.
+    Console_.CreateResources(Renderer);
+#endif
 
     // Pack each piece into an R8G8 texture — R = shade, G = coverage — and upload once. The
     // interleave itself is Lur::Render::PackRg8 (promoted in #201: RPS packs the same primitive into
@@ -402,7 +394,11 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
 
     if (PostGuiHook) PostGuiHook();  // app overlay (e.g. debug HUD), composited last
 
-    DrawDevConsole(Renderer, WidthPx, HeightPx);
+#if !LUR_SHIPPING
+    // Last, over the board and its GUI: the console enters the dev pass itself and is a no-op while
+    // closed, so this line costs a closed frame nothing.
+    Console_.Draw(Renderer, WidthPx, HeightPx);
+#endif
 
     Renderer->EndFrame();
 }
@@ -750,147 +746,5 @@ void BoardView::RebuildItems() {
 }
 
 
-// ---- The dev console (#201) -------------------------------------------------------------------
-// Chess's CVars are its board palette, so this console is a colour tuner: tap a row, drag the
-// picker, watch the board change behind the panel. It is deliberately SMALLER than RPS's — chess has
-// no numeric knobs, so there is no numpad and no command strip, only rows and a picker.
-//
-// Everything structural is engine: Lur::DevGui::CategoryTree splits the dotted names into sections,
-// FlatList flattens them honouring folds and owns the scroll clamp and the row geometry, ColorPicker
-// owns the picker's layout and hit-testing, DevTheme owns the colours. What is here is the PAINTING
-// and chess's own choices about it — which is this module's convention (a DevGui widget never holds a
-// renderer, so that the geometry drawn and the geometry hit-tested are the same call).
-bool BoardView::DevTap(float XPx, float YPx) {
-    if (!DevOverlayOpen_) return false;   // closed: the tap belongs to the board
-    // Deferred, not handled here: the hit-test needs the same row rects the paint computes, and
-    // recomputing them separately is exactly how a console ends up editing a different row from the
-    // one you touched.
-    TapPending_ = true;
-    TapX_ = XPx;
-    TapY_ = YPx;
-    return true;
-}
-
-void BoardView::DrawDevConsole(Lur::Render::IRenderer* Renderer, float WidthPx, float HeightPx) {
-    if (!DevOverlayOpen_) return;
-    using Lur::Render::Color;
-    using Lur::Render::MaterialHandle;
-    namespace Theme = Lur::DevGui::DevTheme;
-
-    Lur::Render::BeginDevGuiLayer(Renderer);
-
-    // Scale everything off the short edge so the panel is the same physical size on a phone and a
-    // desktop window (HS = "hud scale", 1.0 at 720 px across).
-    const float HS = (WidthPx < HeightPx ? WidthPx : HeightPx) / 720.0f;
-    const float LineH = 30.0f * HS, CatH = 32.0f * HS, TitleH = 34.0f * HS;
-    const float IndentW = 14.0f * HS, Pad = 10.0f * HS;
-
-    auto Blit = [&](MaterialHandle Mat, float X, float Y, float W, float H) {
-        using Lur::Math::Mat4;
-        Renderer->DrawMesh(QuadMesh, Mat,
-                           Mat4::Translation({X, Y, 0.0f}) * Mat4::Scale({W, H, 1.0f}));
-    };
-
-    const float X0 = Pad, Y0 = HeightPx * 0.06f;
-    const float PW = WidthPx - 2.0f * Pad, PH = HeightPx * 0.86f;
-    const float ViewTop = Y0 + TitleH + 4.0f * HS;
-    const float ViewBot = Y0 + PH - 4.0f * HS;
-    const float ViewH = ViewBot - ViewTop;
-
-    // Split on '.', so "chess.view.square_light" nests as chess > view > square_light — the dotted
-    // name IS the hierarchy, with no separate category metadata to keep in step.
-    const auto Root = Lur::DevGui::BuildCategoryTree(Lur::DevGui::GatherCvars('.'), '.');
-
-    std::vector<Lur::DevGui::FlatRow<Lur::Core::ICVar*>> Rows;
-    const float ContentH = Lur::DevGui::FlattenTree(
-        Root,
-        [this](const std::string& Path) { return CollapsedCats_.count(Path) != 0; },
-        LineH, CatH, Rows);
-
-    ScrollY_ += ScrollAccum_;
-    ScrollAccum_ = 0.0f;
-    const float MaxScroll = Lur::DevGui::ClampScroll(ScrollY_, ContentH, ViewH);
-
-    // Panel, title, close box.
-    Blit(DevPanelMat, X0, Y0, PW, PH);
-    const float XbtnS = TitleH;
-    Blit(DevKeyMat, X0 + PW - XbtnS, Y0, XbtnS, XbtnS);
-    Text.Draw(Renderer, "X", X0 + PW - XbtnS, Y0, XbtnS, XbtnS, 18.0f * HS, Theme::Accent,
-              Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
-    char Title[64];
-    std::snprintf(Title, sizeof(Title), "Console  %d cvars", Root.TotalLeaves);
-    Text.Draw(Renderer, Title, X0 + 8.0f * HS, Y0, PW - XbtnS - 16.0f * HS, TitleH, 17.0f * HS,
-              Theme::Accent, Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
-
-    // Take this frame's tap once. Anything the console does not claim below still counts as
-    // consumed — the panel is opaque to the board underneath it.
-    const bool Tapped = TapPending_;
-    const float Tx = TapX_, Ty = TapY_;
-    TapPending_ = false;
-    if (Tapped && Tx >= X0 + PW - XbtnS && Tx < X0 + PW && Ty >= Y0 && Ty < Y0 + XbtnS) {
-        SetDevOverlayOpen(false);
-        return;
-    }
-
-    // ---- Rows -------------------------------------------------------------------------------
-    const int Hit = Tapped ? Lur::DevGui::RowAtScreenY(Rows, Ty, ViewTop, ViewBot, ScrollY_, LineH,
-                                                       CatH)
-                           : -1;
-    for (std::size_t I = 0; I < Rows.size(); ++I) {
-        const auto& R = Rows[I];
-        const float RowH = R.IsCategory ? CatH : LineH;
-        const float Sy = ViewTop - ScrollY_ + R.ContentY;
-        if (Sy + RowH < ViewTop || Sy > ViewBot) continue;   // culled: outside the clip band
-        const float Ix = X0 + 6.0f * HS + static_cast<float>(R.Depth) * IndentW;
-
-        if (R.IsCategory) {
-            const bool Folded = CollapsedCats_.count(R.Node->Path) != 0;
-            Blit(DevKeyMat, X0 + 4.0f * HS, Sy + 1.0f * HS, PW - 8.0f * HS, RowH - 2.0f * HS);
-            char Head[96];
-            std::snprintf(Head, sizeof(Head), "%s %s  (%d)", Folded ? "[+]" : "[-]",
-                          R.Node->Segment.c_str(), R.Node->TotalLeaves);
-            Text.Draw(Renderer, Head, Ix, Sy, PW - 12.0f * HS, RowH, 16.0f * HS, Theme::CatInk,
-                      Lur::Text::EHAlign::Left, Lur::Text::EVAlign::Middle);
-            if (static_cast<int>(I) == Hit) {
-                if (Folded) CollapsedCats_.erase(R.Node->Path);
-                else CollapsedCats_.insert(R.Node->Path);
-            }
-            continue;
-        }
-
-        Lur::Core::ICVar* C = R.Item;
-        const bool Open = (C == PickerCvar_);
-        Text.Draw(Renderer, C->Name(), Ix, Sy, PW * 0.55f, RowH, 15.0f * HS,
-                  Open ? Theme::Accent : Theme::Ink, Lur::Text::EHAlign::Left,
-                  Lur::Text::EVAlign::Middle);
-        // The value box. For a colour CVar the box IS the colour, which is the only readout worth
-        // having — a hex triple tells you nothing about whether it looks right on the board.
-        const float VwW = PW * 0.30f, VwX = X0 + PW - VwW - 8.0f * HS;
-        if (C->IsColor()) {
-            Color Cur{};
-            if (Lur::Render::FromString(C->ValueString().c_str(), Cur)) {
-                Renderer->SetMaterialTint(DevSwatchMat, Cur);
-                Blit(DevSwatchMat, VwX, Sy + 3.0f * HS, VwW, RowH - 6.0f * HS);
-            }
-        } else {
-            Blit(DevKeyMat, VwX, Sy + 3.0f * HS, VwW, RowH - 6.0f * HS);
-            Text.Draw(Renderer, C->ValueString().c_str(), VwX, Sy, VwW, RowH, 14.0f * HS,
-                      Theme::Ink, Lur::Text::EHAlign::Center, Lur::Text::EVAlign::Middle);
-        }
-        if (static_cast<int>(I) == Hit) PickerCvar_ = Open ? nullptr : C;   // tap toggles the picker
-    }
-
-    // ---- Scrollbar --------------------------------------------------------------------------
-    if (MaxScroll > 0.0f && ContentH > 0.0f) {
-        const float TrackW = 4.0f * HS;
-        const float ThumbH = ViewH * (ViewH / ContentH);
-        const float ThumbY = ViewTop + (ViewH - ThumbH) * (ScrollY_ / MaxScroll);
-        Blit(DevAccentMat, X0 + PW - TrackW - 2.0f * HS, ThumbY, TrackW, ThumbH);
-    }
-
-    // The colour PICKER is the next slice. Selecting a row already marks it (accent name) and the
-    // swatch already shows the live value, so the console is readable now; editing arrives with the
-    // picker popover, which needs its own hit-testing pass.
-}
 
 } // namespace Chess

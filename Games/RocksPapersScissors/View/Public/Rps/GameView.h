@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "Lur/Core/CVar.h"  // ICVar* (selected cvar)
-#include "Lur/DevGui/Numpad.h"
+#include "Lur/DevGui/Console.h"
 #include "Lur/Hud/Dropdown.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Math/Spring.h"   // visual-only smoothing (frontier retraction, ghost obstacle push)
@@ -175,40 +175,24 @@ public:
     // state rather than the freeze that was the whole #163 complaint.
     void SetLinkHalfOpen(bool On) { LinkHalfOpen_ = On; }
 #if !LUR_SHIPPING
-    // The CONSOLE (#114) is one tool with ONE UI on both platforms: this cvar-browser
-    // overlay, driven by pointer taps. A tap (input thread on the phone) is stashed and
-    // consumed on the render thread, where the category/row/numpad rects are known — so
-    // hit-test + edits are race-free with the ValueString read. Tapping a category header
-    // folds it; tapping a row selects that cvar + opens the numpad; the numpad Enter commits.
-    void DevTap(float XPx, float YPx);
+    // ---- The dev console (#114, now Lur::DevGui::Console — #201) ----
+    // The console IS the engine's: one tool, one UI, one implementation, shared with chess and
+    // with game 3. What remains here is the ROUTING — which taps and keys the console gets
+    // before the game sees them, and where in the frame it draws. Everything below forwards.
+    //
+    // The routing is not a formality. DevKey returns whether the console CLAIMED the key, and a
+    // caller that ignores that gives the same keystroke to the console AND the game.
+    void DevTap(float XPx, float YPx) { Console_.Tap(XPx, YPx); }
+    void DevScroll(float DeltaY) { Console_.Scroll(DeltaY); }
+    bool DevKey(uint32_t Vk) { return Console_.Key(Vk); }
+    void SetDevOverlayOpen(bool On) { Console_.SetOpen(On); }
+    bool DevOverlayOpen() const { return Console_.IsOpen(); }
 
-    // Scroll the console's cvar list (it holds more cvars than fit on screen, #121). DeltaY in
-    // pixels, POSITIVE scrolls the content DOWN (reveals lower rows). Accumulated on the input
-    // thread, applied + clamped on the render thread. No-op while the console is hidden.
-    void DevScroll(float DeltaY) { DevScrollAccum_.fetch_add(DeltaY, std::memory_order_relaxed); }
-
-    // Feed a physical key (Win32 VK code) to the open console — #119, desktop in practice.
-    // Strictly ADDITIVE to the on-screen numpad, which keeps working identically: the UI is
-    // untouched, so the console stays one tool with one UI on both platforms. A keyboard is
-    // just a second device aimed at the same widgets, the way a mouse and a finger already are.
-    //   Up/Down  scrub the selected cvar (ICVar::Nudge picks the per-type step) and commit.
-    //   0-9 . Enter Backspace  drive the same Numpad_ buffer the on-screen keys drive.
-    // Queued here and drained on the render thread, same discipline as DevTap/DevScroll.
-    // Returns true if the console is open and therefore claims the key — the caller must NOT
-    // also give it to the game.
-    bool DevKey(uint32_t Vk);
-
-    // Show/hide the console. Default hidden (the game is unobstructed). Opened by the phone's
-    // two-finger TRIPLE-tap or the desktop § key; closed by the in-panel top-right X button.
-    // Closing also dismisses the numpad.
-    void SetDevOverlayOpen(bool On) { DevOverlayOpen_ = On; if (!On) NumpadOpen_ = false; }
-    bool DevOverlayOpen() const { return DevOverlayOpen_; }
-
-    // Called after a gameplay CVar is committed via the numpad/keyboard (the global value
-    // is already set). The app persists (cvars.cfg) and, on a phone in a live match, routes
-    // it through the LockstepPeer sync. Null on desktop-solo (LiveCvLatch + save suffice).
-    using CvCommitFn = void (*)(void* Ctx, Lur::Core::ICVar& Cv);
-    void SetCvCommitHook(CvCommitFn Fn, void* Ctx) { CvCommitFn_ = Fn; CvCommitCtx_ = Ctx; }
+    // Called after a CVar is committed in the console (the global value is already set). The app
+    // persists it to cvars.cfg and, on a phone in a live match, routes an AffectsGameplay one
+    // through the LockstepPeer sync. Null on desktop-solo, where LiveCvLatch + save suffice.
+    using CvCommitFn = Lur::DevGui::Console::CommitFn;
+    void SetCvCommitHook(CvCommitFn Fn, void* Ctx) { Console_.SetCommitHook(Fn, Ctx); }
 #endif
 
 private:
@@ -265,64 +249,12 @@ private:
     Lur::Render::MaterialHandle HealthFg = 0;
     Lur::Render::MaterialHandle GoldBarFg = 0;   // mine reserve bar (#84) — gold accent
 #if !LUR_SHIPPING
-    Lur::Render::MaterialHandle DevPanelMat = 0;   // #113 dev overlay: charcoal translucent
-    Lur::Render::MaterialHandle DevAccentMat = 0;  //   + cyan accent (DevTheme, bring-up)
-    std::atomic<float> DevTapX_{-1.0e9f};          // input-thread tap -> render-thread nudge
-    std::atomic<float> DevTapY_{-1.0e9f};
-    std::atomic<bool>  DevTapPending_{false};
-    bool               DevOverlayOpen_ = false;     // console shown? (two-finger triple-tap / desktop §)
-    Lur::Core::ICVar*  SelectedCvar_ = nullptr;     // the OPEN EDITOR's target (numpad/picker)
-    // #173: the keyboard highlight, distinct from SelectedCvar_. Arrows move it; Enter promotes it
-    // to the editor. Held as a KEY, never an index into the flattened row list — that list is
-    // rebuilt each frame and its indices shift whenever a category folds. Exactly one is active:
-    // HiCvar_ for a cvar row, HiCat_ (a category PATH) for a header, neither before first use.
-    Lur::Core::ICVar*  HiCvar_ = nullptr;
-    std::string        HiCat_;
-    std::unordered_set<std::string> CollapsedCats_; // folded category headers, keyed by FULL path
-    std::atomic<float> DevScrollAccum_{0.0f};       // input-thread scroll delta -> render thread
-    float              ScrollY_ = 0.0f;             // console scroll offset (px into the content)
-    Lur::Core::ICVar*  ToastCvar_ = nullptr;        // cvar whose tooltip toaster is showing
-    std::string        ToastText_;                  //   the tooltip text ("" = no toaster)
-    float              ToastAge_ = 0.0f;            //   seconds shown (auto-dismiss)
-    Lur::DevGui::Numpad Numpad_;                    // tap-driven numeric entry (the #118 answer)
-    bool               NumpadOpen_ = false;         //   shown after selecting a cvar; Enter commits
-    // #117: a CVar<Color> row opens the PICKER popover instead of the numpad — same anchor, same
-    // dismissal, different editor. Mutually exclusive with NumpadOpen_: one editor at a time, or
-    // two popovers would fight for the same screen space below the selected row.
-    bool               PickerOpen_ = false;
-    Lur::Render::MaterialHandle DevKeyMat = 0;      //   numpad key face (DevTheme)
-    Lur::Render::MaterialHandle DevSwatchMat = 0;   //   #117 picker swatch: retinted, not recreated
-    // #175: a small RING of materials for the colour-row swatches. One per VISIBLE colour row is
-    // all that is ever needed (rows outside the clip band are not drawn), and reusing them means
-    // the draw loop never calls CreateMaterial — which allocates a descriptor set and grows a
-    // vector nothing reclaims. 16 is far more colour cvars than will ever share a screen.
-    static constexpr int DevRowSwatchCount = 16;
-    Lur::Render::MaterialHandle DevRowSwatchMat[DevRowSwatchCount] = {};
-    int                ColorRowsDrawn_ = 0;         //   reset each frame; indexes the ring
-    // ---- #174 colour picker v2 ----
-    Lur::Render::MeshHandle     SvSatMesh = 0;      // white alpha ramp across X (saturation)
-    Lur::Render::MeshHandle     SvValMesh = 0;      // black alpha ramp down Y (value)
-    Lur::Render::MeshHandle     HueStripMesh = 0;   // 6-segment hue wheel, per-vertex coloured
-    Lur::Render::MaterialHandle PickHueMat = 0;     // retinted with the LIVE hue each frame
-    Lur::Render::MaterialHandle PickAlphaMat = 0;   // retinted with the live RGB for the A strip
-    // The picker's WORKING state. H,S,V are authoritative while it is open and RGBA is written
-    // out; HSV is re-derived from the CVar only when the binding changes or the value is edited
-    // from OUTSIDE (console, reset button). RGB->HSV is lossy at the grey/black/white corners —
-    // hue is undefined when S or V is 0 — so round-tripping every frame would snap the hue handle
-    // to red the instant a drag reaches an edge of the square.
-    float              PickH_ = 0.0f, PickS_ = 0.0f, PickV_ = 0.0f, PickA_ = 1.0f;
-    Lur::Core::ICVar*  PickBound_ = nullptr;        // which cvar the working state describes
-    float              PickWrote_[4] = {0, 0, 0, 0};// last RGBA we wrote, to detect external edits
-    CvCommitFn         CvCommitFn_ = nullptr;       //   app hook: persist + (phone) sync
-    void*              CvCommitCtx_ = nullptr;
-    // #119 keyboard queue: written by the input thread, drained by the render thread inside
-    // the console block (where SelectedCvar_/Numpad_ are already being touched, so the edit
-    // stays on one thread). Capacity is a frame's worth of human typing many times over;
-    // an overflow drops the excess rather than blocking, since a lost keystroke while
-    // holding a key down is invisible and a stalled input thread is not.
-    static constexpr int DevKeyCap = 32;
-    std::atomic<uint32_t> DevKeys_[DevKeyCap] = {};
-    std::atomic<int>      DevKeyCount_{0};
+    // The dev console, whole (#201). ~30 members and ~650 lines of painting used to live here:
+    // the row tree, the numpad, the picker's working HSV, the toaster, the keyboard cursor, the
+    // materials and gradient meshes, the tap/key/scroll queues. It owns all of it now, including
+    // its own font — a tool that only works in a game that happens to have an Inter atlas is not
+    // an engine facility.
+    Lur::DevGui::Console Console_;
 #endif
 
     Lur::Render::Color TeamTint[2] = {};              // locked BASE team colours

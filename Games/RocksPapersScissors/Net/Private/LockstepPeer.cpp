@@ -141,8 +141,8 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     // landed. Between Init and the new peer's first fingerprint the verdict describes the PREVIOUS
     // peer, which is strictly better than describing nothing.
     Build_.Rederive(Lur::BuildFingerprint());
-#endif
     Inited_ = true;   // #208: only now may a match-live edge be announced
+#endif
     BeginMatch(Seed);
 }
 
@@ -1336,7 +1336,9 @@ void LockstepPeer::RebuildFromHistory(uint32_t Frontier) {
     // #208: was this peer already in a live match? A cold rejoin adopts one that is ALREADY running,
     // and that transition has to be announced exactly like a match start or the rejoiner records
     // nothing — see the sink call at the end of this function.
+#if !LUR_SHIPPING
     const bool WasStarted = MatchStarted_;
+#endif
     const uint64_t S = TheSim.Seed;
     // #147: ResetSim, NOT TheSim.Init — a rebuild must start from the MERGED cvar set. Re-latching
     // the local globals here silently un-converged an already-synced match on every reconnect (the

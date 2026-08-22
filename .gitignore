@@ -5,6 +5,11 @@
 /build-agent/
 # ad-hoc optimized host build dir
 /build-opt/
+# host build configured with -DLUR_CONFIG=Shipping. Worth keeping around and running now and then:
+# nothing in CI or build.ps1 builds Shipping, and it had been broken for 46 commits before anyone
+# looked (two recording-only variables touched outside their `#if !LUR_SHIPPING` guard). The dev and
+# Android debug builds stay green straight through that class of break.
+/build-ship/
 **/build/
 **/build-agent/
 **/.cxx/

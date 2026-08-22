@@ -146,6 +146,11 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
     // #201: the dev console. Same platform toggle RPS uses, so the two games open their console with
     // the same key rather than each inventing one.
     if (G.Win.TakeConsoleToggle()) G.View.SetDevOverlayOpen(!G.View.DevOverlayOpen());
+    // Physical keys go to the console FIRST, and only while it is open (DevKey answers false
+    // otherwise). Chess has no keyboard gameplay input, so nothing competes for them today — but
+    // draining them unconditionally would silently swallow any that gets added later, so ask.
+    for (uint32_t Vk : G.Win.TakeKeys())
+        if (!G.View.DevKey(Vk)) { /* chess has no keyboard gameplay input yet */ }
     int W = 0, H = 0;
     G.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
