@@ -134,13 +134,13 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
 
     const ::Lur::Render::Quad Q = MakeQuad();  // unit (0,0)-(1,1), white vertices
     QuadMesh = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
-    LightSquare = Renderer->CreateMaterial(MaterialDesc{0, CvSquareLight.Get(), false});
-    DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, CvSquareDark.Get(), false});
-    Highlight   = Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
+    LightSquare = Lur::Render::MakeFlatMaterial(Renderer, CvSquareLight.Get());
+    DarkSquare  = Lur::Render::MakeFlatMaterial(Renderer, CvSquareDark.Get());
+    Highlight   = Lur::Render::MakeFlatMaterial(Renderer, Color{0.30f, 0.85f, 0.40f, 0.55f});
     // #193: the peer's anticipated pick-up. Deliberately a DIFFERENT hue from our own green
     // selection — it is a guess about what they are about to do, and must never be mistaken
     // for something that has actually happened.
-    PeerHighlight = Renderer->CreateMaterial(MaterialDesc{0, Color{0.98f, 0.75f, 0.25f, 0.45f}, false});
+    PeerHighlight = Lur::Render::MakeFlatMaterial(Renderer, Color{0.98f, 0.75f, 0.25f, 0.45f});
 
 #if !LUR_SHIPPING
     // The console builds its own materials, meshes and font — chess supplies nothing but a renderer.

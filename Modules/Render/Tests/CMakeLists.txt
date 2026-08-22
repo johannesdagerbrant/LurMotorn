@@ -30,3 +30,12 @@ add_executable(render_mesh2d_tests Mesh2DTests.cpp)
 target_link_libraries(render_mesh2d_tests PRIVATE lur_render)
 target_compile_features(render_mesh2d_tests PRIVATE cxx_std_20)
 add_test(NAME render_mesh2d_tests COMMAND render_mesh2d_tests)
+
+# #201: MakeFlatMaterial, promoted from five copies of the same five lines. Five lines do not usually
+# earn a test, but each field here fails SILENTLY and visibly-much-later: a non-zero BaseColor makes
+# every flat panel sample art, a dropped tint alpha turns translucent surfaces opaque, and Lit=true
+# shades a quad by a normal that means nothing.
+add_executable(render_sprite2d_tests Sprite2DTests.cpp)
+target_link_libraries(render_sprite2d_tests PRIVATE lur_render)
+target_compile_features(render_sprite2d_tests PRIVATE cxx_std_20)
+add_test(NAME render_sprite2d_tests COMMAND render_sprite2d_tests)

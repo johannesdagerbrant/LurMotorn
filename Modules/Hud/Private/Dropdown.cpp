@@ -135,7 +135,7 @@ void Dropdown::CreateResources(Lur::Render::IRenderer* Renderer, const Lur::Text
     // re-warmed by the next SetItems.
     ColorMesh.clear();
     Text.CreateResources(Renderer, Font);
-    White = Renderer->CreateMaterial(MaterialDesc{0, Color{1, 1, 1, 1}, false});
+    White = Lur::Render::MakeFlatMaterial(Renderer, Color{1, 1, 1, 1});
 
     QuadPanel   = MakeQuadMesh(Renderer, PanelCol);
     QuadLine    = MakeQuadMesh(Renderer, LineCol);

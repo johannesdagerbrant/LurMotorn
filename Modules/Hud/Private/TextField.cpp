@@ -21,7 +21,7 @@ void TextField::CreateResources(Lur::Render::IRenderer* Renderer, const Lur::Tex
     // Debug overflow outline resources (a unit quad + a red material).
     const Lur::Render::Quad Q = Lur::Render::MakeQuad();
     UnitQuad = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
-    DebugMaterial = Renderer->CreateMaterial(MaterialDesc{0, Color{0.90f, 0.15f, 0.15f, 0.9f}, false});
+    DebugMaterial = Lur::Render::MakeFlatMaterial(Renderer, Color{0.90f, 0.15f, 0.15f, 0.9f});
 }
 
 Lur::Text::LayoutResult TextField::Draw(Lur::Render::IRenderer* Renderer, const char* Text,

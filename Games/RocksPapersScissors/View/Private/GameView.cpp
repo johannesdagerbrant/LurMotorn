@@ -55,13 +55,6 @@ float HudScale(float WidthPx) {
 // Lur::Render::ColorMath::FromHsvDeg() was a second HSV implementation in a third convention; it is Lur::Render::ColorMath now
 // (#201), and render_colormath_tests pins it against the formula that used to live here.
 
-Lur::Render::MaterialHandle FlatMat(IRenderer* R, Color C) {
-    MaterialDesc D;
-    D.BaseColor = 0;  // flat white
-    D.Tint = C;
-    return R->CreateMaterial(D);
-}
-
 const char* ResultStr(uint8_t R, int MyTeam) {
     if (R == ResultDraw) return "DRAW";
     if (R == ResultTeam0Wins) return MyTeam == 0 ? "YOU WIN" : "YOU LOSE";
@@ -70,7 +63,8 @@ const char* ResultStr(uint8_t R, int MyTeam) {
 }
 
 // ---- Locked palette (#85, Docs/Journal/2026-07-19/rps-hud-prototype.html) ----
-using Lur::Render::ColorMath::Srgb8;   // #201: was a local constexpr copy
+using Lur::Render::ColorMath::Srgb8;      // #201: was a local constexpr copy
+using Lur::Render::MakeFlatMaterial;      // #201: was a local FlatMat copy
 
 // #117's first real CVar<Color>: the invalid-placement red. #142 reserves red for exactly this
 // meaning, which makes it a palette DECISION rather than an arbitrary constant — the kind of
@@ -174,13 +168,13 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Disc = Lur::Render::MakeDiscMesh(Renderer, 28);   // 28 segments: no straight edge visible at button size
 
     // Field backdrop + grid (#85): gradient meshes drawn under everything else.
-    WhiteMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 1.0f});
+    WhiteMat = MakeFlatMaterial(Renderer, {1.0f, 1.0f, 1.0f, 1.0f});
     FieldGradMesh = Lur::Render::MakeGradientStripV(Renderer, FieldStops, NumFieldStops, 1.0f);
     VLineMesh = Lur::Render::MakeGradientStripV(Renderer, GridStops, 2, GridAlpha);
     for (int I = 0; I < GridShades; ++I) {
         Color C = Lur::Render::GradSample(GridStops, 2, static_cast<float>(I) / (GridShades - 1));
         C.A *= GridAlpha;
-        GridLut[I] = FlatMat(Renderer, C);
+        GridLut[I] = MakeFlatMaterial(Renderer, C);
     }
 
     // Upload the cooked glyph atlas (#85): GlyphCount masks side by side, RG8
@@ -268,20 +262,20 @@ void GameView::CreateResources(IRenderer* Renderer) {
             // THOSE stays on the hue, while scaling RGB drifts off it.
             constexpr float BarKnock = 0.7f;
             ProgressMat[Tm][Ty] =
-                FlatMat(Renderer, Lur::Render::ColorMath::FromHsvDeg(H, BldgSat * BarKnock, BldgVal * BarKnock));
+                MakeFlatMaterial(Renderer, Lur::Render::ColorMath::FromHsvDeg(H, BldgSat * BarKnock, BldgVal * BarKnock));
         }
     // #143 pulse LUTs: the plate keeps its base colour and only rises in OPACITY (transparent ->
     // opaque); the coin glyph glows from gold toward pure white. The throb walks both.
     for (int I = 0; I < PulseSteps; ++I) {
         const float F = static_cast<float>(I) / (PulseSteps - 1);
-        PulsePlate[I] = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.40f + 0.58f * F});
+        PulsePlate[I] = MakeFlatMaterial(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.40f + 0.58f * F});
         const Color G{Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f};  // gold -> white
         CoinGlow[I] = AtlasTinted({G.R + (1.0f - G.R) * F, G.G + (1.0f - G.G) * F, G.B + (1.0f - G.B) * F, 1.0f});
         // #107 press LUT: a press must be unmistakable, so unlike the pulse (which only breathes in
         // opacity on the SAME dark plate) the pressed plate goes LIGHT — the panel-light grey at a
         // rising alpha. Its own LUT, because materials are immutable and the pulse's dark base could
         // never read as "I got your touch" against a dark button.
-        PressPlate[I] = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.30f + 0.65f * F});
+        PressPlate[I] = MakeFlatMaterial(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.30f + 0.65f * F});
     }
     // #139 placement ghost: a translucent team-tinted silhouette while the drop is valid, and a
     // blinking red one while invalid (two alpha steps the blink alternates — materials are immutable).
@@ -291,13 +285,13 @@ void GameView::CreateResources(IRenderer* Renderer) {
     }
     GhostBadMat[0] = AtlasTinted({Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 0.85f});  // red, bright
     GhostBadMat[1] = AtlasTinted({Srgb8(0xE1), Srgb8(0x4E), Srgb8(0x38), 0.30f});  // red, dim
-    ProdBtnBg = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.62f});  // #140 translucent button
+    ProdBtnBg = MakeFlatMaterial(Renderer, {Srgb8(0x1A), Srgb8(0x20), Srgb8(0x26), 0.62f});  // #140 translucent button
     for (int Tm = 0; Tm < 2; ++Tm)  // #141 build-frontier line in each team's colour (semi-transparent)
-        FrontierMat[Tm] = FlatMat(Renderer, {TeamTint[Tm].R, TeamTint[Tm].G, TeamTint[Tm].B, 0.6f});
+        FrontierMat[Tm] = MakeFlatMaterial(Renderer, {TeamTint[Tm].R, TeamTint[Tm].G, TeamTint[Tm].B, 0.6f});
     MineMat = AtlasTinted({Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});  // mine stone = gold tone
-    HealthBg = FlatMat(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
-    HealthFg = FlatMat(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
-    GoldBarFg = FlatMat(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
+    HealthBg = MakeFlatMaterial(Renderer, {0.05f, 0.05f, 0.05f, 0.9f});
+    HealthFg = MakeFlatMaterial(Renderer, {0.35f, 0.95f, 0.40f, 1.0f});
+    GoldBarFg = MakeFlatMaterial(Renderer, {0.85f, 0.66f, 0.24f, 1.0f});
 #if !LUR_SHIPPING
     // The console builds its own materials, gradient meshes and font. This was ~40 lines of dev
     // palette and picker-mesh construction here, re-typed in chess the moment chess wanted a
@@ -310,16 +304,16 @@ void GameView::CreateResources(IRenderer* Renderer) {
     Text.CreateResources(Renderer, &Font);
 
     // ---- HUD (#85): locked panel palette + the engine dropdown + DSEG7 clock ----
-    PanelMat = FlatMat(Renderer, {Srgb8(0x1A), Srgb8(0x1F), Srgb8(0x24), 0.97f});
-    PanelEdge = FlatMat(Renderer, {Srgb8(0x39), Srgb8(0x42), Srgb8(0x4B), 1.0f});
-    PlateBg = FlatMat(Renderer, {Srgb8(0x23), Srgb8(0x29), Srgb8(0x30), 0.97f});
-    BarBg = FlatMat(Renderer, {0.0f, 0.0f, 0.0f, 0.45f});
-    GoldFlat = FlatMat(Renderer, {Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});
+    PanelMat = MakeFlatMaterial(Renderer, {Srgb8(0x1A), Srgb8(0x1F), Srgb8(0x24), 0.97f});
+    PanelEdge = MakeFlatMaterial(Renderer, {Srgb8(0x39), Srgb8(0x42), Srgb8(0x4B), 1.0f});
+    PlateBg = MakeFlatMaterial(Renderer, {Srgb8(0x23), Srgb8(0x29), Srgb8(0x30), 0.97f});
+    BarBg = MakeFlatMaterial(Renderer, {0.0f, 0.0f, 0.0f, 0.45f});
+    GoldFlat = MakeFlatMaterial(Renderer, {Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});
     PlateIconMat = AtlasTinted({Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 1.0f});
     PlateIconDim = AtlasTinted({Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.4f});
     GoldIconMat = AtlasTinted({Srgb8(0xD9), Srgb8(0xA9), Srgb8(0x3C), 1.0f});
-    MiniWinMat = FlatMat(Renderer, {1.0f, 1.0f, 1.0f, 0.12f});
-    MiniWinEdge = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.6f});
+    MiniWinMat = MakeFlatMaterial(Renderer, {1.0f, 1.0f, 1.0f, 0.12f});
+    MiniWinEdge = MakeFlatMaterial(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), 0.6f});
     // First-scroll hint (#85 playtest): alpha-stepped materials (materials are
     // immutable, so the fade walks a LUT) + up/down arrow triangle meshes.
     for (int I = 0; I < HintAlphaSteps; ++I) {
@@ -328,7 +322,7 @@ void GameView::CreateResources(IRenderer* Renderer) {
         DP.BaseColor = IconAtlas;
         DP.Tint = {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), A};
         HintPointer[I] = Renderer->CreateMaterial(DP);
-        HintArrow[I] = FlatMat(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), A});  // white, like the finger
+        HintArrow[I] = MakeFlatMaterial(Renderer, {Srgb8(0xC9), Srgb8(0xD3), Srgb8(0xDA), A});  // white, like the finger
     }
     {
         const Lur::Math::Vec3 Nrm{0.0f, 0.0f, 1.0f};

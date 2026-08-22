@@ -31,18 +31,9 @@ namespace {
 
 using Lur::Math::Mat4;
 using Lur::Render::Color;
-using Lur::Render::MaterialDesc;
 using Lur::Render::MaterialHandle;
 
 namespace Theme = DevTheme;
-
-MaterialHandle FlatMat(Lur::Render::IRenderer* R, Color C) {
-    MaterialDesc D;
-    D.BaseColor = 0;  // flat white, tinted
-    D.Tint = C;
-    D.Lit = false;
-    return R->CreateMaterial(D);
-}
 
 uint64_t NowMs() {
     using namespace std::chrono;
@@ -135,13 +126,13 @@ void Console::CreateResources(Lur::Render::IRenderer* Renderer) {
     const Lur::Render::Quad Q = Lur::Render::MakeQuad({1.0f, 1.0f, 1.0f, 1.0f});
     QuadMesh_ = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
 
-    PanelMat_ = FlatMat(Renderer, Theme::Panel);
-    AccentMat_ = FlatMat(Renderer, Theme::AccentFill);
-    KeyMat_ = FlatMat(Renderer, Theme::KeyFace);
-    WhiteMat_ = FlatMat(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
-    SwatchMat_ = FlatMat(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
+    PanelMat_ = Lur::Render::MakeFlatMaterial(Renderer, Theme::Panel);
+    AccentMat_ = Lur::Render::MakeFlatMaterial(Renderer, Theme::AccentFill);
+    KeyMat_ = Lur::Render::MakeFlatMaterial(Renderer, Theme::KeyFace);
+    WhiteMat_ = Lur::Render::MakeFlatMaterial(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
+    SwatchMat_ = Lur::Render::MakeFlatMaterial(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
     for (int I = 0; I < RowSwatchCount; ++I)
-        RowSwatchMat_[I] = FlatMat(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
+        RowSwatchMat_[I] = Lur::Render::MakeFlatMaterial(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
 
     // The SV square is three layers, which is what makes it exactly S(across) x V(down): a white
     // quad, then a white->transparent ramp TINTED with the live hue (saturation), then a black ramp
@@ -165,8 +156,8 @@ void Console::CreateResources(Lur::Render::IRenderer* Renderer) {
         HueStops[I] = {H, {R2, G2, B2, 1.0f}};
     }
     HueStripMesh_ = Lur::Render::MakeGradientStripH(Renderer, HueStops, 7);
-    HueMat_ = FlatMat(Renderer, Color{1.0f, 0.0f, 0.0f, 1.0f});
-    AlphaMat_ = FlatMat(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
+    HueMat_ = Lur::Render::MakeFlatMaterial(Renderer, Color{1.0f, 0.0f, 0.0f, 1.0f});
+    AlphaMat_ = Lur::Render::MakeFlatMaterial(Renderer, Color{1.0f, 1.0f, 1.0f, 1.0f});
 
     Font_.Init(Lur::Text::InterFont());
     Font_.UploadAtlas(*Renderer);
