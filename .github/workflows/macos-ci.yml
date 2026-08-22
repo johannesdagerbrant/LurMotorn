@@ -113,91 +113,20 @@ jobs:
             -scheme OnlyChess -configuration Debug \
             -sdk iphonesimulator CODE_SIGNING_ALLOWED=NO build
 
-  # ── The .ipa jobs, as ONE matrix (#198) ──────────────────────────────────────
-  # This was FOUR near-identical jobs — chess, RPS, and an AGENT variant of each — roughly 240 lines
-  # of copy. Per-game CI jobs are the third axis of the boilerplate #198 exists to remove (per game x
-  # per platform x per tool), and a third game would have made it six.
-  #
-  # The agent rows are gated per-ROW rather than per-job, which is the whole reason a matrix works
-  # here: `if` may read the matrix context, so `agent: true` rows are skipped on an ordinary push and
-  # run only on a manual dispatch that asked for them. That gate is load-bearing, not tidiness — an
-  # agent .ipa is remote-controllable, and building it on every push would leave it sitting in the
-  # artifact list next to the player one, one mis-click from being sideloaded. Its ARTIFACT NAME
-  # carries -AGENT- for the same reason.
+  # ── The .ipa jobs ────────────────────────────────────────────────────────────
+  # One reusable workflow, called twice. See .github/workflows/ios-ipa.yml for why this is not a
+  # single matrix over {game} x {agent}: the `matrix` context is not available in a job-level `if`,
+  # and a workflow that tries it fails to parse.
   ios-ipa:
-    name: ${{ matrix.app }} iOS .ipa${{ matrix.agent && ' — AGENT (manual, never for a player)' || ' (for sideloading)' }}
-    if: ${{ !matrix.agent || (github.event_name == 'workflow_dispatch' && inputs.agent) }}
-    runs-on: macos-latest
-    strategy:
-      # One game's failure must not cancel the other's — a broken RPS build should still tell us
-      # whether chess is fine.
-      fail-fast: false
-      matrix:
-        include:
-          - { dir: Chess,               app: OnlyChess, agent: false }
-          - { dir: RocksPapersScissors, app: OnlyRps,   agent: false }
-          - { dir: Chess,               app: OnlyChess, agent: true  }
-          - { dir: RocksPapersScissors, app: OnlyRps,   agent: true  }
-    steps:
-      - uses: actions/checkout@v4
+    uses: ./.github/workflows/ios-ipa.yml
 
-      - name: Cache MoltenVK
-        id: mvk
-        uses: actions/cache@v4
-        with:
-          path: mvk
-          key: moltenvk-1.4.1-ios
-      - name: Fetch MoltenVK (v1.4.1)
-        if: steps.mvk.outputs.cache-hit != 'true'
-        run: |
-          curl -fL -o /tmp/MoltenVK-all.tar \
-            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
-          mkdir -p mvk
-          tar -xf /tmp/MoltenVK-all.tar -C mvk \
-            MoltenVK/MoltenVK/include \
-            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
-            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
-
-      # A DEVICE build (arm64, iphoneos) with signing disabled. The simulator app cannot use real
-      # Bluetooth, so a cross-platform test needs the app on a physical iPhone — which means a device
-      # build. It is unsigned; the dev rig signs it at install time with a free Apple ID.
-      #
-      # Separate build directories per row so a cached agent tree can never be mistaken for the
-      # player one — the two differ by a compile definition, which no artifact name would reveal.
-      - name: Configure (device, unsigned)
-        run: |
-          cmake -S Games/${{ matrix.dir }}/iOS -B Games/${{ matrix.dir }}/iOS/build-${{ matrix.agent && 'agent' || 'device' }} -G Xcode \
-            -DCMAKE_SYSTEM_NAME=iOS \
-            -DCMAKE_OSX_SYSROOT=iphoneos \
-            -DCMAKE_OSX_ARCHITECTURES=arm64 \
-            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
-            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
-            ${{ matrix.agent && '-DLUR_AGENT=ON' || '' }}
-
-      # -configuration Debug is what it has always been, and it no longer decides optimization:
-      # lur_configure_app_target pins GCC_OPTIMIZATION_LEVEL from LUR_CONFIG (#198), because Xcode
-      # ignores CMAKE_BUILD_TYPE and this flag used to hard-force -O0 — a 20x sim.step gap that read
-      # as an iPhone performance problem for a full investigation.
-      - name: Build (device, unsigned)
-        run: |
-          xcodebuild -project Games/${{ matrix.dir }}/iOS/build-${{ matrix.agent && 'agent' || 'device' }}/${{ matrix.app }}.xcodeproj \
-            -scheme ${{ matrix.app }} -configuration Debug \
-            -sdk iphoneos -destination 'generic/platform=iOS' \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
-
-      # Wrap the .app in the standard Payload/ layout and zip it to a .ipa.
-      - name: Package unsigned .ipa
-        run: |
-          APP=$(find Games/${{ matrix.dir }}/iOS/build-${{ matrix.agent && 'agent' || 'device' }} -name '${{ matrix.app }}.app' -type d | head -1)
-          echo "App bundle: $APP"
-          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
-          zip -qry ${{ matrix.app }}${{ matrix.agent && '-AGENT' || '' }}-unsigned.ipa Payload
-
-      # Artifact names are UNCHANGED from the four hand-written jobs — Tools/DeviceRig downloads
-      # them by name, so renaming would break the headless install path.
-      - name: Upload .ipa artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.app }}${{ matrix.agent && '-AGENT' || '' }}-unsigned-ipa
-          path: ${{ matrix.app }}${{ matrix.agent && '-AGENT' || '' }}-unsigned.ipa
-          if-no-files-found: error
+  # The AGENT variants: MANUAL DISPATCH ONLY, and deliberately so. An agent .ipa is remote-
+  # controllable; building it on every push would leave it in the artifact list beside the player one,
+  # one mis-click from being sideloaded onto a phone someone then plays on. `inputs` IS available in a
+  # job-level `if`, which is exactly why the agent axis is the reusable workflow's input rather than a
+  # matrix dimension.
+  ios-ipa-agent:
+    if: github.event_name == 'workflow_dispatch' && inputs.agent
+    uses: ./.github/workflows/ios-ipa.yml
+    with:
+      agent: true

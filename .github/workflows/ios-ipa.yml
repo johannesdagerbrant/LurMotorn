@@ -1,0 +1,110 @@
+# Reusable: build unsigned iOS .ipas for every game, optionally with the agent harness.
+#
+# ── Why a reusable workflow and not one matrix ────────────────────────────────
+# The obvious shape is a single matrix over {game} x {agent} with the agent rows gated by
+# `if: ${{ !matrix.agent || ... }}`. That does not work: the `matrix` context is NOT available in a
+# job-level `if` (only github / needs / vars / inputs are), and a workflow that tries it fails to
+# PARSE — the run ends in 0s and GitHub stops resolving the workflow's own name, which is a confusing
+# way to be told about a typo'd context.
+#
+# So the agent axis becomes the reusable-workflow INPUT, where the caller gates it with `inputs`,
+# and the game axis stays a matrix here. One copy of the steps, two invocations.
+#
+# This replaced four near-identical hand-written jobs (chess, RPS, and an AGENT variant of each),
+# ~242 lines. Per-game CI jobs are the third axis of the per-game-per-platform boilerplate #198
+# exists to remove, and a third game would have made six.
+name: iOS .ipa
+
+on:
+  workflow_call:
+    inputs:
+      agent:
+        description: "Build with -DLUR_AGENT=ON (assistant remote control; never for a player)"
+        type: boolean
+        default: false
+
+jobs:
+  ipa:
+    name: ${{ matrix.app }}${{ inputs.agent && ' — AGENT (never for a player)' || '' }}
+    runs-on: macos-latest
+    strategy:
+      # One game's failure must not cancel the other's — a broken RPS build should still say
+      # whether chess is fine.
+      fail-fast: false
+      matrix:
+        include:
+          - { dir: Chess,               app: OnlyChess }
+          - { dir: RocksPapersScissors, app: OnlyRps }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache MoltenVK
+        id: mvk
+        uses: actions/cache@v4
+        with:
+          path: mvk
+          key: moltenvk-1.4.1-ios
+      - name: Fetch MoltenVK (v1.4.1)
+        if: steps.mvk.outputs.cache-hit != 'true'
+        run: |
+          curl -fL -o /tmp/MoltenVK-all.tar \
+            https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.1/MoltenVK-all.tar
+          mkdir -p mvk
+          tar -xf /tmp/MoltenVK-all.tar -C mvk \
+            MoltenVK/MoltenVK/include \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64 \
+            MoltenVK/MoltenVK/static/MoltenVK.xcframework/ios-arm64_x86_64-simulator
+
+      # A DEVICE build (arm64, iphoneos) with signing disabled. The simulator app cannot use real
+      # Bluetooth, so a cross-platform test needs the app on a physical iPhone — which means a device
+      # build. It is unsigned; the dev rig signs it at install time with a free Apple ID.
+      #
+      # Distinct build directory per variant, so a cached agent tree can never be mistaken for the
+      # player one — they differ by a compile definition, which no artifact name would reveal.
+      - name: Configure (device, unsigned)
+        env:
+          VARIANT: ${{ inputs.agent && 'agent' || 'device' }}
+          AGENT_FLAG: ${{ inputs.agent && '-DLUR_AGENT=ON' || '' }}
+        run: |
+          cmake -S Games/${{ matrix.dir }}/iOS -B Games/${{ matrix.dir }}/iOS/build-$VARIANT -G Xcode \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_SYSROOT=iphoneos \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DMOLTENVK_DIR="$GITHUB_WORKSPACE/mvk/MoltenVK/MoltenVK" \
+            -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO \
+            $AGENT_FLAG
+
+      # -configuration Debug is what it has always been, and it no longer decides optimization:
+      # lur_configure_app_target pins GCC_OPTIMIZATION_LEVEL from LUR_CONFIG (#198), because Xcode
+      # ignores CMAKE_BUILD_TYPE and this flag used to hard-force -O0 — a 20x sim.step gap that read
+      # as an iPhone performance problem for a full investigation.
+      - name: Build (device, unsigned)
+        env:
+          VARIANT: ${{ inputs.agent && 'agent' || 'device' }}
+        run: |
+          xcodebuild -project Games/${{ matrix.dir }}/iOS/build-$VARIANT/${{ matrix.app }}.xcodeproj \
+            -scheme ${{ matrix.app }} -configuration Debug \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" build
+
+      # Wrap the .app in the standard Payload/ layout and zip it to a .ipa. The -AGENT- infix is
+      # deliberate: an agent build is remote-controllable and must be identifiable at a glance in the
+      # artifact list, next to the ordinary one.
+      - name: Package unsigned .ipa
+        env:
+          VARIANT: ${{ inputs.agent && 'agent' || 'device' }}
+          SUFFIX: ${{ inputs.agent && '-AGENT' || '' }}
+        run: |
+          APP=$(find Games/${{ matrix.dir }}/iOS/build-$VARIANT -name '${{ matrix.app }}.app' -type d | head -1)
+          echo "App bundle: $APP"
+          rm -rf Payload && mkdir Payload && cp -R "$APP" Payload/
+          zip -qry ${{ matrix.app }}$SUFFIX-unsigned.ipa Payload
+
+      # Artifact names are UNCHANGED from the four hand-written jobs — Tools/DeviceRig downloads them
+      # by name, so renaming would break the headless install path.
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.app }}${{ inputs.agent && '-AGENT' || '' }}-unsigned-ipa
+          path: ${{ matrix.app }}${{ inputs.agent && '-AGENT' || '' }}-unsigned.ipa
+          if-no-files-found: error
