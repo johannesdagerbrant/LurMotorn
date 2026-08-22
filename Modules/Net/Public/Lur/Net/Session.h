@@ -96,7 +96,13 @@ enum class EMsgType : uint8_t {
 //     bit-identical games under different labels and different seeds forever, which makes their
 //     flight recordings unpairable and their score tallies disagree. A v10 peer sends no ordinal, so
 //     a v10<->v11 pair would read the varint off the end of the payload; it must not link.
-inline constexpr uint8_t ProtocolVersion = 11;
+// v12: the chess per-opponent save record (EMsgType::Sync) gained a format-version byte (#66). Those
+//     bytes are BOTH the on-disk record and the wire payload — GameHost sends exactly what
+//     ISaveState::Write produces — so a layout change there is a wire change. #66 asserted it was not;
+//     it was wrong. A v11 peer would read the new version byte (0xC1) as its WinsLower and report 193
+//     wins, then take every later field one byte early: a silent, plausible-looking corruption of the
+//     one piece of state the two phones are supposed to agree on. It must not link.
+inline constexpr uint8_t ProtocolVersion = 12;
 
 // Coarse link state for UI feedback (is a game live? did the link fail?).
 enum class ELinkState : uint8_t {

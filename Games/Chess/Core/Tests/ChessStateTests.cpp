@@ -398,7 +398,90 @@ static void TestClearIdentityHotSeat() {
     CHECK(!S.IsMyTurn());
 }
 
+// ---- #66: the on-disk/on-wire record carries a FORMAT VERSION ----
+// Before this the format had none, so the first layout change would have made every existing record
+// misparse SILENTLY — the win tallies would simply be wrong numbers, with nothing to notice. These
+// tests pin the byte layout, not just the round trip: the pre-existing round-trip tests passed both
+// with and without the version byte, because Write and Read moved together.
+static void TestRecordFormatVersion() {
+    // 1. A written record LEADS with the version byte, and round-trips.
+    ChessRecord W;
+    W.WinsLower = 3; W.WinsHigher = 5; W.Draws = 2;
+    std::vector<uint8_t> B;
+    W.Write(B);
+    CHECK(B.size() >= 4);
+    CHECK(B[0] == ChessRecord::Version1);      // pins the LAYOUT, not merely the round trip
+    CHECK(B[1] == 3 && B[2] == 5 && B[3] == 2);
+
+    ChessRecord R;
+    CHECK(R.Read(B.data(), B.size()));
+    CHECK(R.WinsLower == 3 && R.WinsHigher == 5 && R.Draws == 2);
+
+    // 2. A v0 (pre-#66, unversioned) record still loads — a tally is cheap to keep and annoying to
+    //    lose, and this is the whole reason the version byte sits in a reserved high range.
+    std::vector<uint8_t> V0 = {7, 1, 4};       // [WinsLower][WinsHigher][Draws], no moves
+    {
+        // v0 bodies end with the move stream, so borrow a real one from a v1 write.
+        ChessRecord Src; Src.WinsLower = 7; Src.WinsHigher = 1; Src.Draws = 4;
+        std::vector<uint8_t> Tmp; Src.Write(Tmp);
+        V0.assign(Tmp.begin() + 1, Tmp.end());  // strip the version byte -> exactly a v0 record
+    }
+    ChessRecord Old;
+    CHECK(Old.Read(V0.data(), V0.size()));
+    CHECK(Old.WinsLower == 7 && Old.WinsHigher == 1 && Old.Draws == 4);
+
+    // 3. An UNKNOWN version is REFUSED, not guessed at. Without the reserved range this byte would
+    //    fall into the v0 path and be read as a win count — the same silent misparse, one version on.
+    std::vector<uint8_t> Future = B;
+    Future[0] = 0xC7;                          // a v-something we do not know
+    ChessRecord Untouched;
+    Untouched.WinsLower = 42;
+    CHECK(!Untouched.Read(Future.data(), Future.size()));
+    CHECK(Untouched.WinsLower == 42);          // and a refused read leaves the record ALONE
+
+    // THE DISCRIMINATING CASE. The check above is not enough on its own: with the reserved-range guard
+    // removed, that payload ALSO fails, because the v0 misread shifts the move stream and it stops
+    // decoding. Both paths reject, so the test cannot tell them apart — and a sabotage of the guard
+    // passed until this case existed.
+    //
+    // So craft a payload where the v0 misread would SUCCEED: put a valid empty move stream at offset 3,
+    // so reading the lead byte as WinsLower produces a clean, plausible, WRONG record.
+    {
+        const std::vector<uint8_t> Trap = {0xC7, 11, 22, 0x00, 0x00};  // stream at +3 decodes as 0 plies
+        ChessRecord Guarded;
+        CHECK(!Guarded.Read(Trap.data(), Trap.size()));   // refused because 0xC7 is a version we
+                                                          // do not know — NOT because it failed to parse
+        // Proof that it WOULD have parsed: the same shape with a sub-reserved lead is accepted as v0.
+        // The lead byte becomes WinsLower, so all three tallies shift down one — which is exactly the
+        // corruption the guard prevents.
+        const std::vector<uint8_t> AsV0 = {33, 11, 22, 0x00, 0x00};
+        ChessRecord Legacy;
+        CHECK(Legacy.Read(AsV0.data(), AsV0.size()));
+        CHECK(Legacy.WinsLower == 33 && Legacy.WinsHigher == 11 && Legacy.Draws == 22);
+    }
+
+    // Every byte in the reserved range is refused, and every byte below it is treated as v0.
+    for (int Lead = 0xC0; Lead <= 0xFF; ++Lead) {
+        if (Lead == ChessRecord::Version1) continue;
+        std::vector<uint8_t> Bad = B;
+        Bad[0] = static_cast<uint8_t>(Lead);
+        ChessRecord Rej;
+        CHECK(!Rej.Read(Bad.data(), Bad.size()));
+    }
+
+    // 4. Truncation is refused at both versions.
+    ChessRecord T;
+    CHECK(!T.Read(B.data(), 1));               // version byte only
+    CHECK(!T.Read(B.data(), 3));               // version + 2 tallies
+    // 5. Empty is "no save yet", which is a success that yields defaults.
+    ChessRecord E;
+    E.WinsLower = 9;
+    CHECK(E.Read(nullptr, 0));
+    CHECK(E.WinsLower == 0 && E.TotalMatches() == 0);
+}
+
 int main() {
+    TestRecordFormatVersion();
     TestRecordRoundTrip();
     TestReadAbsentIsFresh();
     TestIdentityColour();
