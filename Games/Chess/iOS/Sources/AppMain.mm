@@ -25,7 +25,8 @@
 #include "Lur/Render/Vulkan/VulkanRenderer.h"
 #include "Lur/App/GameHost.h"   // #43: engine-owned session + persistence choreography
 #include "Lur/App/IosApp.h"      // #43 section B: the shared entry point + Metal view + delegate
-#include "Lur/App/IosViewHost.h"  // #43 section C: the whole shared #73 heal, renderer included
+#include "Lur/App/IosViewHost.h"
+#include "Lur/DevGui/Console.h"   // the console routes its own pointer events (#201)  // #43 section C: the whole shared #73 heal, renderer included
 #include "Lur/App/Platform.h"   // #43 section B: MoltenVK stdio guard + log sink
 #include "Lur/App/RenderHandshake.h"  // #43 section C: the platform<->renderer surface/park protocol
 #include "Lur/Save/Store.h"
@@ -512,23 +513,75 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // chess's own TOUCH-MOVE RULE says that once you touch a piece you must move it. This makes
 // the app MORE faithful to over-the-board play, not less. (There is no drag gesture here
 // either, so in practice nothing is lost.)
+#if !LUR_SHIPPING
+// Drawable-pixel position of a touch, and the event timestamp in ns. The console's gesture windows
+// are measured in ns and its rects are in drawable pixels, so both conversions belong here — the
+// shim's whole job.
+- (void)consolePoint:(UITouch*)touch outX:(float*)OutX outY:(float*)OutY outNs:(uint64_t*)OutNs {
+    const CGPoint P = [touch locationInView:self.view];
+    const CGFloat Scale = [self metalLayer].contentsScale;
+    *OutX = static_cast<float>(P.x * Scale);
+    *OutY = static_cast<float>(P.y * Scale);
+    // UITouch.timestamp is seconds since boot; the recognizer only ever compares two of these, so
+    // any monotonic origin is fine as long as it is the SAME origin every time.
+    *OutNs = static_cast<uint64_t>(touch.timestamp * 1.0e9);
+}
+#endif
+
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_RH.IsReady()) return;
     UITouch* Touch = touches.anyObject;
+#if !LUR_SHIPPING
+    // The console gets first refusal and answers for itself: it owns the two-finger triple-tap that
+    // opens it and, once open, the whole pointer. This is the SAME call chess's Android shim makes —
+    // the routing is the console's, so neither platform holds a copy of the decision. iOS not having
+    // this at all is what #151 was filed about.
+    {
+        float X = 0, Y = 0;
+        uint64_t Ns = 0;
+        [self consolePoint:Touch outX:&X outY:&Y outNs:&Ns];
+        const int Pointers = static_cast<int>(event.allTouches.count);
+        if (_View.DevConsole().PointerDown(Pointers, X, Y, Ns)) return;
+    }
+#endif
     _TouchDownNs = [self stampTouch:Touch];
     [self dispatchTap:Touch];
+}
+
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+    if (!_RH.IsReady()) return;
+#if !LUR_SHIPPING
+    // Only the console cares about a move: chess commits on the press and has no drag gesture.
+    float X = 0, Y = 0;
+    uint64_t Ns = 0;
+    [self consolePoint:touches.anyObject outX:&X outY:&Y outNs:&Ns];
+    (void)_View.DevConsole().PointerMove(X, Y, Ns);
+#endif
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (!_RH.IsReady()) return;
     UITouch* Touch = touches.anyObject;
     (void)[self stampTouch:Touch];
+#if !LUR_SHIPPING
+    float X = 0, Y = 0;
+    uint64_t Ns = 0;
+    [self consolePoint:Touch outX:&X outY:&Y outNs:&Ns];
+    (void)_View.DevConsole().PointerUp(X, Y, Ns);   // advances/opens the chain, or taps a row
+#endif
     // The move already went out on the press (#187). All that is left here is closing the
     // measurement of the dead time we no longer spend.
     if (_TouchDownNs != 0) {
         LUR_TRACE_LATENCY("input.downToUp", _TouchDownNs);
         _TouchDownNs = 0;
     }
+}
+
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+#if !LUR_SHIPPING
+    _View.DevConsole().CancelGesture();   // a system alert is not a console tap
+#endif
+    _TouchDownNs = 0;
 }
 
 // Map a UITouch into drawable pixels and hand it to the board. Points -> pixels via the

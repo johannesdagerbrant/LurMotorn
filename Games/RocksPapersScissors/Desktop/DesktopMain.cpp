@@ -90,7 +90,6 @@ struct Peer {
     Lur::Input::ScrollCamera Cam;
     bool CamInit = false;   // first frame parks the camera at MinCam (camp visible)
     uint8_t Team = 0;
-    Lur::Input::ConsoleGesture DevGesture;  // per-window: each peer's console scrolls on its own
     // #43 section D: what a touch MEANS is Rps::TouchRouter now, shared with the solo loop and both
     // phone mains. This window used to carry the OLDEST of the four copies — no ghost offset, no
     // magnetic snap, no press flash, no tap slop (#209) — which mattered because the two-window
@@ -115,7 +114,7 @@ bool SetupPeer(Peer& P, const char* Title, int X, const std::string& Guid) {
     // window IS its peer — so an AI-tier or peer-row pick is not reachable here.
     Rps::TouchRouterHooks Hooks;
     Hooks.Emit = [&P](const Rps::InputEvent& E) { P.Lp.QueueLocalEvent(E); };
-    P.Router.Init(&P.View, &P.Cam, &P.DevGesture, std::move(Hooks));
+    P.Router.Init(&P.View, &P.Cam, std::move(Hooks));
     P.Guid = Guid;
     P.Transport.SetDeferred(true);  // deferred delivery: lockstep replies from a receiver never recurse
     // #147/#112: the workbench must carry the SAME message set as a phone, or a bug in the cvar-sync
@@ -1093,7 +1092,6 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
 
     Lur::Input::ScrollCamera Cam;
     bool CamInit = false;
-    Lur::Input::ConsoleGesture DevGesture;  // #151: drag-to-scroll the console, shared with the phones
     // #43 section D: one dispatch for all four RPS mains. PickAiTier only LATCHES — the restart it
     // triggers stops and respawns the sim thread, and doing that from inside a touch handler would
     // move it off the frame boundary it has always run on.
@@ -1103,7 +1101,7 @@ int RunSolo(bool Auto, int MaxFrames, uint64_t Seed, int Stress, bool FlockDemo,
         Rps::TouchRouterHooks Hooks;
         Hooks.Emit = [&Human](const Rps::InputEvent& E) { Human.Push(E); };
         Hooks.PickAiTier = [&PendingAiTier](int Tier) { PendingAiTier = Tier; };
-        Router.Init(&View, &Cam, &DevGesture, std::move(Hooks));
+        Router.Init(&View, &Cam, std::move(Hooks));
     }
     uint64_t PrevNs = NowNs();
     static Rps::Snapshot Snap;

@@ -17,5 +17,7 @@ target_include_directories(lur_devgui PUBLIC Public)
 target_compile_features(lur_devgui PUBLIC cxx_std_20)
 # lur::core for the CVar + DevCommand registries the console lists; lur::hud/lur::text for its own
 # text field and font (it does not borrow the game's); lur::render for the draw and for Color.
-target_link_libraries(lur_devgui PUBLIC lur::core lur::render lur::text lur::hud)
+# lur::input for the console's OWN open gesture (ConsoleGesture) — the routing is the console's,
+# not each platform shim's. That was the last per-platform-per-game copy of console plumbing.
+target_link_libraries(lur_devgui PUBLIC lur::core lur::render lur::text lur::hud lur::input)
 add_library(lur::devgui ALIAS lur_devgui)

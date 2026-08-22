@@ -17,6 +17,7 @@
 #include <vector>
 #if LUR_AGENT
 #include <sys/system_properties.h>  // read debug.lur.autoplay (agent-driven soak, #195)
+#include "Lur/DevGui/Console.h"     // the console routes its own pointer events (#201)
 #endif
 
 #include "Chess/Board.h"
@@ -139,6 +140,33 @@ bool HandleInput(AppState& State, AInputEvent* Event) {
         State.TouchDownNs = 0;
     }
 
+    const float X = AMotionEvent_getX(Event, 0), Y = AMotionEvent_getY(Event, 0);
+
+#if !LUR_SHIPPING
+    // The dev console gets first refusal on every pointer event, and answers for itself: it owns the
+    // two-finger triple-tap that opens it and, once open, the whole pointer. This shim contributes
+    // plumbing only — pointer count, position, timestamp — because the decisions were per-platform
+    // copies once (#151: Android could open the console, iOS could not open it AT ALL) and are not
+    // going to be again.
+    const int Pointers = static_cast<int>(AMotionEvent_getPointerCount(Event));
+    Lur::DevGui::Console& Con = State.View.DevConsole();
+    switch (Action) {
+        case AMOTION_EVENT_ACTION_DOWN:
+        case AMOTION_EVENT_ACTION_POINTER_DOWN:
+            if (Con.PointerDown(Pointers, X, Y, EventNs)) return true;
+            break;
+        case AMOTION_EVENT_ACTION_MOVE:
+            if (Con.PointerMove(X, Y, EventNs)) return true;
+            break;
+        case AMOTION_EVENT_ACTION_UP:
+        case AMOTION_EVENT_ACTION_POINTER_UP:
+            if (Con.PointerUp(X, Y, EventNs)) return true;
+            break;
+        case AMOTION_EVENT_ACTION_CANCEL: Con.CancelGesture(); return true;
+        default: break;
+    }
+#endif
+
     // #187: commit on DOWN, not UP. This used to wait for ACTION_UP, which spent the whole
     // input.downToUp span — 140 ms measured, and the largest single cost in the chain by an
     // order of magnitude — doing nothing at all.
@@ -147,9 +175,14 @@ bool HandleInput(AppState& State, AInputEvent* Event) {
     // chess's own TOUCH-MOVE RULE says that once you touch a piece you must move it. This
     // makes the app MORE faithful to over-the-board play, not less. (There is no drag
     // gesture here either, so in practice nothing is lost.)
+    //
+    // NOTE on the console gesture: commit-on-DOWN means the FIRST finger of a two-finger chain
+    // still lands on the board if that is where you put it, so perform the gesture in the margin
+    // above or below the board — an off-board tap hits no square (SquareAt returns NoSquare) and
+    // does nothing. The console consumes every SUBSEQUENT finger of the chain, so only that first
+    // touch can reach the board at all.
     if (Action != AMOTION_EVENT_ACTION_DOWN) return false;
-    State.View.OnTap(AMotionEvent_getX(Event, 0), AMotionEvent_getY(Event, 0),
-                     State.Plat.Width(), State.Plat.Height());
+    State.View.OnTap(X, Y, State.Plat.Width(), State.Plat.Height());
     return true;
 }
 

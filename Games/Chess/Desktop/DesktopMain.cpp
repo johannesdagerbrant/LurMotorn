@@ -160,15 +160,19 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
         std::memcpy(Blob + 1, &T.XPx, 4);
         std::memcpy(Blob + 5, &T.YPx, 4);
         G.Recorder.Record(Lur::Core::EFlightEvent::Input, TimeNs, Blob, sizeof(Blob));
-        // #187: commit on press, matching both phones. The desktop is the fast iteration
-        // loop for chess, so it must agree with the devices about WHEN a move happens —
-        // otherwise the interaction being tuned here is not the one that ships.
-        if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0) {
-            // An open console EATS the press. Without this the same click both edits a CVar row and
-            // moves a piece on the board underneath the panel.
-            if (!G.View.DevTap(T.XPx, T.YPx))
-                G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+        // The console routes its own pointer events (#201) — the same three calls the phones make,
+        // so the desktop cannot drift from them the way the three hand-written shims once did (#151:
+        // the desktop scrolled the console and Android did not).
+        if (T.Phase == Lur::Input::ETouchPhase::Began) {
+            if (G.View.DevConsole().PointerDown(1, T.XPx, T.YPx, TimeNs)) continue;
+        } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
+            if (G.View.DevConsole().PointerMove(T.XPx, T.YPx, TimeNs)) continue;
+        } else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
+            if (G.View.DevConsole().PointerUp(T.XPx, T.YPx, TimeNs)) continue;
         }
+        // #187: commit on press, matching both phones.
+        if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0)
+            G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
     }
     // #189: drain the inbox once more immediately before drawing, so a peer move that
     // arrived after this frame's Tick is shown NOW rather than one iteration later.

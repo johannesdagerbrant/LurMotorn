@@ -641,6 +641,185 @@ static void TestRowResetCommits() {
     CHECK(Log.Saw("test.console.number"));   // a reset persists too, or it un-resets on relaunch
 }
 
+// ---- The OPEN gesture: two-finger triple-tap, and only that -------------------------------------
+// The console now owns its own routing (#201), because the routing was the last piece of console
+// plumbing that existed once per platform per game — and the copies had already drifted once badly
+// enough that iOS could not open the console AT ALL (#151). These tests are what stop the shared
+// version drifting from its own spec.
+namespace {
+
+constexpr uint64_t Ms = 1'000'000ull;
+
+// One two-finger tap: finger down, second finger down, both lift. Returns whether the console is
+// OPEN afterwards.
+//
+// Deliberately not PointerUp's return value, which answers a different question — "did the console
+// consume this event" — and is TRUE for every two-finger lift, chain completed or not. That is the
+// intended behaviour (a rejected chain must still be swallowed rather than reaching the game), and
+// conflating the two is what made the first version of these tests fail against correct code.
+// TestRejectedChainIsStillConsumed below pins the consume half separately.
+bool TwoFingerTapOpens(Console& C, uint64_t AtNs, uint64_t HoldMs = 40) {
+    C.PointerDown(1, 10.0f, 10.0f, AtNs);
+    C.PointerDown(2, 10.0f, 10.0f, AtNs);
+    (void)C.PointerUp(10.0f, 10.0f, AtNs + HoldMs * Ms);
+    return C.IsOpen();
+}
+
+}  // namespace
+
+static void TestTwoFingerTripleTapOpens() {
+    RecordingRenderer R;
+    Console C;
+    CommitLog Log;
+    C.CreateResources(&R);
+    CHECK(!C.IsOpen());
+
+    // Two taps are not enough — a debug panel must not open by accident over a live game.
+    CHECK(!TwoFingerTapOpens(C, 1000 * Ms));
+    CHECK(!C.IsOpen());
+    CHECK(!TwoFingerTapOpens(C, 1200 * Ms));
+    CHECK(!C.IsOpen());
+    // The third opens it.
+    CHECK(TwoFingerTapOpens(C, 1400 * Ms));
+    CHECK(C.IsOpen());
+}
+
+// ---- A SINGLE finger never opens it, however many times -----------------------------------------
+// This is the assertion that protects ordinary play: chess commits a move on finger-down and RPS
+// places buildings, so if one finger could chain, playing the game would summon the console.
+static void TestOneFingerNeverOpens() {
+    RecordingRenderer R;
+    Console C;
+    C.CreateResources(&R);
+    for (int I = 0; I < 10; ++I) {
+        const uint64_t T = static_cast<uint64_t>(1000 + I * 100) * Ms;
+        C.PointerDown(1, 10.0f, 10.0f, T);
+        CHECK(!C.PointerUp(10.0f, 10.0f, T + 40 * Ms));   // never claimed
+    }
+    CHECK(!C.IsOpen());
+}
+
+// ---- A HOLD is not a tap ------------------------------------------------------------------------
+// Two fingers resting on a phone happen. The window is 350 ms; a rest must not count.
+static void TestTwoFingerHoldDoesNotChain() {
+    RecordingRenderer R;
+    Console C;
+    C.CreateResources(&R);
+    for (int I = 0; I < 5; ++I)
+        CHECK(!TwoFingerTapOpens(C, static_cast<uint64_t>(1000 + I * 500) * Ms, /*HoldMs*/ 400));
+    CHECK(!C.IsOpen());
+}
+
+// ---- A REJECTED two-finger lift is still consumed ----------------------------------------------
+// The other half of the rule, and the half a "did it open?" test cannot see. Two fingers went down,
+// so whatever happens next is not the game's business: releasing a rejected chain must not place a
+// building or move a piece. This is why PointerUp returns "consumed" rather than "opened".
+static void TestRejectedChainIsStillConsumed() {
+    RecordingRenderer R;
+    Console C;
+    C.CreateResources(&R);
+    C.PointerDown(1, 10.0f, 10.0f, 1000 * Ms);
+    C.PointerDown(2, 10.0f, 10.0f, 1000 * Ms);
+    // A 400 ms hold is REJECTED as a tap (max 350) — and still swallowed.
+    CHECK(C.PointerUp(10.0f, 10.0f, 1400 * Ms));
+    CHECK(!C.IsOpen());
+    // ...whereas a plain one-finger lift with no chain in progress passes through to the game.
+    C.PointerDown(1, 10.0f, 10.0f, 3000 * Ms);
+    CHECK(!C.PointerUp(10.0f, 10.0f, 3040 * Ms));
+}
+
+// ---- Taps must be a CHAIN ----------------------------------------------------------------------
+// Three two-finger taps spread over a minute of play are an accident, not an instruction. The
+// window is 1000 ms, MEASURED on both phones (see ConsoleGesture) — so 900 ms chains and 1500 ms
+// does not, and this pins both sides rather than only the easy one.
+static void TestChainWindow() {
+    {
+        RecordingRenderer R;
+        Console C;
+        C.CreateResources(&R);
+        TwoFingerTapOpens(C, 1000 * Ms);
+        TwoFingerTapOpens(C, 1900 * Ms);   // 900 ms later: inside the window
+        CHECK(TwoFingerTapOpens(C, 2800 * Ms));
+        CHECK(C.IsOpen());
+    }
+    {
+        RecordingRenderer R;
+        Console C;
+        C.CreateResources(&R);
+        TwoFingerTapOpens(C, 1000 * Ms);
+        TwoFingerTapOpens(C, 2500 * Ms);   // 1500 ms later: chain broken, this becomes tap 1 of a new one
+        CHECK(!TwoFingerTapOpens(C, 4000 * Ms));   // 1500 ms again — still never three in a window
+        CHECK(!C.IsOpen());
+    }
+}
+
+// ---- Closed: one finger passes through, a SECOND never does ------------------------------------
+static void TestSecondFingerIsAlwaysConsumed() {
+    RecordingRenderer R;
+    Console C;
+    C.CreateResources(&R);
+    CHECK(!C.PointerDown(1, 10.0f, 10.0f, 1000 * Ms));   // the game's
+    CHECK(C.PointerDown(2, 10.0f, 10.0f, 1000 * Ms));    // never the game's
+}
+
+// ---- Open: the console owns the whole pointer --------------------------------------------------
+// The panel sits over a live match, so a scroll must not leak through and pan a camera, and a
+// still release must tap a row rather than the board underneath.
+static void TestOpenConsoleOwnsThePointer() {
+    RecordingRenderer R;
+    Console C;
+    CommitLog Log;
+    Bring(C, R, Log);   // opens it and draws one frame
+
+    CHECK(C.PointerDown(1, 400.0f, 600.0f, 5000 * Ms));
+    CHECK(C.PointerMove(400.0f, 560.0f, 5010 * Ms));
+    CHECK(C.PointerUp(400.0f, 560.0f, 5020 * Ms));
+}
+
+// ---- A drag SCROLLS; a still release TAPS ------------------------------------------------------
+// One gesture, two meanings, told apart by travel. Getting this wrong makes the list either
+// impossible to scroll or impossible to click.
+static void TestDragScrollsStillReleaseTaps() {
+    // Drag: the offset must move, and no row may be selected.
+    {
+        RecordingRenderer R;
+        Console C;
+        CommitLog Log;
+        Bring(C, R, Log);
+        // A short screen, so the content overflows and scrolling has somewhere to go.
+        C.Draw(&R, ScreenW, 260.0f);
+        C.PointerDown(1, 400.0f, 200.0f, 5000 * Ms);
+        C.PointerMove(400.0f, 150.0f, 5010 * Ms);   // 50 px up, far beyond DragSlopPx
+        C.PointerUp(400.0f, 150.0f, 5020 * Ms);
+        C.Draw(&R, ScreenW, 260.0f);
+        CHECK(C.ScrollOffset() > 0.0f);
+        // A scroll must change NOTHING else. Both halves are needed: on a viewport this short the
+        // row under the finger is a category HEADER, so a spurious tap folds it rather than
+        // selecting a CVar — and a selection-only assertion is therefore blind to exactly the bug
+        // it is meant to catch (it survived that sabotage).
+        CHECK(C.SelectedCvar() == nullptr);
+        CHECK(!C.IsFolded("test"));
+        CHECK(!C.IsFolded("test.console"));
+    }
+    // Still release on a row: that row's editor opens, and nothing scrolled.
+    {
+        RecordingRenderer R;
+        Console C;
+        CommitLog Log;
+        Bring(C, R, Log);
+        Lur::Core::ICVar* Num = Find("test.console.number");
+        CHECK(Num != nullptr);
+        if (Num == nullptr) return;
+        float X = 0, Y = 0, W = 0, H = 0;
+        CHECK(C.RowRect(Num, ScreenW, ScreenH, X, Y, W, H));
+        C.PointerDown(1, X + W * 0.45f, Y + H * 0.5f, 5000 * Ms);
+        C.PointerUp(X + W * 0.45f, Y + H * 0.5f, 5010 * Ms);   // no move at all
+        C.Draw(&R, ScreenW, ScreenH);
+        CHECK(C.SelectedCvar() == Num);
+        CHECK(C.ScrollOffset() == 0.0f);
+    }
+}
+
 int main() {
     Lur::Core::CVarEnterMain();   // CVars may not be read before main()
     TestClosedIsInvisibleAndInert();
@@ -656,6 +835,14 @@ int main() {
     TestTooltipToaster();
     TestClosingDismissesEditors();
     TestRowResetCommits();
+    TestTwoFingerTripleTapOpens();
+    TestOneFingerNeverOpens();
+    TestTwoFingerHoldDoesNotChain();
+    TestRejectedChainIsStillConsumed();
+    TestChainWindow();
+    TestSecondFingerIsAlwaysConsumed();
+    TestOpenConsoleOwnsThePointer();
+    TestDragScrollsStillReleaseTaps();
     if (GFailures == 0) std::printf("devgui_console_tests: ALL PASS\n");
     else std::printf("devgui_console_tests: %d FAILURE(S)\n", GFailures);
     return GFailures == 0 ? 0 : 1;

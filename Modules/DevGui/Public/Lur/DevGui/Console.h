@@ -49,6 +49,7 @@
 
 #include "Lur/Core/CVar.h"
 #include "Lur/DevGui/Numpad.h"
+#include "Lur/Input/ConsoleGesture.h"
 #include "Lur/Hud/TextField.h"
 #include "Lur/Render/Renderer.h"
 #include "Lur/Text/Font.h"
@@ -87,6 +88,30 @@ public:
     // Wheel / drag scroll for the row list. Accumulated and folded in at draw time; discarded while
     // closed, so a wheel spin with the console shut does not lurch it on reopen.
     void Scroll(float DeltaY);
+
+    // ---- Pointer routing: the console decides for itself whether it wants a touch ----
+    // Forward EVERY pointer event here FIRST and obey the answer. The console owns two things no
+    // caller should re-derive:
+    //
+    //   * the OPEN gesture — a two-finger triple-tap, via Lur::Input::ConsoleGesture, whose timing
+    //     windows were measured on both phones rather than guessed;
+    //   * while it is open, the WHOLE pointer. The panel sits over a live game, so a drag must
+    //     scroll the CVar list and not pan a camera, and a still release must be a row tap and not
+    //     a move. Swallowing is the feature.
+    //
+    // This exists because the routing was the last per-platform-per-game copy of the console. #151
+    // consolidated the recognizer's timing after three shims drifted (the desktop scrolled and
+    // Android did not; iOS could not open the console AT ALL) — but each shim still hand-wrote the
+    // routing around it, so a fourth and fifth copy were one game away. Now there is one.
+    //
+    // Returns true when the console consumed the event; the game must then not see it.
+    bool PointerDown(int PointerCount, float XPx, float YPx, uint64_t NowNs);
+    bool PointerMove(float XPx, float YPx, uint64_t NowNs);
+    bool PointerUp(float XPx, float YPx, uint64_t NowNs);
+
+    // Another gesture claimed the input (a building placement, a pinch, a plate press), so this
+    // two-finger candidate is void — releasing that gesture must not read as a console tap.
+    void CancelGesture() { Gesture_.Cancel(); }
 
     // Draws the console and consumes this frame's input. A no-op while closed, including the
     // BeginDevGui pass — a closed console costs the frame nothing and paints nothing.
@@ -204,6 +229,10 @@ private:
 
     Numpad Numpad_;
     bool   NumpadOpen_ = false;
+
+    // The open gesture and the open-console drag. Owned here, not by each platform shim.
+    Lur::Input::ConsoleGesture Gesture_;
+    float DownX_ = 0.0f, DownY_ = 0.0f;   // where the open-console gesture started
 
     bool  PickerOpen_ = false;
     // The picker's working HSV, authoritative while it is open, because RGB->HSV cannot recover a

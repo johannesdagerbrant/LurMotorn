@@ -2,7 +2,6 @@
 #include <functional>
 
 #include "Lur/Core/Log.h"
-#include "Lur/Input/ConsoleGesture.h"
 #include "Lur/Input/Input.h"
 #include "Lur/Input/ScrollCamera.h"
 #include "Rps/GameView.h"
@@ -69,11 +68,10 @@ class TouchRouter {
 public:
     // Non-owning. All four must outlive the router, which every main satisfies trivially: they are
     // sibling members of the same app state.
-    void Init(GameView* View, Lur::Input::ScrollCamera* Cam, Lur::Input::ConsoleGesture* Gesture,
+    void Init(GameView* View, Lur::Input::ScrollCamera* Cam,
               TouchRouterHooks Hooks) {
         View_ = View;
         Cam_ = Cam;
-        Gesture_ = Gesture;
         Hooks_ = std::move(Hooks);
     }
 
@@ -125,22 +123,18 @@ private:
         // the exact bug, present only in the build nobody tests against.
         if (T.PointerCount >= 2) {
 #if !LUR_SHIPPING
-            Gesture_->PointersDown(T.PointerCount, T.TimeNs);
+            (void)View_->DevConsole().PointerDown(T.PointerCount, T.XPx, T.YPx, T.TimeNs);
 #endif
             return true;
         }
         DownX_ = T.XPx;
         DownY_ = T.YPx;
 #if !LUR_SHIPPING
-        // Pointer count and timestamp come from the platform; the recognizer owns the windows (#151).
-        Gesture_->PointersDown(T.PointerCount, T.TimeNs);
-        // While the console is open it OWNS the pointer: a drag scrolls the CVar list and a still
-        // release is a DevTap. Swallowing is the point — the panel sits over a LIVE match, so a
-        // scroll must not leak through and pan the camera or start a building drag.
-        if (View_->DevOverlayOpen()) {
-            Gesture_->DragBegin(T.YPx);
-            return true;
-        }
+        // The console gets first refusal and answers for itself: it owns its open gesture AND, while
+        // open, the whole pointer (a drag scrolls the CVar list, a still release taps a row).
+        // Swallowing is the point — the panel sits over a LIVE match, so a scroll must not leak
+        // through and pan the camera or start a building drag.
+        if (View_->DevConsole().PointerDown(T.PointerCount, T.XPx, T.YPx, T.TimeNs)) return true;
 #endif
         const float Off = GhostOffset(Snap, F);
         const float GhX = T.XPx - Off, GhY = T.YPx - Off;
@@ -170,10 +164,7 @@ private:
 
     bool Moved(const Lur::Input::TouchEvent& T, const Snapshot& Snap, const TouchFrame& F) {
 #if !LUR_SHIPPING
-        if (View_->DevOverlayOpen()) {
-            View_->DevScroll(Gesture_->DragMove(T.YPx));   // atomic; the render thread drains it
-            return true;
-        }
+        if (View_->DevConsole().PointerMove(T.XPx, T.YPx, T.TimeNs)) return true;
 #endif
         if (View_->IsPlacing()) {
             const float Off = GhostOffset(Snap, F);
@@ -181,7 +172,9 @@ private:
             float Wx = 0, Wy = 0, Gsx = 0, Gsy = 0;
             const bool V = Resolve(Snap, F, GhX, GhY, Wx, Wy, Gsx, Gsy);
             View_->UpdatePlaceDrag(GhX, GhY, Gsx, Gsy, V);
-            Gesture_->Cancel();   // #151: a placement drag is not a console tap
+#if !LUR_SHIPPING
+            View_->DevConsole().CancelGesture();   // #151: a placement drag is not a console tap
+#endif
             return true;
         }
         // One finger pans; two or more is a gesture in progress, so the camera must stay put — the
@@ -192,10 +185,9 @@ private:
 
     bool Ended(const Lur::Input::TouchEvent& T, const Snapshot& Snap, const TouchFrame& F) {
 #if !LUR_SHIPPING
-        if (View_->DevOverlayOpen()) {
-            if (Gesture_->DragEndIsTap()) View_->DevTap(T.XPx, T.YPx);
-            return true;
-        }
+        // The console answers first: while open it keeps the release (tap a row, or finish a
+        // scroll), and while closed it only keeps one that completed its two-finger chain.
+        if (View_->DevConsole().PointerUp(T.XPx, T.YPx, T.TimeNs)) return true;
 #endif
         if (View_->IsPlacing()) {
             const float Off = GhostOffset(Snap, F);
@@ -208,34 +200,12 @@ private:
                 Placed = true;
             }
             View_->EndPlaceDrag(Placed);   // valid -> the real building takes over; else slide back
-            Gesture_->Cancel();            // a placement is not a console tap
+#if !LUR_SHIPPING
+            View_->DevConsole().CancelGesture();   // a placement is not a console tap
+#endif
             return true;
         }
         Cam_->End();
-#if !LUR_SHIPPING
-        // Two-finger triple-tap opens the CVar console. Read TwoFingerActive BEFORE the lift: the
-        // lift is what clears it, and a tap that was part of the chain must not also hit the HUD.
-        const bool WasTwoFinger = Gesture_->TwoFingerActive();
-        const bool Open = Gesture_->LiftAndShouldOpen(T.TimeNs);
-        // Report every two-finger lift with the two numbers that decide it. "The gesture feels
-        // picky" is not debuggable; a hold of 412 ms against a 350 ms window is. Only two-finger
-        // lifts are logged, so ordinary play stays silent.
-        if (WasTwoFinger) {
-            const Lur::Input::ConsoleGesture::LiftDiag& D = Gesture_->LastLift();
-            Lur::Log::Info("console gesture: hold=%llums (max %llu) chain=%llums (max %llu) taps=%d/%d%s",
-                           static_cast<unsigned long long>(D.HoldNs / 1'000'000ull),
-                           static_cast<unsigned long long>(Lur::Input::ConsoleGesture::TapHoldMaxNs / 1'000'000ull),
-                           static_cast<unsigned long long>(D.SinceLastTapNs / 1'000'000ull),
-                           static_cast<unsigned long long>(Lur::Input::ConsoleGesture::TapChainMaxNs / 1'000'000ull),
-                           D.TapCount, Lur::Input::ConsoleGesture::TapsToOpen,
-                           D.Opened ? " -> OPEN" : (D.TapCount == 0 ? " -> REJECTED (hold too long)" : ""));
-        }
-        if (Open) {
-            View_->SetDevOverlayOpen(true);
-            return true;
-        }
-        if (WasTwoFinger) { Gesture_->Cancel(); return true; }
-#endif
         const float Dx = T.XPx - DownX_, Dy = T.YPx - DownY_;
         if (Dx * Dx + Dy * Dy < TapSlopPx * TapSlopPx) {
             // The opponent selector consumes its own taps: an AI row (re)starts solo, the linked row
@@ -249,7 +219,9 @@ private:
             }
             // (x1/x5 queue buttons fire on Began — see above — not here.)
         }
-        Gesture_->Cancel();   // the gesture is over either way
+#if !LUR_SHIPPING
+        View_->DevConsole().CancelGesture();   // the gesture is over either way
+#endif
         return true;
     }
 
@@ -258,13 +230,14 @@ private:
     bool Cancelled() {
         if (View_->IsPlacing()) View_->EndPlaceDrag(false);
         Cam_->End();
-        Gesture_->Cancel();
+#if !LUR_SHIPPING
+        View_->DevConsole().CancelGesture();
+#endif
         return true;
     }
 
     GameView*                   View_    = nullptr;
     Lur::Input::ScrollCamera*               Cam_     = nullptr;
-    Lur::Input::ConsoleGesture* Gesture_ = nullptr;
     TouchRouterHooks            Hooks_;
     float                       DownX_ = 0.0f, DownY_ = 0.0f;
 };

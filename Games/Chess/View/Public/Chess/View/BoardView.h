@@ -49,17 +49,14 @@ public:
     void SetDevOverlayOpen(bool On) { Console_.SetOpen(On); }
     bool DevOverlayOpen() const { return Console_.IsOpen(); }
 
-    // A tap/click at pixel (X, Y). Returns true when the console consumed it, which the caller MUST
-    // respect or the same press also moves a piece under the panel.
-    bool DevTap(float XPx, float YPx) {
-        if (!Console_.IsOpen()) return false;   // closed: the tap belongs to the board
-        Console_.Tap(XPx, YPx);
-        return true;
-    }
-
     // A physical key, forwarded only while the console is open (it answers false otherwise, and the
     // caller must then leave the key to the game).
     bool DevKey(uint32_t Vk) { return Console_.Key(Vk); }
+
+    // The console itself, so each platform shim can forward raw pointer events and obey the answer.
+    // The console owns the two-finger triple-tap that opens it and, while open, the whole pointer —
+    // so a shim contributes plumbing only, never a decision.
+    Lur::DevGui::Console& DevConsole() { return Console_; }
 #endif
     void OnTap(float XPx, float YPx, float WidthPx, float HeightPx);
 

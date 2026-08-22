@@ -52,7 +52,7 @@ struct Rig {
     Rig() {
         Rps::TouchRouterHooks Hooks;
         Hooks.Emit = [this](const Rps::InputEvent& E) { ++Emitted; LastEvent = E; };
-        Router.Init(&View, &Cam, &Gesture, std::move(Hooks));
+        Router.Init(&View, &Cam, std::move(Hooks));
     }
 
     void Send(ETouchPhase Phase, float X, float Y, int Pointers = 1, uint64_t Ns = 0) {

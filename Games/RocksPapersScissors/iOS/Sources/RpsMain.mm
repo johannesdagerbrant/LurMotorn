@@ -176,7 +176,6 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // #151: the dev-console gesture — two-finger triple-tap to open, drag-to-scroll while open. It now
     // runs on the RENDER thread (which owns _View), replayed from the touch queue; the MAIN handlers only
     // capture pointer counts + timestamps into TouchEvent. Shared recognizer (Lur::Input::ConsoleGesture).
-    Lur::Input::ConsoleGesture _DevGesture;
 
     // ---- SIM thread only (after _SimThread starts) ----
     // #43: engine-owned identity + session lifecycle. RPS takes only that half of GameHost — no
@@ -441,7 +440,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
             RpsViewController* Me = WeakSelf;
             if (Me != nil) Me->_SwitchToLinkedAtomic.store(true, std::memory_order_release);
         };
-        _Router.Init(&_View, &_Cam, &_DevGesture, std::move(Hooks));
+        _Router.Init(&_View, &_Cam, std::move(Hooks));
     }
     // pthread (not std::thread) so we can hand it a 4MB stack — see the ivar note. The trampoline just
     // re-enters the ObjC loop; self is passed raw (VC outlives the thread, which -dealloc joins first).
@@ -804,9 +803,12 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
         bool Opened = false;
         for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
             const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
-            _DevGesture.PointersDown(1, Down);
-            _DevGesture.PointersDown(2, Down);
-            Opened = _DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
+            // The console's own routing, so the agent path and a real finger share one code path.
+            Lur::DevGui::Console& C = _View.DevConsole();
+            (void)C.PointerDown(1, 0.0f, 0.0f, Down);
+            (void)C.PointerDown(2, 0.0f, 0.0f, Down);
+            (void)C.PointerUp(0.0f, 0.0f, Down + 40'000'000ull);
+            Opened = _View.DevOverlayOpen();
         }
         os_log(OS_LOG_DEFAULT, "OnlyRps: AGENT gesture -> recognizer says open=%d (console now %d)",
                Opened ? 1 : 0, _View.DevOverlayOpen() ? 1 : 0);

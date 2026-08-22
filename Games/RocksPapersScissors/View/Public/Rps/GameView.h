@@ -182,8 +182,6 @@ public:
     //
     // The routing is not a formality. DevKey returns whether the console CLAIMED the key, and a
     // caller that ignores that gives the same keystroke to the console AND the game.
-    void DevTap(float XPx, float YPx) { Console_.Tap(XPx, YPx); }
-    void DevScroll(float DeltaY) { Console_.Scroll(DeltaY); }
     bool DevKey(uint32_t Vk) { return Console_.Key(Vk); }
     void SetDevOverlayOpen(bool On) { Console_.SetOpen(On); }
     bool DevOverlayOpen() const { return Console_.IsOpen(); }
@@ -193,6 +191,11 @@ public:
     // through the LockstepPeer sync. Null on desktop-solo, where LiveCvLatch + save suffice.
     using CvCommitFn = Lur::DevGui::Console::CommitFn;
     void SetCvCommitHook(CvCommitFn Fn, void* Ctx) { Console_.SetCommitHook(Fn, Ctx); }
+
+    // The console itself, for the touch router to forward pointer events to. The console decides
+    // whether it wants each one (its open gesture, and the whole pointer while it is open); the
+    // router only has to obey the answer.
+    Lur::DevGui::Console& DevConsole() { return Console_; }
 #endif
 
 private:

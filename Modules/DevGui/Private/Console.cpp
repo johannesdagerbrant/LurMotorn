@@ -20,6 +20,7 @@
 #include "Lur/DevGui/FlatList.h"       // fold-aware row list + scroll clamp
 #include "Lur/DevGui/Popover.h"        // below-or-above anchored placement
 #include "Lur/DevGui/Widgets.h"        // HitRect / Slider
+#include "Lur/Core/Log.h"
 #include "Lur/Math/Mat4.h"
 #include "Lur/Render/DevGuiLayer.h"    // BeginDevGuiLayer (shipping-guarded dev pass)
 #include "Lur/Render/Mesh2D.h"         // gradient strips
@@ -200,6 +201,64 @@ bool Console::Key(uint32_t Vk) {
 }
 
 void Console::Scroll(float DeltaY) { ScrollAccum_.fetch_add(DeltaY, std::memory_order_relaxed); }
+
+bool Console::PointerDown(int PointerCount, float XPx, float YPx, uint64_t NowNs) {
+    Gesture_.PointersDown(PointerCount, NowNs);
+    // A SECOND finger is never the game's. Android once had a dedicated ACTION_POINTER_DOWN case
+    // that did this while iOS sent every touch down the full press path, so the two phones
+    // disagreed about what a second finger does; consuming it here is Android's (careful) answer,
+    // now shared.
+    if (PointerCount >= 2) return true;
+    if (!Open_) return false;
+    // Open: the console owns the pointer for the whole gesture.
+    Gesture_.DragBegin(YPx);
+    DownX_ = XPx;
+    DownY_ = YPx;
+    return true;
+}
+
+bool Console::PointerMove(float XPx, float YPx, uint64_t NowNs) {
+    (void)XPx;
+    (void)NowNs;
+    if (!Open_) return false;
+    Scroll(Gesture_.DragMove(YPx));   // content follows the finger
+    return true;
+}
+
+bool Console::PointerUp(float XPx, float YPx, uint64_t NowNs) {
+    // Read TwoFingerActive BEFORE the lift: the lift is what clears it, and a tap that was part of
+    // the chain must not also reach the game underneath.
+    const bool WasTwoFinger = Gesture_.TwoFingerActive();
+    const bool ShouldOpen = Gesture_.LiftAndShouldOpen(NowNs);
+    // Report every two-finger lift with the two numbers that decide it. "The gesture feels picky"
+    // is not debuggable; a hold of 412 ms against a 350 ms window is. Only two-finger lifts log, so
+    // ordinary play stays silent.
+    if (WasTwoFinger) {
+        using G = Lur::Input::ConsoleGesture;
+        const G::LiftDiag& D = Gesture_.LastLift();
+        Lur::Log::Info(
+            "console gesture: hold=%llums (max %llu) chain=%llums (max %llu) taps=%d/%d%s",
+            static_cast<unsigned long long>(D.HoldNs / 1'000'000ull),
+            static_cast<unsigned long long>(G::TapHoldMaxNs / 1'000'000ull),
+            static_cast<unsigned long long>(D.SinceLastTapNs / 1'000'000ull),
+            static_cast<unsigned long long>(G::TapChainMaxNs / 1'000'000ull), D.TapCount,
+            G::TapsToOpen,
+            D.Opened ? " -> OPEN" : (D.TapCount == 0 ? " -> REJECTED (hold too long)" : ""));
+    }
+    if (ShouldOpen) {
+        SetOpen(true);
+        return true;
+    }
+    if (WasTwoFinger) {
+        Gesture_.Cancel();
+        return true;
+    }
+    if (!Open_) return false;
+    // Open, and the chain did not fire: this was either a scroll (already applied in PointerMove)
+    // or a tap on a row. Either way the console keeps it.
+    if (Gesture_.DragEndIsTap()) Tap(XPx, YPx);
+    return true;
+}
 
 void Console::OpenEditorFor(Lur::Core::ICVar* Cv) {
     SelectedCvar_ = Cv;

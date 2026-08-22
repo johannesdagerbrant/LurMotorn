@@ -151,7 +151,6 @@ struct AppState {
     // ONE shared recognizer (Lur::Input::ConsoleGesture), not a per-platform copy. The three copies
     // had drifted in three different directions: this one could open the panel but not scroll it, the
     // desktop could scroll but used a different slop, and iOS could not open it at all.
-    Lur::Input::ConsoleGesture DevGesture;         // glue thread only
     // #43 section D: the touch DISPATCH is shared too now, not just the recognizer. Same story
     // one level up — four copies, six drifts, none of them reachable by a host test.
     Rps::TouchRouter Router;                      // glue thread only
@@ -370,7 +369,7 @@ void android_main(android_app* App) {
         Hooks.PickPeer = [&State]() {
             State.SwitchToLinked.store(true, std::memory_order_release);
         };
-        State.Router.Init(&State.View, &State.Cam, &State.DevGesture, std::move(Hooks));
+        State.Router.Init(&State.View, &State.Cam, std::move(Hooks));
     }
     State.Plat.Start(App, std::move(Cb));
 
@@ -1138,12 +1137,16 @@ void android_main(android_app* App) {
             if (State.AgentGestureRequest.exchange(false, std::memory_order_acquire)) {
                 const uint64_t T0 = NowNs();
                 bool Opened = false;
+                // Drive the console's OWN routing rather than a recognizer the main holds — the
+                // agent path and a real finger now go through exactly the same code.
                 for (int Tap = 0; Tap < Rps::AgentGestureTaps; ++Tap) {
                     const uint64_t Down = T0 + static_cast<uint64_t>(Tap) * 200'000'000ull;
-                    State.DevGesture.PointersDown(1, Down);
-                    State.DevGesture.PointersDown(2, Down);
-                    Opened = State.DevGesture.LiftAndShouldOpen(Down + 40'000'000ull);
+                    Lur::DevGui::Console& C = State.View.DevConsole();
+                    (void)C.PointerDown(1, 0.0f, 0.0f, Down);
+                    (void)C.PointerDown(2, 0.0f, 0.0f, Down);
+                    (void)C.PointerUp(0.0f, 0.0f, Down + 40'000'000ull);
                 }
+                Opened = State.View.DevOverlayOpen();
                 LOGI("AGENT gesture -> recognizer says open=%d (console now %d)", Opened ? 1 : 0,
                      State.View.DevOverlayOpen() ? 1 : 0);
                 if (Opened) State.View.SetDevOverlayOpen(true);

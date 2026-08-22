@@ -196,20 +196,21 @@ static void TestDevConsoleClosedIsInertOpenPaints() {
     R.Draws = 0;
     V.Render(&R, 800.0f, 1200.0f);
     const int ClosedDraws = R.Draws;
-    // Closed, a tap is NOT claimed — it belongs to the board.
-    CHECK(!V.DevTap(400.0f, 600.0f));
+    // Closed, a press is NOT claimed — it belongs to the board. Routed the way every platform shim
+    // routes it, so this asserts the console's own decision rather than a wrapper's.
+    CHECK(!V.DevConsole().PointerDown(1, 400.0f, 600.0f, 1'000'000'000ull));
 
     V.SetDevOverlayOpen(true);
     CHECK(V.DevOverlayOpen());
-    // Open, a tap IS claimed, so the caller must not also route it to the board.
-    CHECK(V.DevTap(400.0f, 600.0f));
+    // Open, a press IS claimed, so the caller must not also route it to the board.
+    CHECK(V.DevConsole().PointerDown(1, 400.0f, 600.0f, 2'000'000'000ull));
     R.Draws = 0;
     V.Render(&R, 800.0f, 1200.0f);
     CHECK(R.Draws > ClosedDraws);   // the panel, its rows and their swatches are extra geometry
 
     // And closing it goes back to drawing nothing extra and claiming nothing.
     V.SetDevOverlayOpen(false);
-    CHECK(!V.DevTap(400.0f, 600.0f));
+    CHECK(!V.DevConsole().PointerDown(1, 400.0f, 600.0f, 3'000'000'000ull));
     R.Draws = 0;
     V.Render(&R, 800.0f, 1200.0f);
     CHECK(R.Draws == ClosedDraws);
