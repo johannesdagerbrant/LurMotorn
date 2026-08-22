@@ -473,6 +473,15 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     if (_SimThread.joinable()) _SimThread.join();
 }
 
+// Publish the safe-area insets in DRAWABLE PIXELS for the render thread. MUST be called by every
+// site that changes contentsScale or drawableSize, because px insets and a px drawable size are only
+// comparable when both came from the same scale (#103 misalignment).
+- (void)publishInsetsForScale:(CGFloat)Scale {
+    const UIEdgeInsets Sa = self.view.safeAreaInsets;
+    _InsetTopPx.store(static_cast<int32_t>(Sa.top * Scale), std::memory_order_relaxed);
+    _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Scale), std::memory_order_relaxed);
+}
+
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     // #183: MAIN only sizes the layer and PUBLISHES drawable-size + safe-area insets for the render thread,
@@ -485,9 +494,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;
     const int DrawW = static_cast<int>(Layer.drawableSize.width);
     const int DrawH = static_cast<int>(Layer.drawableSize.height);
-    const UIEdgeInsets Sa = self.view.safeAreaInsets;
-    _InsetTopPx.store(static_cast<int32_t>(Sa.top * Scale), std::memory_order_relaxed);
-    _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Scale), std::memory_order_relaxed);
+    [self publishInsetsForScale:Scale];
 
     if (!_RH.HasSurface()) {
         // First valid layout: record the #73 precondition (a renderer born while inactive presents into a
@@ -656,9 +663,7 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     // the new insets land first in practice, and one frame at the old insets is cosmetic either way.
     LurMetalView* NewView = (LurMetalView*)self.view;
     CAMetalLayer* Layer = (CAMetalLayer*)NewView.layer;
-    const UIEdgeInsets Sa = NewView.safeAreaInsets;
-    _InsetTopPx.store(static_cast<int32_t>(Sa.top * Layer.contentsScale), std::memory_order_relaxed);
-    _InsetBotPx.store(static_cast<int32_t>(Sa.bottom * Layer.contentsScale), std::memory_order_relaxed);
+    [self publishInsetsForScale:Layer.contentsScale];
     _InitWhileInactive =
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
 #if !LUR_SHIPPING
@@ -685,6 +690,11 @@ static void* RpsRenderThreadTrampoline(void* Ctx) {
     Layer.drawableSize = CGSizeMake(self.view.bounds.size.width * Eff,
                                     self.view.bounds.size.height * Eff);
     if (Layer.drawableSize.width == 0 || Layer.drawableSize.height == 0) return;  // not laid out yet — retry next tick
+    // Republish the insets at the NEW scale, in the same breath as the new drawable size. Changing
+    // contentsScale does NOT trigger viewDidLayoutSubviews, so without this the HUD stays laid out
+    // against the previous scale's px insets until something else happens to re-lay-out the view —
+    // which at 0.5 is insets twice as tall as they should be, squeezing the world view.
+    [self publishInsetsForScale:Eff];
     _RH.RequestResize(static_cast<int>(Layer.drawableSize.width),
                       static_cast<int>(Layer.drawableSize.height));   // swapchain recreated at a safe point
     _AppliedRenderScaleRaw = Raw;
