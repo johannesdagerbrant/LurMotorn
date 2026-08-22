@@ -1,5 +1,7 @@
 #include "Lur/App/GameHost.h"
 
+#include "Lur/Core/CVar.h"
+
 #include <cstdarg>
 #include <cstdio>
 #include <vector>
@@ -48,6 +50,19 @@ void GameHost::OnPeerLive() {
 
 void GameHost::Init(const Config& Cfg) {
     if (Store_) return;
+#if !LUR_SHIPPING
+    // Arm the "no CVar read before main()" guard HERE, not in each entry point. CVar::Get() asserts
+    // on it in a dev build, so every main had to remember the call — chess's three mains each carried
+    // it with the same four-line comment, and RPS's iOS and desktop mains did NOT, relying on
+    // Rps::Sim::Init to arm it as a side effect. That worked, and it is exactly the implicit
+    // dependency that breaks the day a main reads a tunable before it starts a sim.
+    //
+    // This is the right home: Init is the first engine call every platform main makes, it runs
+    // post-main by construction, and it is idempotent (the early-out above), so arming here is
+    // unforgettable rather than merely documented. Games and tests with no host still call it
+    // themselves.
+    Lur::Core::CVarEnterMain();
+#endif
     Cfg_ = Cfg;
     Store_ = std::make_unique<Lur::Save::Store>(Cfg_.SaveDir.empty() ? "." : Cfg_.SaveDir);
     DeviceId_ = Lur::Save::LoadOrCreateDeviceId(*Store_);
