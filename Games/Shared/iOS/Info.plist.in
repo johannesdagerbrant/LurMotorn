@@ -5,6 +5,10 @@
      CoreBluetooth without them. Both keys are present because this device acts as
      BOTH central (scans/connects) and peripheral (advertises), chosen at runtime
      by DecideBleRole — see BleProtocol.h. -->
+<!-- The iOS app plist, shared by every game (#198). It differed only in the bundle id, the
+     app name and one noun inside the Bluetooth usage strings — and those strings are what
+     iOS shows the user in the permission prompt, so they have to name the real game.
+     Substituted by lur_add_ios_app() via configure_file(@ONLY). -->
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
@@ -12,11 +16,11 @@
     <key>CFBundleExecutable</key>
     <string>$(EXECUTABLE_NAME)</string>
     <key>CFBundleIdentifier</key>
-    <string>com.lurmotorn.onlychess</string>
+    <string>@LUR_APP_BUNDLE_ID@</string>
     <key>CFBundleName</key>
-    <string>OnlyChess</string>
+    <string>@LUR_APP_NAME@</string>
     <key>CFBundleDisplayName</key>
-    <string>OnlyChess</string>
+    <string>@LUR_APP_NAME@</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
@@ -34,9 +38,9 @@
 
     <!-- BLE usage strings (CLAUDE.md: BLE is the cross-platform transport). -->
     <key>NSBluetoothAlwaysUsageDescription</key>
-    <string>OnlyChess uses Bluetooth to connect to a nearby phone for local two-player chess. No internet, no servers.</string>
+    <string>@LUR_APP_NAME@ uses Bluetooth to connect to a nearby phone for @LUR_APP_USAGE_NOUN@. No internet, no servers.</string>
     <!-- Legacy key for iOS 12 and earlier; harmless on newer iOS. -->
     <key>NSBluetoothPeripheralUsageDescription</key>
-    <string>OnlyChess uses Bluetooth to host a local game so a nearby phone can join. No internet, no servers.</string>
+    <string>@LUR_APP_NAME@ uses Bluetooth to host a local game so a nearby phone can join. No internet, no servers.</string>
 </dict>
 </plist>

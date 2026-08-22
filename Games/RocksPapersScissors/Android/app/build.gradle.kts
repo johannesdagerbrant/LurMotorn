@@ -12,9 +12,22 @@ android {
     // this replaces a 788-line duplicate that had drifted from its sibling.
     // Path is from the ANDROID PROJECT root, the same anchor cpp/CMakeLists.txt walks up from.
     sourceSets["main"].kotlin.srcDir("$rootDir/../../../Modules/Transport/Platform/Android")
+    // The app SHELL — the NativeActivity subclass and the manifest — is shared too (#198).
+    // There was one Activity per game with 30 of 46 lines byte-identical and the rest the
+    // same comments re-wrapped, and a manifest that differed by zero lines once the names
+    // were normalized. Both are parameterized by the manifestPlaceholders below, so this
+    // game states its identity ONCE, here, next to its application id.
+    sourceSets["main"].kotlin.srcDir("$rootDir/../../Shared/Android/kotlin")
+    sourceSets["main"].manifest.srcFile("$rootDir/../../Shared/Android/AndroidManifest.xml")
 
     defaultConfig {
         applicationId = "com.lurmotorn.onlyrps"
+        // Consumed by the shared manifest AND read back by LurActivity at runtime:
+        // libName is the .so android_main lives in, logTag is what `logcat -s <tag>`
+        // filters on. Neither has a default anywhere — a game that omits one fails
+        // rather than inheriting another game's identity.
+        manifestPlaceholders["libName"] = "onlyrps"
+        manifestPlaceholders["logTag"] = "OnlyRps"
         minSdk = 26          // BLE + Vulkan baseline
         targetSdk = 35
         versionCode = 1

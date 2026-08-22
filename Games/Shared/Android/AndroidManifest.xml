@@ -1,4 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- The Android app shell manifest, shared by every game (#198).
+
+     There was one of these per game and they differed by ZERO lines once the names were
+     normalized — only the activity class, the native library name and a comment naming the .so.
+     All three are now placeholders that each app supplies once in its build.gradle.kts, beside
+     its application id, so this file is genuinely identical for every game rather than
+     accidentally so.
+
+     ${libName}  the native library android_main lives in  (also read by LurActivity)
+     ${logTag}   what `logcat -s <tag>` filters on          (read by LurActivity) -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- BLE is the cross-platform transport (see CLAUDE.md). Android 12+ split the
@@ -23,14 +33,16 @@
         android:hasCode="true"
         android:allowBackup="false">
 
-        <!-- Control passes to C++ (android_main in libonlychess.so). We subclass
-             NativeActivity in Kotlin only so the BLE shim object is loaded and
-             reachable from native code via JNI. -->
+        <!-- Control passes to C++ (android_main in lib${libName}.so). The Kotlin subclass exists
+             only so the BLE shim object is constructed and reachable from native code over JNI;
+             it is the engine's, shared by every game. -->
         <activity
-            android:name=".OnlyChessActivity"
+            android:name="com.lurmotorn.shell.LurActivity"
             android:exported="true"
             android:configChanges="orientation|keyboardHidden|screenSize|screenLayout|density">
-            <meta-data android:name="android.app.lib_name" android:value="onlychess" />
+            <meta-data android:name="android.app.lib_name" android:value="${libName}" />
+            <!-- Read by LurActivity: the tag every line this app logs is filed under. -->
+            <meta-data android:name="com.lurmotorn.log_tag" android:value="${logTag}" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
