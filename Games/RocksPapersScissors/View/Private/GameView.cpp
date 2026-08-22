@@ -13,6 +13,7 @@
 
 #include "Lur/Core/Assert.h"          // LUR_ASSERT_MSG — trap a row/tier decode disagreement
 #include "Lur/DevGui/CategoryTree.h"  // #121: hierarchical (|-nested) category tree
+#include "Lur/DevGui/FlatList.h"      // #201: fold-aware row list + scroll clamp
 #include "Lur/DevGui/Popover.h"       // #121/#129: below-or-above anchored placement
 #include "Lur/Hud/GuidLabel.h"    // ShortGuid — the linked row is labelled with the peer id
 #include "Lur/Math/Mat4.h"
@@ -1848,34 +1849,26 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // Flatten the (honouring-collapse) tree into a linear list of rows with content-space Y,
         // so scroll, culling, hit-testing + the anchored popovers all read one array. Kind 0 =
         // category header (Node), 1 = a cvar row (Cv).
-        struct VItem { int Kind; const Lur::DevGui::CatNode<Lur::Core::ICVar*>* Node;
-                       Lur::Core::ICVar* Cv; int Depth; float Cy; };
+        // #201: the flatten, the fold rule and the scroll clamp are Lur::DevGui::FlatList now — the
+        // reusable half of the console. What stays here is the PAINTING, which is this module's
+        // convention (every DevGui widget is pure logic + shared geometry; the game draws).
+        using VItem = Lur::DevGui::FlatRow<Lur::Core::ICVar*>;
         std::vector<VItem> Vis;
-        float Cy = 0.0f;
-        for (Lur::Core::ICVar* C : Root.Leaves) { Vis.push_back({1, nullptr, C, 0, Cy}); Cy += LineH; }
-        using Node = Lur::DevGui::CatNode<Lur::Core::ICVar*>;
-        std::function<void(const Node&, int)> Flatten = [&](const Node& N, int Depth) {
-            Vis.push_back({0, &N, nullptr, Depth, Cy});
-            Cy += CatH;
-            if (CollapsedCats_.find(N.Path) != CollapsedCats_.end()) return;  // folded: skip body
-            for (Lur::Core::ICVar* C : N.Leaves) { Vis.push_back({1, nullptr, C, Depth + 1, Cy}); Cy += LineH; }
-            for (const Node& Ch : N.Children) Flatten(Ch, Depth + 1);
-        };
-        for (const Node& Ch : Root.Children) Flatten(Ch, 0);
-        const float ContentH = Cy;
+        const float ContentH = Lur::DevGui::FlattenTree(
+            Root,
+            [this](const std::string& Path) {
+                return CollapsedCats_.find(Path) != CollapsedCats_.end();
+            },
+            LineH, CatH, Vis);
 
         // Fold in this frame's accumulated scroll (drag on phone / wheel on desktop), clamp.
         ScrollY_ += DevScrollAccum_.exchange(0.0f, std::memory_order_relaxed);
-        const float MaxScroll = ContentH > ViewH ? ContentH - ViewH : 0.0f;
-        if (ScrollY_ < 0.0f) ScrollY_ = 0.0f;
-        if (ScrollY_ > MaxScroll) ScrollY_ = MaxScroll;
+        const float MaxScroll = Lur::DevGui::ClampScroll(ScrollY_, ContentH, ViewH);
 
         // A cvar's row screen-Y this frame (content-Y - scroll + viewport top), for anchoring
         // the numpad/toaster. Defaults to mid-viewport if the row is folded/scrolled away.
         auto RowScreenY = [&](Lur::Core::ICVar* Which, float Fallback) {
-            for (const VItem& It : Vis)
-                if (It.Kind == 1 && It.Cv == Which) return ViewTop - ScrollY_ + It.Cy;
-            return Fallback;
+            return Lur::DevGui::RowScreenY(Vis, Which, ViewTop, ScrollY_, Fallback);
         };
 
         // Panel + title + close-X.
@@ -1912,22 +1905,23 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // the phone (which has no keyboard) behaves exactly as before.
         auto HighlightIndex = [&]() -> int {
             for (std::size_t I = 0; I < Vis.size(); ++I) {
-                if (Vis[I].Kind == 1 && HiCvar_ != nullptr && Vis[I].Cv == HiCvar_)
+                if (!Vis[I].IsCategory && HiCvar_ != nullptr && Vis[I].Item == HiCvar_)
                     return static_cast<int>(I);
-                if (Vis[I].Kind == 0 && !HiCat_.empty() && Vis[I].Node->Path == HiCat_)
+                if (Vis[I].IsCategory && !HiCat_.empty() && Vis[I].Node->Path == HiCat_)
                     return static_cast<int>(I);
             }
             return -1;
         };
         auto SetHighlight = [&](const VItem& It) {
-            if (It.Kind == 1) { HiCvar_ = It.Cv; HiCat_.clear(); }
+            if (!It.IsCategory) { HiCvar_ = It.Item; HiCat_.clear(); }
             else              { HiCvar_ = nullptr; HiCat_ = It.Node->Path; }
             // Follow the cursor with the viewport. Without this, Down walks the highlight off the
             // bottom of the clip band and keeps going invisibly — so the list appears frozen and
             // then jumps several rows when you finally press Enter.
-            const float RowH2 = (It.Kind == 0) ? CatH : LineH;
-            if (It.Cy < ScrollY_) ScrollY_ = It.Cy;
-            else if (It.Cy + RowH2 > ScrollY_ + ViewH) ScrollY_ = It.Cy + RowH2 - ViewH;
+            const float RowH2 = It.IsCategory ? CatH : LineH;
+            if (It.ContentY < ScrollY_) ScrollY_ = It.ContentY;
+            else if (It.ContentY + RowH2 > ScrollY_ + ViewH)
+                ScrollY_ = It.ContentY + RowH2 - ViewH;
             if (ScrollY_ < 0.0f) ScrollY_ = 0.0f;
             if (ScrollY_ > MaxScroll) ScrollY_ = MaxScroll;
         };
@@ -2183,13 +2177,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // Draw + hit-test every visible row, culled to the viewport (rows scrolled fully out of
         // the band are neither drawn nor tappable).
         for (const VItem& It : Vis) {
-            const float RowH = It.Kind == 0 ? CatH : LineH;
-            const float Sy = ViewTop - ScrollY_ + It.Cy;
+            const float RowH = It.IsCategory ? CatH : LineH;
+            const float Sy = ViewTop - ScrollY_ + It.ContentY;
             if (Sy + RowH <= ViewTop || Sy >= ViewBot) continue;  // fully outside the band
             const float IndentX = X0 + static_cast<float>(It.Depth) * IndentW;
             const bool InBand = TapY >= ViewTop && TapY <= ViewBot;
 
-            if (It.Kind == 0) {  // ---- category header: tap toggles fold ----
+            if (It.IsCategory) {  // ---- category header: tap toggles fold ----
                 const bool Collapsed = CollapsedCats_.find(It.Node->Path) != CollapsedCats_.end();
                 if (TapPending && !TapUsed && InBand && TapX >= IndentX && TapX <= X0 + PW &&
                     TapY >= Sy && TapY <= Sy + CatH) {
@@ -2217,7 +2211,7 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             }
 
             // ---- a cvar row: [ i | name ......... | AG | value | R ] ----
-            Lur::Core::ICVar* C = It.Cv;
+            Lur::Core::ICVar* C = It.Item;
             const bool Overridden = C->Overridden();
             const bool HasTip = C->Tooltip()[0] != '\0';
             const float InfoS = LineH - 6.0f * HS;
