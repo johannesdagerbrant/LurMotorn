@@ -19,6 +19,7 @@
 
 #include "Chess/Board.h"
 #include "Chess/ChessMatchState.h"
+#include "Lur/Core/CVar.h"
 #include "Chess/View/BoardView.h"
 #include "Lur/App/GameHost.h"   // #43: the session + persistence choreography, engine-owned
 #include "Lur/Core/FlightRecorder.h"
@@ -328,6 +329,11 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // unbuffered so logs flush live/on kill
     Lur::Log::Init(nullptr, "Desktop");        // built-in stdout/stderr sink for the host
+    // Chess has view CVars since #201 (the board palette), and CVar::Get() asserts if it is read
+    // before main() in a dev build. RPS gets this implicitly from Sim::Init; chess has no such
+    // choke point, so each of its three entry points arms the guard itself.
+    Lur::Core::CVarEnterMain();
+
 
     int MaxFrames = 0;  // 0 = run until a window is closed; "--frames N" = headless smoke
     bool Ble = false;   // "--ble [path]" = one window, live over real BLE to the phone

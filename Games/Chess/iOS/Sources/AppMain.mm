@@ -18,6 +18,7 @@
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
 #include "Chess/View/SfxLibrary.h"
+#include "Lur/Core/CVar.h"
 #include "Lur/Audio/AudioDevice.h"
 #include "Lur/Audio/Mixer.h"
 #include "Lur/Net/Session.h"
@@ -548,5 +549,9 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0 (RPS learned it in #103); adopting the shared entry point
 // is what gives it that, and it is the one behaviour change here — see IosApp.mm.
 int main(int argc, char* argv[]) {
+    // Chess has view CVars since #201 (the board palette), and CVar::Get() asserts if it is read
+    // before main() in a dev build. RPS gets this implicitly from Sim::Init; chess has no such
+    // choke point, so each of its three entry points arms the guard itself.
+    Lur::Core::CVarEnterMain();
     return LurIosMain(argc, argv, [OnlyChessViewController class]);
 }

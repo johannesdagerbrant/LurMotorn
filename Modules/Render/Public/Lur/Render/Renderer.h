@@ -111,6 +111,16 @@ public:
         (void)Material; (void)Tint;
     }
 
+    // The colour the frame is cleared to, i.e. what shows wherever nothing is drawn. It used to be
+    // a literal inside the Vulkan backend, which is the wrong place by this repo's own rule: a
+    // backend holds API verbs, and "what colour is the background" is a decision. A game that wants
+    // it tunable could only get there by drawing a full-screen quad over the top — paying a draw to
+    // work around a constant.
+    //
+    // Default body is a no-op so a backend need not implement it; the Vulkan one does. Set it before
+    // BeginFrame; it persists until changed.
+    virtual void SetClearColor(const Color& /*C*/) {}
+
     // --- Per-frame. ---
     // Optional: wait for the previous frame's GPU work + acquire the next image, up front.
     // Call this at the TOP of the loop, BEFORE sampling input, so the ~vsync fence-wait

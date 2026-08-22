@@ -296,6 +296,8 @@ public:
         Materials[Material - 1].Tint = Tint;  // no descriptor touched: same texture binding
     }
 
+    void SetClearColor(const Color& C) override { ClearColor_ = C; }
+
     // Wait for the previous frame's GPU work and acquire the next image. SPLIT OUT of
     // BeginFrame so the app loop can call it BEFORE it samples input: the ~vsync fence-wait
     // idle then happens ahead of input, so the presented frame carries the FRESHEST input
@@ -388,7 +390,7 @@ public:
         VK_CHECK(vkBeginCommandBuffer(CommandBuffer, &BeginInfo));
 
         VkClearValue Clear{};
-        Clear.color = {{0.16f, 0.20f, 0.26f, 1.0f}};
+        Clear.color = {{ClearColor_.R, ClearColor_.G, ClearColor_.B, ClearColor_.A}};
 
         VkRenderPassBeginInfo Pass{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
         Pass.renderPass = RenderPass;
@@ -632,6 +634,11 @@ public:
     }
 
 private:
+    // The frame's clear colour — what shows wherever nothing is drawn. Was a literal at the
+    // vkCmdBeginRenderPass call; the default below keeps the old slate so nothing changes for a
+    // caller that never sets it.
+    Color ClearColor_{0.16f, 0.20f, 0.26f, 1.0f};
+
     // ---- Init steps ----
 
     bool CreateInstance() {

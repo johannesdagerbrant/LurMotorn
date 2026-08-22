@@ -23,6 +23,7 @@
 #include "Chess/ChessMatchState.h"
 #include "Chess/View/BoardView.h"
 #include "Chess/View/SfxLibrary.h"
+#include "Lur/Core/CVar.h"
 #include "Lur/Audio/AudioDevice.h"
 #include "Lur/Audio/Mixer.h"
 #include "Lur/App/AndroidApp.h"  // #43 section B: the NativeActivity ceremony, engine-owned
@@ -155,6 +156,10 @@ bool HandleInput(AppState& State, AInputEvent* Event) {
 } // namespace
 
 void android_main(android_app* App) {
+    // Chess has view CVars since #201 (the board palette), and CVar::Get() asserts if it is read
+    // before main() in a dev build. RPS gets this implicitly from Sim::Init; chess has no such
+    // choke point, so each of its three entry points arms the guard itself.
+    Lur::Core::CVarEnterMain();
     AppState State;
 
     // #43 section B: hand the NativeActivity ritual to the engine — glue callbacks, the engine log

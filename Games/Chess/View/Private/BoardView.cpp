@@ -11,6 +11,9 @@
 #include "Chess/MatchMeta.h"
 #include "Chess/MoveCodec.h"
 #include "Chess/OpponentRegistry.h"
+#include "Lur/Render/ColorString.h"  // FromString/ToString/== for Color: what makes a Color CVar
+                                    // parse from cvars.cfg and print in the console
+#include "Lur/Core/CVar.h"       // the board palette is tunable (#201 acceptance: chess CVars)
 #include "Lur/Hud/GuidLabel.h"   // ShortGuid (shared with RPS's selector)
 #include "Lur/Net/Session.h"
 #include "Lur/Render/Sprite2D.h"
@@ -34,14 +37,40 @@ namespace {
 //   * Black pieces: dark fill, WHITE outline, steep gamma (deep shadows).
 // Legibility on same-colour squares comes from the baked outline, so no separate
 // outline pass is needed.
-constexpr Lur::Render::Color PieceLightTint{0.97f, 0.97f, 0.95f, 1.0f};
-constexpr Lur::Render::Color PieceDarkTint{0.20f, 0.20f, 0.22f, 1.0f};
 constexpr Lur::Render::Color OutlineOnLight{0.0f, 0.0f, 0.0f, 1.0f};  // dark outline for white pieces
 constexpr Lur::Render::Color OutlineOnDark{1.0f, 1.0f, 1.0f, 1.0f};   // white outline for black pieces
 constexpr float PieceInkLo = 0.32f;      // shade band the art's outline ink occupies
 constexpr float PieceInkHi = 0.60f;
 constexpr float PieceGammaLight = 1.3f;  // white pieces: gentle shadow contrast
 constexpr float PieceGammaDark  = 3.0f;  // black pieces: deep shadow contrast
+
+// ---- The board PALETTE, as CVars ------------------------------------------------------------
+// Chess's first CVars. They are view-only (no CVarFlagAffectsGameplay), so they are never hashed,
+// never synced to the peer and cannot desync a match — two phones may legitimately show different
+// board colours, exactly as they may run different HUD scales.
+//
+// All five are applied EVERY FRAME (SetClearColor / SetMaterialTint), never at material creation, so
+// an edit lands live instead of at the next launch. That is the whole point of a tunable colour: you
+// judge it against the art on screen, not against a hex value in a diff.
+//
+// Note the piece tints are multiplied by the art's baked shade, so a tint is the piece's *fill*
+// colour and the outline stays as OutlineOnLight/Dark above — nudging a fill will not cost you the
+// legibility that the baked outline provides on a same-colour square (#30).
+LUR_CVAR(CvBackground, "chess.view.background",
+         (Lur::Render::Color{0.16f, 0.20f, 0.26f, 1.0f}), ::Lur::Core::CVarFlagNone,
+         "Colour behind the board — what shows wherever nothing is drawn");
+LUR_CVAR(CvSquareLight, "chess.view.square_light",
+         (Lur::Render::Color{0.93f, 0.85f, 0.70f, 1.0f}), ::Lur::Core::CVarFlagNone,
+         "Light board square");
+LUR_CVAR(CvSquareDark, "chess.view.square_dark",
+         (Lur::Render::Color{0.45f, 0.30f, 0.20f, 1.0f}), ::Lur::Core::CVarFlagNone,
+         "Dark board square");
+LUR_CVAR(CvPieceLight, "chess.view.piece_light",
+         (Lur::Render::Color{0.97f, 0.97f, 0.95f, 1.0f}), ::Lur::Core::CVarFlagNone,
+         "White pieces' fill colour (multiplied by the art's baked shade)");
+LUR_CVAR(CvPieceDark, "chess.view.piece_dark",
+         (Lur::Render::Color{0.20f, 0.20f, 0.22f, 1.0f}), ::Lur::Core::CVarFlagNone,
+         "Black pieces' fill colour (multiplied by the art's baked shade)");
 
 // Board placement in the window: a centred square, 0.95 of the shorter side.
 struct BoardLayout { float OriginX, OriginY, Square; };
@@ -105,8 +134,8 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
 
     const ::Lur::Render::Quad Q = MakeQuad();  // unit (0,0)-(1,1), white vertices
     QuadMesh = Renderer->CreateMesh(Q.Vertices, 4, Q.Indices, 6);
-    LightSquare = Renderer->CreateMaterial(MaterialDesc{0, Color{0.93f, 0.85f, 0.70f, 1.0f}, false});
-    DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, Color{0.45f, 0.30f, 0.20f, 1.0f}, false});
+    LightSquare = Renderer->CreateMaterial(MaterialDesc{0, CvSquareLight.Get(), false});
+    DarkSquare  = Renderer->CreateMaterial(MaterialDesc{0, CvSquareDark.Get(), false});
     Highlight   = Renderer->CreateMaterial(MaterialDesc{0, Color{0.30f, 0.85f, 0.40f, 0.55f}, false});
     // #193: the peer's anticipated pick-up. Deliberately a DIFFERENT hue from our own green
     // selection — it is a guess about what they are about to do, and must never be mistaken
@@ -125,12 +154,12 @@ void BoardView::CreateResources(Lur::Render::IRenderer* Renderer) {
                              ChessArt::PieceCoverage[Type], N, N);
         const TextureHandle Tex = Renderer->LoadTexture(Rg.data(), N, N, ETextureFormat::Rg8);
 
-        MaterialDesc Light{Tex, PieceLightTint, false};
+        MaterialDesc Light{Tex, CvPieceLight.Get(), false};
         Light.Outline = OutlineOnLight; Light.Gamma = PieceGammaLight;
         Light.InkLo = PieceInkLo; Light.InkHi = PieceInkHi;
         PieceLight[Type] = Renderer->CreateMaterial(Light);
 
-        MaterialDesc Dark{Tex, PieceDarkTint, false};
+        MaterialDesc Dark{Tex, CvPieceDark.Get(), false};
         Dark.Outline = OutlineOnDark; Dark.Gamma = PieceGammaDark;
         Dark.InkLo = PieceInkLo; Dark.InkHi = PieceInkHi;
         PieceDark[Type] = Renderer->CreateMaterial(Dark);
@@ -197,6 +226,17 @@ void BoardView::Render(Lur::Render::IRenderer* Renderer, float WidthPx, float He
     const float TrayBox = TrayH + TrayGap * 2.0f;
     const bool  ShowTopTray = TopRoom >= TrayBox;
     const bool  ShowBotTray = BotRoom >= TrayBox + Sq * 1.2f;   // ...and still fit the score line
+
+    // Re-apply the palette every frame. Materials are RETINTED, never re-created (no descriptor is
+    // touched), so this is a handful of writes and it is what makes a console edit move the colour on
+    // screen while you are looking at it.
+    Renderer->SetClearColor(CvBackground.Get());
+    Renderer->SetMaterialTint(LightSquare, CvSquareLight.Get());
+    Renderer->SetMaterialTint(DarkSquare, CvSquareDark.Get());
+    for (int Type = 0; Type < 6; ++Type) {
+        Renderer->SetMaterialTint(PieceLight[Type], CvPieceLight.Get());
+        Renderer->SetMaterialTint(PieceDark[Type], CvPieceDark.Get());
+    }
 
     Renderer->BeginFrame(MakeOrthoCamera(WidthPx, HeightPx));
 
