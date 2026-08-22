@@ -8,6 +8,7 @@
 // lockstep path BOUNDED where it used to be an unbounded vector — so a full inbox is a new failure mode
 // and it must be countable rather than silent.
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <cstdint>
 #include <thread>
@@ -151,13 +152,26 @@ static void TestConcurrentProducerConsumer() {
     int Seen = 0;
     bool Ordered = true;
     Ev Out[64];
-    // BOUNDED, not `while (Seen < Total)`. An inbox that loses events would spin here forever, and a
-    // sabotage pass that hangs teaches nothing — it just wedges the run. The bound is generous
-    // (drains at least 1 event per iteration when working) so it can only be hit by a real defect.
-    int Spins = 0;
-    while (Seen < Total && Spins < Total * 100) {
-        ++Spins;
+    // BOUNDED, not `while (Seen < Total)`: an inbox that loses events would spin here forever, and a
+    // sabotage pass that hangs teaches nothing — it just wedges the run.
+    //
+    // Bounded by TIME, not by iteration count. The first version of this bound counted total spins
+    // (Total * 100), which is not a proxy for progress: on a machine where the consumer out-paces the
+    // producer, most drains legitimately return nothing, so it burned through 2,000,000 empty drains
+    // and gave up before the producer had finished. That passed under g++ on Windows and FAILED under
+    // Apple clang on CI — a flake I introduced while fixing a hang.
+    //
+    // A wall-clock deadline is machine-independent in the right way: a working inbox finishes this in
+    // milliseconds, and only a genuinely broken one can reach 30 seconds.
+    const auto Deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (Seen < Total && std::chrono::steady_clock::now() < Deadline) {
         const int N = B.Drain(Out, 7);
+        // Yield on an empty drain rather than spinning hot — it stops the consumer starving the
+        // producer of a core, which is the situation that made the spin bound look plausible.
+        if (N == 0) {
+            std::this_thread::yield();
+            continue;
+        }
         for (int I = 0; I < N; ++I) {
             ++Seen;
             if (Out[I].Id != Seen) Ordered = false;
