@@ -12,6 +12,7 @@
 #include "Lur/Sim/Tick.h"
 #include "Rps/Sim.h"
 #include "Lur/Net/BuildGate.h"
+#include "Lur/Net/CvarLedger.h"
 #include "Lur/Net/FrameSequence.h"
 #include "Lur/Net/RecoveryPolicy.h"
 #include "Rps/SnapshotRing.h"  // rollback snapshot ring + peer predictor
@@ -435,15 +436,19 @@ private:
     // This peer's current override set (id -> value + edit wall-clock), relative to the
     // compile-time defaults. Seeded pre-match and updated by live tweaks; exchanged +
     // merged at match start (MsgCvarSync). Reverting an id to default = erasing it here.
-    struct CvarVal { int32_t Raw; uint64_t WallMs; };
-    std::unordered_map<uint8_t, CvarVal> ActiveCvars;
+    // #201: the merge rule (later wall clock wins; a same-millisecond DISAGREEMENT erases, so both
+    // peers land on the compiled default without a referee) is Lur::Net::CvarLedger. It also replaces
+    // the std::unordered_map with a flat 256-slot array, so the sync message's entries are emitted in
+    // ascending id order instead of an implementation-defined one.
+    Lur::Net::CvarLedger ActiveCvars;
     void MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs);  // resolver: last-writer; tie -> default
     void ApplyActiveCvars();  // rebuild the pre-tick-0 sim from the merged set (or move Cv mid-match)
     CvSnapshot MergedCvs() const;  // compile-time defaults overlaid with ActiveCvars
-    // Set once this peer has merged ANYTHING (seeded or received). From then on the merged set —
-    // not the local globals — is what a fresh sim must be built from, so #147 can't come back via
-    // a path that calls Sim::Init directly.
-    bool HaveMergedCvs_ = false;
+    // ActiveCvars.AnyMerged() is true once this peer has merged ANYTHING (seeded or received).
+    // From then on the merged set — not the local globals — is what a fresh sim must be built from,
+    // so #147 can't come back via a path that calls Sim::Init directly. It stays true after a tie has
+    // erased the entry, because "an override was discussed and resolved to the default" is still a
+    // different starting point from "none was ever mentioned".
 
     // #169: how many MsgCvarSync datagrams this peer has RECEIVED. Not a statistic — zero at match
     // start is the signature of the bug that made every match on the last-launched phone desync at

@@ -32,3 +32,11 @@ add_executable(build_gate_tests BuildGateTests.cpp)
 target_link_libraries(build_gate_tests PRIVATE lur::net)
 target_compile_features(build_gate_tests PRIVATE cxx_std_20)
 add_test(NAME build_gate_tests COMMAND build_gate_tests)
+
+# #147/#169/#201: the gameplay-CVar override merge promoted out of Rps::LockstepPeer. What it enforces
+# is a CONSISTENCY rule — a same-millisecond disagreement resolves to the compiled default on BOTH
+# peers, because there is no host to ask which one wins.
+add_executable(cvar_ledger_tests CvarLedgerTests.cpp)
+target_link_libraries(cvar_ledger_tests PRIVATE lur::net)
+target_compile_features(cvar_ledger_tests PRIVATE cxx_std_20)
+add_test(NAME cvar_ledger_tests COMMAND cvar_ledger_tests)

@@ -28,7 +28,7 @@ constexpr uint8_t ResyncTagRequest = 0xFE;
 // set yet, so the globals ARE the answer (and in Shipping they're the only thing there is).
 void LockstepPeer::ResetSim(uint64_t Seed) {
 #if LUR_INTERNAL
-    if (HaveMergedCvs_) { TheSim.InitWithCvs(Seed, MergedCvs()); return; }
+    if (ActiveCvars.AnyMerged()) { TheSim.InitWithCvs(Seed, MergedCvs()); return; }
 #endif
     TheSim.Init(Seed);
 }
@@ -40,7 +40,8 @@ void LockstepPeer::ResetSim(uint64_t Seed) {
 // for every id the merge didn't carry.
 CvSnapshot LockstepPeer::MergedCvs() const {
     CvSnapshot Merged = DefaultCvs();
-    for (const auto& [Id, V] : ActiveCvars) ApplyCvOverride(Merged, Id, V.Raw);
+    ActiveCvars.ForEach(
+        [&Merged](uint8_t Id, const Lur::Net::CvarEdit& V) { ApplyCvOverride(Merged, Id, V.Raw); });
     return Merged;
 }
 #endif
@@ -661,18 +662,13 @@ void LockstepPeer::SetGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64_
 }
 
 void LockstepPeer::MergeCvar(uint8_t Id, int32_t Raw, uint64_t WallMs) {
-    // Last-writer-wins by wall clock; an exact timestamp collision with a DIFFERENT value
-    // reverts to the compile-time default (drop the override) — the one value both peers
-    // unambiguously agree on (C.2). Commutative, so both peers reach the same merged set.
-    // #147: from the first merge onward THIS peer is in the synced regime, so every later fresh sim
-    // must come from the merged set rather than the globals — including when the merge resolver has
-    // emptied the set (a wall-clock tie), which means "all compile-time defaults", NOT "our locals".
-    HaveMergedCvs_ = true;
-    const auto It = ActiveCvars.find(Id);
-    if (It == ActiveCvars.end()) { ActiveCvars[Id] = {Raw, WallMs}; return; }
-    if (WallMs > It->second.WallMs)                          It->second = {Raw, WallMs};
-    else if (WallMs == It->second.WallMs && Raw != It->second.Raw) ActiveCvars.erase(It);
-    // else: incoming is older, or identical -> keep existing.
+    // The rule and its rationale now live on Lur::Net::CvarLedger, along with the #147 note that a
+    // tie-emptied set still means "all compile-time defaults" rather than "our locals". One
+    // correction while moving it: the old comment here claimed the merge is COMMUTATIVE. It is not,
+    // quite — three values at one millisecond for one id are order-dependent (pinned by
+    // cvar_ledger_tests). It needs one peer to write the same knob twice inside a millisecond, so it
+    // has never been reachable in play, but the claim was wrong.
+    ActiveCvars.Merge(Id, Raw, WallMs);
 }
 
 void LockstepPeer::ApplyActiveCvars() {
@@ -697,13 +693,13 @@ void LockstepPeer::SeedGameplayCvar(uint8_t GameplayId, int32_t RawValue, uint64
 
 void LockstepPeer::SendCvarSync() {
     Lur::Serialization::BitWriter W;
-    Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(ActiveCvars.size()));
-    for (const auto& [Id, V] : ActiveCvars) {
+    Lur::Serialization::WriteVarUint(W, static_cast<uint32_t>(ActiveCvars.Count()));
+    ActiveCvars.ForEach([&W](uint8_t Id, const Lur::Net::CvarEdit& V) {
         W.WriteBits(Id, 8);
         W.WriteBits(static_cast<uint32_t>(V.WallMs >> 32), 32);
         W.WriteBits(static_cast<uint32_t>(V.WallMs & 0xFFFFFFFFu), 32);
         W.WriteBits(static_cast<uint32_t>(V.Raw), 32);
-    }
+    });
     const std::vector<uint8_t>& B = W.Finish();
     if (Send) Send(Ctx, MsgCvarSync, B.data(), B.size());
 }
