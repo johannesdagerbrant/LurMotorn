@@ -126,6 +126,87 @@ static void TestRunnerMatchesSynchronous() {
     delete R;
 }
 
+// ---- #139's PRE-MATCH HOLD, through the real SimRunner composition ----
+// This gate had no test at all before #201 moved the mechanism into Lur::Sim::SimThread. The engine
+// side (held time is DROPPED, not banked) is sabotage-tested in sim_thread_tests; what can only be
+// tested HERE is the RPS half — that "acceptable opening camp" means Sim::CanPlaceBuilding, so an
+// invalid drop cannot start the clock. Get that wrong and the match opens with no camp, which reads
+// to the player as their placement having silently vanished.
+//
+// Deliberately asserts no tick COUNTS (that would race the scheduler) — only "zero" and "advanced",
+// both of which the gate makes deterministic regardless of how the OS schedules the thread.
+namespace {
+
+// Inside team 0's opening frontier at tick 0. Note this is TIGHTER than the (17, 16) the agent
+// `place` verb uses — that one goes through the drag-snap, which slides an out-of-frontier drop to
+// the nearest legal square. The gate sees the raw event, so it needs a genuinely legal coordinate.
+constexpr int32_t GateX = 16;
+constexpr int32_t GateValidY = 10;
+constexpr int32_t GateInvalidY = 200;   // deep in team 1's half
+
+struct GateScript {
+    bool Valid = false;   // flipped by the test to release the gate
+    int Samples = 0;
+};
+
+void GateInput(void* Ctx, const Sim& /*S*/, uint32_t /*Tick*/, InputEvent* Out, int /*Cap*/,
+               int& Count) {
+    GateScript* G = static_cast<GateScript*>(Ctx);
+    ++G->Samples;
+    Count = 0;
+    // GateValidY is inside team 0's opening frontier; team 1's half is not. An out-of-frontier drop
+    // is rejected SILENTLY (no log, no gold movement), which is precisely why the gate needs a test
+    // rather than an eyeball.
+    if (G->Valid) Out[Count++] = InputEvent::Place(0, UnitMiner, F(GateX), F(GateValidY));
+    else          Out[Count++] = InputEvent::Place(0, UnitMiner, F(GateX), F(GateInvalidY));
+}
+
+}  // namespace
+
+static void TestPreMatchHoldNeedsAPlaceableCamp() {
+    // Assert the fixtures FIRST, synchronously. If the opening frontier ever moves, this fails here
+    // with an obvious message instead of as a mysterious timeout in the threaded part below.
+    {
+        static Sim Fixture;
+        Fixture.Init(0x139);
+        CHECK(Fixture.CanPlaceBuilding(0, UnitMiner, F(GateX), F(GateValidY)));
+        CHECK(!Fixture.CanPlaceBuilding(0, UnitMiner, F(GateX), F(GateInvalidY)));
+    }
+
+    SimRunner* R = new SimRunner();
+    GateScript G;
+    R->Start(0x139, &GateInput, &G, 0, false, /*PreMatchTeam*/ 0);
+
+    // An unplaceable camp offered ~50 times over 250 ms must not start the clock.
+    for (int I = 0; I < 50; ++I) std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    CHECK(R->PublishedTick() == 0);
+    CHECK(G.Samples > 0);            // the input layer WAS asked — the gate rejected, it didn't stall
+
+    // Now offer a placeable one: the clock starts, and the camp is in the sim.
+    G.Valid = true;
+    for (int I = 0; I < 400 && R->PublishedTick() < 3; ++I)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    R->Stop();
+    CHECK(R->FinalTick() >= 3);
+
+    Snapshot Snap;
+    CHECK(R->LatestSnapshot(Snap));
+    CHECK(Snap.HasMinerCamp(0));     // the placeable camp is in the sim...
+    CHECK(!Snap.HasMinerCamp(1));     // ...and the rejected offers never placed anything
+    delete R;
+}
+
+// ---- No gate armed: the clock runs immediately (the stress/flock scenes have no camp) ----
+static void TestUngatedRunnerTicksWithoutACamp() {
+    SimRunner* R = new SimRunner();
+    R->Start(0x13A, nullptr, nullptr);   // PreMatchTeam defaults to -1
+    for (int I = 0; I < 400 && R->PublishedTick() < 3; ++I)
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    R->Stop();
+    CHECK(R->FinalTick() >= 3);          // would hang at 0 if the gate defaulted to armed
+    delete R;
+}
+
 // ---- Smoke: the thread runs decoupled from any render loop and publishes snapshots ----
 static void TestRunnerPublishesSnapshots() {
     SimRunner* R = new SimRunner();
@@ -199,6 +280,8 @@ int main() {
     TestMailboxPublishConsume();
     TestInterpolationAlpha();
     TestRunnerMatchesSynchronous();
+    TestPreMatchHoldNeedsAPlaceableCamp();
+    TestUngatedRunnerTicksWithoutACamp();
     TestRunnerPublishesSnapshots();
     TestPreviewAgreesWithSim();
 

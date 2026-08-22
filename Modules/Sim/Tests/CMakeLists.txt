@@ -11,3 +11,12 @@ add_executable(csr_buckets_tests CsrBucketsTests.cpp)
 target_link_libraries(csr_buckets_tests PRIVATE lur::sim)
 target_compile_features(csr_buckets_tests PRIVATE cxx_std_20)
 add_test(NAME csr_buckets_tests COMMAND csr_buckets_tests)
+
+# #201: the fixed-timestep sim THREAD promoted out of Rps::SimRunner. Threads::Threads is linked
+# here rather than on lur::sim, because SimThread.h is the only header in the module that spawns one
+# and the module's many header-only consumers should not inherit the dependency.
+find_package(Threads REQUIRED)
+add_executable(sim_thread_tests SimThreadTests.cpp)
+target_link_libraries(sim_thread_tests PRIVATE lur::sim Threads::Threads)
+target_compile_features(sim_thread_tests PRIVATE cxx_std_20)
+add_test(NAME sim_thread_tests COMMAND sim_thread_tests)

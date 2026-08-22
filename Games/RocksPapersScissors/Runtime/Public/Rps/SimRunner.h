@@ -1,83 +1,62 @@
 #pragma once
-#include <atomic>
 #include <cstdint>
-#include <thread>
 
-#include "Lur/Sim/Tick.h"
+#include "Lur/Sim/SimThread.h"
 #include "Rps/Sim.h"
 #include "Rps/Snapshot.h"
 #include "Rps/Tunables.h"
 
 namespace Rps {
 
-// The dedicated sim(+transport) thread — #69's loop shape, built here from the first
-// line rather than retrofitted. It runs the fixed-timestep sim tick DECOUPLED from
-// render/present/vsync: an inbound datagram (once transport is wired in slice 2) is
-// serviced in ~1 ms instead of waiting up to a rendered frame (~16 ms vsync). Slice 0
-// has no transport, so the thread just advances the sim at TickRateHz and publishes a
-// Snapshot per tick; the high-rate service loop and the transport-pump seam are in
-// place for slice 1/2 to fill.
+// RPS's solo sim thread. Since #201 the thread, the clock, the bounded-catch-up rule and the
+// hold-drops-elapsed-time rule all live in Lur::Sim::SimThread; what remains here is the RPS-shaped
+// part of the original class, and that is exactly three things:
 //
-// Determinism note: this class decides only WHEN ticks run (wall-clock driven); each
-// tick's computation is deterministic, and inputs are sampled by TICK NUMBER via the
-// InputFn, so the produced state after N ticks is independent of timing. That is what
-// makes it lockstep-ready and unit-testable against a synchronous run.
+//   * the SEEDING and the LUR_INTERNAL pre-fill (the #75 stress scene, --flockdemo's combat toggle,
+//     the solo live-CVar latch) — game rules about what a fresh sim looks like;
+//   * the two PRE-MATCH GATE predicates (#139): held while the gated team has no mining camp,
+//     released by a batch carrying a PLACEABLE opening camp for that team. "Placeable" is
+//     Sim::CanPlaceBuilding, so an invalid drop cannot start the clock;
+//   * the type bindings (Sim / Snapshot / InputEvent / TickRateHz / MaxEventsPerTick).
+//
+// Everything else — the ~1 kHz service loop, the per-tick publish, input sampled by tick number,
+// idempotent Stop — is engine now, with its own host tests that sabotage each rule.
+//
+// This wrapper keeps the original signature rather than exposing SimThread directly, because the
+// stress/gate arguments belong together with Init: a caller must not be able to spawn the thread and
+// *then* seed the sim.
 class SimRunner {
 public:
-    // Sampled ON THE SIM THREAD at the start of each tick to get that tick's input EVENTS
-    // (#137: place/queue, replacing the old 4-bit mask). Fn-ptr + ctx (not std::function) to
-    // stay allocation-free — the callee writes up to Cap events into Out and sets Count. Real
-    // play drains the input layer; tests return a scripted schedule by tick index; a single-
-    // player AI reads the (const) sim state to decide its events. The sim is const-ref because
-    // the AI's whole input IS the game state — read here on the sim thread, before StepEvents,
-    // so the read is race-free and deterministic.
-    using InputFn = void (*)(void* Ctx, const Sim& S, uint32_t Tick, InputEvent* Out, int Cap,
-                             int& Count);
-
-    ~SimRunner() { Stop(); }
+    using Engine = Lur::Sim::SimThread<Sim, Snapshot, InputEvent, MaxEventsPerTick>;
+    using InputFn = Engine::InputFn;
 
     // Spawn the sim thread. Init(Seed) runs on the caller before the thread starts.
-    // StressPerTeam > 0 (LUR_INTERNAL) bulk-spawns that many soldiers per side first —
-    // the #75 stress scene (tick budget + one-draw render at the raised cap).
-    // PreMatchTeam >= 0 arms the PRE-MATCH HOLD (#139's ready gate, for solo): the clock does not
-    // run and nothing is stepped until a tick's input batch contains an ACCEPTABLE opening mining
-    // camp for that team — then the whole batch applies at tick 0, the human's camp and the AI's
-    // together, exactly as two lockstep peers begin. Elapsed time while held is dropped, not banked,
-    // so no catch-up burst follows. -1 (default) = no gate, which is what the stress/flock scenes
-    // need: they have no camp and would never tick.
+    // StressPerTeam > 0 (LUR_INTERNAL) bulk-spawns that many soldiers per side first — the #75 stress
+    // scene (tick budget + one-draw render at the raised cap).
+    // PreMatchTeam >= 0 arms the pre-match hold: nothing is stepped until a tick's input batch
+    // contains an acceptable opening mining camp for that team — then the whole batch applies at tick
+    // 0, the human's camp and the AI's together, exactly as two lockstep peers begin. -1 (default) =
+    // no gate, which is what the stress/flock scenes need: they have no camp and would never tick.
     void Start(uint64_t Seed, InputFn Input, void* Ctx, uint32_t StressPerTeam = 0,
                bool DisableCombat = false, int PreMatchTeam = -1);
 
-    // Signal the thread to finish the current iteration and join. Idempotent.
-    void Stop();
+    void Stop() { Thread.Stop(); }
 
     // --- Consumer (render thread), safe while running ---
-    bool LatestSnapshot(Snapshot& Out) const { return Mailbox.Consume(Out); }
-    uint32_t PublishedTick() const { return PublishedTickCounter.load(std::memory_order_acquire); }
+    bool LatestSnapshot(Snapshot& Out) const { return Thread.LatestSnapshot(Out); }
+    uint32_t PublishedTick() const { return Thread.PublishedTick(); }
 
-    // --- Post-Stop() accessors (thread joined; no other thread touches TheSim) ---
-    uint64_t FinalStateHash() const { return TheSim.StateHash(); }
-    uint32_t FinalTick() const { return TheSim.Tick; }
+    // --- Post-Stop() accessors (thread joined; no other thread touches the sim) ---
+    uint64_t FinalStateHash() const { return Thread.GetSim().StateHash(); }
+    uint32_t FinalTick() const { return Thread.FinalTick(); }
 
 private:
-    void ThreadMain();
+    static bool Held(void* Ctx, const Sim& S);
+    static bool Opens(void* Ctx, const Sim& S, const InputEvent* Evs, int Count);
 
-    // Cap on ticks run per service iteration: bounds the catch-up BURST after a hitch
-    // (debugger, backgrounded window) so one iteration can't block the loop; the rest
-    // stays in TickClock's accumulator and drains over the next iterations. Never a
-    // discard — the lockstep sim runs every tick (design doc §3).
-    static constexpr uint32_t MaxTicksPerService = 8;
-
-    Sim TheSim;
-    SnapshotMailbox Mailbox;
-    Lur::Sim::TickClock Clock{TickRateHz};
-
-    std::thread Thread;
-    std::atomic<bool> Running{false};
-    std::atomic<uint32_t> PublishedTickCounter{0};
-
-    InputFn Input = nullptr;
-    void* Ctx = nullptr;
+    // One constant for the catch-up burst cap, shared with LockstepPeer::Execute — the two used to
+    // be separate 8s kept in step by a comment.
+    Engine Thread{TickRateHz, MaxExecTicksPerService};
     int PreMatchTeam = -1;   // >=0: hold the clock until this team's opening camp lands (see Start)
 };
 

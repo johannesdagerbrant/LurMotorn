@@ -486,7 +486,9 @@ constexpr uint32_t SendLeadTicks = 3;       // ≤300 ms of wire lead; 0 disable
 // LockstepPeer::Execute drains at most this many ticks per call, so a catch-up burst
 // (post-background / thermal / -O0) can't monopolize the loop and starve input -> ANR
 // (#90; forensics 2026-07-19). Backlog drains over subsequent calls, never discarded.
-// Mirrors SimRunner::MaxTicksPerService. Scheduling never changes results (design §3).
+// Also the cap SimRunner hands Lur::Sim::SimThread, so the solo thread and the lockstep path
+// bound their bursts identically (#201 — they used to be two 8s kept in step by comment).
+// Scheduling never changes results (design §3).
 constexpr uint32_t MaxExecTicksPerService = 8;
 // Above this start-of-call backlog Execute is "catching up": suppress the per-10-tick
 // anchors and emit ONE at the frontier reached, so a burst can't flood the

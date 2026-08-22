@@ -1,106 +1,54 @@
 #include "Rps/SimRunner.h"
 
-#include <chrono>
-#include <thread>
-
 namespace Rps {
-namespace {
 
-// Monotonic nanoseconds since an arbitrary (process-stable) epoch. steady_clock is
-// the right source — never goes backwards, unaffected by wall-clock adjustments.
-uint64_t NowNs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
+// The gate is HELD while the gated team has no mining camp. #139: solo must not begin until the
+// player has placed their opening camp, and the wait must not be banked as catch-up — that second
+// part is Lur::Sim::SimThread's job, this predicate only says whether we are still waiting.
+bool SimRunner::Held(void* Ctx, const Sim& S) {
+    const SimRunner* Self = static_cast<const SimRunner*>(Ctx);
+    return !S.HasMinerCamp(static_cast<uint8_t>(Self->PreMatchTeam));
 }
 
-}  // namespace
+// A batch RELEASES the gate only if it carries a PLACEABLE opening camp for the gated team. The
+// CanPlaceBuilding check is the load-bearing half: without it an invalid drop starts the clock and
+// the match opens with no camp, which reads as the placement having silently vanished.
+bool SimRunner::Opens(void* Ctx, const Sim& S, const InputEvent* Evs, int Count) {
+    const SimRunner* Self = static_cast<const SimRunner*>(Ctx);
+    const uint8_t Team = static_cast<uint8_t>(Self->PreMatchTeam);
+    for (int I = 0; I < Count; ++I) {
+        const InputEvent& E = Evs[I];
+        if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner && E.Team == Team &&
+            S.CanPlaceBuilding(E.Team, E.Type, Fixed{E.X}, Fixed{E.Y}))
+            return true;
+    }
+    return false;
+}
 
-void SimRunner::Start(uint64_t Seed, InputFn InInput, void* InCtx, uint32_t StressPerTeam,
+void SimRunner::Start(uint64_t Seed, InputFn Input, void* Ctx, uint32_t StressPerTeam,
                       bool DisableCombat, int InPreMatchTeam) {
-    Input = InInput;
-    Ctx = InCtx;
     PreMatchTeam = InPreMatchTeam;
-    TheSim.Init(Seed);
+
+    // Seed and pre-fill BEFORE the thread exists — no other thread may be reading the sim.
+    Sim& S = Thread.GetSim();
+    S.Init(Seed);
 #if LUR_INTERNAL
-    if (StressPerTeam > 0) TheSim.StressFill(static_cast<int32_t>(StressPerTeam));
-    TheSim.DisableCombat = DisableCombat;  // --flockdemo (#97): pure flocking, no kills
-    TheSim.LiveCvLatch = true;             // solo (no peer to sync with): console edits apply live
+    if (StressPerTeam > 0) S.StressFill(static_cast<int32_t>(StressPerTeam));
+    S.DisableCombat = DisableCombat;  // --flockdemo (#97): pure flocking, no kills
+    S.LiveCvLatch = true;             // solo (no peer to sync with): console edits apply live
 #else
     (void)StressPerTeam; (void)DisableCombat;
 #endif
 
-    // Publish tick 0 immediately so the render thread has a frame before the first
-    // sim step lands.
-    Mailbox.Back().CaptureFrom(TheSim, NowNs(), Clock.GetStepNs());
-    Mailbox.Publish();
-    PublishedTickCounter.store(TheSim.Tick, std::memory_order_release);
-
-    Running.store(true, std::memory_order_release);
-    Thread = std::thread([this] { ThreadMain(); });
-}
-
-void SimRunner::Stop() {
-    if (!Running.exchange(false, std::memory_order_acq_rel)) return;  // idempotent
-    if (Thread.joinable()) Thread.join();
-}
-
-void SimRunner::ThreadMain() {
-    uint64_t Last = NowNs();
-    while (Running.load(std::memory_order_acquire)) {
-        const uint64_t Now = NowNs();
-        const uint64_t Elapsed = Now - Last;
-        Last = Now;
-
-        // (slice 1/2: pump the transport here — this is the ~1 kHz service point that
-        //  collapses the local polling latency #69 measured. Slice 0 has no transport.)
-
-        // Pre-match hold (see Start): the clock is not advanced at all, so the wait is DROPPED rather
-        // than banked. Each iteration still asks the input layer for a batch, but applies it only if
-        // it carries an acceptable opening camp for the gated team — so the match begins on the
-        // player's placement, with the AI's own first move in that same tick, and an invalid drop
-        // cannot start the clock.
-        if (PreMatchTeam >= 0 && !TheSim.HasMinerCamp(static_cast<uint8_t>(PreMatchTeam))) {
-            InputEvent Evs[MaxEventsPerTick];
-            int Count = 0;
-            if (Input) Input(Ctx, TheSim, TheSim.Tick, Evs, MaxEventsPerTick, Count);
-            bool Opens = false;
-            for (int I = 0; I < Count; ++I) {
-                const InputEvent& E = Evs[I];
-                if (E.Kind == EventPlaceBuilding && E.Type == UnitMiner &&
-                    E.Team == static_cast<uint8_t>(PreMatchTeam) &&
-                    TheSim.CanPlaceBuilding(E.Team, E.Type, Fixed{E.X}, Fixed{E.Y}))
-                    Opens = true;
-            }
-            if (Opens) {
-                TheSim.StepEvents(Evs, Count);
-                Mailbox.Back().CaptureFrom(TheSim, NowNs(), Clock.GetStepNs());
-                Mailbox.Publish();
-                PublishedTickCounter.store(TheSim.Tick, std::memory_order_release);
-            }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        const uint32_t Owed = Clock.AdvancePreserving(Elapsed, MaxTicksPerService);
-        for (uint32_t K = 0; K < Owed; ++K) {
-            InputEvent Evs[MaxEventsPerTick];
-            int Count = 0;
-            if (Input) Input(Ctx, TheSim, TheSim.Tick, Evs, MaxEventsPerTick, Count);  // by tick number
-            TheSim.StepEvents(Evs, Count);
-
-            // Publish this tick. CaptureFrom (the heavy copy) runs UNLOCKED into the
-            // back buffer; Publish() only flips indices under a short lock.
-            Mailbox.Back().CaptureFrom(TheSim, NowNs(), Clock.GetStepNs());
-            Mailbox.Publish();
-            PublishedTickCounter.store(TheSim.Tick, std::memory_order_release);
-        }
-
-        // High service rate (~1 kHz), independent of vsync. The accumulator absorbs
-        // the OS sleep granularity, so tick TIMING stays correct even if the sleep
-        // overshoots. Slice 2 replaces this sleep with a transport wait/pump.
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Engine::Hooks H;
+    H.Input = Input;
+    H.InputCtx = Ctx;
+    if (PreMatchTeam >= 0) {
+        H.Held = &Held;
+        H.Opens = &Opens;
+        H.GateCtx = this;
     }
+    Thread.Start(H);
 }
 
 }  // namespace Rps
