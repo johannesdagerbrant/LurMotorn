@@ -7,6 +7,14 @@ target_link_libraries(core_tests PRIVATE lur::core lur::sim lur::render)
 target_compile_features(core_tests PRIVATE cxx_std_20)
 add_test(NAME core_tests COMMAND core_tests)
 
+# #201: the assistant remote-control command line promoted out of Rps::AgentControl. NOT behind
+# LUR_AGENT on purpose — the parser cannot drive anything, and compiling it always is what keeps the
+# grammar (and the sequence-number idempotence rule) in the ordinary host suite.
+add_executable(agent_parser_tests AgentCommandParserTests.cpp)
+target_link_libraries(agent_parser_tests PRIVATE lur::core)
+target_compile_features(agent_parser_tests PRIVATE cxx_std_20)
+add_test(NAME agent_parser_tests COMMAND agent_parser_tests)
+
 # CVar SHIPPING zero-overhead proof (spec §1/§7, issue #111): reading a CVar must emit
 # machine code identical to reading the old constexpr. The script compiles a probe TU
 # twice at -O2 -DLUR_SHIPPING=1 and diffs Hot()'s disassembly. Host/Windows-only (needs

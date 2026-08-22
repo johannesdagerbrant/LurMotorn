@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "Lur/Net/Session.h"  // EMsgType (the generic game slots)
+#include "Lur/Sim/InputInbox.h"
 #include "Lur/Sim/Tick.h"
 #include "Rps/Sim.h"
 #include "Rps/SnapshotRing.h"  // rollback snapshot ring + peer predictor
@@ -479,8 +480,13 @@ private:
     Lur::Sim::TickClock Clock{TickRateHz};
     uint32_t Delay = InputDelayTicks;
     uint8_t MyTeam = 0;
-    std::mutex EventQueueMutex_;              // input thread -> sim thread inbox (#91)
-    std::vector<InputEvent> PendingLocalEvents;
+    // Input thread -> sim thread inbox (#91). Since #201 this is Lur::Sim::InputInbox, shared with the
+    // solo path (Rps::SoloInputInbox) so the two cannot disagree about ordering. It used to be an
+    // unbounded std::vector: bounded is better here, because a stalled sim thread grew the old one
+    // without limit and the input path allocated on a phone. Four ticks' worth is far above a human
+    // tap rate, and a drop is COUNTED — QueueLocalEvent logs it, because a dropped local event is a
+    // lost player action and this codebase's failures are the silent ones.
+    Lur::Sim::InputInbox<InputEvent, MaxEventsPerTick * 4> LocalInbox_;
 
     // index = exec tick; each entry is that tick's event batch for the team (pre-seeded empty
     // for ticks 0..Delay-1, the by-convention empty delay window on both peers).

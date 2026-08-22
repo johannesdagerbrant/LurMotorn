@@ -66,7 +66,7 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     WallClockTicks_ = 0;
     NextSendTick_ = 0;
     SentBatches_.clear();
-    { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
+    LocalInbox_.Clear();
     Desync = false;
     DesyncsSeen_ = 0;   // #204: per-MATCH, so the next match is not judged by this one's divergence
     MyHash.clear();
@@ -152,8 +152,12 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
 
 void LockstepPeer::QueueLocalEvent(InputEvent E) {
     E.Team = MyTeam;  // authoritative — the UI can only ever act for its own team
-    std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-    PendingLocalEvents.push_back(E);
+    if (!LocalInbox_.Push(E)) {
+        // Reachable only if the sim thread has stalled for four ticks while input kept arriving. Say so:
+        // a silently dropped place/queue reads as the game ignoring the player.
+        Lur::Log::Error("RPS: local input inbox FULL — dropped a %s event (%u dropped in total)",
+                        E.Kind == EventPlaceBuilding ? "place" : "queue", LocalInbox_.Dropped());
+    }
 }
 
 // Send ONE per-tick input frame on the wire (no local-timeline side effect — LocalEvents is grown
@@ -275,10 +279,10 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // frame, no dup.
     {
         std::vector<InputEvent> Batch;
-        {
-            std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-            if (!PendingLocalEvents.empty() && NextSendTick_ < WallClockTicks_ + SendLeadTicks)
-                Batch.swap(PendingLocalEvents);
+        if (NextSendTick_ < WallClockTicks_ + SendLeadTicks) {
+            InputEvent Buf[decltype(LocalInbox_)::Capacity];
+            const int N = LocalInbox_.Drain(Buf, decltype(LocalInbox_)::Capacity);
+            Batch.assign(Buf, Buf + N);
         }
         if (!Batch.empty()) {
             SendInputFrame(NextSendTick_, Batch);
@@ -336,9 +340,9 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
 // match the moment both camps are in. No wall ticks are produced/executed until then.
 void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
     if (!LocalReady_) {
-        std::lock_guard<std::mutex> Lock(EventQueueMutex_);
-        for (const InputEvent& E : PendingLocalEvents) {
-            if (E.Kind != EventPlaceBuilding || E.Type != UnitMiner) continue;
+        LocalInbox_.Visit([this](const InputEvent& E) {
+            if (LocalReady_) return;   // Visit cannot break; the first accepted camp wins, as before
+            if (E.Kind != EventPlaceBuilding || E.Type != UnitMiner) return;
             // #167: "ready" must mean "ready with a camp that will EXIST". This used to take the camp
             // on faith, so an unplaceable one still set LocalReady_, the match started, and tick 0's
             // ApplyPlace then discarded it — leaving a peer in a live match with NO camp and its full
@@ -361,12 +365,11 @@ void LockstepPeer::PreMatchTick(uint64_t ElapsedNs) {
                 Lur::Log::Error("RPS: pre-match camp at (%d,%d) is NOT placeable — ignoring it and "
                                 "staying unready. Place again on valid ground.",
                                 Fixed{E.X}.ToInt(), Fixed{E.Y}.ToInt());
-                continue;  // a later candidate in the same batch may still be good
+                return;  // a later candidate in the same batch may still be good
             }
             LocalCamp_ = E; LocalReady_ = true;
-            break;
-        }
-        PendingLocalEvents.clear();  // pre-match: only the mining camp is accepted; drop the rest
+        });
+        LocalInbox_.Clear();  // pre-match: only the mining camp is accepted; drop the rest
     }
     // #149: send our camp, then KEEP re-sending it on a period until the peer's arrives. One send
     // was safe only while both peers entered a match together; across a post-match restart the
@@ -1427,7 +1430,7 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     WallClockTicks_ = Frontier;  // re-base the wall-clock counter with the timeline
     NextSendTick_ = Frontier;    // next frame to send is tick Frontier
     SentBatches_.clear();        // drop anything sent-but-not-produced (consistency over completeness)
-    { std::lock_guard<std::mutex> Lock(EventQueueMutex_); PendingLocalEvents.clear(); }
+    LocalInbox_.Clear();
     MyHash.clear();  // old anchors are pre-outage; resume with fresh ones
     PeerHash.clear();
     // #163: both peers re-base their timelines to the same frontier here, so the sequence expectation

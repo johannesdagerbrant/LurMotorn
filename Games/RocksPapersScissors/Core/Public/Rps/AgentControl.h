@@ -1,6 +1,8 @@
 #pragma once
 #include <cstdint>
 
+#include "Lur/Core/AgentCommandParser.h"
+
 namespace Rps {
 
 // The assistant's remote-control command set for a phone (CLAUDE.md's LUR_AGENT axis).
@@ -68,85 +70,39 @@ constexpr int AgentGestureTaps = 3;
 //
 // Total on hostile input: it is parsing text from outside the process, so it never traps, never reads
 // past the terminator, and rejects anything it does not fully understand.
+// Since #201 the grammar, the sequence-number gating and the hostile-input hardening are
+// Lur::AgentCommandParser; what stays here is the VERB TABLE, which is the only game-specific part of
+// a command line. The table is the single place a verb name is bound to its meaning — the enum above
+// and this array are the whole contract.
 class AgentControl {
 public:
     // Parse Text and, if it carries a NEW command, fill Out and return true.
     bool Poll(const char* Text, AgentCommand& Out) {
-        if (Text == nullptr) return false;
-        const char* P = Text;
-        uint32_t Seq = 0;
-        if (!ParseUInt(P, Seq)) return false;
-        if (Seq <= LastSeq_) return false;          // already applied (or a stale channel re-read)
-        AgentCommand Cmd;
-        if (!ParseVerb(P, Cmd)) return false;       // unknown verb: ignore, and do NOT consume the seq,
-                                                    // so fixing a typo in place still works
-        ParseInt(P, Cmd.A);
-        ParseInt(P, Cmd.B);
-        ParseInt(P, Cmd.C);
-        LastSeq_ = Seq;
-        Out = Cmd;
+        static constexpr Lur::AgentVerb Verbs[] = {
+            {"place",   static_cast<int32_t>(EAgentCmd::Place)},
+            {"queue",   static_cast<int32_t>(EAgentCmd::Queue)},
+            {"stress",  static_cast<int32_t>(EAgentCmd::Stress)},
+            {"corrupt", static_cast<int32_t>(EAgentCmd::Corrupt)},
+            {"droptx",  static_cast<int32_t>(EAgentCmd::DropTx)},
+            {"console", static_cast<int32_t>(EAgentCmd::Console)},
+            {"gesture", static_cast<int32_t>(EAgentCmd::Gesture)},
+            {"killown", static_cast<int32_t>(EAgentCmd::KillOwn)},
+            {"linked",  static_cast<int32_t>(EAgentCmd::Linked)},
+        };
+        Lur::AgentCommandLine Line;
+        if (!Parser_.Poll(Text, Verbs, static_cast<int>(sizeof(Verbs) / sizeof(Verbs[0])), Line))
+            return false;
+        Out.Kind = static_cast<EAgentCmd>(Line.Verb);
+        Out.A = Line.A;
+        Out.B = Line.B;
+        Out.C = Line.C;
         return true;
     }
 
-    uint32_t LastSeq() const { return LastSeq_; }
+    uint32_t LastSeq() const { return Parser_.LastSeq(); }
 
 private:
-    static void SkipSpace(const char*& P) {
-        while (*P == ' ' || *P == '\t' || *P == '\r' || *P == '\n') ++P;
-    }
-    static bool ParseUInt(const char*& P, uint32_t& Out) {
-        SkipSpace(P);
-        if (*P < '0' || *P > '9') return false;
-        uint64_t V = 0;
-        while (*P >= '0' && *P <= '9') {
-            V = V * 10 + static_cast<uint64_t>(*P - '0');
-            if (V > 0xFFFFFFFFull) return false;    // absurd seq: reject rather than wrap
-            ++P;
-        }
-        Out = static_cast<uint32_t>(V);
-        return true;
-    }
-    // Optional signed argument; leaves Out untouched when absent, so defaults stand.
-    static void ParseInt(const char*& P, int32_t& Out) {
-        SkipSpace(P);
-        const bool Neg = *P == '-';
-        if (Neg) ++P;
-        if (*P < '0' || *P > '9') return;
-        int64_t V = 0;
-        bool Clamped = false;
-        while (*P >= '0' && *P <= '9') {
-            if (!Clamped) {
-                V = V * 10 + static_cast<int64_t>(*P - '0');
-                if (V > 0x7FFFFFFF) { V = 0x7FFFFFFF; Clamped = true; }  // clamp, never wrap
-            }
-            ++P;                                     // always advance, so digits can't be re-read
-        }
-        Out = static_cast<int32_t>(Neg ? -V : V);
-    }
-    static bool Match(const char*& P, const char* Word) {
-        const char* Q = P;
-        while (*Word != '\0') {
-            if (*Q != *Word) return false;
-            ++Q; ++Word;
-        }
-        if (*Q != '\0' && *Q != ' ' && *Q != '\t' && *Q != '\r' && *Q != '\n') return false;
-        P = Q;
-        return true;
-    }
-    static bool ParseVerb(const char*& P, AgentCommand& Cmd) {
-        SkipSpace(P);
-        if (Match(P, "place"))   { Cmd.Kind = EAgentCmd::Place;   return true; }
-        if (Match(P, "queue"))   { Cmd.Kind = EAgentCmd::Queue;   return true; }
-        if (Match(P, "stress"))  { Cmd.Kind = EAgentCmd::Stress;  return true; }
-        if (Match(P, "corrupt")) { Cmd.Kind = EAgentCmd::Corrupt; return true; }
-        if (Match(P, "droptx"))  { Cmd.Kind = EAgentCmd::DropTx;  return true; }
-        if (Match(P, "console")) { Cmd.Kind = EAgentCmd::Console; return true; }
-        if (Match(P, "gesture")) { Cmd.Kind = EAgentCmd::Gesture; return true; }
-        if (Match(P, "killown")) { Cmd.Kind = EAgentCmd::KillOwn; return true; }
-        if (Match(P, "linked"))  { Cmd.Kind = EAgentCmd::Linked;  return true; }
-        return false;
-    }
-    uint32_t LastSeq_ = 0;
+    Lur::AgentCommandParser Parser_;
 };
 
 }  // namespace Rps

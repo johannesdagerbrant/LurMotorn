@@ -20,3 +20,10 @@ add_executable(sim_thread_tests SimThreadTests.cpp)
 target_link_libraries(sim_thread_tests PRIVATE lur::sim Threads::Threads)
 target_compile_features(sim_thread_tests PRIVATE cxx_std_20)
 add_test(NAME sim_thread_tests COMMAND sim_thread_tests)
+
+# #201: the input-thread -> sim-thread event inbox promoted out of Rps::SoloInputInbox and
+# LockstepPeer::PendingLocalEvents. Threaded conservation test, hence Threads::Threads.
+add_executable(input_inbox_tests InputInboxTests.cpp)
+target_link_libraries(input_inbox_tests PRIVATE lur::sim Threads::Threads)
+target_compile_features(input_inbox_tests PRIVATE cxx_std_20)
+add_test(NAME input_inbox_tests COMMAND input_inbox_tests)
