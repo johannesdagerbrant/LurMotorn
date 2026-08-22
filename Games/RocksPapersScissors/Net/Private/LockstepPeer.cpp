@@ -94,12 +94,9 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     ReoffersLeft = 0;   // no resync round is in flight in a fresh match (BeginResync arms it)
     // #161: the recovery budget is PER MATCH. A match that needed two repairs should not start the
     // next one already one attempt into a spent budget — and a fresh match cannot be mid-recovery.
-    Recovering_ = false;
-    RecoveryAdopting_ = false;
-    RecoveryAttempts_ = 0;
-    GapRecoveries_ = 0;     // #167: the gap budget is per-match too
-    RecoveryNs_ = 0;
-    RecoveryCarryNs_ = 0;
+    // Both budgets, the in-flight state and any banked held time. Rounds and the retry ladder
+    // deliberately survive: they are the "how many times has this pair failed to converge" signal.
+    Recov_.ResetForMatch();
     StallNs_ = 0;       // #162: a fresh match is not starved
     LastExecTick_ = 0;
 #if LUR_INTERNAL
@@ -142,8 +139,7 @@ void LockstepPeer::Init(uint64_t Seed, uint8_t InMyTeam, SendFn InSend, void* In
     // handler re-assigns), which is all the clearing was for — without discarding one that already
     // landed. Between Init and the new peer's first fingerprint the verdict describes the PREVIOUS
     // peer, which is strictly better than describing nothing.
-    BuildMismatch_ = !PeerFingerprint_.empty() && PeerFingerprint_ != Lur::BuildFingerprint();
-    BadBuildLogged_ = false;
+    Build_.Rederive(Lur::BuildFingerprint());
 #endif
     Inited_ = true;   // #208: only now may a match-live edge be announced
     BeginMatch(Seed);
@@ -225,17 +221,19 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
     // the next round the moment it expires. Nothing else re-triggers this — the anchor cross-check
     // only fires on a fresh hash pair, and a stalled pair may produce none — so without this the
     // "always recover" rule would hold only when the peer happened to keep talking.
-    if (!Recovering_ && RecoveryRetryNs_ > 0) {
-        RecoveryRetryNs_ = ElapsedNs >= RecoveryRetryNs_ ? 0 : RecoveryRetryNs_ - ElapsedNs;
-        if (RecoveryRetryNs_ == 0 && Desync && TheSim.Result == ResultOngoing)
-            BeginRecovery("retrying after a spent recovery round");
+    // One Advance drives both timers in the same order the two blocks used to run: count the
+    // between-rounds backoff down first, then charge an in-flight repair against its timeout. (One
+    // difference, deliberate: a retry that starts a repair on THIS call no longer also charges that
+    // fresh repair one service interval of its 4 s timeout.)
+    const Lur::Net::RecoveryPolicy::ETick RT =
+        Recov_.Advance(ElapsedNs, Desync && TheSim.Result == ResultOngoing);
+    if (RT == Lur::Net::RecoveryPolicy::ETick::RetryDue)
+        BeginRecovery("retrying after a spent recovery round");
+    else if (RT == Lur::Net::RecoveryPolicy::ETick::Timeout) {
+        FailRecovery("the survivor's history never arrived");
+        return;
     }
-    if (Recovering_) {
-        RecoveryNs_ += ElapsedNs;
-        if (RecoveryNs_ >= DesyncRecoveryTimeoutNs) {
-            FailRecovery("the survivor's history never arrived");
-            return;
-        }
+    if (Recov_.Recovering()) {
         // CARRY the held wall time rather than dropping it. The survivor keeps ticking through the
         // exchange while we are frozen, so time discarded here is time we can never make up: WallTicks
         // is the execution target and the ceiling is min(WallTicks, ...), so the adopter would resume
@@ -243,13 +241,10 @@ void LockstepPeer::Tick(uint64_t ElapsedNs) {
         // Giving the time back produces a short catch-up burst instead, which the design already
         // guarantees is result-neutral (scheduling never changes results, §3's sprint law) and which
         // Execute's per-call cap keeps from starving input.
-        RecoveryCarryNs_ += ElapsedNs;
+        Recov_.BankHeldTime(ElapsedNs);
         return;   // hold production and execution until the repair lands
     }
-    if (RecoveryCarryNs_ != 0) {
-        ElapsedNs += RecoveryCarryNs_;
-        RecoveryCarryNs_ = 0;
-    }
+    ElapsedNs += Recov_.TakeHeldTime();
     if (Awaiting) {
         AwaitingNs += ElapsedNs;
         if (AwaitingNs < ResyncStallTimeoutNs) return;
@@ -449,13 +444,13 @@ void LockstepPeer::TryStartMatch() {
     // Unlike the cvar-sync warning above, this IS a refusal: a fingerprint mismatch is proof, not
     // suspicion. TryStartMatch runs every pre-match tick, so log once per Init or the error scrolls
     // the log away.
-    if (BuildMismatch_) {
-        if (!BadBuildLogged_) {
+    if (Build_.Mismatch()) {
+        // ClaimLogSlot is the one-shot: TryStartMatch runs every pre-match tick, so without it the
+        // error scrolls the log away.
+        if (Build_.ClaimLogSlot())
             Lur::Log::Error("RPS: REFUSING to start the match — peer build '%s' != local '%s'. "
                             "Rebuild BOTH devices from the same commit.",
-                            PeerFingerprint_.c_str(), Lur::BuildFingerprint());
-            BadBuildLogged_ = true;
-        }
+                            Build_.PeerFingerprint(), Lur::BuildFingerprint());
         return;
     }
 #endif
@@ -756,44 +751,39 @@ void LockstepPeer::EmitAnchor(uint32_t Tick, uint32_t Hash) {
 // essential, because a desync is exactly the situation where the two sides cannot agree about
 // anything derived from state. The loser replays the survivor's input history through a fresh sim.
 void LockstepPeer::BeginRecovery(const char* Why) {
-    if (Recovering_) return;                 // one round at a time; the timeout ends it
     if (TheSim.Result != ResultOngoing) return;  // a decided match has nothing left to repair
-    if (RecoveryAttempts_ >= MaxDesyncRecoveries) {
+    const Lur::Net::ERecoveryAction Act = Recov_.BeginDesync(IsRecoverySurvivor());
+    if (Act == Lur::Net::ERecoveryAction::None) return;   // one round at a time; the timeout ends it
+    if (Act == Lur::Net::ERecoveryAction::BudgetSpent) {
         FailRecovery("recovery budget spent");
         return;
     }
-    ++RecoveryAttempts_;
-    Recovering_ = true;
-    RecoveryNs_ = 0;
     MyHash.clear();  // anchors from before the repair say nothing about the state after it
     PeerHash.clear();
-    if (IsRecoverySurvivor()) {
-        RecoveryAdopting_ = false;
+    if (Act == Lur::Net::ERecoveryAction::Offer) {
         Lur::Log::Info("RPS: recovering (%s) — we hold the lower device id, so our timeline survives; "
                        "handing it to the peer (attempt %d/%d, tick %u)",
-                       Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
+                       Why, Recov_.Attempts(), MaxDesyncRecoveries, TheSim.Tick);
         OfferHistoryToLoser();
         // Our own state stands (OfferHistoryToLoser re-based us to our confirmed frontier). Clear the
         // desync gate and resume: we speculate forward again, confirming as the peer's rebuilt frames
         // arrive — no ceiling to sit at under rollback.
         Desync = false;
-        Recovering_ = false;
         return;
     }
-    RecoveryAdopting_ = true;
     IncomingHistory.clear();
     Awaiting = true;    // hold production AND execution: our state is the one known to be suspect
     AwaitingNs = 0;
     Lur::Log::Info("RPS: recovering (%s) — peer holds the lower device id, asking for its history to "
                    "rebuild from (attempt %d/%d, our tick %u)",
-                   Why, RecoveryAttempts_, MaxDesyncRecoveries, TheSim.Tick);
+                   Why, Recov_.Attempts(), MaxDesyncRecoveries, TheSim.Tick);
     // #212: ASK once waiting has demonstrably not worked. The FIRST attempt still relies on the
     // symmetric cross-check — that is the common case and it converges (measured: 40 recoveries in an
     // 8000-tick soak) — because answering a request costs the survivor a re-base, and a re-base
     // truncates up to RollbackHorizon ticks of its own produced input. Asking on every attempt made
     // things worse, not better: checkpoint failures went 4/41 -> 22/41 purely from that churn. But a
     // SECOND attempt means the first wait timed out, and waiting again unchanged is the livelock.
-    if (RecoveryAttempts_ > 1 || RecoveryRounds_ > 0) RequestHistoryFromSurvivor(TheSim.Tick);
+    if (Act == Lur::Net::ERecoveryAction::Request) RequestHistoryFromSurvivor(TheSim.Tick);
 }
 
 // #163's gap detector named a frame that never arrived, so WE know we are the incomplete peer while
@@ -805,14 +795,16 @@ void LockstepPeer::BeginRecovery(const char* Why) {
 // is why the attempts are bounded). If the lost frame was empty, the prediction already matched and the
 // rebuild lands on the identical state.
 void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
-    if (Recovering_ || Awaiting) return;
+    if (Recov_.Recovering() || Awaiting) return;
     if (TheSim.Result != ResultOngoing) return;  // the match is over; the peer's later frames are noise
     // #167: charge the GAP budget, not the desync one. A lost frame is not worth ending a match, and
     // it must not burn the budget that spending MaxDesyncRecoveries ends a round on — an
     // ordinary app restart takes this path too (it is the cold-rejoin case), so sharing the budget
     // meant one restart left the next real repair already an attempt down.
-    if (GapRecoveries_ >= MaxGapRecoveries) return;
-    ++GapRecoveries_;
+    // A spent GAP budget is a refusal, never a BudgetSpent report: a lost frame must not push the
+    // match toward the draw a spent DESYNC budget declares (#167).
+    const Lur::Net::ERecoveryAction Act = Recov_.BeginGap(IsRecoverySurvivor());
+    if (Act == Lur::Net::ERecoveryAction::None) return;
 
     // THE SURVIVOR NEVER ADOPTS. Measured on hardware 2026-08-16: this function made the survivor an
     // adopter like anyone else, so a gap in ITS inbound stream left it Awaiting a history the peer is
@@ -826,28 +818,23 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
     // our timeline and let the peer conform. The lost input is dropped. That costs the loser a
     // placement, and it is the same trade the tie-break already makes everywhere else: consistency,
     // not fairness (CLAUDE.md), with both players in one room.
-    if (IsRecoverySurvivor()) {
-        MyHash.clear();   // anchors from before the re-base say nothing about the state after it
-        PeerHash.clear();
+    MyHash.clear();   // anchors from before the re-base say nothing about the state after it
+    PeerHash.clear();
+    if (Act == Lur::Net::ERecoveryAction::Offer) {
         Lur::Log::Info("RPS: input gap at tick %u — we hold the lower device id, so our timeline "
                        "stands: publishing it for the peer to rebuild from instead of waiting "
                        "(attempt %d/%d)",
-                       MissingTick, GapRecoveries_, MaxGapRecoveries);
+                       MissingTick, Recov_.GapRepairs(), MaxGapRecoveries);
         OfferHistoryToLoser();
         return;
     }
 
-    Recovering_ = true;
-    RecoveryAdopting_ = true;
-    RecoveryNs_ = 0;
     IncomingHistory.clear();
     Awaiting = true;
     AwaitingNs = 0;
-    MyHash.clear();
-    PeerHash.clear();
     Lur::Log::Info("RPS: input gap at tick %u — asking the peer for its history before the hole is "
                    "executed, so nothing diverges (attempt %d/%d)",
-                   MissingTick, GapRecoveries_, MaxGapRecoveries);
+                   MissingTick, Recov_.GapRepairs(), MaxGapRecoveries);
     RequestHistoryFromSurvivor(MissingTick);
 }
 
@@ -858,7 +845,7 @@ void LockstepPeer::RequestRecovery(uint32_t MissingTick) {
 // #212: this used to be inline in RequestRecovery and reachable ONLY from the lost-frame path. The
 // anchor-mismatch path (BeginRecovery) just set Awaiting and waited, on the reasoning that "both peers
 // cross-check the SAME anchor tick, so both reach BeginRecovery". That is false whenever the survivor
-// is already handling something: CrossCheck returns early on `if (Desync || Recovering_)`, so a
+// is already handling something: CrossCheck returns early on `if (Desync || Recov_.Recovering())`, so a
 // mismatch the loser trips on during the survivor's own in-flight round is never seen by the survivor,
 // and nobody ever offers. The loser then waits out AwaitingResyncTimeout, fails the round, backs off,
 // re-enters the identical silent wait, and repeats forever — the second half of the #212 livelock, logged as
@@ -883,9 +870,7 @@ void LockstepPeer::OfferHistoryToLoser() {
 }
 
 void LockstepPeer::FinishRecovery() {
-    Recovering_ = false;
-    RecoveryAdopting_ = false;
-    RecoveryNs_ = 0;
+    Recov_.Finish();
     Awaiting = false;
     AwaitingNs = 0;
     Desync = false;   // the ONLY place besides BeginMatch that clears it: we are provably converged
@@ -912,29 +897,25 @@ void LockstepPeer::FinishRecovery() {
 // (a reconnect/resync cycle every ~11 s for eight minutes, never widening its wait). A pair that
 // genuinely cannot converge should wait quietly and keep trying, not thrash.
 void LockstepPeer::FailRecovery(const char* Why) {
-    Recovering_ = false;
-    RecoveryAdopting_ = false;
+    // Fail() arms the backoff and hands the new round a fresh budget. It deliberately does NOT
+    // drop the banked held time: the match continues, so those ticks are still owed to us.
+    Recov_.Fail();
     Awaiting = false;
-    RecoveryNs_ = 0;
-    // Do NOT drop the carry: the match continues, so held wall time is still owed to us.
     Desync = true;
-    ++RecoveryRounds_;
-    RecoveryAttempts_ = 0;                       // a fresh budget for the new round
-    RecoveryRetryNs_ = RecoveryRetryBackoffNs(RecoveryRounds_);
     Lur::Log::Error("RPS: recovery round %d exhausted (%s) at tick %u — retrying in %llums. The match "
                     "is NOT ended: a draw is not an acceptable outcome, and the survivor rule "
                     "(lower device id) resolves this symmetrically without one. Replay converges on a "
                     "lost input and CANNOT on nondeterminism, so a round count that keeps climbing is "
                     "the signal to look for the latter (a float in sim state, a compiler difference).",
-                    RecoveryRounds_, Why, TheSim.Tick,
-                    static_cast<unsigned long long>(RecoveryRetryNs_ / 1'000'000ull));
+                    Recov_.Rounds(), Why, TheSim.Tick,
+                    static_cast<unsigned long long>(Recov_.RetryNs() / 1'000'000ull));
 }
 
 void LockstepPeer::CrossCheck(uint32_t Tick) {
     const auto Mine = MyHash.find(Tick);
     const auto Theirs = PeerHash.find(Tick);
     if (Mine == MyHash.end() || Theirs == PeerHash.end() || Mine->second == Theirs->second) return;
-    if (Desync || Recovering_) return;   // already handling it — don't re-trip on every later anchor
+    if (Desync || Recov_.Recovering()) return;   // already handling it — don't re-trip on every later anchor
     // A mismatch under a reliable transport + a deterministic sim is always a bug. The RESPONSE has to
     // be a playable one, and it has been wrong twice: first Desync simply gated the exec loop and
     // nothing ever cleared it, so the match STOPPED (2026-07-30, both peers pinned at tick 8180 with
@@ -1030,7 +1011,7 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
                 // being repaired. (Observe has already re-based past the hole, so the gap is counted
                 // once rather than on every later frame.)
                 RequestRecovery(PeerSeq_.LastGapTick());
-                if (Recovering_) return;
+                if (Recov_.Recovering()) return;
             }
             PeerSeq_.AdvanceExpected();
         }
@@ -1142,7 +1123,7 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             // the same frontier so its next produced frame lands where we expect it.
             //
             // ONLY THE SURVIVOR ANSWERS, unconditionally. This used to read
-            //     if (RecoveryAdopting_ && !IsRecoverySurvivor()) return;
+            //     if (Recov_.Adopting() && !IsRecoverySurvivor()) return;
             // which enforced the rule only WHILE the loser happened to be mid-adoption; between
             // rounds it answered anyway. Whether we are currently adopting has nothing to do with
             // whose timeline is authoritative — only the tie-break does.
@@ -1169,10 +1150,10 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             // sides and neither would ever yield — which is why the existing machinery, though it was
             // all present, never converged anything on a hash mismatch.
             const bool Adopt = R.IsOk() && IncomingHistory.size() >= F &&
-                               (RecoveryAdopting_ || F > TheSim.Tick);
+                               (Recov_.Adopting() || F > TheSim.Tick);
             if (Adopt) {
                 RebuildFromHistory(F);
-                if (Recovering_) { FinishRecovery(); return; }
+                if (Recov_.Recovering()) { FinishRecovery(); return; }
             } else {
                 IncomingHistory.clear();  // we're ahead / short -> keep ours
                 // #161: the peer published a frontier we are ALREADY standing on. Offering a history
@@ -1244,18 +1225,13 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
         // builds -> refuse the match (the app checks BuildMismatch() and aborts before
         // tick 0). Loud, located, and BEFORE any divergence instead of a mid-match draw.
         const char* Mine = Lur::BuildFingerprint();
-        const std::size_t Ml = std::strlen(Mine);
-        const bool Differs = (N != Ml || std::memcmp(Data, Mine, Ml) != 0);
+        const bool Differs = Build_.OnPeerFingerprint(reinterpret_cast<const char*>(Data), N, Mine);
         // ASSIGN, don't just latch on. The verdict should describe the last fingerprint we actually
         // heard, and now that BeginResync re-offers one on every reconnect, a matching fingerprint is
         // positive evidence that the peer's build is fine. That is a better answer to the 2026-07-30
         // complaint (a peer reinstalled from a matching commit left the OTHER phone reporting
         // badbuild=1 against a build that no longer existed) than clearing at our own Init, because it
         // clears on evidence rather than on an unrelated local event.
-        BuildMismatch_ = Differs;
-        // Remember the STRING, not just the verdict (#166): Init re-derives from this, so a
-        // fingerprint that arrives before our own Init is no longer thrown away.
-        PeerFingerprint_.assign(reinterpret_cast<const char*>(Data), N);
         if (Differs)
             Lur::Log::Error("RPS: build-fingerprint mismatch — peer '%.*s' vs local '%s' "
                             "(refuse match; rebuild both from the same commit)",

@@ -11,7 +11,9 @@
 #include "Lur/Sim/InputInbox.h"
 #include "Lur/Sim/Tick.h"
 #include "Rps/Sim.h"
+#include "Lur/Net/BuildGate.h"
 #include "Lur/Net/FrameSequence.h"
+#include "Lur/Net/RecoveryPolicy.h"
 #include "Rps/SnapshotRing.h"  // rollback snapshot ring + peer predictor
 #include "Rps/Tunables.h"
 
@@ -111,7 +113,7 @@ public:
     // BEFORE tick 0 — the proactive form of the reactive anchor-hash desync alarm, and what
     // makes the 1-byte GameplayId agreement safe (identical builds => identical CVar list).
     void SendFingerprint();
-    bool BuildMismatch() const { return BuildMismatch_; }
+    bool BuildMismatch() const { return Build_.Mismatch(); }
 #endif
 
     // Reconnect (cold rejoin or blip): send our executed input history as chunks +
@@ -150,10 +152,19 @@ public:
     // nothing and still recovers the instant the peer becomes able to answer.
     static constexpr uint64_t RecoveryRetryBaseNs = 1'000'000'000ull;
     static constexpr uint64_t RecoveryRetryMaxNs  = 15'000'000'000ull;
+    // The whole recovery state machine is Lur::Net::RecoveryPolicy since #201; these constants are
+    // the RPS tuning fed into it, kept as public names because the desktop HUD and the tests read them.
+    static Lur::Net::RecoveryConfig RecoveryTuning() {
+        Lur::Net::RecoveryConfig C;
+        C.MaxAttemptsPerRound = MaxDesyncRecoveries;
+        C.MaxGapRepairs = MaxGapRecoveries;
+        C.TimeoutNs = DesyncRecoveryTimeoutNs;
+        C.RetryBaseNs = RecoveryRetryBaseNs;
+        C.RetryMaxNs = RecoveryRetryMaxNs;
+        return C;
+    }
     static uint64_t RecoveryRetryBackoffNs(int Round) {
-        uint64_t Ns = RecoveryRetryBaseNs;
-        for (int I = 1; I < Round && Ns < RecoveryRetryMaxNs; ++I) Ns *= 2;
-        return Ns > RecoveryRetryMaxNs ? RecoveryRetryMaxNs : Ns;
+        return Lur::Net::RecoveryPolicy{RecoveryTuning()}.RetryBackoffNs(Round);
     }
     // #167: the LOST-FRAME path gets its OWN, more generous bound instead of sharing the one above.
     // The two are not the same kind of event. An anchor mismatch means the sims already disagree and
@@ -186,7 +197,7 @@ public:
     // A recovery is in flight: state is not trusted and nothing is executed. The view shows this as
     // "resyncing" — a recovery that silently rewinds several seconds of play reads as a glitch or as
     // cheating, so the player has to be told something is being repaired.
-    bool Recovering() const { return Recovering_; }
+    bool Recovering() const { return Recov_.Recovering(); }
 
     // Rollback diagnostics (Docs/Journal/2026-08-03). Rollbacks() counts how many times a delivered
     // peer frame contradicted the "peer idle" prediction and forced a restore+re-simulate; ResimTicks()
@@ -197,13 +208,13 @@ public:
     uint32_t ResimTicks() const { return ResimTicks_; }
     // Recoveries attempted THIS match (reset by BeginMatch). Reaching MaxDesyncRecoveries is what
     // finally declares the draw — that is the only place a draw legitimately lives.
-    int RecoveryAttempts() const { return RecoveryAttempts_; }
+    int RecoveryAttempts() const { return Recov_.Attempts(); }
     // How many times a recovery BUDGET has been spent. Effort is bounded per round; rounds are
     // not, because the match must always be able to recover (owner ruling, 2026-08-16).
-    int RecoveryRounds() const { return RecoveryRounds_; }
+    int RecoveryRounds() const { return Recov_.Rounds(); }
     // #167: gap repairs attempted THIS match, bounded separately by MaxGapRecoveries. Split out so a
     // lost frame can never push the match toward the draw that MaxDesyncRecoveries declares.
-    int GapRecoveries() const { return GapRecoveries_; }
+    int GapRecoveries() const { return Recov_.GapRepairs(); }
     // #163: produced frames discarded as duplicates/reorders — a frame whose sequence sits BEHIND the
     // one we expect. Exposed because it is the difference between "the link lost data" (InputGaps) and
     // "the link delivered data twice", which are opposite faults that looked identical before.
@@ -440,11 +451,10 @@ private:
     // reset: it answers "has this peer ever heard the other one's tunables", which spans matches.
     int CvarSyncsSeen_ = 0;
 
-    bool BuildMismatch_ = false;  // peer reported a different LUR_BUILD_FP at connect
-    // #166: the last fingerprint the peer ACTUALLY sent ("" = none heard yet). Kept as evidence
-    // so Init can re-derive the verdict instead of discarding a fingerprint that arrived early.
-    std::string PeerFingerprint_;
-    bool        BadBuildLogged_ = false;  // refuse once per Init, not once per TryStartMatch
+    // #201: the three rules (assign don't latch; remember the STRING; re-derive at init, never
+    // clear blind) are Lur::Net::BuildGate. All three came from the two phones DISAGREEING about
+    // whether there was a mismatch at all.
+    Lur::Net::BuildGate Build_;
 
     std::mutex               CvQueueMutex_;  // UI thread -> sim thread edit inbox
     std::vector<PendingCvar> CvQueue_;
@@ -473,7 +483,7 @@ private:
     void FinishRecovery();        // converged: resume play
     // Budget or patience spent. This USED to end the match as a draw; it now starts a fresh
     // recovery round after a backoff instead, and never touches TheSim.Result. See the ruling note
-    // on RecoveryRounds_.
+    // above Recov_.
     void FailRecovery(const char* Why);
     bool IsRecoverySurvivor() const { return MyTeam == 0; }  // lower device GUID keeps its timeline
 
@@ -528,19 +538,15 @@ private:
     // #161 recovery state. Separate from Awaiting (the reconnect exchange) because the two differ in
     // what they mean and in how they end: a reconnect resumes on OUR state when it times out, while a
     // recovery that times out must NOT — our state is the one known to be suspect.
-    bool     Recovering_ = false;
-    bool     RecoveryAdopting_ = false;  // we are the one rebuilding (waiting for the survivor's history)
-    int      RecoveryAttempts_ = 0;
-    int      GapRecoveries_ = 0;     // #167: lost-frame repairs, bounded by MaxGapRecoveries
-    uint64_t RecoveryNs_ = 0;
-    uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
+    // #201: the state machine — in-flight/adopting, both budgets, the timeout, the retry ladder and
+    // the banked held time — is Lur::Net::RecoveryPolicy. What stays here is the I/O each decision
+    // implies (publish history, request it, re-base a timeline) and the logging.
+    Lur::Net::RecoveryPolicy Recov_{RecoveryTuning()};
     // A DRAW IS NOT AN ACCEPTABLE OUTCOME OF RPS (owner ruling, 2026-08-16). A match must always be
     // able to recover and continue until one team wins, so exhausting the budget can no longer end
-    // it. These two carry the retry instead: rounds is how many times the budget has been spent (it
-    // only escalates the log), and the timer spaces the retries so a pair that cannot converge waits
-    // quietly rather than thrashing — the failure shape #210 documents.
-    int      RecoveryRounds_ = 0;
-    uint64_t RecoveryRetryNs_ = 0;   // >0 = counting down to the next forced recovery round
+    // it: Recov_ carries the retry instead. Recov_.Rounds() is how many times the budget has been
+    // spent (it only escalates the log), and Recov_.RetryNs() spaces the retries so a pair that
+    // cannot converge waits quietly rather than thrashing — the failure shape #210 documents.
 
     // #162: how long we have been unable to advance while live (not resyncing, not recovering). Reset
     // by any executed tick, so it measures a CONTINUOUS starvation rather than accumulated slowness.

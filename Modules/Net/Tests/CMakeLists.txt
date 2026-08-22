@@ -16,3 +16,19 @@ add_executable(frame_sequence_tests FrameSequenceTests.cpp)
 target_link_libraries(frame_sequence_tests PRIVATE lur::net)
 target_compile_features(frame_sequence_tests PRIVATE cxx_std_20)
 add_test(NAME frame_sequence_tests COMMAND frame_sequence_tests)
+
+# #161/#167/#210/#212/#201: the recovery state machine promoted out of Rps::LockstepPeer. Every test in
+# here is named after the bug that taught the rule — a two-peer soak can say the pair stopped
+# converging, but not WHICH rule broke.
+add_executable(recovery_policy_tests RecoveryPolicyTests.cpp)
+target_link_libraries(recovery_policy_tests PRIVATE lur::net)
+target_compile_features(recovery_policy_tests PRIVATE cxx_std_20)
+add_test(NAME recovery_policy_tests COMMAND recovery_policy_tests)
+
+# #112/#164/#166/#201: the build-fingerprint refusal promoted out of Rps::LockstepPeer. All three of its
+# rules came from the same symptom — the two phones DISAGREEING about whether there was a mismatch — so
+# the tests are two-sided where the rule is about symmetry.
+add_executable(build_gate_tests BuildGateTests.cpp)
+target_link_libraries(build_gate_tests PRIVATE lur::net)
+target_compile_features(build_gate_tests PRIVATE cxx_std_20)
+add_test(NAME build_gate_tests COMMAND build_gate_tests)
