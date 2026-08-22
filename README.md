@@ -83,4 +83,4 @@ winget install BrechtSanders.WinLibs.POSIX.UCRT   # MinGW-w64 GCC (UCRT)
 The Android and iOS apps are built from `Games/<Game>/Android` (Gradle) and `Games/<Game>/iOS`
 (Xcode, linking MoltenVK) respectively; those wire the same C++ core in via each platform's native
 build. Each game also has a desktop harness (`scripts/desktop-build.ps1`,
-`scripts/rps-desktop-build.ps1`) that runs both peers in one process — the loop to iterate in.
+`scripts/desktop-build.ps1 -Game rps`) that runs both peers in one process — the loop to iterate in.

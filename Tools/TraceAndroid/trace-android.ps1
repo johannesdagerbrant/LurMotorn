@@ -94,7 +94,7 @@ Start-Sleep -Seconds 3   # let the app reach the field + start advertising
 $peer = $null
 if (-not $NoPeer) {
     if (-not (Test-Path $PeerExe)) {
-        Write-Warning "PC peer exe not found ($PeerExe). Build it: scripts\rps-desktop-build.ps1. Continuing capture-only."
+        Write-Warning "PC peer exe not found ($PeerExe). Build it: scripts\desktop-build.ps1 -Game rps. Continuing capture-only."
     } elseif (-not (Test-Path $RadioExe)) {
         Write-Warning "BLE radio not found ($RadioExe). Build it: Tools\BleDevRig\build.ps1 -Source BleRadio.cs. Continuing capture-only."
     } else {

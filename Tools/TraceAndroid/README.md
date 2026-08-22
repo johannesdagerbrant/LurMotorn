@@ -32,7 +32,7 @@ waits for the BLE link, then over the window captures and writes `runs\<ts>\repo
 
 - The phone on wireless ADB (see CLAUDE.md), app installed optimized
   (`gradlew installDebug`, which is now optimized-Development, #89).
-- The PC peer + radio built: `scripts\rps-desktop-build.ps1` and
+- The PC peer + radio built: `scripts\desktop-build.ps1 -Game rps` and
   `Tools\BleDevRig\build.ps1 -Source BleRadio.cs`.
 
 ## Flags

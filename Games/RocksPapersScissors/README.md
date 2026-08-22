@@ -34,8 +34,8 @@ Games/RocksPapersScissors/
 
 ```
 powershell -File build.ps1                                   # shared core + host test suites (do this for any core change)
-powershell -File scripts\rps-desktop-build.ps1 -Run          # the desktop workbench (two-window loopback)
-powershell -File scripts\rps-desktop-build.ps1 -Run -Solo -Ai hard   # one window vs the AI
+powershell -File scripts\desktop-build.ps1 -Game rps -Run          # the desktop workbench (two-window loopback)
+powershell -File scripts\desktop-build.ps1 -Game rps -Run -Solo -Ai hard   # one window vs the AI
 ```
 
 - **Android:** `cd Games/RocksPapersScissors/Android && ./gradlew.bat assembleDebug`

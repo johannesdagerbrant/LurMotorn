@@ -464,7 +464,7 @@ function Diff-Rec-Pairs($andDir, $iosDir) {
     foreach ($k in @($b.Keys | Where-Object { $b[$_] -and -not $a[$_] })) { Warn "  ios-only:     $(Split-Path $b[$k] -Leaf)  [$k]" }
     foreach ($u in $unkeyed) { Warn $u }
     if (-not (Test-Path $exe)) {
-        Warn "recdiff skipped: $exe not built (scripts\rps-desktop-build.ps1)"
+        Warn "recdiff skipped: $exe not built (scripts\desktop-build.ps1 -Game rps)"
         return
     }
     foreach ($k in $paired) {

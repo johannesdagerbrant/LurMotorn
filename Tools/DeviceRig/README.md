@@ -38,7 +38,7 @@ Pulls every `.rec` off both phones into `dist\rec\{android,ios}\`, pairs the lin
 (`rps-vs-*`) captures **by match rather than by filename** — each peer stamps its own
 clock and its own per-session ordinal, so one match is `…-073714-1.rec` here and
 `…-073715-2.rec` there — and runs `--recdiff` on each pair. Requires the desktop binary
-(`scripts\rps-desktop-build.ps1`); without it the pull still happens and the diff is
+(`scripts\desktop-build.ps1 -Game rps`); without it the pull still happens and the diff is
 skipped with a note.
 
 The pairing key is seed + build fingerprint + the footer's `end` line. Captures with **no

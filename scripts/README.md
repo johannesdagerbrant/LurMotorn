@@ -12,7 +12,7 @@ via its own Gradle wrapper and logs under `OnlyRps`. Unifying them is issue #198
 | `build.bat` | Build + unit-test the shared C++ engine core (VS-free: CMake + Ninja + g++). Wraps `build.ps1`. |
 | `clean.bat` | Delete host + Android build output for a from-scratch rebuild. |
 | `desktop-build.ps1` | Build the chess desktop harness (two peers in one process). |
-| `rps-desktop-build.ps1` | Build the RPS desktop harness. **The playtest-tuning loop** — use this, not `build.ps1`, while iterating on tunables; kill the old exe before relinking. |
+| `desktop-build.ps1 -Game rps` | Build the RPS desktop harness. **The playtest-tuning loop** — use this, not `build.ps1`, while iterating on tunables; kill the old exe before relinking. |
 | `setup-android.bat` | One-time: install JDK + Gradle + the Android SDK/NDK/CMake (CLI-only, no Android Studio). |
 | `android-bootstrap.bat` | One-time Android environment bootstrap (wraps `android-bootstrap.ps1`; `gradle-bootstrap.ps1` is its Gradle half). |
 | `android-build.bat` | *(chess)* Build the Android debug APK (`assembleDebug`). |

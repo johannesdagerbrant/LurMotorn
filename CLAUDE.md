@@ -245,7 +245,7 @@ always-green correctness loop before touching the apps.
 
 Each game has a `Desktop/` target that runs **two instances in one process** over loopback or a real
 BLE radio — the correctness and balance loop, and the only place a change compiles fast enough to
-iterate on. `scripts/desktop-build.ps1` (chess) and `scripts/rps-desktop-build.ps1` (RPS); during
+iterate on. `scripts/desktop-build.ps1 -Game chess|rps` — ONE script for every game since #198; during
 playtest tuning build these rather than the full `build.ps1` suite. Kill the old exe before
 relinking.
 
