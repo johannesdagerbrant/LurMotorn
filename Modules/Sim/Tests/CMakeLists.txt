@@ -27,3 +27,11 @@ add_executable(input_inbox_tests InputInboxTests.cpp)
 target_link_libraries(input_inbox_tests PRIVATE lur::sim Threads::Threads)
 target_compile_features(input_inbox_tests PRIVATE cxx_std_20)
 add_test(NAME input_inbox_tests COMMAND input_inbox_tests)
+
+# #201: the rollback snapshot ring promoted out of Rps::SnapshotRing. What it guarantees is that an
+# EVICTED tick answers null rather than the slot's current (valid-looking, wrong) occupant — a
+# violation restores the sim to a tick nobody asked for and diverges silently.
+add_executable(snapshot_ring_tests SnapshotRingTests.cpp)
+target_link_libraries(snapshot_ring_tests PRIVATE lur::sim)
+target_compile_features(snapshot_ring_tests PRIVATE cxx_std_20)
+add_test(NAME snapshot_ring_tests COMMAND snapshot_ring_tests)

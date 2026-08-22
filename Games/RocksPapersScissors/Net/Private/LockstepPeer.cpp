@@ -83,11 +83,11 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     // #163: per-MATCH diagnostics. Reset here (not in Init) so each match's gap count answers "did
     // THIS match lose input", which is the question a desync investigation asks; a session-lifetime
     // total would blur a clean match after a bad one.
-    InputGaps_ = 0;
-    LastGapTick_ = 0;
+    PeerSeq_.ResetCounters();
     PreMatchStalled_ = false;
     PreMatchWaitNs_ = 0;
-    PeerTickNext_ = 1;  // tick 0 is the opening camp (MsgCamp, not counted); first MsgInput frame is tick 1
+    // tick 0 is the opening camp (MsgCamp, not counted); the first MsgInput frame is for tick 1
+    PeerSeq_.Reset(1);
     LocalCamp_ = InputEvent{};
     PeerCamp_ = InputEvent{};
     AwaitingNs = 0;
@@ -98,7 +98,6 @@ void LockstepPeer::BeginMatch(uint64_t Seed) {
     RecoveryAdopting_ = false;
     RecoveryAttempts_ = 0;
     GapRecoveries_ = 0;     // #167: the gap budget is per-match too
-    DuplicateFrames_ = 0;   // #163
     RecoveryNs_ = 0;
     RecoveryCarryNs_ = 0;
     StallNs_ = 0;       // #162: a fresh match is not starved
@@ -1001,42 +1000,39 @@ void LockstepPeer::OnMessage(Lur::Net::EMsgType Type, const uint8_t* Data, std::
             // twice": the latter yields 255, which then reads as a 25-second hole (#163, hardware
             // 2026-08-01, where a duplicate GATT subscription delivered every notification twice and
             // produced a 255-missing report on EVERY tick of a 20-minute match).
-            const uint32_t Fwd = (Seq - (PeerTickNext_ & 0xFFu)) & 0xFFu;
-            const int32_t Ahead = Fwd >= 128 ? static_cast<int32_t>(Fwd) - 256 : static_cast<int32_t>(Fwd);
-            if (Ahead < 0) {
+            const uint32_t Expected = PeerSeq_.ExpectedTick();
+            const Lur::Net::FrameSeqVerdict V = PeerSeq_.Observe(Seq);
+            if (V.Kind == Lur::Net::EFrameSeq::Duplicate) {
                 // BEHIND our expectation: this frame's tick has already been accounted for, so it is a
                 // duplicate or a reorder — never a loss. Drop it whole. Buffering it would append a
                 // second batch for a tick that already has one and skew every later index by a frame,
                 // which is invisible while batches are empty and diverges the sims the moment one is
                 // not (#160's shape, and the leading suspect for #159). Counting it as a gap would also
                 // spend a repair attempt on a frame we already have.
-                ++DuplicateFrames_;
-                if (DuplicateFrames_ == 1 || DuplicateFrames_ % 256 == 0)
-                    Lur::Log::Error("RPS: DUPLICATE input frame — seq %u is %d behind the expected %u "
-                                    "(%d so far). The peer's frame arrived more than once, so the link "
+                const uint32_t Dups = PeerSeq_.Duplicates();
+                if (Dups == 1 || Dups % 256 == 0)
+                    Lur::Log::Error("RPS: DUPLICATE input frame — seq %u is %u behind the expected %u "
+                                    "(%u so far). The peer's frame arrived more than once, so the link "
                                     "is delivering data twice rather than losing it (#163). Discarding.",
-                                    Seq, -Ahead, PeerTickNext_ & 0xFFu, DuplicateFrames_);
+                                    Seq, V.Count, Expected & 0xFFu, Dups);
                 return;
             }
-            const uint32_t Missing = static_cast<uint32_t>(Ahead);
-            if (Missing != 0) {
-                ++InputGaps_;
-                LastGapTick_ = PeerTickNext_;
+            if (V.Kind == Lur::Net::EFrameSeq::Missing) {
                 Lur::Log::Error("RPS: INPUT GAP — peer frame for tick %u never arrived (it sent seq %u, "
                                 "we expected %u; %u frame(s) missing). The link reported no error, so "
                                 "this is the lost-input shape of #163 and the leading candidate for "
                                 "#159's divergence.",
-                                PeerTickNext_, Seq, PeerTickNext_ & 0xFFu, Missing);
-                PeerTickNext_ += Missing;  // re-base past the hole: count the gap once, not forever
+                                V.GapAtTick, Seq, Expected & 0xFFu, V.Count);
                 // #161: ACT on it. We are provably the incomplete peer and the other side has seen
                 // nothing wrong, so it must be asked — and because detection beat execution to the
                 // hole, this repairs the timeline while both sims are still identical. Return without
                 // buffering: appending this frame at the hole's index is exactly the misalignment
-                // being repaired.
-                RequestRecovery(LastGapTick_);
+                // being repaired. (Observe has already re-based past the hole, so the gap is counted
+                // once rather than on every later frame.)
+                RequestRecovery(PeerSeq_.LastGapTick());
                 if (Recovering_) return;
             }
-            ++PeerTickNext_;
+            PeerSeq_.AdvanceExpected();
         }
         if (!MatchStarted_) {
             // Pre-match, a produced frame can only be from a peer that has ALREADY started (it
@@ -1440,7 +1436,7 @@ void LockstepPeer::ReseedFrom(uint32_t Frontier) {
     // timeline [0, Frontier) is for tick Frontier — except a re-base all the way to 0 (a pre-match
     // BeginResync) still owes tick 1 first, since tick 0 is the camp on MsgCamp and never a counted
     // MsgInput frame. So the expectation floors at 1, matching BeginMatch.
-    PeerTickNext_ = Frontier < 1 ? 1u : Frontier;
+    PeerSeq_.Reset(Frontier < 1 ? 1u : Frontier);
 }
 
 }  // namespace Rps

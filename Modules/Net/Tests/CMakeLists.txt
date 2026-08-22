@@ -9,3 +9,10 @@ target_link_libraries(net_tests PRIVATE
 target_compile_features(net_tests PRIVATE cxx_std_20)
 
 add_test(NAME net_tests COMMAND net_tests)
+
+# #163/#201: the lost/duplicated input-frame detector promoted out of Rps::LockstepPeer. The signed
+# shorter-way-round-the-circle reading is what stops a DOUBLED link reading as a 255-frame hole.
+add_executable(frame_sequence_tests FrameSequenceTests.cpp)
+target_link_libraries(frame_sequence_tests PRIVATE lur::net)
+target_compile_features(frame_sequence_tests PRIVATE cxx_std_20)
+add_test(NAME frame_sequence_tests COMMAND frame_sequence_tests)

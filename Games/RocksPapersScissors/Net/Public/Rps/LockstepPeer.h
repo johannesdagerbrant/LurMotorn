@@ -11,6 +11,7 @@
 #include "Lur/Sim/InputInbox.h"
 #include "Lur/Sim/Tick.h"
 #include "Rps/Sim.h"
+#include "Lur/Net/FrameSequence.h"
 #include "Rps/SnapshotRing.h"  // rollback snapshot ring + peer predictor
 #include "Rps/Tunables.h"
 
@@ -206,7 +207,7 @@ public:
     // #163: produced frames discarded as duplicates/reorders — a frame whose sequence sits BEHIND the
     // one we expect. Exposed because it is the difference between "the link lost data" (InputGaps) and
     // "the link delivered data twice", which are opposite faults that looked identical before.
-    int DuplicateFrames() const { return DuplicateFrames_; }
+    int DuplicateFrames() const { return static_cast<int>(PeerSeq_.Duplicates()); }
 
     // #148: how long a peer may hold production/execution waiting for the other side's frontier
     // marker before resuming on its own state. A restarted app cannot send that marker (Session
@@ -307,11 +308,11 @@ public:
     // (see ProduceAndSend). Non-zero means the transport dropped input while the link looked healthy —
     // the #163 shape, and the leading candidate for #159's unexplained divergence. Counted once per
     // gap rather than once per later frame, so it answers "how many did we lose".
-    int InputGaps() const { return InputGaps_; }
+    int InputGaps() const { return static_cast<int>(PeerSeq_.Gaps()); }
     // The exec tick of the most recent missing frame. This is the field the log could not produce:
     // frames were logged as `recv msg type=N size=M` with nothing tying one to a tick, so locating a
     // lost input needed two flight recordings and a diff.
-    uint32_t LastInputGapTick() const { return LastGapTick_; }
+    uint32_t LastInputGapTick() const { return PeerSeq_.LastGapTick(); }
     // Pre-match, WE are ready and the peer is not, for longer than PreMatchStallWarnNs. Derived
     // against MatchStarted_ rather than cleared by whoever starts the match, so it cannot outlive its
     // fault by a path that forgot to reset it — and a latch that stays lit after the fault is one
@@ -513,11 +514,13 @@ private:
     // counter: one byte per frame (10 B/s at the tick rate) catches every gap of 1..255 frames, which
     // at 10 Hz is any outage up to 25 s — far longer than the link timeout that would fire first. A
     // full varint tick would cost 2-3 bytes per frame for a distinction the transport can't produce.
-    int      InputGaps_ = 0;
-    uint32_t LastGapTick_ = 0;
+    // Since #201 the classification, the counters and the count-the-gap-once re-basing are
+    // Lur::Net::FrameSequenceTracker; PeerSeq_.ExpectedTick() is the exec tick of the next produced
+    // frame the peer owes us. The signed shorter-way-round-the-circle reading lives there, with the
+    // 2026-08-01 doubled-link failure recorded next to it.
+    Lur::Net::FrameSequenceTracker PeerSeq_;
     bool     PreMatchStalled_ = false;
     uint64_t PreMatchWaitNs_ = 0;   // time spent ready-but-unpaired (only accrues while LocalReady_)
-    uint32_t PeerTickNext_ = 0;     // exec tick of the next produced frame the peer owes us
 #if LUR_AGENT
     int AgentDropTx_ = 0;           // produced frames still to be swallowed (agent fault injection)
 #endif
@@ -529,7 +532,6 @@ private:
     bool     RecoveryAdopting_ = false;  // we are the one rebuilding (waiting for the survivor's history)
     int      RecoveryAttempts_ = 0;
     int      GapRecoveries_ = 0;     // #167: lost-frame repairs, bounded by MaxGapRecoveries
-    int      DuplicateFrames_ = 0;   // #163: frames arriving BEHIND the expected sequence
     uint64_t RecoveryNs_ = 0;
     uint64_t RecoveryCarryNs_ = 0;  // wall time held during a repair, given back so no tick is lost
     // A DRAW IS NOT AN ACCEPTABLE OUTCOME OF RPS (owner ruling, 2026-08-16). A match must always be
