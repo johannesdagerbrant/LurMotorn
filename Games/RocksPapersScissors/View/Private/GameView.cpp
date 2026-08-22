@@ -1903,14 +1903,12 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
         // The highlight is DISTINCT from SelectedCvar_, which is the open editor's target. Arrows
         // move the highlight; Enter promotes it to the editor. Tapping still does both at once, so
         // the phone (which has no keyboard) behaves exactly as before.
+        // #201: the key->index resolution, the step rule and the scroll-to-reveal are
+        // Lur::DevGui::FlatList now. Which of the two keys is live stays here — that a cvar and a
+        // category are alternative cursor targets is this console's model, not a list's.
         auto HighlightIndex = [&]() -> int {
-            for (std::size_t I = 0; I < Vis.size(); ++I) {
-                if (!Vis[I].IsCategory && HiCvar_ != nullptr && Vis[I].Item == HiCvar_)
-                    return static_cast<int>(I);
-                if (Vis[I].IsCategory && !HiCat_.empty() && Vis[I].Node->Path == HiCat_)
-                    return static_cast<int>(I);
-            }
-            return -1;
+            if (HiCvar_ != nullptr) return Lur::DevGui::FindLeafRow(Vis, HiCvar_);
+            return Lur::DevGui::FindCategoryRow(Vis, HiCat_);
         };
         auto SetHighlight = [&](const VItem& It) {
             if (!It.IsCategory) { HiCvar_ = It.Item; HiCat_.clear(); }
@@ -1918,22 +1916,13 @@ void GameView::Render(IRenderer* Renderer, const Snapshot& Snap, float Alpha, fl
             // Follow the cursor with the viewport. Without this, Down walks the highlight off the
             // bottom of the clip band and keeps going invisibly — so the list appears frozen and
             // then jumps several rows when you finally press Enter.
-            const float RowH2 = It.IsCategory ? CatH : LineH;
-            if (It.ContentY < ScrollY_) ScrollY_ = It.ContentY;
-            else if (It.ContentY + RowH2 > ScrollY_ + ViewH)
-                ScrollY_ = It.ContentY + RowH2 - ViewH;
-            if (ScrollY_ < 0.0f) ScrollY_ = 0.0f;
-            if (ScrollY_ > MaxScroll) ScrollY_ = MaxScroll;
+            Lur::DevGui::ScrollToReveal(It.ContentY, It.IsCategory ? CatH : LineH, ScrollY_, ViewH,
+                                        MaxScroll);
         };
         auto MoveHighlight = [&](int Delta) {
-            if (Vis.empty()) return;
-            int I = HighlightIndex();
-            // Nothing highlighted yet: Down starts at the top, Up starts at the bottom.
-            if (I < 0) I = (Delta > 0) ? -1 : static_cast<int>(Vis.size());
-            I += Delta;
-            if (I < 0) I = 0;
-            if (I >= static_cast<int>(Vis.size())) I = static_cast<int>(Vis.size()) - 1;
-            SetHighlight(Vis[static_cast<std::size_t>(I)]);
+            const int I = Lur::DevGui::StepIndex(HighlightIndex(), Delta,
+                                                 static_cast<int>(Vis.size()));
+            if (I >= 0) SetHighlight(Vis[static_cast<std::size_t>(I)]);
         };
         // Enter with no editor open: act on whatever is highlighted.
         auto OpenHighlighted = [&]() {

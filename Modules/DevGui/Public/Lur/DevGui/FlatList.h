@@ -131,4 +131,61 @@ int RowAtScreenY(const std::vector<FlatRow<Leaf>>& Rows, float Y, float ViewTop,
     return -1;
 }
 
+// ---- The keyboard CURSOR over the flattened list -----------------------------------------------
+// A dev console gets arrow keys on desktop and none on a phone, so the cursor is separate state from
+// the open editor: arrows move the cursor, Enter promotes it. What follows is the part that is the
+// same for any list.
+
+// Index of the row holding Item, or -1. The cursor is stored as a KEY, never an index, and these are
+// how it is resolved each frame — because the flattened list is rebuilt every frame and its indices
+// shift the moment any category folds. An index would quietly start pointing at a different row after
+// an expand/collapse, which reads as the cursor teleporting.
+template <class Leaf>
+int FindLeafRow(const std::vector<FlatRow<Leaf>>& Rows, const Leaf& Item) {
+    for (std::size_t I = 0; I < Rows.size(); ++I)
+        if (!Rows[I].IsCategory && Rows[I].Item == Item) return static_cast<int>(I);
+    return -1;
+}
+
+template <class Leaf>
+int FindCategoryRow(const std::vector<FlatRow<Leaf>>& Rows, const std::string& Path) {
+    if (Path.empty()) return -1;
+    for (std::size_t I = 0; I < Rows.size(); ++I)
+        if (Rows[I].IsCategory && Rows[I].Node != nullptr && Rows[I].Node->Path == Path)
+            return static_cast<int>(I);
+    return -1;
+}
+
+// Step a cursor index by Delta and clamp it into the list.
+//
+// Current < 0 means "nothing highlighted yet", and then the step enters from the NEAR END: a downward
+// move starts at the top, an upward move starts at the bottom. Without that, the first arrow press
+// after opening the console does nothing visible, because a clamped -1 + 1 lands on the same row a
+// fresh 0 would and the user cannot tell whether the key registered.
+//
+// Returns -1 only for an empty list.
+inline int StepIndex(int Current, int Delta, int Count) {
+    if (Count <= 0) return -1;
+    int I = Current;
+    if (I < 0) I = (Delta > 0) ? -1 : Count;   // enter from the near end
+    I += Delta;
+    if (I < 0) I = 0;
+    if (I >= Count) I = Count - 1;
+    return I;
+}
+
+// Scroll the MINIMUM amount that brings [RowContentY, RowContentY + RowH) fully into a ViewH-tall
+// viewport. Already-visible rows do not move the view at all, which is what keeps arrowing through the
+// middle of a long list from jittering.
+//
+// The bug this fixes: without it, Down walks the cursor off the bottom of the clip band and keeps
+// going INVISIBLY — the list looks frozen, and then jumps several rows the moment you press Enter.
+inline void ScrollToReveal(float RowContentY, float RowH, float& ScrollY, float ViewH,
+                           float MaxScroll) {
+    if (RowContentY < ScrollY) ScrollY = RowContentY;
+    else if (RowContentY + RowH > ScrollY + ViewH) ScrollY = RowContentY + RowH - ViewH;
+    if (ScrollY < 0.0f) ScrollY = 0.0f;
+    if (ScrollY > MaxScroll) ScrollY = MaxScroll;
+}
+
 }  // namespace Lur::DevGui

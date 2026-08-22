@@ -27,7 +27,11 @@ using Lur::DevGui::ClampScroll;
 using Lur::DevGui::FlatRow;
 using Lur::DevGui::FlattenTree;
 using Lur::DevGui::RowAtScreenY;
+using Lur::DevGui::FindCategoryRow;
+using Lur::DevGui::FindLeafRow;
 using Lur::DevGui::RowScreenY;
+using Lur::DevGui::ScrollToReveal;
+using Lur::DevGui::StepIndex;
 
 using Leaf = const char*;
 using Row = FlatRow<Leaf>;
@@ -245,6 +249,142 @@ static void TestFlattenClearsOut() {
     CHECK(A == B);
 }
 
+// ---- The cursor is a KEY, not an index: folding must not move it to a different row ----
+// THE headline for this half. The flattened list is rebuilt every frame and its indices shift the
+// moment a category folds, so a stored index silently starts pointing somewhere else — which reads as
+// the cursor teleporting mid-keystroke.
+static void TestCursorSurvivesAFold() {
+    auto Root = Tree();
+    std::vector<Row> Open;
+    FlattenTree(Root, FoldSet(NoFolds), LeafH, CatH, Open);
+    Leaf Target = nullptr;
+    int OpenIdx = -1;
+    for (std::size_t I = 0; I < Open.size(); ++I)
+        if (!Open[I].IsCategory && std::string(Open[I].Item) == "unit.rock.hp") {
+            Target = Open[I].Item;
+            OpenIdx = static_cast<int>(I);
+        }
+    CHECK(Target != nullptr);
+    CHECK(FindLeafRow(Open, Target) == OpenIdx);
+
+    // Fold an EARLIER category. Every later index shifts; the key still finds the same row.
+    std::unordered_set<std::string> F = {"boid"};
+    std::vector<Row> Shut;
+    FlattenTree(Root, FoldSet(F), LeafH, CatH, Shut);
+    const int ShutIdx = FindLeafRow(Shut, Target);
+    CHECK(ShutIdx >= 0);
+    CHECK(ShutIdx != OpenIdx);                                  // the index really did move...
+    CHECK(std::string(Shut[ShutIdx].Item) == "unit.rock.hp");    // ...and the key still lands right
+}
+
+// ---- A cursor on a row that folds away is reported missing, not silently wrong ----
+static void TestCursorOnAFoldedRowIsMissing() {
+    auto Root = Tree();
+    std::vector<Row> Open;
+    FlattenTree(Root, FoldSet(NoFolds), LeafH, CatH, Open);
+    Leaf Amp = nullptr;
+    for (const Row& R : Open)
+        if (!R.IsCategory && std::string(R.Item) == "boid.noise.amp") Amp = R.Item;
+    std::unordered_set<std::string> F = {"boid.noise"};
+    std::vector<Row> Shut;
+    FlattenTree(Root, FoldSet(F), LeafH, CatH, Shut);
+    CHECK(FindLeafRow(Shut, Amp) == -1);
+    // The category header itself is still findable — it is what you press to unfold.
+    CHECK(FindCategoryRow(Shut, "boid.noise") >= 0);
+    CHECK(FindCategoryRow(Shut, "no.such.path") == -1);
+
+    // An empty path is the "no category highlighted" sentinel and must never match. The flatten does
+    // not currently emit the root (the only node with an empty Path), so this branch is unreachable
+    // through FlattenTree — a sabotage that removed the guard passed until the row was hand-built.
+    // Kept and tested because the sentinel lives at the CALL SITE: callers pass their highlight key
+    // straight in, and "" means nothing is highlighted.
+    Lur::DevGui::CatNode<Leaf> RootLike;   // Segment and Path both empty, like a root node
+    std::vector<Row> WithRoot;
+    Row Hand;
+    Hand.IsCategory = true;
+    Hand.Node = &RootLike;
+    WithRoot.push_back(Hand);
+    CHECK(FindCategoryRow(WithRoot, "") == -1);
+}
+
+// ---- Stepping enters from the NEAR END when nothing is highlighted ----
+// Otherwise the first arrow press after opening the console does nothing visible: a clamped -1 + 1
+// lands on the same row a fresh 0 would, and the user cannot tell whether the key registered.
+static void TestStepEntersFromTheNearEnd() {
+    CHECK(StepIndex(-1, +1, 10) == 0);    // Down from nowhere -> the top
+    CHECK(StepIndex(-1, -1, 10) == 9);    // Up from nowhere   -> the bottom
+    // Ordinary movement.
+    CHECK(StepIndex(4, +1, 10) == 5);
+    CHECK(StepIndex(4, -1, 10) == 3);
+    // Clamps at both ends rather than wrapping — a wrap in a long cvar list loses your place.
+    CHECK(StepIndex(9, +1, 10) == 9);
+    CHECK(StepIndex(0, -1, 10) == 0);
+    CHECK(StepIndex(0, -5, 10) == 0);
+    CHECK(StepIndex(9, +5, 10) == 9);
+    // A page-sized jump from nowhere still enters from the near end first.
+    CHECK(StepIndex(-1, +5, 10) == 4);
+    // Empty list: nothing to step to.
+    CHECK(StepIndex(-1, +1, 0) == -1);
+    CHECK(StepIndex(3, +1, 0) == -1);
+    // A single row is both ends.
+    CHECK(StepIndex(-1, +1, 1) == 0);
+    CHECK(StepIndex(0, +1, 1) == 0);
+    CHECK(StepIndex(0, -1, 1) == 0);
+}
+
+// ---- ScrollToReveal moves the MINIMUM, and not at all for a visible row ----
+// A view that re-centres on every keypress jitters; one that never scrolls walks the cursor off the
+// band invisibly and then jumps.
+static void TestScrollToRevealIsMinimal() {
+    const float ViewH = 100.0f, MaxScroll = 400.0f;
+    // Fully visible: untouched.
+    float S = 50.0f;
+    ScrollToReveal(/*RowY*/ 60.0f, /*RowH*/ 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == 50.0f);
+    // Row exactly filling the bottom edge is still visible.
+    S = 50.0f;
+    ScrollToReveal(130.0f, 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == 50.0f);
+    // One pixel past the bottom: scroll by exactly one pixel.
+    S = 50.0f;
+    ScrollToReveal(131.0f, 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == 51.0f);
+    // Above the top: align to the row's top, not its middle.
+    S = 50.0f;
+    ScrollToReveal(30.0f, 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == 30.0f);
+    // Clamped both ways.
+    S = 0.0f;
+    ScrollToReveal(-500.0f, 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == 0.0f);
+    S = 0.0f;
+    ScrollToReveal(100000.0f, 20.0f, S, ViewH, MaxScroll);
+    CHECK(S == MaxScroll);
+}
+
+// ---- Arrowing from top to bottom keeps every row inside the band ----
+// The integration property: step + reveal, walked end to end, must never leave the cursor outside the
+// viewport. That is the "list looks frozen then jumps" bug, asserted directly.
+static void TestArrowingEndToEndKeepsTheCursorVisible() {
+    auto Root = Tree();
+    std::vector<Row> Rows;
+    const float ContentH = FlattenTree(Root, FoldSet(NoFolds), LeafH, CatH, Rows);
+    const float ViewH = 90.0f;
+    float Scroll = 0.0f;
+    const float MaxScroll = ClampScroll(Scroll, ContentH, ViewH);
+    int Cursor = -1;
+    for (int Step = 0; Step < static_cast<int>(Rows.size()) + 3; ++Step) {
+        Cursor = StepIndex(Cursor, +1, static_cast<int>(Rows.size()));
+        const Row& R = Rows[static_cast<std::size_t>(Cursor)];
+        ScrollToReveal(R.ContentY, R.IsCategory ? CatH : LeafH, Scroll, ViewH, MaxScroll);
+        const float Top = R.ContentY - Scroll;
+        const float Bot = Top + (R.IsCategory ? CatH : LeafH);
+        CHECK(Top >= -0.001f);            // never above the band
+        CHECK(Bot <= ViewH + 0.001f);     // never below it
+    }
+    CHECK(Cursor == static_cast<int>(Rows.size()) - 1);   // and it ends at the last row
+}
+
 int main() {
     TestRootLeavesAlwaysFirstAndVisible();
     TestContentYUsesPerKindHeights();
@@ -256,6 +396,11 @@ int main() {
     TestRowScreenYFallsBackWhenFolded();
     TestEmptyTree();
     TestFlattenClearsOut();
+    TestCursorSurvivesAFold();
+    TestCursorOnAFoldedRowIsMissing();
+    TestStepEntersFromTheNearEnd();
+    TestScrollToRevealIsMinimal();
+    TestArrowingEndToEndKeepsTheCursorVisible();
     if (GFailures == 0) std::printf("devgui_flatlist_tests: ALL PASS\n");
     else std::printf("devgui_flatlist_tests: %d FAILURE(S)\n", GFailures);
     return GFailures == 0 ? 0 : 1;
