@@ -164,11 +164,28 @@ endif()
 # AND the desktop ran -O0 (issue #89). Bind the two here so LUR_CONFIG is the one
 # dial a human turns; a driver that wants -O0 for compile speed passes LUR_FAST.
 #
-# Single-config generators only (Ninja: host + Android, where CMAKE_BUILD_TYPE
-# governs -O). Multi-config generators (Xcode/iOS, Visual Studio) ignore it and
-# choose optimization per-build — there the app project owns the Opt column and
-# must be kept in sync with LUR_CONFIG by hand.
+# CMAKE_BUILD_TYPE binds single-config generators only (Ninja: host + Android). Multi-config
+# generators (Xcode/iOS, Visual Studio) ignore it and choose optimization per-build — which used to
+# mean the app project owned the Opt column and had to be kept in sync with LUR_CONFIG BY HAND, a
+# checklist line that failed once at 20x cost. It no longer does: LUR_XCODE_OPT below drives Xcode
+# from the same dial.
+# The multi-config half of the same decision. Xcode ignores CMAKE_BUILD_TYPE and picks optimization
+# per-build, so `xcodebuild -configuration Debug` hard-forces -O0 whatever LUR_CONFIG says — the 20x
+# sim.step gap of 2026-08-03 was purely that. Derive the Xcode optimization level HERE, beside
+# CMAKE_BUILD_TYPE, so the Opt column has one home; lur_configure_app_target() applies it to the app
+# target, and the directory-scope default below covers every engine target in the tree.
+if(LUR_FAST OR LUR_CONFIG STREQUAL "Debugging")
+    set(LUR_XCODE_OPT "0" CACHE INTERNAL "Xcode GCC_OPTIMIZATION_LEVEL, derived from LUR_CONFIG")
+else()   # Development, Shipping — both optimized, per the ladder
+    set(LUR_XCODE_OPT "2" CACHE INTERNAL "Xcode GCC_OPTIMIZATION_LEVEL, derived from LUR_CONFIG")
+endif()
+set(CMAKE_XCODE_ATTRIBUTE_GCC_OPTIMIZATION_LEVEL "${LUR_XCODE_OPT}")
+
 get_property(_lur_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(_lur_multi_config)
+    message(STATUS "LurMotorn opt: GCC_OPTIMIZATION_LEVEL=${LUR_XCODE_OPT} "
+            "(multi-config generator; from LUR_CONFIG=${LUR_CONFIG}, LUR_FAST=${LUR_FAST})")
+endif()
 if(NOT _lur_multi_config)
     if(LUR_FAST OR LUR_CONFIG STREQUAL "Debugging")
         set(_lur_build_type Debug)            # -O0 -g

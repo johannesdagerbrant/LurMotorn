@@ -18,6 +18,7 @@ if(LUR_DESKTOP AND WIN32)
     target_compile_definitions(onlychess_desktop PRIVATE
         "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7370\"")
     target_link_libraries(onlychess_desktop PRIVATE
+        chess::app
         chess::view
         chess::core
         lur::render

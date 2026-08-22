@@ -18,7 +18,7 @@
 #include <thread>
 
 #include "Chess/Board.h"
-#include "Chess/ChessMatchState.h"
+#include "Chess/App/ChessGame.h"
 #include "Lur/Core/CVar.h"
 #include "Chess/View/BoardView.h"
 #include "Lur/App/GameHost.h"   // #43: the session + persistence choreography, engine-owned
@@ -49,8 +49,10 @@ struct GameInstance {
     Lur::Platform::Window            Win;
     Lur::Render::IRenderer*          Renderer = nullptr;
     Lur::App::GameHost               Host;    // Store + device id + SyncManager + Session
-    Chess::ChessMatchState           Match;
-    Chess::BoardView                 View;
+    // #45: the game's state and its wiring both live in Chess::ChessGame. This struct used to
+    // declare Match + View and Setup() connected them to the host by hand — the same connecting the
+    // Android and iOS mains each wrote out separately.
+    Chess::ChessGame                 Game;
     Lur::Transport::LoopbackTransport Transport;
     Lur::Core::FlightRecorder        Recorder;   // record the session for replay/debug
     std::string                      RecPath;
@@ -80,62 +82,10 @@ bool Setup(GameInstance& G, const char* Title, const char* SaveDir, int X,
     HostCfg.Log       = [](const char* M) { Lur::Log::Info("%s", M); };
     G.Host.Init(HostCfg);
 
-    Lur::App::GameHost::RecordSync Rec;
-    // The #38 hijack rule, unchanged — still the game's decision, just no longer the game's plumbing.
-    Rec.OnPeerAdopted    = [&G](const std::string& Peer) { return G.View.OnPeerLinked(Peer); };
-    Rec.IsActiveOpponent = [&G](const std::string& Peer) { return G.View.ActiveOpponentGuid() == Peer; };
-    Rec.Summarize        = [&G] {
-        Lur::App::GameHost::RecordSync::MatchSummary S;
-        S.Result     = static_cast<int>(G.Match.LastResult());
-        S.WinsLower  = G.Match.Record().WinsLower;
-        S.WinsHigher = G.Match.Record().WinsHigher;
-        S.Draws      = G.Match.Record().Draws;
-        S.Total      = G.Match.Record().TotalMatches();
-        return S;
-    };
-    // Record everything (Review #2), including a record we go on to refuse: this was the workbench's
-    // only DatagramIn site, and the host owns EMsgType::Sync now, so it hands the bytes back here.
-    Rec.OnRecordDatagram = [&G](const uint8_t* D, std::size_t N) {
-        G.Recorder.Record(Lur::Core::EFlightEvent::DatagramIn, 0, D, N);
-    };
-    G.Host.EnableRecordSync(G.Match, Rec);
-
-    G.Match.SetOnMatchEnd([&G] { G.Host.OnMatchEnded(); });   // persist + the one MATCH END line
-
-    G.View.SetState(&G.Match);
-    G.View.AttachSession(&G.Host.Session());
-    G.View.AttachPersistence(&G.Host.Store(), &G.Host.Sync(), G.Host.DeviceId());
-    G.View.SetLogger([](const char* M) { Lur::Log::Info("View: %s", M); });
-    G.View.CreateResources(G.Renderer);
-    G.Overlay.CreateResources(G.Renderer);
-    // #188: the frame's idle wait pumps the inbox — see AndroidMain. On the loopback pair
-    // this mostly proves the plumbing; on the BLE rig it is the same win the phones get.
-    G.Renderer->SetIdleWaitCallback(
-        [](void* U) { static_cast<GameInstance*>(U)->Host.PumpInbox(); }, &G);
-
-    // Debug overlay drawn inside the frame, on top of the board (F1 toggles it).
-    G.View.SetPostGuiHook([&G] {
-        if (!G.ShowOverlay) return;
-        int W = 0, H = 0;
-        G.Win.GetSize(&W, &H);
-        Lur::Net::Session& S1 = G.Host.Session();
-        const std::string& Peer = S1.GetPeerGuid();
-        const std::string Short = Peer.empty() ? std::string() : Peer.substr(0, 8);
-        Lur::Hud::DebugStats S;
-        S.FrameMs = G.FrameMs;
-        S.Link = Lur::Net::LinkStateName(S1.GetLinkState());
-        S.NsSinceRecv = S1.GetNsSinceRecv();
-        S.Sent = S1.GetDatagramsSent();
-        S.Recv = S1.GetDatagramsReceived();
-        S.PeerShort = Short.c_str();
-        G.Overlay.Draw(G.Renderer, static_cast<float>(W), static_cast<float>(H), S);
-    });
-
-    // Start LAST: the view is now holding Store/Sync/DeviceId, so a peer going ready can call
-    // straight back into the adopt rule and find everything in place.
+    // #45: chess's answers come from Chess::ChessGame, identically on every platform.
     Lur::App::GameHost::Hooks Hooks;
-    Hooks.StateHash = [&G] { return G.Match.PositionHash(); };   // desync detection (#72)
-    G.Host.Start(Hooks);
+    G.Game.Configure(G.Host, Hooks);
+    G.Host.Start(std::move(Hooks));
 
     G.RecPath = std::string(SaveDir) + ".flightrec";
     return true;
@@ -145,12 +95,12 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
     if (G.Win.TakeOverlayToggle()) G.ShowOverlay = !G.ShowOverlay;  // F1
     // #201: the dev console. Same platform toggle RPS uses, so the two games open their console with
     // the same key rather than each inventing one.
-    if (G.Win.TakeConsoleToggle()) G.View.SetDevOverlayOpen(!G.View.DevOverlayOpen());
+    if (G.Win.TakeConsoleToggle()) G.Game.View().SetDevOverlayOpen(!G.Game.View().DevOverlayOpen());
     // Physical keys go to the console FIRST, and only while it is open (DevKey answers false
     // otherwise). Chess has no keyboard gameplay input, so nothing competes for them today — but
     // draining them unconditionally would silently swallow any that gets added later, so ask.
     for (uint32_t Vk : G.Win.TakeKeys())
-        if (!G.View.DevKey(Vk)) { /* chess has no keyboard gameplay input yet */ }
+        if (!G.Game.View().DevKey(Vk)) { /* chess has no keyboard gameplay input yet */ }
     int W = 0, H = 0;
     G.Win.GetSize(&W, &H);
     for (const Lur::Input::TouchEvent& T : G.Win.TakeTouches()) {
@@ -164,20 +114,20 @@ void PumpInput(GameInstance& G, uint64_t TimeNs) {
         // so the desktop cannot drift from them the way the three hand-written shims once did (#151:
         // the desktop scrolled the console and Android did not).
         if (T.Phase == Lur::Input::ETouchPhase::Began) {
-            if (G.View.DevConsole().PointerDown(1, T.XPx, T.YPx, TimeNs)) continue;
+            if (G.Game.View().DevConsole().PointerDown(1, T.XPx, T.YPx, TimeNs)) continue;
         } else if (T.Phase == Lur::Input::ETouchPhase::Moved) {
-            if (G.View.DevConsole().PointerMove(T.XPx, T.YPx, TimeNs)) continue;
+            if (G.Game.View().DevConsole().PointerMove(T.XPx, T.YPx, TimeNs)) continue;
         } else if (T.Phase == Lur::Input::ETouchPhase::Ended) {
-            if (G.View.DevConsole().PointerUp(T.XPx, T.YPx, TimeNs)) continue;
+            if (G.Game.View().DevConsole().PointerUp(T.XPx, T.YPx, TimeNs)) continue;
         }
         // #187: commit on press, matching both phones.
         if (T.Phase == Lur::Input::ETouchPhase::Began && W > 0 && H > 0)
-            G.View.OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
+            G.Game.View().OnTap(T.XPx, T.YPx, static_cast<float>(W), static_cast<float>(H));
     }
     // #189: drain the inbox once more immediately before drawing, so a peer move that
     // arrived after this frame's Tick is shown NOW rather than one iteration later.
     G.Host.PumpInbox();
-    if (W > 0 && H > 0) G.View.Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
+    if (W > 0 && H > 0) G.Game.View().Render(G.Renderer, static_cast<float>(W), static_cast<float>(H));
 }
 
 // Parse an algebraic square ("e2") to an index 0..63 (a1=0, h8=63), or -1 if bad.
@@ -251,8 +201,8 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
             std::chrono::duration_cast<std::chrono::nanoseconds>(Now - PrevTime).count();
         PrevTime = Now;
 
-        const bool     WasMyTurn = G.Match.IsMyTurn();
-        const uint32_t MatchesBefore = G.Match.Record().TotalMatches();
+        const bool     WasMyTurn = G.Game.Match().IsMyTurn();
+        const uint32_t MatchesBefore = G.Game.Match().Record().TotalMatches();
 
         G.Host.Tick(ElapsedNs);  // pumps the radio inbox -> applies any peer move THIS frame
 
@@ -260,11 +210,11 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
             Linked = true;
             G.Recorder.Record(Lur::Core::EFlightEvent::LinkUp, 0, nullptr, 0);
             Lur::Log::Info("handshake complete - live over BLE with peer %.8s; we are %s",
-                           G.Host.Session().GetPeerGuid().c_str(), ColorName(G.Match.MyColor()));
+                           G.Host.Session().GetPeerGuid().c_str(), ColorName(G.Game.Match().MyColor()));
         }
 
-        const bool     NowMyTurn = G.Match.IsMyTurn();
-        const uint32_t MatchesAfterTick = G.Match.Record().TotalMatches();
+        const bool     NowMyTurn = G.Game.Match().IsMyTurn();
+        const uint32_t MatchesAfterTick = G.Game.Match().Record().TotalMatches();
         const bool     GotPeerMove   = !WasMyTurn && NowMyTurn;   // peer moved -> our turn, this frame
         const bool     PeerEndedGame = MatchesAfterTick != MatchesBefore;
 
@@ -273,10 +223,10 @@ int RunBle(const char* RadioExe, int MaxFrames, const std::string& Script, bool 
 #if LUR_INTERNAL
         if (Linked && NowMyTurn && !Draining) {
             if (Auto) {
-                Played = G.View.AutoPlayRandomLegalMove(Rng);
+                Played = G.Game.View().AutoPlayRandomLegalMove(Rng);
             } else {
                 for (std::size_t i = 0; i < Moves.size(); ++i)
-                    if (G.View.PlayMove(static_cast<Chess::Square>(Moves[i].first),
+                    if (G.Game.View().PlayMove(static_cast<Chess::Square>(Moves[i].first),
                                         static_cast<Chess::Square>(Moves[i].second))) {
                         Moves.erase(Moves.begin() + i); Played = true; break;
                     }
@@ -409,8 +359,8 @@ int main(int argc, char** argv) {
         // been taken (the capture trays, #67) could not be looked at on the desktop at all.
         // Pace it with --loop-ms; the default 8 ms plays a whole game in about two seconds.
         if (Linked && Auto) {
-            A.View.AutoPlayRandomLegalMove(RngA);
-            B.View.AutoPlayRandomLegalMove(RngB);
+            A.Game.View().AutoPlayRandomLegalMove(RngA);
+            B.Game.View().AutoPlayRandomLegalMove(RngB);
         }
 #endif
         if (!Linked && A.Host.Session().IsReady() && B.Host.Session().IsReady()) {

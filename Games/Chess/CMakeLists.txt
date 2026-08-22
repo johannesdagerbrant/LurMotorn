@@ -28,3 +28,13 @@ target_link_libraries(chess_view PUBLIC chess::core lur::render lur::net lur::hu
                                       lur::devgui)  # #201: Lur::DevGui::Console (the whole tool)
 target_compile_features(chess_view PUBLIC cxx_std_20)
 add_library(chess::view ALIAS chess_view)
+
+# chess::app — chess's answers to Lur::App::IGame (#45). The record-sync trio, the view attachment,
+# the match-end hook and the state hash, written ONCE instead of once per platform main. Its own
+# library rather than part of chess::view because a view draws and this decides, and because it needs
+# lur::app — which nothing that merely renders a board should have to link.
+add_library(chess_app App/Private/ChessGame.cpp)
+target_include_directories(chess_app PUBLIC App/Public)
+target_link_libraries(chess_app PUBLIC chess::view lur::app)
+target_compile_features(chess_app PUBLIC cxx_std_20)
+add_library(chess::app ALIAS chess_app)

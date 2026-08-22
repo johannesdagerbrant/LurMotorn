@@ -15,7 +15,7 @@
 #include <vector>
 
 #include "Chess/Board.h"
-#include "Chess/ChessMatchState.h"
+#include "Chess/App/ChessGame.h"
 #include "Chess/View/BoardView.h"
 #include "Chess/View/SfxLibrary.h"
 #include "Lur/Core/CVar.h"
@@ -48,13 +48,13 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 
 @implementation OnlyChessViewController {
     Lur::Render::IRenderer* _Renderer;
-    Chess::BoardView _View;
+    // #45: state AND wiring, one place, shared by all three platform shells.
+    Chess::ChessGame _Game;
     Lur::Transport::ITransport* _Transport;  // owned by its translation unit
     // #43: the engine owns the session + persistence choreography now. No Session, Store,
     // SyncManager or device id of its own — this main supplies where files live, which radio role
     // and how to log, plus the game's four decisions.
     Lur::App::GameHost _Host;
-    Chess::ChessMatchState _Match;           // authoritative game state
     Lur::Audio::Mixer _Mixer;                // wait-free SFX mixer (audio thread reads it)
     Chess::SfxLibrary _Sfx;                  // cooked move sounds, loaded into _Mixer
     Lur::Audio::IAudioDevice* _Audio;        // RemoteIO output stream
@@ -180,27 +180,12 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         _Host.Init(HostCfg);
     }
 
-    Lur::App::GameHost::RecordSync Rec;
-    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
-    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
-    // route through this one hook now, so they cannot drift apart.
-    Rec.OnPeerAdopted = [View = &_View](const std::string& Peer) { return View->OnPeerLinked(Peer); };
-    // Only share OUR game with the peer we are actually playing.
-    Rec.IsActiveOpponent = [View = &_View](const std::string& Peer) {
-        return View->ActiveOpponentGuid() == Peer;
-    };
-    Rec.Summarize = [M = &_Match] {
-        Lur::App::GameHost::RecordSync::MatchSummary S;
-        S.Result     = static_cast<int>(M->LastResult());
-        S.WinsLower  = M->Record().WinsLower;
-        S.WinsHigher = M->Record().WinsHigher;
-        S.Draws      = M->Record().Draws;
-        S.Total      = M->Record().TotalMatches();
-        return S;
-    };
-    _Host.EnableRecordSync(_Match, std::move(Rec));
-
-    _Match.SetOnMatchEnd([H = &_Host] { H->OnMatchEnded(); });  // persist + report, one seam
+    // #45: chess states its own answers ONCE, in Chess::ChessGame — the record-sync trio, the view
+    // attachment, the match-end hook and the state hash. All of it was written out here, in
+    // AndroidMain and in DesktopMain, differing only in how each captured its state. Configure runs
+    // between Init and Start, the window GameHost's phase comment requires.
+    Lur::App::GameHost::Hooks Hooks;
+    _Game.Configure(_Host, Hooks);
     // Persist the in-progress match when backgrounded, so it survives a close.
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(persistState)
@@ -216,23 +201,9 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                                                  name:UIApplicationDidBecomeActiveNotification
                                                object:nil];
 
-    // The shared BoardView renders + mutates _Match and ships moves via MoveCodec.
-    _View.SetState(&_Match);
-    _View.AttachSession(&_Host.Session());
-    _View.AttachPersistence(&_Host.Store(), &_Host.Sync(),
-                            _Host.DeviceId());  // selector + match switching
-    _View.SetLogger([](const char* M) {
-        os_log(OS_LOG_DEFAULT, "OnlyChess: View: %{public}s", M);
-    });
-
-    // #43: the ~35 lines of session choreography that used to sit here — the hijack-guarded record
-    // send, the ready/resync/state-hash/Sync handlers, Session::Start — now live once in
-    // Lur::App::GameHost. What is left is the game's four decisions, and they must read IDENTICALLY
-    // to the Android main's: that they did not is what this extraction is for.
-
-    // Chess hashes its board so the session can catch a divergence (#72).
-    Lur::App::GameHost::Hooks Hooks;
-    Hooks.StateHash = [M = &_Match] { return M->PositionHash(); };
+    // #43 moved the session choreography into GameHost; #45 moved the game's answers into
+    // ChessGame. What is left in this main is genuinely iOS: UIKit, the layer, the audio device and
+    // the notification observers above.
     _Host.Start(std::move(Hooks));
 #if LUR_AGENT
     _Rng = 0xC0FFEEu ^ static_cast<uint32_t>(_Host.DeviceId().size());  // per-device autoplay seed
@@ -265,7 +236,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         os_log(OS_LOG_DEFAULT, "OnlyChess: Renderer init: %{public}s (drawable %dx%d, appActive=%d)",
                Ok ? "ok" : "failed", DrawW, DrawH, _InitWhileInactive ? 0 : 1);
         if (Ok) {
-            _View.CreateResources(_Renderer);
+            _Game.View().CreateResources(_Renderer);
             // #188: make the frame's idle wait feed the radio — see the Android note. The
             // callback runs on this same thread, inside the wait, so nothing is shared.
             _Renderer->SetIdleWaitCallback(
@@ -284,7 +255,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                 _Sfx.Load(_Mixer);
                 Chess::SfxLibrary* Sfx = &_Sfx;
                 Lur::Audio::Mixer* Mixer = &_Mixer;
-                _View.SetMovePlayed([Sfx, Mixer](Chess::EMoveSound S) { Sfx->Play(*Mixer, S); });
+                _Game.View().SetMovePlayed([Sfx, Mixer](Chess::EMoveSound S) { Sfx->Play(*Mixer, S); });
                 _Audio = Lur::Audio::CreateAudioDevice();
                 const bool AudioOk = _Audio && _Audio->Start(MixThunk, &_Mixer);
                 os_log(OS_LOG_DEFAULT, "OnlyChess: Audio init: %{public}s", AudioOk ? "ok" : "failed");
@@ -343,8 +314,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     }
 #endif
 #if LUR_AGENT
-    const bool WasMyTurn = _Match.IsMyTurn();
-    const uint32_t MatchesBefore = _Match.Record().TotalMatches();
+    const bool WasMyTurn = _Game.Match().IsMyTurn();
+    const uint32_t MatchesBefore = _Game.Match().Record().TotalMatches();
 #endif
     _Host.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness (applies peer move)
 #if LUR_AGENT
@@ -362,8 +333,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
             }
         }
         if (_AutoEnabled) {
-            const bool NowMyTurn = _Match.IsMyTurn();
-            const uint32_t MatchesAfter = _Match.Record().TotalMatches();
+            const bool NowMyTurn = _Game.Match().IsMyTurn();
+            const uint32_t MatchesAfter = _Game.Match().Record().TotalMatches();
             const bool GotPeerMove = !WasMyTurn && NowMyTurn;
             const bool PeerEndedGame = MatchesAfter != MatchesBefore;
             _ClockNs += ElapsedNs;
@@ -374,7 +345,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                 if (Ms > _RttMaxMs) _RttMaxMs = Ms;
                 _MoveSentNs = 0;
             }
-            const bool Played = (_Host.Session().IsReady() && NowMyTurn) ? _View.AutoPlayRandomLegalMove(_Rng) : false;
+            const bool Played = (_Host.Session().IsReady() && NowMyTurn) ? _Game.View().AutoPlayRandomLegalMove(_Rng) : false;
             if (Played) _MoveSentNs = _ClockNs;         // our move is on the wire; await reply
             if (GotPeerMove) {
                 ++_PeerReplies;
@@ -393,8 +364,8 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
                        "presented=%u",  // stuck at 0 = dead swapchain (#73)
                        MatchesAfter, (unsigned long long)_SameFrame, (unsigned long long)_PeerReplies,
                        (unsigned long long)_NewGameOpens, (unsigned long long)_DelayedReplies,
-                       _Match.IsMyTurn() ? 1 : 0, _Match.Record().Moves.size(),
-                       (unsigned)(_Match.PositionHash() & 0xFFFFFFFFu),
+                       _Game.Match().IsMyTurn() ? 1 : 0, _Game.Match().Record().Moves.size(),
+                       (unsigned)(_Game.Match().PositionHash() & 0xFFFFFFFFu),
                        _Host.Session().IsAwaitingResync() ? 1 : 0,
                        (unsigned long long)_RttCount,
                        (unsigned long long)(_RttCount ? _RttSumMs / _RttCount : 0),
@@ -411,7 +382,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     // and on this device that beat is 40 Hz, so it is ~25 ms of sitting still.
     _Host.PumpInbox();
     CAMetalLayer* Layer = [self metalLayer];
-    _View.Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
+    _Game.View().Render(_Renderer, static_cast<float>(Layer.drawableSize.width),
                  static_cast<float>(Layer.drawableSize.height));
     // #192: touch sample -> frame handed to the presentation engine. See the Android note
     // for what this does and does not include.
@@ -481,7 +452,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         UIApplication.sharedApplication.applicationState != UIApplicationStateActive;
     os_log(OS_LOG_DEFAULT, "OnlyChess: #73 reattach: re-init %{public}s (drawable %dx%d, appActive=%d)",
            Ok ? "ok" : "FAILED", Work.W, Work.H, _InitWhileInactive ? 0 : 1);
-    if (Ok) _View.CreateResources(_Renderer);
+    if (Ok) _Game.View().CreateResources(_Renderer);
     // No SignalReinitDone here: that ack exists to tell another thread's owner it may release the
     // retiring view, and chess has no retiring view to hold — the rebuild finished before this method
     // returned. Setting a flag nothing consumes would be dead state dressed as symmetry.
@@ -541,7 +512,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
         uint64_t Ns = 0;
         [self consolePoint:Touch outX:&X outY:&Y outNs:&Ns];
         const int Pointers = static_cast<int>(event.allTouches.count);
-        if (_View.DevConsole().PointerDown(Pointers, X, Y, Ns)) return;
+        if (_Game.View().DevConsole().PointerDown(Pointers, X, Y, Ns)) return;
     }
 #endif
     _TouchDownNs = [self stampTouch:Touch];
@@ -555,7 +526,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     float X = 0, Y = 0;
     uint64_t Ns = 0;
     [self consolePoint:touches.anyObject outX:&X outY:&Y outNs:&Ns];
-    (void)_View.DevConsole().PointerMove(X, Y, Ns);
+    (void)_Game.View().DevConsole().PointerMove(X, Y, Ns);
 #endif
 }
 
@@ -567,7 +538,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     float X = 0, Y = 0;
     uint64_t Ns = 0;
     [self consolePoint:Touch outX:&X outY:&Y outNs:&Ns];
-    (void)_View.DevConsole().PointerUp(X, Y, Ns);   // advances/opens the chain, or taps a row
+    (void)_Game.View().DevConsole().PointerUp(X, Y, Ns);   // advances/opens the chain, or taps a row
 #endif
     // The move already went out on the press (#187). All that is left here is closing the
     // measurement of the dead time we no longer spend.
@@ -579,7 +550,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 
 - (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
 #if !LUR_SHIPPING
-    _View.DevConsole().CancelGesture();   // a system alert is not a console tap
+    _Game.View().DevConsole().CancelGesture();   // a system alert is not a console tap
 #endif
     _TouchDownNs = 0;
 }
@@ -590,7 +561,7 @@ static void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
     const CGPoint P = [touch locationInView:self.view];
     CAMetalLayer* Layer = [self metalLayer];
     const CGFloat Scale = Layer.contentsScale;
-    _View.OnTap(static_cast<float>(P.x * Scale), static_cast<float>(P.y * Scale),
+    _Game.View().OnTap(static_cast<float>(P.x * Scale), static_cast<float>(P.y * Scale),
                 static_cast<float>(Layer.drawableSize.width),
                 static_cast<float>(Layer.drawableSize.height));
 }

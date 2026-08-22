@@ -18,6 +18,10 @@ option(LUR_DESKTOP "Build the desktop Workbench app (Windows window + Vulkan)" O
 # Shared compiler discipline (-Wall/-Wextra/-Werror, RTTI off) for the host build.
 # Must precede the add_subdirectory calls so it applies to their targets.
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/EngineFlags.cmake)
+# lur_configure_app_target() for the out-of-tree Android/iOS app projects. Included from the
+# engine root so an app gets it for free from its add_subdirectory of this tree — it must not
+# have to know where the engine keeps its cmake/ directory.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/LurApp.cmake)
 
 # --- Pure-C++ engine modules (shared verbatim across host / Android / iOS) ---
 add_subdirectory(Modules/Core)

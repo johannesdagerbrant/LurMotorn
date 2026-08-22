@@ -49,27 +49,13 @@ add_executable(OnlyRps MACOSX_BUNDLE
 
 target_include_directories(OnlyRps PRIVATE ${MVK_INCLUDE})
 
-target_compile_definitions(OnlyRps PRIVATE
-    LUR_SHIPPING=${LUR_SHIPPING}
-    LUR_INTERNAL=${LUR_INTERNAL}
-    LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW}
-    # #69: compile the Lur::Trace CPU scopes/latencies (sim.step, ble.toApply, ...) into the iPhone
-    # build too. It was Android-only, so the iOS main could never MEASURE its own net-service latency —
-    # which is exactly the number #69 needs to decide whether the render-driven pump costs a frame.
-    LUR_TRACE=${LUR_TRACE}
-    # LUR_AGENT was MISSING here, which meant the app target silently compiled agent code out even
-    # when the engine tree was configured with -DLUR_AGENT=ON — the iPhone is the half that most needs
-    # remote control, since it has no touch injection at all. LUR_AGENT_ON is the derived value
-    # EngineFlags publishes (force-zeroed in Shipping); Android's cpp/CMakeLists.txt does the same.
-    LUR_AGENT=${LUR_AGENT_ON}
-    # The app's log tag, for the engine platform sources compiled into THIS target. An
-    # out-of-tree app target cannot see the engine tree's add_compile_definitions — the same
-    # reason the LUR_* macros above are repeated here. Lur/Core/LogTag.h #errors without it.
-    LUR_LOG_TAG="${LUR_LOG_TAG}"
-    # Distinct per-game BLE service UUID so RPS never cross-links a chess phone
-    # (chess keeps the default ...7370; RPS advertises/scans ...7371).
-    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7371\"")
+# The capability macros, the log tag and the BLE service UUID, in ONE call (#198). This was four
+# hand-copied copies of the same block; LUR_AGENT went MISSING from one of them for a while, which
+# silently compiled the agent harness out of the iPhone app. Adding a LUR_* macro is now a one-line
+# change in cmake/LurApp.cmake, and a game that forgets this call does not build.
+lur_configure_app_target(OnlyRps
+    LOG_TAG  OnlyRps
+    BLE_UUID 4C55524D-4F54-4F52-4E00-5472616E7371)
 
 target_link_libraries(OnlyRps PRIVATE
     rps::view      # snapshot rendering (pulls in rps::core, lur::render/hud/text)

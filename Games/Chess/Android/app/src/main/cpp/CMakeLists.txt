@@ -44,6 +44,7 @@ add_library(onlychess SHARED
 
 target_link_libraries(onlychess
     native_app_glue
+    chess::app    # #45: chess's IGame answers + its state (pulls in chess::view)
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
     chess::core
     lur::render
@@ -60,34 +61,13 @@ target_link_libraries(onlychess
     aaudio    # low-latency audio output (NDK, API 26+)
     vulkan)   # the GPU API (Vulkan backend, task #9)
 
-# The build-config capability macros (LUR_INTERNAL etc.) are derived by
-# cmake/EngineFlags.cmake during the add_subdirectory(LUR_ROOT) above and published
-# as cache vars. This app target lives in the parent (onlychess) project scope, out
-# of reach of the engine tree's add_compile_definitions, so apply them explicitly —
-# AndroidMain's soak/autoplayer (issue #57/#58) is #if LUR_INTERNAL. Default config
-# is Development (INTERNAL=1); a release build passes -DLUR_CONFIG=Shipping.
-target_compile_definitions(onlychess PRIVATE
-    LUR_SHIPPING=${LUR_SHIPPING}
-    LUR_INTERNAL=${LUR_INTERNAL}
-    LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW}
-    # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
-    # Shipping. Without this the touch->present latency lines expand to nothing.
-    LUR_TRACE=${LUR_TRACE}
-    # Assistant-only remote control (#195). Off unless the build was explicitly configured
-    # with -DLUR_AGENT=ON, so an ordinary Gradle build — the one a player installs — has none
-    # of it compiled in at all. LUR_AGENT_ON is the derived value EngineFlags publishes.
-    LUR_AGENT=${LUR_AGENT_ON}
-    # The app's log tag, for the engine platform sources compiled into THIS target.
-    # Re-applied here because an out-of-tree app target cannot see the engine tree's
-    # add_compile_definitions — the same reason the LUR_* capability macros are repeated
-    # above (CLAUDE.md). Lur/Core/LogTag.h #errors without it.
-    LUR_LOG_TAG="${LUR_LOG_TAG}"
-    # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
-    # phone from cross-linking an RTS phone. Was inherited from a default in
-    # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
-    # unchanged, so chess's wire identity is untouched.
-    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7370\"")
+# The capability macros, the log tag and the BLE service UUID, in ONE call (#198). This was four
+# hand-copied copies of the same block; LUR_AGENT went MISSING from one of them for a while, which
+# silently compiled the agent harness out of the iPhone app. Adding a LUR_* macro is now a one-line
+# change in cmake/LurApp.cmake, and a game that forgets this call does not build.
+lur_configure_app_target(onlychess
+    LOG_TAG  OnlyChess
+    BLE_UUID 4C55524D-4F54-4F52-4E00-5472616E7370)
 
 # native_app_glue provides ANativeActivity_onCreate; keep the linker from stripping it.
 set_target_properties(onlychess PROPERTIES

@@ -21,7 +21,7 @@
 #endif
 
 #include "Chess/Board.h"
-#include "Chess/ChessMatchState.h"
+#include "Chess/App/ChessGame.h"
 #include "Chess/View/BoardView.h"
 #include "Chess/View/SfxLibrary.h"
 #include "Lur/Core/CVar.h"
@@ -45,12 +45,14 @@ struct AppState {
     // owns a renderer pointer, a Ready flag, an ALooper drain or an internalDataPath lookup — all
     // of which it had been re-deriving alongside RPS, comment for comment.
     Lur::App::AndroidApp Plat;
-    Chess::BoardView View;
+    // #45: the game's state AND its wiring live in Chess::ChessGame now. This main used to declare
+    // View + Match here and then connect them to the host by hand — the same connecting the iOS and
+    // desktop mains each wrote out separately.
+    Chess::ChessGame Game;
     // #43: the session + persistence choreography lives in the engine now. This main holds no
     // Session, Store or SyncManager of its own — the host owns them, and what used to be ~50 lines
     // of wiring duplicated with the iOS main is now a Config plus four game hooks.
     Lur::App::GameHost Host;
-    Chess::ChessMatchState Match;   // authoritative game state (record + board + colour)
     uint64_t PendingTouchNs = 0;             // oldest touch sample not yet presented (#192)
     uint64_t TouchDownNs = 0;                // press time of the gesture in progress (#192)
     Lur::Audio::Mixer Mixer;                 // wait-free SFX mixer (audio thread reads it)
@@ -72,7 +74,7 @@ void MixThunk(void* User, int16_t* Out, uint32_t Frames) {
 // state — the loop parks on a -1 poll timeout forever — so those two were serving an app that was
 // already dead. "Surface ready" now means ready.
 void OnSurfaceReady(AppState& State) {
-    State.View.CreateResources(State.Plat.Renderer());
+    State.Game.View().CreateResources(State.Plat.Renderer());
     // #188: make the frame's idle wait feed the radio. At one frame in flight the CPU
     // parks ~15 ms per frame inside vkWaitForFences, and that park sits between the
     // loop's two inbox drains (#189) and the next iteration — which is exactly where a
@@ -89,7 +91,7 @@ void OnSurfaceReady(AppState& State) {
         State.Mixer.Init(Lur::Audio::Mixer::DefaultRate);
         State.Sfx.Load(State.Mixer);
         AppState* St = &State;
-        State.View.SetMovePlayed([St](Chess::EMoveSound S) { St->Sfx.Play(St->Mixer, S); });
+        State.Game.View().SetMovePlayed([St](Chess::EMoveSound S) { St->Sfx.Play(St->Mixer, S); });
         State.Audio = Lur::Audio::CreateAudioDevice();
         const bool AudioOk = State.Audio && State.Audio->Start(MixThunk, &State.Mixer);
         LOGI("Audio init: %s", AudioOk ? "ok" : "failed");
@@ -149,7 +151,7 @@ bool HandleInput(AppState& State, AInputEvent* Event) {
     // copies once (#151: Android could open the console, iOS could not open it AT ALL) and are not
     // going to be again.
     const int Pointers = static_cast<int>(AMotionEvent_getPointerCount(Event));
-    Lur::DevGui::Console& Con = State.View.DevConsole();
+    Lur::DevGui::Console& Con = State.Game.View().DevConsole();
     switch (Action) {
         case AMOTION_EVENT_ACTION_DOWN:
         case AMOTION_EVENT_ACTION_POINTER_DOWN:
@@ -182,7 +184,7 @@ bool HandleInput(AppState& State, AInputEvent* Event) {
     // does nothing. The console consumes every SUBSEQUENT finger of the chain, so only that first
     // touch can reach the board at all.
     if (Action != AMOTION_EVENT_ACTION_DOWN) return false;
-    State.View.OnTap(X, Y, State.Plat.Width(), State.Plat.Height());
+    State.Game.View().OnTap(X, Y, State.Plat.Width(), State.Plat.Height());
     return true;
 }
 
@@ -228,40 +230,13 @@ void android_main(android_app* App) {
     // them before a peer can go ready (the ready handler calls back into the view's adopt rule).
     State.Host.Init(HostCfg);
 
-    Lur::App::GameHost::RecordSync Rec;
-    // The view applies the #38 hijack rule and sets identity + loads the record for the adopted
-    // peer; the host sends our record only when it adopted. Both the initial link and a reconnect
-    // route through this one hook now, so they cannot drift apart.
-    Rec.OnPeerAdopted = [&State](const std::string& Peer) { return State.View.OnPeerLinked(Peer); };
-    // Only share OUR game with the peer we are actually playing.
-    Rec.IsActiveOpponent = [&State](const std::string& Peer) {
-        return State.View.ActiveOpponentGuid() == Peer;
-    };
-    Rec.Summarize = [&State] {
-        Lur::App::GameHost::RecordSync::MatchSummary S;
-        S.Result     = static_cast<int>(State.Match.LastResult());
-        S.WinsLower  = State.Match.Record().WinsLower;
-        S.WinsHigher = State.Match.Record().WinsHigher;
-        S.Draws      = State.Match.Record().Draws;
-        S.Total      = State.Match.Record().TotalMatches();
-        return S;
-    };
-    State.Host.EnableRecordSync(State.Match, std::move(Rec));
-
-
-    State.View.SetState(&State.Match);
-    State.View.AttachSession(&State.Host.Session());
-    State.View.AttachPersistence(&State.Host.Store(), &State.Host.Sync(),
-                                 State.Host.DeviceId());   // selector + match switching
-    State.View.SetLogger([](const char* M) { LOGI("View: %s", M); });
-
-    State.Match.SetOnMatchEnd([&State] { State.Host.OnMatchEnded(); });  // persist + report
-
-
-    // Chess hashes its board so the session can catch a divergence (#72). RPS leaves StateHash unset
-    // — it detects divergence itself with per-tick anchors.
+    // #45: chess states its own answers ONCE, in Chess::ChessGame — the record-sync trio, the view
+    // attachment, the match-end hook and the state hash. This main used to carry all of it, as did
+    // the iOS and desktop mains, with bodies that differed only in capture style. Configure runs in
+    // the window GameHost's phase comment describes: after Init (Store + device id exist, so the
+    // view can be handed them) and before Start (nothing can call back into an unattached view).
     Lur::App::GameHost::Hooks Hooks;
-    Hooks.StateHash = [&State] { return State.Match.PositionHash(); };
+    State.Game.Configure(State.Host, Hooks);
     State.Host.Start(std::move(Hooks));
 
 #if LUR_INTERNAL
@@ -297,14 +272,14 @@ void android_main(android_app* App) {
         PrevTime = Now;
 
 #if LUR_AGENT
-        const bool     WasMyTurn = State.Match.IsMyTurn();
-        const uint32_t MatchesBefore = State.Match.Record().TotalMatches();
+        const bool     WasMyTurn = State.Game.Match().IsMyTurn();
+        const uint32_t MatchesBefore = State.Game.Match().Record().TotalMatches();
 #endif
         State.Host.Tick(ElapsedNs);  // real-time-denominated: drives handshake + liveness
 #if LUR_AGENT
         {
-            const bool     NowMyTurn = State.Match.IsMyTurn();
-            const uint32_t MatchesAfter = State.Match.Record().TotalMatches();
+            const bool     NowMyTurn = State.Game.Match().IsMyTurn();
+            const uint32_t MatchesAfter = State.Game.Match().Record().TotalMatches();
             const bool     GotPeerMove = !WasMyTurn && NowMyTurn;       // peer moved -> our turn, this frame
             const bool     PeerEndedGame = MatchesAfter != MatchesBefore;
             if (!AutoEnabled) {
@@ -324,7 +299,7 @@ void android_main(android_app* App) {
                     MoveSentNs = 0;
                 }
                 const bool Played = (State.Host.Session().IsReady() && NowMyTurn)
-                                        ? State.View.AutoPlayRandomLegalMove(Rng) : false;
+                                        ? State.Game.View().AutoPlayRandomLegalMove(Rng) : false;
                 if (Played) MoveSentNs = ClockNs;       // our move is on the wire; await reply
                 if (GotPeerMove) {
                     ++PeerReplies;
@@ -345,8 +320,8 @@ void android_main(android_app* App) {
                      "presented=%u",  // stuck at 0 = dead swapchain (#73)
                      MatchesAfter, (unsigned long long)SameFrame, (unsigned long long)PeerReplies,
                      (unsigned long long)NewGameOpens, (unsigned long long)DelayedReplies,
-                     State.Match.IsMyTurn() ? 1 : 0, State.Match.Record().Moves.size(),
-                     (unsigned)(State.Match.PositionHash() & 0xFFFFFFFFu),
+                     State.Game.Match().IsMyTurn() ? 1 : 0, State.Game.Match().Record().Moves.size(),
+                     (unsigned)(State.Game.Match().PositionHash() & 0xFFFFFFFFu),
                      State.Host.Session().IsAwaitingResync() ? 1 : 0,
                      (unsigned long long)RttCount,
                      (unsigned long long)(RttCount ? RttSumMs / RttCount : 0),
@@ -379,7 +354,7 @@ void android_main(android_app* App) {
             // iteration — and this loop is vsync-bound, so that is a whole refresh of
             // sitting still. Half a frame off every inbound move, on average.
             State.Host.PumpInbox();
-            State.View.Render(State.Plat.Renderer(), State.Plat.Width(), State.Plat.Height());
+            State.Game.View().Render(State.Plat.Renderer(), State.Plat.Width(), State.Plat.Height());
             // #192: touch sample -> this frame handed to the presentation engine. Bounds OUR
             // share of move latency: OS dispatch + the wait for this loop iteration + tap
             // handling + record + submit, stopping at vkQueuePresentKHR returning. It does

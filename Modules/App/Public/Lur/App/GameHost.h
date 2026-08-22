@@ -161,9 +161,15 @@ public:
     const std::string&      DeviceId() const { return DeviceId_; }
     bool                    Started() const { return Started_; }
 
-private:
+    // The app's log sink, which the platform supplied in Config. PUBLIC because the GAME
+    // legitimately shares it (#45): the alternative is every platform main installing its own
+    // logging lambda with its own prefix into the game's view — which is one of the copies IGame
+    // exists to delete, and the copies had already drifted (a MATCH END line whose format differed
+    // per phone). One sink, one tag, whoever is writing.
     void Log(const char* Msg) const { if (Cfg_.Log) Cfg_.Log(Msg); }
     void Logf(const char* Fmt, ...) const;
+
+private:
     // Both the initial link and a reconnect route here: adopt per the game's rule, and send our
     // record only if it adopted. One function, so the two paths cannot drift apart.
     void OnPeerLive();

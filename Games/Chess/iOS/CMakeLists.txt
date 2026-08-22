@@ -72,33 +72,16 @@ add_executable(OnlyChess MACOSX_BUNDLE
 
 target_include_directories(OnlyChess PRIVATE ${MVK_INCLUDE})
 
-# Build-config capability macros (LUR_INTERNAL etc.), derived by EngineFlags.cmake in
-# the add_subdirectory(root) above. Like the Android main, this app target is in the
-# parent scope, out of the engine tree's add_compile_definitions reach, so apply them
-# here. Default Development; a release build passes -DLUR_CONFIG=Shipping.
-target_compile_definitions(OnlyChess PRIVATE
-    LUR_SHIPPING=${LUR_SHIPPING}
-    LUR_INTERNAL=${LUR_INTERNAL}
-    LUR_ASSERTS=${LUR_ASSERTS}
-    LUR_SLOW=${LUR_SLOW}
-    # Drives Lur::Trace's macros (#192): on in Development/Debugging, compiled out of
-    # Shipping. Without this the touch->present latency lines expand to nothing.
-    LUR_TRACE=${LUR_TRACE}
-    # Assistant-only remote control (#195) — see the Android CMakeLists. The agent .ipa comes
-    # from a MANUAL-DISPATCH CI job only (`gh workflow run "macOS CI" -f agent=true`), never
-    # an ordinary push, or it would sit next to the player artifact.
-    LUR_AGENT=${LUR_AGENT_ON}
-    # The app's log tag, for the engine platform sources compiled into THIS target. An
-    # out-of-tree app target cannot see the engine tree's add_compile_definitions — the same
-    # reason the LUR_* macros above are repeated here. Lur/Core/LogTag.h #errors without it.
-    LUR_LOG_TAG="${LUR_LOG_TAG}"
-    # Chess's BLE service UUID — the advertise/scan discriminator that keeps a chess
-    # phone from cross-linking an RTS phone. Was inherited from a default in
-    # BleProtocol.h; the default is gone (#200), so it is stated here. The VALUE is
-    # unchanged, so chess's wire identity is untouched.
-    "LUR_BLE_SERVICE_UUID=\"4C55524D-4F54-4F52-4E00-5472616E7370\"")
+# The capability macros, the log tag and the BLE service UUID, in ONE call (#198). This was four
+# hand-copied copies of the same block; LUR_AGENT went MISSING from one of them for a while, which
+# silently compiled the agent harness out of the iPhone app. Adding a LUR_* macro is now a one-line
+# change in cmake/LurApp.cmake, and a game that forgets this call does not build.
+lur_configure_app_target(OnlyChess
+    LOG_TAG  OnlyChess
+    BLE_UUID 4C55524D-4F54-4F52-4E00-5472616E7370)
 
 target_link_libraries(OnlyChess PRIVATE
+    chess::app
     chess::view   # shared board presentation + touch (pulls in chess::core, lur::render)
     chess::core
     lur::render
